@@ -14109,245 +14109,244 @@ export async function handleMistralRequest(
   } catch (error) {
     return createErrorResponse("mistral_request", 1, "", corrId, error as Error);
   }
-  let durationMs = 0;
-  let wasSuccessful = false;
-  let worktreeLifecycle: RequestOwnedWorktreeLifecycle | undefined;
-  let sessionAdmission: SessionAdmissionMutation | undefined;
-  let sessionAdmissionCommitted = false;
-
-  try {
-    const existingSession = sessionResult.userProvidedSession
-      ? await getExistingSessionForProvider(
-          deps.sessionManager,
-          sessionResult.effectiveSessionId,
-          "mistral",
-          { requireTrackedRemoteSession: true }
-        )
-      : null;
-    let worktreeResolution: ResolvedWorktree = {};
-    try {
-      worktreeResolution = await resolveWorkspaceAndWorktreeForRequest({
-        provider: "mistral",
-        workspace: params.workspace,
-        worktree: params.worktree,
-        sessionId: sessionResult.effectiveSessionId,
-        runtime,
-        workingDir: params.workingDir,
-        addDir: params.addDir,
-        requireStableCwd: sessionResult.resumeArgs.includes("--continue"),
-        deferWorktree: true,
-      });
-    } catch (err) {
-      return createErrorResponse("mistral_request", 1, "", corrId, err as Error);
-    }
-    applyEffectiveWorkingDirectory(
-      "vibe",
-      args,
-      "--workdir",
-      worktreeResolution.effectiveWorkingDir,
-      "mistral",
-      "--add-dir",
-      worktreeResolution.effectiveAddDirs
-    );
-    assertUpstreamCliArgs("mistral", args);
-    assertUpstreamCliEnv("mistral", mistralEnv);
-    assertFinalCliProcessAdmission("vibe", args, "mistral", mistralEnv);
-    let effectiveSessionId = sessionResult.effectiveSessionId;
-    if (!params.createNewSession && !effectiveSessionId) {
-      effectiveSessionId = `${GATEWAY_SESSION_PREFIX}${randomUUID()}`;
-    }
-    if (effectiveSessionId) {
-      if (existingSession) {
-        const admitted = await persistResolvedSessionScope(
-          deps.sessionManager,
-          effectiveSessionId,
-          worktreeResolution,
-          runtime,
-          existingSession
-        );
-        sessionAdmission = { original: existingSession, admitted };
-      } else if (sessionResult.userProvidedSession || !params.createNewSession) {
-        const admitted = await createSessionWithResolvedScope(
-          deps.sessionManager,
-          "mistral",
-          "Mistral Session",
-          effectiveSessionId,
-          worktreeResolution,
-          runtime
-        );
-        sessionAdmission = { original: admitted.previousSession, admitted: admitted.session };
-      }
-    }
-    if (params.worktree) {
-      worktreeResolution = await resolveWorkspaceAndWorktreeForRequest({
-        provider: "mistral",
-        workspace: params.workspace,
-        worktree: params.worktree,
-        sessionId: sessionAdmission ? effectiveSessionId : undefined,
-        runtime,
-        workingDir: params.workingDir,
-        addDir: params.addDir,
-        requireStableCwd: sessionResult.resumeArgs.includes("--continue"),
-        expectedSession: sessionAdmission?.admitted,
-      });
-      advanceSessionAdmissionWorktree(sessionAdmission, worktreeResolution);
-    }
-    worktreeLifecycle = createRequestOwnedWorktreeLifecycle(worktreeResolution, runtime, true);
-    safeFlightStart(
-      {
-        correlationId: corrId,
-        cli: "mistral",
-        model: prep.resolvedModel || "default",
-        prompt: prep.effectivePrompt,
-        sessionId: effectiveSessionId,
-        stablePrefixHash: prep.stablePrefixHash ?? undefined,
-        stablePrefixTokens: prep.stablePrefixTokens ?? undefined,
-      },
-      runtime
-    );
-    deps.logger.info(
-      `[${corrId}] mistral_request invoked with model=${prep.resolvedModel || "default"}, permissionMode=${resolveMistralAgentMode(params.approvalStrategy, params.permissionMode)}, prompt length=${prep.effectivePrompt.length}`
-    );
-
-    const effectiveCompress = resolveEffectiveCompression(runtime.compression, {
-      compressResponse: params.compressResponse,
-      outputFormat: params.outputFormat,
-      outputSchemaDeclared: false,
-    });
-    const mistralFrHandoff = buildAsyncFlightRecorderHandoff(
-      "mistral",
-      prep,
-      effectiveSessionId,
-      params.outputFormat,
-      params.optimizePrompt
-    );
-    let result = await awaitJobOrDefer(
-      "mistral",
-      args,
-      corrId,
-      resolveIdleTimeout("mistral", params.idleTimeoutMs),
-      params.outputFormat,
-      params.forceRefresh,
-      runtime,
-      mistralEnv,
-      worktreeLifecycle.onTerminal,
-      mistralFrHandoff.flightRecorderEntry,
-      mistralFrHandoff.extractUsage,
-      undefined,
-      worktreeResolution.cwd,
-      effectiveCompress,
-      undefined,
-      undefined,
-      undefined,
-      undefined,
-      sessionBoundDedupArgs(args, effectiveSessionId)
-    );
-
-    if (isDeferredResponse(result)) {
-      sessionAdmissionCommitted = true;
-      if (sessionAdmission) worktreeLifecycle.transfer();
-      else await worktreeLifecycle.finishHandler();
-      await safeUpdateSessionUsageAfterJobAdmission(
-        deps.sessionManager,
-        sessionResult.userProvidedSession ? effectiveSessionId : undefined,
-        runtime
-      );
-      return buildDeferredToolResponse(result, effectiveSessionId);
-    }
-
-    if (result.code !== 0 && isMistralModelSelectionFailure(result.stderr)) {
-      const recoveryModel = selectMistralRecoveryModel(prep.resolvedModel);
-      if (recoveryModel) {
-        deps.logger.info(
-          `[${corrId}] mistral_request detected stale Vibe model selection; retrying once with ${recoveryModel}`
-        );
-        const retryPrep = buildAdmittedMistralRetryPrep(
-          { ...params, effectivePrompt: prep.effectivePrompt },
-          recoveryModel,
-          sessionResult.resumeArgs
-        );
-        const retryArgs = [...retryPrep.args];
-        applyEffectiveWorkingDirectory(
-          "vibe",
-          retryArgs,
-          "--workdir",
-          worktreeResolution.effectiveWorkingDir,
-          "mistral",
-          "--add-dir",
-          worktreeResolution.effectiveAddDirs
-        );
-        // Reuse the FR handoff built above — the retry preserves corrId,
-        // so the manager's logComplete still updates the original row.
-        worktreeLifecycle.rearm();
-        result = await awaitJobOrDefer(
-          "mistral",
-          retryArgs,
-          corrId,
-          resolveIdleTimeout("mistral", params.idleTimeoutMs),
-          params.outputFormat,
-          true,
-          runtime,
-          retryPrep.env,
-          worktreeLifecycle.onTerminal,
-          mistralFrHandoff.flightRecorderEntry,
-          mistralFrHandoff.extractUsage,
-          undefined,
-          worktreeResolution.cwd,
-          effectiveCompress,
-          undefined,
-          undefined,
-          undefined,
-          undefined,
-          sessionBoundDedupArgs(retryArgs, effectiveSessionId)
-        );
-        if (isDeferredResponse(result)) {
-          sessionAdmissionCommitted = true;
-          if (sessionAdmission) worktreeLifecycle.transfer();
-          else await worktreeLifecycle.finishHandler();
-          await safeUpdateSessionUsageAfterJobAdmission(
-            deps.sessionManager,
-            sessionResult.userProvidedSession ? effectiveSessionId : undefined,
-            runtime
-          );
-          return buildDeferredToolResponse(result, effectiveSessionId);
-        }
-        prep.resolvedModel = recoveryModel;
-        prep.args = retryArgs;
-      }
-    }
-
-    const { stdout, stderr, code } = result;
-    durationMs = Math.max(0, Date.now() - startTime);
-
-    if (code !== 0) {
-      await rollbackSessionAndWorktreeAdmission(
-        deps.sessionManager,
-        sessionAdmission,
-        worktreeLifecycle,
-        runtime
-      );
-      deps.logger.info(`[${corrId}] mistral_request failed in ${durationMs}ms`);
-      const terminalFailure = buildTerminalCliFailure(
-        "mistral",
-        stdout,
-        stderr,
-        code,
-        params.outputFormat
-      );
-      safeFlightComplete(
-        corrId,
+  // Tier-B T5d: route mistral (a non-Kit sibling) through the shared terminal
+  // envelope with kit=null. mistral has claude's in-try topology (states 4..8 in
+  // runInsideTerminalTry, incl. the inline worktree-resolve ok:false seam,
+  // applyEffectiveWorkingDirectory, and the invoked log). The ACP branch +
+  // rejectUnreachableGatewayWorktree stay OUTSIDE. It uses the D4 usageUpdateSessionId
+  // split and env.logger = deps.logger (mistral already logs all three terminal
+  // lines, so there is no D5 delta). The mistral-unique model-selection RETRY loop
+  // (first dispatch; on a stale-model failure rearm the worktree lifecycle and
+  // dispatch once more) folds entirely into the execute hook, which returns the
+  // final result (deferred or inline); the driver's single deferred branch handles
+  // BOTH deferred sites (identical settle + usage-split) and its success/failure
+  // branches handle the final inline result.
+  let effectiveSessionId = sessionResult.effectiveSessionId;
+  if (!params.createNewSession && !effectiveSessionId) {
+    effectiveSessionId = `${GATEWAY_SESSION_PREFIX}${randomUUID()}`;
+  }
+  let effectiveCompress = false;
+  const ledger = new RequestTerminalLedger(runtime, undefined);
+  const flight = new FlightOwnership(
+    () =>
+      safeFlightStart(
         {
-          ...terminalFailure,
-          durationMs,
-          retryCount: 0,
-          circuitBreakerState: "closed",
-          optimizationApplied: false,
-          exitCode: code,
-          status: "failed",
+          correlationId: corrId,
+          cli: "mistral",
+          model: prep.resolvedModel || "default",
+          prompt: prep.effectivePrompt,
+          sessionId: effectiveSessionId,
+          stablePrefixHash: prep.stablePrefixHash ?? undefined,
+          stablePrefixTokens: prep.stablePrefixTokens ?? undefined,
         },
         runtime
+      ),
+    metadata => safeFlightComplete(corrId, metadata, runtime)
+  );
+
+  const env: KitTerminalEnvelope = {
+    runtime,
+    logger: deps.logger,
+    provider: "mistral",
+    corrId,
+    kit: null,
+    kitSession: null,
+    effectiveSessionId,
+    usageUpdateSessionId: sessionResult.userProvidedSession ? effectiveSessionId : undefined,
+    ledger,
+    flight,
+    startTime,
+    optimizationApplied: false,
+    outputFormat: params.outputFormat,
+    usageUpdateManager: deps.sessionManager,
+    failureRollbackManager: deps.sessionManager,
+    exceptionRollbackManager: deps.sessionManager,
+    fireRequestCleanupInCatch: false,
+  };
+
+  const hooks: KitTerminalHooks = {
+    runInsideTerminalTry: async () => {
+      const existingSession = sessionResult.userProvidedSession
+        ? await getExistingSessionForProvider(
+            deps.sessionManager,
+            sessionResult.effectiveSessionId,
+            "mistral",
+            { requireTrackedRemoteSession: true }
+          )
+        : null;
+      let worktreeResolution: ResolvedWorktree;
+      try {
+        worktreeResolution = await resolveWorkspaceAndWorktreeForRequest({
+          provider: "mistral",
+          workspace: params.workspace,
+          worktree: params.worktree,
+          sessionId: sessionResult.effectiveSessionId,
+          runtime,
+          workingDir: params.workingDir,
+          addDir: params.addDir,
+          requireStableCwd: sessionResult.resumeArgs.includes("--continue"),
+          deferWorktree: true,
+        });
+      } catch (err) {
+        return {
+          ok: false,
+          earlyResponse: createErrorResponse("mistral_request", 1, "", corrId, err as Error),
+        };
+      }
+      applyEffectiveWorkingDirectory(
+        "vibe",
+        args,
+        "--workdir",
+        worktreeResolution.effectiveWorkingDir,
+        "mistral",
+        "--add-dir",
+        worktreeResolution.effectiveAddDirs
       );
-      return createErrorResponse(
+      assertUpstreamCliArgs("mistral", args);
+      assertUpstreamCliEnv("mistral", mistralEnv);
+      assertFinalCliProcessAdmission("vibe", args, "mistral", mistralEnv);
+      if (effectiveSessionId) {
+        if (existingSession) {
+          const admitted = await persistResolvedSessionScope(
+            deps.sessionManager,
+            effectiveSessionId,
+            worktreeResolution,
+            runtime,
+            existingSession
+          );
+          ledger.sessionAdmission = { original: existingSession, admitted };
+        } else if (sessionResult.userProvidedSession || !params.createNewSession) {
+          const admitted = await createSessionWithResolvedScope(
+            deps.sessionManager,
+            "mistral",
+            "Mistral Session",
+            effectiveSessionId,
+            worktreeResolution,
+            runtime
+          );
+          ledger.sessionAdmission = {
+            original: admitted.previousSession,
+            admitted: admitted.session,
+          };
+        }
+      }
+      if (params.worktree) {
+        worktreeResolution = await resolveWorkspaceAndWorktreeForRequest({
+          provider: "mistral",
+          workspace: params.workspace,
+          worktree: params.worktree,
+          sessionId: ledger.sessionAdmission ? effectiveSessionId : undefined,
+          runtime,
+          workingDir: params.workingDir,
+          addDir: params.addDir,
+          requireStableCwd: sessionResult.resumeArgs.includes("--continue"),
+          expectedSession: ledger.sessionAdmission?.admitted,
+        });
+        advanceSessionAdmissionWorktree(ledger.sessionAdmission, worktreeResolution);
+      }
+      ledger.installWorktree(
+        createRequestOwnedWorktreeLifecycle(worktreeResolution, runtime, true)
+      );
+      flight.start();
+      deps.logger.info(
+        `[${corrId}] mistral_request invoked with model=${prep.resolvedModel || "default"}, permissionMode=${resolveMistralAgentMode(params.approvalStrategy, params.permissionMode)}, prompt length=${prep.effectivePrompt.length}`
+      );
+      return { ok: true, value: { worktreeResolution } };
+    },
+    execute: async worktreeResolution => {
+      effectiveCompress = resolveEffectiveCompression(runtime.compression, {
+        compressResponse: params.compressResponse,
+        outputFormat: params.outputFormat,
+        outputSchemaDeclared: false,
+      });
+      const mistralFrHandoff = buildAsyncFlightRecorderHandoff(
+        "mistral",
+        prep,
+        effectiveSessionId,
+        params.outputFormat,
+        params.optimizePrompt
+      );
+      let result = await awaitJobOrDefer(
+        "mistral",
+        args,
+        corrId,
+        resolveIdleTimeout("mistral", params.idleTimeoutMs),
+        params.outputFormat,
+        params.forceRefresh,
+        runtime,
+        mistralEnv,
+        ledger.worktreeLifecycle?.onTerminal,
+        mistralFrHandoff.flightRecorderEntry,
+        mistralFrHandoff.extractUsage,
+        undefined,
+        worktreeResolution.cwd,
+        effectiveCompress,
+        undefined,
+        undefined,
+        undefined,
+        undefined,
+        sessionBoundDedupArgs(args, effectiveSessionId)
+      );
+      // Deferrals (from either dispatch) are handled by the driver's deferred
+      // branch (settle + usage-split + buildDeferredToolResponse + the fence).
+      if (isDeferredResponse(result)) return result;
+
+      if (result.code !== 0 && isMistralModelSelectionFailure(result.stderr)) {
+        const recoveryModel = selectMistralRecoveryModel(prep.resolvedModel);
+        if (recoveryModel) {
+          deps.logger.info(
+            `[${corrId}] mistral_request detected stale Vibe model selection; retrying once with ${recoveryModel}`
+          );
+          const retryPrep = buildAdmittedMistralRetryPrep(
+            { ...params, effectivePrompt: prep.effectivePrompt },
+            recoveryModel,
+            sessionResult.resumeArgs
+          );
+          const retryArgs = [...retryPrep.args];
+          applyEffectiveWorkingDirectory(
+            "vibe",
+            retryArgs,
+            "--workdir",
+            worktreeResolution.effectiveWorkingDir,
+            "mistral",
+            "--add-dir",
+            worktreeResolution.effectiveAddDirs
+          );
+          // Reuse the FR handoff built above: the retry preserves corrId, so the
+          // manager's logComplete still updates the original row.
+          ledger.worktreeLifecycle?.rearm();
+          result = await awaitJobOrDefer(
+            "mistral",
+            retryArgs,
+            corrId,
+            resolveIdleTimeout("mistral", params.idleTimeoutMs),
+            params.outputFormat,
+            true,
+            runtime,
+            retryPrep.env,
+            ledger.worktreeLifecycle?.onTerminal,
+            mistralFrHandoff.flightRecorderEntry,
+            mistralFrHandoff.extractUsage,
+            undefined,
+            worktreeResolution.cwd,
+            effectiveCompress,
+            undefined,
+            undefined,
+            undefined,
+            undefined,
+            sessionBoundDedupArgs(retryArgs, effectiveSessionId)
+          );
+          if (isDeferredResponse(result)) return result;
+          prep.resolvedModel = recoveryModel;
+          prep.args = retryArgs;
+        }
+      }
+      return result;
+    },
+    computeSuccessFacts: () => undefined,
+    finalizeKit: async () => {},
+    buildFailureResponse: ({ code, stderr, terminalFailure, result }) =>
+      createErrorResponse(
         "mistral",
         code,
         stderr,
@@ -14358,43 +14357,29 @@ export async function handleMistralRequest(
           providerSessionId: terminalFailure.providerSessionId,
         },
         result
+      ),
+    buildSuccessResponse: ({ worktreeResolution, stdout, durationMs }) => {
+      const response = buildCliResponse(
+        "mistral",
+        stdout,
+        params.optimizeResponse ?? false,
+        corrId,
+        effectiveSessionId,
+        prep,
+        durationMs,
+        sessionResult.userProvidedSession,
+        params.outputFormat,
+        undefined,
+        effectiveCompress
       );
-    }
-    wasSuccessful = true;
-    sessionAdmissionCommitted = true;
-    if (sessionAdmission) worktreeLifecycle.transfer();
-    else await worktreeLifecycle.finishHandler();
-
-    await safeUpdateSessionUsageAfterJobAdmission(
-      deps.sessionManager,
-      sessionResult.userProvidedSession ? effectiveSessionId : undefined,
-      runtime
-    );
-
-    deps.logger.info(`[${corrId}] mistral_request completed successfully in ${durationMs}ms`);
-    const response = buildCliResponse(
-      "mistral",
-      stdout,
-      params.optimizeResponse ?? false,
-      corrId,
-      effectiveSessionId,
-      prep,
-      durationMs,
-      sessionResult.userProvidedSession,
-      params.outputFormat,
-      undefined,
-      effectiveCompress
-    );
-    safeRecordCompression(corrId, response.compression, runtime);
-    if (worktreeResolution.worktreePath) {
-      const first = response.content[0];
-      if (first && first.type === "text") {
-        first.text = formatWorktreePrefix(worktreeResolution.worktreePath) + first.text;
+      safeRecordCompression(corrId, response.compression, runtime);
+      if (worktreeResolution.worktreePath) {
+        const first = response.content[0];
+        if (first && first.type === "text") {
+          first.text = formatWorktreePrefix(worktreeResolution.worktreePath) + first.text;
+        }
       }
-    }
-    safeFlightComplete(
-      corrId,
-      {
+      flight.completeInline({
         response: stdout,
         durationMs,
         retryCount: 0,
@@ -14403,41 +14388,12 @@ export async function handleMistralRequest(
         optimizationApplied: params.optimizePrompt || (params.optimizeResponse ?? false),
         exitCode: 0,
         status: "completed",
-      },
-      runtime
-    );
-    return response;
-  } catch (error) {
-    if (!sessionAdmissionCommitted) {
-      await rollbackSessionAndWorktreeAdmission(
-        deps.sessionManager,
-        sessionAdmission,
-        worktreeLifecycle,
-        runtime
-      );
-    }
-    const elapsedMs = Math.max(0, Date.now() - startTime);
-    deps.logger.info(`[${corrId}] mistral_request threw exception after ${elapsedMs}ms`);
-    safeFlightComplete(
-      corrId,
-      {
-        response: "",
-        durationMs: elapsedMs,
-        retryCount: 0,
-        circuitBreakerState: "closed",
-        optimizationApplied: false,
-        exitCode: 1,
-        errorMessage: (error as Error).message,
-        status: "failed",
-      },
-      runtime
-    );
-    return createErrorResponse("mistral", 1, "", corrId, error as Error);
-  } finally {
-    await worktreeLifecycle?.finishHandler();
-    const finalizedDurationMs = Math.max(0, durationMs || Date.now() - startTime);
-    runtime.performanceMetrics.recordRequest("mistral", finalizedDurationMs, wasSuccessful);
-  }
+      });
+      return response;
+    },
+  };
+
+  return runKitTerminalEnvelope(env, hooks);
 }
 
 export async function handleMistralRequestAsync(
