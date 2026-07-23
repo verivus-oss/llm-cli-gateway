@@ -13534,156 +13534,168 @@ export async function handleCursorRequest(
   } catch (error) {
     return createErrorResponse("cursor_request", 1, "", corrId, error as Error);
   }
-  let durationMs = 0;
-  let wasSuccessful = false;
-  let sessionAdmission: SessionAdmissionMutation | undefined;
-  let sessionAdmissionCommitted = false;
-  try {
-    const existingSession = sessionResult.userProvidedSession
-      ? await getExistingSessionForProvider(
-          deps.sessionManager,
-          sessionResult.effectiveSessionId,
-          "cursor",
-          { requireTrackedRemoteSession: true }
-        )
-      : null;
-    let worktreeResolution: Awaited<ReturnType<typeof resolveWorkspaceAndWorktreeForRequest>> = {};
-    try {
-      worktreeResolution = await resolveWorkspaceAndWorktreeForRequest({
-        provider: "cursor",
-        workspace: cursorWorkspace.registryAlias,
-        sessionId: sessionResult.effectiveSessionId,
-        runtime,
-        workingDir: cursorWorkspace.cwd,
-        addDir: params.addDir,
-        suppressImplicitWorkspace: cursorWorkspace.localWorkspaceInput !== undefined,
-        requireStableCwd: sessionResult.resumeArgs.includes("--continue"),
-        deferWorktree: true,
-      });
-    } catch (err) {
-      return createErrorResponse("cursor_request", 1, "", corrId, err as Error);
-    }
-    applyEffectiveWorkingDirectory(
-      "cursor-agent",
-      args,
-      undefined,
-      undefined,
-      "cursor",
-      "--add-dir",
-      worktreeResolution.effectiveAddDirs
-    );
-    assertUpstreamCliArgs("cursor", args);
-    assertUpstreamCliEnv("cursor", undefined);
-    assertFinalCliProcessAdmission("cursor-agent", args, "cursor");
-    let effectiveSessionId = sessionResult.effectiveSessionId;
-    if (!params.createNewSession && !effectiveSessionId) {
-      effectiveSessionId = `${GATEWAY_SESSION_PREFIX}${randomUUID()}`;
-    }
-    if (effectiveSessionId) {
-      if (existingSession) {
-        const admitted = await persistResolvedSessionScope(
-          deps.sessionManager,
-          effectiveSessionId,
-          worktreeResolution,
-          runtime,
-          existingSession
-        );
-        sessionAdmission = { original: existingSession, admitted };
-      } else if (sessionResult.userProvidedSession || !params.createNewSession) {
-        const admitted = await createSessionWithResolvedScope(
-          deps.sessionManager,
-          "cursor",
-          "Cursor Session",
-          effectiveSessionId,
-          worktreeResolution,
-          runtime
-        );
-        sessionAdmission = { original: admitted.previousSession, admitted: admitted.session };
-      }
-    }
-    safeFlightStart(
-      {
-        correlationId: corrId,
-        cli: "cursor",
-        model: prep.resolvedModel || "default",
-        prompt: prep.effectivePrompt,
-        sessionId: effectiveSessionId,
-      },
-      runtime
-    );
-
-    const effectiveCompress = resolveEffectiveCompression(runtime.compression, {
-      compressResponse: params.compressResponse,
-      outputFormat: params.outputFormat,
-      outputSchemaDeclared: false,
-    });
-    const cursorFrHandoff = buildAsyncFlightRecorderHandoff(
-      "cursor",
-      prep,
-      effectiveSessionId,
-      params.outputFormat,
-      params.optimizePrompt
-    );
-    const result = await awaitJobOrDefer(
-      "cursor",
-      args,
-      corrId,
-      resolveIdleTimeout("cursor", params.idleTimeoutMs),
-      params.outputFormat,
-      params.forceRefresh,
-      runtime,
-      undefined,
-      undefined,
-      cursorFrHandoff.flightRecorderEntry,
-      cursorFrHandoff.extractUsage,
-      undefined,
-      cursorWorkspace.cwd ?? worktreeResolution.cwd,
-      effectiveCompress,
-      undefined,
-      undefined,
-      undefined,
-      undefined,
-      sessionBoundDedupArgs(args, effectiveSessionId)
-    );
-    if (isDeferredResponse(result)) {
-      sessionAdmissionCommitted = true;
-      await safeUpdateSessionUsageAfterJobAdmission(
-        deps.sessionManager,
-        sessionResult.userProvidedSession ? effectiveSessionId : undefined,
-        runtime
-      );
-      return buildDeferredToolResponse(result, effectiveSessionId);
-    }
-    const { stdout, stderr, code } = result;
-    durationMs = Math.max(0, Date.now() - startTime);
-    if (code !== 0) {
-      await rollbackSessionAndWorktreeAdmission(
-        deps.sessionManager,
-        sessionAdmission,
-        undefined,
-        runtime
-      );
-      const terminalFailure = buildTerminalCliFailure(
-        "cursor",
-        stdout,
-        stderr,
-        code,
-        params.outputFormat
-      );
-      safeFlightComplete(
-        corrId,
+  // Tier-B T5e: route cursor (the last non-Kit sibling) through the shared
+  // terminal envelope with kit=null. cursor is the MINIMAL member: it installs
+  // NO request-owned worktree lifecycle (deferWorktree resolve only feeds the
+  // effective add-dirs + cwd), so ledger.worktreeLifecycle stays undefined and
+  // the driver's settle / finally finishHandler / rollback worktree arg all
+  // degrade to no-ops exactly as cursor did inline. It has no --workdir/--add-dir
+  // env, no CLI env, and no "invoked" log. It uses the D4 usageUpdateSessionId
+  // split and env.logger = deps.logger; like devin (D5) the driver adds the three
+  // terminal stderr lines (failed/completed/threw) that cursor emitted none of.
+  // cursor's H-DoubleComplete is UNREACHABLE (inert): with no worktree lifecycle
+  // the deferred settle never calls finishHandler, and the only post-arm step
+  // (safeUpdateSessionUsageAfterJobAdmission) swallows, so the catch is never
+  // reached after a deferral.
+  let effectiveSessionId = sessionResult.effectiveSessionId;
+  if (!params.createNewSession && !effectiveSessionId) {
+    effectiveSessionId = `${GATEWAY_SESSION_PREFIX}${randomUUID()}`;
+  }
+  let effectiveCompress = false;
+  const ledger = new RequestTerminalLedger(runtime, undefined);
+  const flight = new FlightOwnership(
+    () =>
+      safeFlightStart(
         {
-          ...terminalFailure,
-          durationMs,
-          retryCount: 0,
-          circuitBreakerState: "closed",
-          optimizationApplied: false,
-          exitCode: code,
-          status: "failed",
+          correlationId: corrId,
+          cli: "cursor",
+          model: prep.resolvedModel || "default",
+          prompt: prep.effectivePrompt,
+          sessionId: effectiveSessionId,
         },
         runtime
+      ),
+    metadata => safeFlightComplete(corrId, metadata, runtime)
+  );
+
+  const env: KitTerminalEnvelope = {
+    runtime,
+    logger: deps.logger,
+    provider: "cursor",
+    corrId,
+    kit: null,
+    kitSession: null,
+    effectiveSessionId,
+    usageUpdateSessionId: sessionResult.userProvidedSession ? effectiveSessionId : undefined,
+    ledger,
+    flight,
+    startTime,
+    optimizationApplied: false,
+    outputFormat: params.outputFormat,
+    usageUpdateManager: deps.sessionManager,
+    failureRollbackManager: deps.sessionManager,
+    exceptionRollbackManager: deps.sessionManager,
+    fireRequestCleanupInCatch: false,
+  };
+
+  const hooks: KitTerminalHooks = {
+    runInsideTerminalTry: async () => {
+      const existingSession = sessionResult.userProvidedSession
+        ? await getExistingSessionForProvider(
+            deps.sessionManager,
+            sessionResult.effectiveSessionId,
+            "cursor",
+            { requireTrackedRemoteSession: true }
+          )
+        : null;
+      let worktreeResolution: ResolvedWorktree;
+      try {
+        worktreeResolution = await resolveWorkspaceAndWorktreeForRequest({
+          provider: "cursor",
+          workspace: cursorWorkspace.registryAlias,
+          sessionId: sessionResult.effectiveSessionId,
+          runtime,
+          workingDir: cursorWorkspace.cwd,
+          addDir: params.addDir,
+          suppressImplicitWorkspace: cursorWorkspace.localWorkspaceInput !== undefined,
+          requireStableCwd: sessionResult.resumeArgs.includes("--continue"),
+          deferWorktree: true,
+        });
+      } catch (err) {
+        return {
+          ok: false,
+          earlyResponse: createErrorResponse("cursor_request", 1, "", corrId, err as Error),
+        };
+      }
+      applyEffectiveWorkingDirectory(
+        "cursor-agent",
+        args,
+        undefined,
+        undefined,
+        "cursor",
+        "--add-dir",
+        worktreeResolution.effectiveAddDirs
       );
-      return createErrorResponse(
+      assertUpstreamCliArgs("cursor", args);
+      assertUpstreamCliEnv("cursor", undefined);
+      assertFinalCliProcessAdmission("cursor-agent", args, "cursor");
+      if (effectiveSessionId) {
+        if (existingSession) {
+          const admitted = await persistResolvedSessionScope(
+            deps.sessionManager,
+            effectiveSessionId,
+            worktreeResolution,
+            runtime,
+            existingSession
+          );
+          ledger.sessionAdmission = { original: existingSession, admitted };
+        } else if (sessionResult.userProvidedSession || !params.createNewSession) {
+          const admitted = await createSessionWithResolvedScope(
+            deps.sessionManager,
+            "cursor",
+            "Cursor Session",
+            effectiveSessionId,
+            worktreeResolution,
+            runtime
+          );
+          ledger.sessionAdmission = {
+            original: admitted.previousSession,
+            admitted: admitted.session,
+          };
+        }
+      }
+      flight.start();
+      return { ok: true, value: { worktreeResolution } };
+    },
+    execute: async worktreeResolution => {
+      effectiveCompress = resolveEffectiveCompression(runtime.compression, {
+        compressResponse: params.compressResponse,
+        outputFormat: params.outputFormat,
+        outputSchemaDeclared: false,
+      });
+      const cursorFrHandoff = buildAsyncFlightRecorderHandoff(
+        "cursor",
+        prep,
+        effectiveSessionId,
+        params.outputFormat,
+        params.optimizePrompt
+      );
+      return awaitJobOrDefer(
+        "cursor",
+        args,
+        corrId,
+        resolveIdleTimeout("cursor", params.idleTimeoutMs),
+        params.outputFormat,
+        params.forceRefresh,
+        runtime,
+        undefined,
+        undefined,
+        cursorFrHandoff.flightRecorderEntry,
+        cursorFrHandoff.extractUsage,
+        undefined,
+        cursorWorkspace.cwd ?? worktreeResolution.cwd,
+        effectiveCompress,
+        undefined,
+        undefined,
+        undefined,
+        undefined,
+        sessionBoundDedupArgs(args, effectiveSessionId)
+      );
+    },
+    computeSuccessFacts: () => undefined,
+    finalizeKit: async () => {},
+    buildFailureResponse: ({ code, stderr, terminalFailure, result }) =>
+      createErrorResponse(
         "cursor",
         code,
         stderr,
@@ -13694,33 +13706,23 @@ export async function handleCursorRequest(
           providerSessionId: terminalFailure.providerSessionId,
         },
         result
+      ),
+    buildSuccessResponse: ({ stdout, durationMs }) => {
+      const response = buildCliResponse(
+        "cursor",
+        stdout,
+        params.optimizeResponse ?? false,
+        corrId,
+        effectiveSessionId,
+        prep,
+        durationMs,
+        sessionResult.userProvidedSession,
+        params.outputFormat,
+        undefined,
+        effectiveCompress
       );
-    }
-    wasSuccessful = true;
-    sessionAdmissionCommitted = true;
-    await safeUpdateSessionUsageAfterJobAdmission(
-      deps.sessionManager,
-      sessionResult.userProvidedSession ? effectiveSessionId : undefined,
-      runtime
-    );
-
-    const response = buildCliResponse(
-      "cursor",
-      stdout,
-      params.optimizeResponse ?? false,
-      corrId,
-      effectiveSessionId,
-      prep,
-      durationMs,
-      sessionResult.userProvidedSession,
-      params.outputFormat,
-      undefined,
-      effectiveCompress
-    );
-    safeRecordCompression(corrId, response.compression, runtime);
-    safeFlightComplete(
-      corrId,
-      {
+      safeRecordCompression(corrId, response.compression, runtime);
+      flight.completeInline({
         response: stdout,
         durationMs,
         retryCount: 0,
@@ -13728,42 +13730,12 @@ export async function handleCursorRequest(
         optimizationApplied: params.optimizePrompt || (params.optimizeResponse ?? false),
         exitCode: 0,
         status: "completed",
-      },
-      runtime
-    );
-    return response;
-  } catch (error) {
-    if (!sessionAdmissionCommitted) {
-      await rollbackSessionAndWorktreeAdmission(
-        deps.sessionManager,
-        sessionAdmission,
-        undefined,
-        runtime
-      );
-    }
-    const elapsedMs = Math.max(0, Date.now() - startTime);
-    safeFlightComplete(
-      corrId,
-      {
-        response: "",
-        durationMs: elapsedMs,
-        retryCount: 0,
-        circuitBreakerState: "closed",
-        optimizationApplied: false,
-        exitCode: 1,
-        errorMessage: (error as Error).message,
-        status: "failed",
-      },
-      runtime
-    );
-    return createErrorResponse("cursor", 1, "", corrId, error as Error);
-  } finally {
-    runtime.performanceMetrics.recordRequest(
-      "cursor",
-      Math.max(0, durationMs || Date.now() - startTime),
-      wasSuccessful
-    );
-  }
+      });
+      return response;
+    },
+  };
+
+  return runKitTerminalEnvelope(env, hooks);
 }
 
 export async function handleCursorRequestAsync(
