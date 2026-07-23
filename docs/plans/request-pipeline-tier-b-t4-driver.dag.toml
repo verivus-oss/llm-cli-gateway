@@ -1,0 +1,561 @@
+# Implementation plan: Tier-B T4 - the terminal-envelope driver.
+#
+# Goal: extract the ONE genuinely shared piece of the two sync Kit request
+# handlers - the terminal envelope (the request's single try/catch/finally, the
+# execute dispatch, and the deferred/failure/success terminal choreography) -
+# into a generic `runKitTerminalEnvelope` driver, and rewrite BOTH
+# `handleClaudeRequest` and `handleCodexRequest` to build an `env` + `hooks` and
+# call it. Byte-behaviour-preserving for both providers across every path. One
+# PR: driver + both handler rewrites + full per-path test coverage + the spec
+# amendment. Nothing deferred to a follow-up.
+#
+# Context:
+#   The coordinated design is docs/plans/request-pipeline-tier-b-t4-driver.design.md
+#   (rev 3, unconditionally approved by Codex gpt-5.5, Grok 4.5, and Mistral).
+#   It SUPERSEDES the one-line T4 framing in the Tier-B spec
+#   (docs/plans/request-pipeline-tier-b-handler-envelope.spec.md, section 5/7:
+#   "the driver replays states 0..12"). The design's load-bearing correction,
+#   verified in code by all three reviewers:
+#
+#     1. The two handlers have DIFFERENT try/finally topologies. Claude wraps
+#        states 4..12 in ONE try/catch/finally (a state 4..8 throw reaches the
+#        terminal catch AND the finally records a performance metric). Codex runs
+#        states 4..8 OUTSIDE its main try, each with its OWN dedicated
+#        early-return catch and NO metric; its try wraps only states 9..12.
+#     2. A single shared try/finally over states 4..12 (the rejected scaffold)
+#        would force Claude's topology onto Codex: a codex front-half failure
+#        would newly run a metric-recording finally and could drop
+#        `requestCleanup` / use the wrong rollback manager. That is a real
+#        behaviour change, not a doc nit. The rejected scaffold has already been
+#        reverted from src/index.ts (verified: 0 matches for the driver symbols).
+#     3. Codex's three front-half catches are NOT uniform: worktree-resolve and
+#        argv-admission do cleanup+discard with NO rollback; only
+#        session-admission/materialize does `rollbackOnFailure(kitSession,
+#        runtime.sessionManager)`. All three record NO metric.
+#
+#   So the extraction is the terminal envelope only, with a `runInsideTerminalTry`
+#   seam that lets Claude keep states 4..8 INSIDE the envelope try (preserving its
+#   metric-on-error boundary) and Codex keep states 4..8 OUTSIDE in its own
+#   dedicated catches (preserving its no-metric boundary). This DAG is a
+#   single-PR decomposition of that design; it is NOT a multi-phase release.
+#
+#   `RequestTerminalLedger` and `FlightOwnership` already exist in src/index.ts
+#   (extracted by T2 / T3); the H-DoubleComplete fence (transfer-before-settle)
+#   is T3 and must stay intact. This is the last Tier-B slice stacked on
+#   master e94ae13 (post T0/T0.5/T0.1/T1/T2/T3, all merged).
+
+[meta]
+name = "Tier-B T4 - terminal-envelope driver"
+schema_version = "1.1"
+owner = "verivus-oss"
+slice = "request-pipeline-tier-b-t4-driver"
+target_branch = "master"
+base_commit = "e94ae13"
+providers = ["claude", "codex"]
+acceptance_resource = """
+A single generic `runKitTerminalEnvelope` driver owns exactly ONE
+try/catch/finally (the execute dispatch + the deferred/failure/success terminal
+choreography + the catch + the finally metric), with a `runInsideTerminalTry`
+seam; BOTH `handleClaudeRequest` and `handleCodexRequest` build an `env` +
+`hooks` and return `runKitTerminalEnvelope(env, hooks)`; every path for both
+providers is byte-behaviour-preserving per the design's section-4 preservation
+matrix (exactly-once metric, fenced flight completion, no dropped/double
+cleanup, preserved manager asymmetry, centralised finalize gate, preserved
+success-facts/finalize order, unchanged principal isolation); every state 4..8
+failure path has its OWN explicit test for BOTH providers plus a codex
+facts-order-throw test; the Tier-B spec's "replays states 0..12" wording is
+amended to "owns the terminal envelope"; and `npm run check` is green.
+"""
+invariant_sources = [
+  "docs/plans/request-pipeline-tier-b-t4-driver.design.md",
+  "docs/plans/request-pipeline-tier-b-handler-envelope.spec.md",
+  "src/index.ts",
+  "src/request-helpers.ts",
+  "src/prep-pipeline.ts",
+  "src/worktree-manager.ts",
+  "src/flight-recorder.ts",
+]
+predecessor_plan = "docs/plans/request-pipeline-tier-b-handler-envelope.spec.md"
+
+[decision]
+extraction_scope = "terminal envelope ONLY (the single try/catch/finally + execute dispatch + deferred/failure/success terminal choreography); the front half (states 0..8) stays per-handler and is NOT hidden behind a prepare callback"
+driver_symbol = "runKitTerminalEnvelope<TFacts>(env: KitTerminalEnvelope, hooks: KitTerminalHooks<TFacts>): Promise<ExtendedToolResponse>"
+outcome_type = "tagged union KitStageOutcome<T> = { ok:true; value:T } | { ok:false; earlyResponse:ExtendedToolResponse } (replaces the weak 'earlyResponse' in o discriminant all three reviewers flagged)"
+topology_seam = "hooks.runInsideTerminalTry() runs WHAT the provider puts inside the envelope try; claude passes states 4..8 (so their failures reach the envelope catch + finally metric); codex passes a trivial passthrough returning the worktreeResolution it already computed OUTSIDE the try (so codex front-half failures never enter the envelope)"
+manager_fields_are_per_context = "usageUpdateManager / failureRollbackManager / exceptionRollbackManager / fireRequestCleanupInCatch are context fields, NOT hard-coded; claude and codex deliberately target different session managers per call-site and the ledger already takes the manager as an argument"
+kit_finalize_gate_centralised = "the driver owns the gate `kit && kitSession && !result.jobId` and calls finalizeKit only when it holds; a leaf can never forget it"
+compute_success_facts_required = "computeSuccessFacts is a REQUIRED hook (not optional) so extract-before-finalize is type-enforced; codex extracts usage/cost/meta there BEFORE finalize (a parse throw leaves the Kit session un-finalized, as today); claude sets TFacts=undefined and implements it as a no-op () => undefined, parsing AFTER finalize inside buildSuccessResponse (finalize-before-parse, as today); making it required removes the unsound `undefined as TFacts` cast"
+kit_job_handed_off_is_driver_local = "kitJobHandedOff is set inside the envelope and read only by the envelope catch; it is NOT a context field, preserving today's per-handler-local semantics"
+h_double_complete_fence_preserved = "deferred transfers completion ownership to the manager BEFORE settle (T3 fence); the catch completeInline is a no-op once transferred; no path writes two inline completions"
+invoked_log_is_provider_owned = "the 'invoked with ...' log is written by each provider inside its own state-8 code (claude AFTER flight.start, ~10409..10411); the driver never logs it"
+single_pr_no_deferral = "one PR: driver + both handler rewrites + all boundary tests + spec amendment; no provider, edge case, or test deferred"
+reason = """
+Three independent adversarial reviews unanimously rejected a generic 0..12
+replay driver because the two handlers do not share a try/finally topology, and
+a shared one silently changes codex's metric/cleanup/rollback boundary. What IS
+genuinely shared and worth de-duplicating is the terminal envelope: both
+handlers implement the exact same ledger+flight call order and gating (including
+the H-DoubleComplete fence) around execute. Extracting only that, with a
+runInsideTerminalTry seam for the topology difference, de-duplicates the shared
+choreography while preserving every provider-specific boundary byte-for-byte.
+The front half is genuinely divergent (opposite prep-vs-kitSession ordering,
+mint-vs-empty effectiveSessionId, claude-only MCP plumbing, opposite try
+scopes); hiding it behind a callback would relocate ~300-400 lines per provider
+without de-duplicating them, for worse stack traces and a read-top-to-bottom
+penalty. So it stays inline per handler.
+"""
+
+[[steps]]
+id = "refresh-anchors-audit"
+depends_on = []
+actor = "assistant"
+action = """
+Re-verify EVERY ~NNNN line anchor in the design doc against the real code at the
+implementation HEAD (base master e94ae13; handleClaudeRequest at src/index.ts:9706,
+handleCodexRequest at src/index.ts:10499). Do NOT edit product code in this step.
+
+IMPORTANT (verified 2026-07-23): the design doc's ~NNNN anchors are STALE relative
+to e94ae13 - they sit ~200..600 lines BELOW the real code (the design was numbered
+against a larger/older tree, not the e94ae13 it names). The STRUCTURAL and
+BEHAVIOURAL claims all hold; only the numbers drifted. The verified real anchors at
+e94ae13 (use THESE, not the design's):
+
+  Claude (handleClaudeRequest 9706..10450):
+    states 0..3 inline early returns: ~10002/10018/10036 (each returns
+      "claude_request", 10036's catch fires ledger.requestCleanup? at 10043).
+    main try open: 10089  (design ~10328). kitJobHandedOff local: 10088 (before try).
+    nested worktree-resolve try/catch: 10093/10105 -> ledger.requestCleanup?.()
+      (10106) + return "claude_request" (10108); NO rollback, NO completeInline.
+    installWorktree 10169; flight.start() 10172; "invoked with" log 10174 (AFTER
+      flight.start). (design ~10408/~10409..10411)
+    deferred: transferCompletionToManager 10248.
+    inline failure: rollbackOnFailure(kitSession, sessionManager=deps) 10265;
+      finalize 10268; completeInline 10280.
+    inline success: finalize 10319 BEFORE parse.
+    catch: rollbackOnException(kitSession, runtime.sessionManager) 10429;
+      cleanupOnException(kitJobHandedOff, error, kitSession, true) 10430; completeInline 10436.
+    finally: finishHandler 10448; recordRequest("claude") 10450 (design ~10684).
+
+  Codex (handleCodexRequest 10499..11098):
+    session-resolution try/catch 10702/10714 -> prepCleanup + discard + return
+      "codex_request" (this is a state-3 prep catch, NOT one of the three
+      states-4..8 catches; it stays inline either way).
+    THREE states-4..8 front-half catches, all OUTSIDE the main try, all NO metric:
+      worktree-resolve 10728/10739 -> prepCleanup?.() (10741) + discard (10745),
+        NO rollback, return "codex_request".
+      argv/assert-admission 10748/10761 -> prepCleanup?.() (10763) + discard (10767),
+        NO rollback, return "codex_request".  NOTE: the design and this DAG's earlier
+        wording said "requestCleanup" here; the CODE fires the prepCleanup LOCAL.
+        It is behaviourally identical: ledger.requestCleanup is initialised to
+        prepCleanup (RequestTerminalLedger ctor, src/index.ts:2283) and only
+        recomposed at installWorktree (2293), which runs at 10823 - AFTER all three
+        catches. So at every front-half catch requestCleanup === prepCleanup. Assert
+        "the base prepCleanup fired".
+      session-admission/materialize 10771/10817 -> rollbackOnFailure(kitSession,
+        runtime.sessionManager) (10818) + ledger.requestCleanup?.() (10819) + discard
+        (10820); worktree-materialize (10800..10814) shares THIS catch.
+    installWorktree 10823; flight.start() 10848; main try 10854 (wraps states 9..12;
+      design ~11084/~11090).
+    kitJobHandedOff 10909/10914.
+    inline failure: rollbackOnFailure(kitSession, runtime.sessionManager) 10936.
+    inline success: extractUsageAndCost("codex", ...) 11007 (codexUsage) BEFORE
+      finalizePersonalKitSessionOrThrow 11021 (design ~11243 -> ~11256).
+    catch: rollbackOnException(kitSession, deps.sessionManager) 11077;
+      cleanupOnException(kitJobHandedOff, error, kitSession, false) 11078 (design ~11314).
+    finally: recordRequest("codex") 11098.
+
+Confirm each of the above against the code and correct anything that has moved
+since 2026-07-23. Also record, with current file:line evidence:
+
+  Claude (handleClaudeRequest):
+    - main try open (before worktree resolve) and the nested worktree-resolve
+      catch early-return (design ~10341, id "claude_request", cleanup + discard,
+      NO rollback, NO completeInline).
+    - applyEffectiveWorkingDirectory + asserts (throw -> main catch).
+    - session admission + worktree materialize (design ~10387..10404, throw ->
+      main catch).
+    - installWorktree, flight.start() (design ~10408, INSIDE the try), and the
+      "invoked with ..." logger.info (design ~10409..10411, AFTER flight.start).
+    - the terminal choreography: deferred (transfer+settle+usage(deps)+
+      warnings-decorate), inline success (settle+usage+finalize(initialNativeSessionId)
+      +dual stream-json build; finalize BEFORE parse, design ~10554 finalize,
+      ~10568 parse), inline failure (rollbackOnFailure(deps)+finalize+completeInline),
+      catch (rollbackOnException(runtime)+cleanup fire=true+no-op completeInline,
+      id "claude"), finally recordRequest("claude") (design ~10684).
+
+  Codex (handleCodexRequest):
+    - the THREE dedicated front-half catches, OUTSIDE any envelope try, and their
+      NON-uniform behaviour: worktree-resolve (design ~10975: prepCleanup + discard,
+      return "codex_request", NO rollback); argv/assert-admission (design ~10997:
+      requestCleanup + discard, NO rollback); session-admission/materialize
+      (design ~11036..11057 shared catch: rollbackOnFailure(kitSession,
+      runtime.sessionManager) + requestCleanup + discard). All three record NO metric.
+    - installWorktree (design ~11059), flight.start() (design ~11084), and the
+      codex "invoked" log - all OUTSIDE the main try.
+    - the main try open (design ~11090, wraps only states 9..12) and
+      fireRequestCleanupInCatch=false (design ~11314).
+    - computeSuccessFacts source order: codex extracts codexUsage/costBasis/codexMeta
+      (design ~11243/11247/11255) BEFORE finalize (design ~11256).
+
+  Shared helpers: confirm RequestTerminalLedger and FlightOwnership (both in
+  src/index.ts today) expose settle / rollbackOnFailure / rollbackOnException /
+  cleanupOnException / sessionAdmissionCommitted / worktreeLifecycle and
+  transferCompletionToManager / completeInline / start with the exact signatures
+  the driver body in design section 2.4 calls. Confirm isDeferredResponse,
+  buildDeferredToolResponse, safeUpdateSessionUsageAfterJobAdmission,
+  buildTerminalCliFailure, and kitAwareErrorResponse are in scope from where the
+  driver will live.
+
+Flag any drift between the design's anchors and the real lines; note the corrected
+numbers so steps 2-4 and step 6 (spec amendment) cite reality.
+"""
+idempotent = true
+validation = """
+An audit note lists the real current file:line for every anchor the design cites,
+confirms (or corrects with the true line) each one, and confirms the ledger /
+flight / helper signatures match what design section 2.4 invokes. The rejected
+scaffold is confirmed absent (grep for runKitTerminalEnvelope / KitTerminalEnvelope
+/ KitStageOutcome / KitTerminalHooks returns 0 matches in src/). No product code
+changed.
+"""
+
+[[steps]]
+id = "introduce-driver"
+depends_on = ["refresh-anchors-audit"]
+actor = "assistant"
+action = """
+Introduce the generic driver machinery in src/index.ts (same file and discipline
+as RequestTerminalLedger / FlightOwnership: no provider literals beyond a
+`provider: CliType` label, no gateway-server import). Add, verbatim to design
+sections 2.1-2.4:
+
+  - `type KitStageOutcome<T>` (tagged union: { ok:true; value:T } |
+    { ok:false; earlyResponse:ExtendedToolResponse }).
+  - `interface KitTerminalEnvelope` with the exact fields in design 2.2, INCLUDING
+    the per-context manager fields (usageUpdateManager, failureRollbackManager,
+    exceptionRollbackManager: ISessionManager) and fireRequestCleanupInCatch:
+    boolean, optimizationApplied, outputFormat, plus runtime/provider/corrId/kit/
+    kitSession/effectiveSessionId/ledger/flight/startTime. kitJobHandedOff is NOT
+    a field (driver-local).
+  - `interface KitTerminalHooks<TFacts = undefined>` with runInsideTerminalTry,
+    execute, decorateDeferred? (optional), computeSuccessFacts (REQUIRED),
+    finalizeKit, buildFailureResponse, buildSuccessResponse - exact signatures per
+    design 2.3.
+  - `async function runKitTerminalEnvelope<TFacts>(env, hooks)` - the driver body
+    exactly as design 2.4: try { runInsideTerminalTry (ok:false -> return
+    earlyResponse); execute; set kitJobHandedOff; deferred branch (transfer BEFORE
+    settle, sessionAdmissionCommitted=true, settle, usage-if-!kitSession,
+    decorateDeferred?); code!==0 failure branch (rollbackOnFailure(failureRollbackManager),
+    buildTerminalCliFailure, gated finalizeKit(completed:false), log, completeInline,
+    buildFailureResponse); success branch (sessionAdmissionCommitted=true, settle,
+    usage-if-!kitSession, log, computeSuccessFacts BEFORE gated finalizeKit(completed:true),
+    buildSuccessResponse) } catch { rollbackOnException(exceptionRollbackManager),
+    cleanupOnException(kitJobHandedOff, error, kitSession, fireRequestCleanupInCatch),
+    log, completeInline, kitAwareErrorResponse } finally { worktreeLifecycle?.finishHandler(),
+    recordRequest(provider, durationMs, wasSuccessful) }.
+
+The finalize gate `kit && kitSession && !result.jobId` lives in the driver (both
+the failure and success branches). Do NOT wire either handler yet; the driver is
+dead-but-compiling code after this step. Keep it in place near the ledger/flight
+classes so the two handlers can call it.
+
+TYPE ALIASES (Grok review note, non-blocking): the design body (2.3/2.4) names
+three types that are NOT declared as such in the code -- `KitTerminalExecuteResult`,
+`KitTerminalInlineResult`, and `KitTerminalFailure`. Define them in this step as
+aliases over the real underlying types so `npm run build` passes and the hook
+signatures type-check: `KitTerminalExecuteResult = InlineJobResponse |
+DeferredJobResponse` (the awaitJobOrDefer return; `isDeferredResponse` narrows it),
+`KitTerminalInlineResult = InlineJobResponse` (the narrowed non-deferred arm), and
+`KitTerminalFailure = ReturnType<typeof buildTerminalCliFailure>`. Confirm the exact
+current names/shapes during `refresh-anchors-audit`; do not invent new runtime types.
+"""
+idempotent = false
+validation = """
+`npm run build` passes with the new types and function present and unused. The
+driver body is byte-faithful to design section 2.4 (reviewable line-by-line against
+it): exactly one try/catch/finally; deferred transfers completion BEFORE settle;
+the finalize gate is `kit && kitSession && !result.jobId` in both branches;
+computeSuccessFacts is awaited BEFORE finalizeKit on the success path; recordRequest
+fires once in the finally. No provider literal appears beyond the `provider` label.
+`npm run lint` and `npm run format:check` pass on the new code.
+"""
+
+[[steps]]
+id = "wire-claude-handler"
+depends_on = ["introduce-driver"]
+actor = "assistant"
+action = """
+Rewrite handleClaudeRequest (src/index.ts:9706) to build `env` + `hooks` and
+`return runKitTerminalEnvelope(env, hooks)`, with states 4..8 INSIDE the envelope
+try via runInsideTerminalTry. Keep states 0..3 + ledger init + flight construction
+inline exactly as today (validation / kit / prep / insertAndAdmitFinalSessionArgs /
+session resolve early returns unchanged).
+
+  - env: provider "claude"; usageUpdateManager = deps.sessionManager;
+    failureRollbackManager = deps.sessionManager; exceptionRollbackManager =
+    runtime.sessionManager; fireRequestCleanupInCatch = true; plus corrId, kit,
+    kitSession, effectiveSessionId, ledger, flight, startTime, optimizationApplied
+    (optimizePrompt || optimizeResponse), outputFormat.
+  - runInsideTerminalTry: runs CURRENT lines ~10089..10174 (verified e94ae13: main
+    try 10089 -> installWorktree 10169 -> flight.start 10172 -> invoked log 10174)
+    verbatim - the nested worktree-resolve try (10093/10105 returns { ok:false,
+    earlyResponse } with operation id "claude_request", ledger.requestCleanup?.()
+    (10106) + return, NO rollback, NO completeInline),
+    applyEffectiveWorkingDirectory + asserts (throw -> envelope catch), session
+    admission, worktree materialize (throw -> envelope catch), installWorktree,
+    flight.start(), and the "invoked with ..." logger.info (AFTER flight.start).
+    Returns { ok:true, value:{ worktreeResolution } } on success.
+  - execute: the full awaitJobOrDefer(...) inside runWithPersonalKitAttemptLease,
+    INCLUDING the pre-awaitJobOrDefer state-9 setup currently inside the main try
+    (~10177..10195) - it moves into the execute hook so the existing try boundary is
+    preserved (Grok review note).
+  - decorateDeferred: attaches claude's warnings to the deferred response.
+  - computeSuccessFacts: no-op `() => undefined` (TFacts = undefined).
+  - finalizeKit: claude's finalize including initialNativeSessionId.
+  - buildFailureResponse: claude's failure body (warnings error).
+  - buildSuccessResponse: claude's dual stream-json parse + OWN success
+    completeInline + response build (parse AFTER finalize; the driver has already
+    run settle + usage + computeSuccessFacts + finalizeKit).
+
+Because states 4..8 run inside the envelope try, a state 4..7 throw reaches the
+envelope catch (no-op completeInline on the not-yet-started flight, id "claude")
+and the envelope finally records the metric; the worktree-resolve ok:false early
+return hits the finally (metric) but NOT the catch - both byte-identical to today.
+"""
+idempotent = false
+validation = """
+`npm run build` passes. handleClaudeRequest ends in
+`return runKitTerminalEnvelope(env, hooks)` and contains no second try/finally
+around execute. The existing claude characterization nets stay green untouched:
+claude-handler-terminal-net, claude-handler, claude-kit-preadmission,
+claude-prep-parity, claude-mcp-config, claude-argv-golden. Manual diff-read confirms
+the claude env manager mapping (usage/failure = deps.sessionManager, exception =
+runtime.sessionManager, fire=true) matches design section 2.2 and the byte matrix
+section 4.
+"""
+
+[[steps]]
+id = "wire-codex-handler"
+depends_on = ["introduce-driver"]
+actor = "assistant"
+action = """
+Rewrite handleCodexRequest (src/index.ts:10499) to build `env` + `hooks` and
+`return runKitTerminalEnvelope(env, hooks)`, keeping states 0..8 INLINE exactly as
+today - OUTSIDE any envelope try - including its three dedicated, NON-uniform
+early-return catches, installWorktree, flight.start(), and the "invoked" log.
+
+  - env: provider "codex"; usageUpdateManager = runtime.sessionManager;
+    failureRollbackManager = runtime.sessionManager; exceptionRollbackManager =
+    deps.sessionManager; fireRequestCleanupInCatch = false; plus corrId, kit,
+    kitSession, effectiveSessionId, ledger, flight, startTime, optimizationApplied,
+    outputFormat.
+  - runInsideTerminalTry: a trivial `async () => ({ ok:true, value:{
+    worktreeResolution } })` returning the resolution already computed outside the
+    try. It can neither throw nor return ok:false, so a codex state 4..8 failure is
+    handled entirely by codex's own inline catches and NEVER enters the envelope
+    (no new metric, no dropped cleanup, correct managers).
+  - execute: codex's awaitJobOrDefer(...) inside runWithPersonalKitAttemptLease,
+    INCLUDING the pre-awaitJobOrDefer state-9 setup currently inside codex's main try
+    (~10855..10870), which moves into the execute hook so the try boundary is
+    preserved (Grok review note).
+  - decorateDeferred: omitted (codex returns the bare deferred).
+  - computeSuccessFacts: extracts codexUsage / costBasis / codexMeta from stdout
+    (extractUsageAndCost at src/index.ts:11007 today) - this runs BEFORE finalizeKit
+    (11021 today), so a parse/extraction throw leaves the Kit session UN-finalized
+    exactly as codex does today.
+  - finalizeKit: codex's finalize (omits initialNativeSessionId).
+  - buildFailureResponse: codex's failure body (JSONL + resume-hint error).
+  - buildSuccessResponse: codex's codexFrResponse build + OWN success completeInline,
+    consuming `facts` from computeSuccessFacts.
+
+Preserve the three front-half catches exactly (verified e94ae13): worktree-resolve
+(10739: prepCleanup + discard, return "codex_request", NO rollback); argv/assert
+(10761: prepCleanup + discard, return "codex_request", NO rollback - the code fires
+the prepCleanup local, which === ledger.requestCleanup here since installWorktree
+at 10823 has not recomposed it yet); session-admission/materialize (10817:
+rollbackOnFailure(kitSession, runtime.sessionManager) + ledger.requestCleanup? +
+discard; worktree-materialize shares this catch). All record NO metric.
+"""
+idempotent = false
+validation = """
+`npm run build` passes. handleCodexRequest ends in
+`return runKitTerminalEnvelope(env, hooks)`; its three front-half catches remain
+outside any envelope try and are unchanged. The existing codex characterization
+nets stay green untouched: codex-handler-terminal-net, codex-handler,
+codex-kit-preadmission. Manual diff-read confirms the codex env manager mapping
+(usage/failure = runtime.sessionManager, exception = deps.sessionManager,
+fire=false) matches design 2.2, that computeSuccessFacts runs its extraction and
+finalizeKit runs after it, and that no state 4..8 path now calls the envelope.
+"""
+
+[[steps]]
+id = "boundary-tests"
+depends_on = ["wire-claude-handler", "wire-codex-handler"]
+actor = "assistant"
+action = """
+Add the new boundary tests in the same change (design section 6). Every state 4..8
+failure path gets its OWN explicit test for BOTH providers (no path folded into
+another); each asserts the exact tuple (recordRequest count, requestCleanup fired?,
+discard fired?, rollback call + manager, completeInline fired?, response operation
+id).
+
+  Codex (all assert recordRequest count == 0, NO metric bleed):
+    1. worktree-resolve failure: prepCleanup + discard, NO rollback, NO
+       completeInline, id "codex_request".
+    2. argv/assert-admission failure: prepCleanup (=== ledger.requestCleanup here,
+       pre-installWorktree) + discard, NO rollback, NO completeInline, id "codex_request".
+    3. session-admission failure: rollbackOnFailure(runtime.sessionManager) +
+       requestCleanup + discard, NO completeInline.
+    4. worktree-materialize failure (shares the session-admission catch): same as
+       (3), asserted explicitly.
+
+  Claude (all assert recordRequest count == 1, metric via finally):
+    5. worktree-resolve early return (the ok:false seam): cleanup + discard, NO
+       rollback, NO flight.completeInline, id "claude_request", catch NOT taken.
+    6. argv/assert failure (throw -> catch): rollbackOnException(runtime.sessionManager)
+       + cleanupOnException(fire=true) + no-op completeInline, id "claude".
+    7. session-admission failure (throw -> catch): as (6).
+    8. worktree-materialize failure (throw -> catch): as (6).
+
+  Terminal parity (both providers): deferred / inline-success / inline-failure /
+  exception each assert the flight ownership call sequence, the settle/rollback/
+  cleanup calls, and the single recordRequest.
+
+  Success facts-order (codex): a codex success where computeSuccessFacts
+  (extraction) THROWS asserts the Kit session is left UN-finalized (finalizeKit NOT
+  called) and the throw surfaces via the envelope catch - pinning
+  extract-before-finalize.
+
+  H-DoubleComplete stays pinned (claude reachable; codex documented unreachable)
+  via the existing terminal nets re-run against the driver.
+"""
+idempotent = false
+validation = """
+All 8 per-provider state-4..8 tests exist and pass, each asserting its exact tuple;
+the terminal-parity tests for deferred/success/failure/exception pass for both
+providers; the codex facts-order-throw test proves finalizeKit is NOT called when
+computeSuccessFacts throws. The pre-existing characterization nets
+(claude/codex-handler-terminal-net, *-handler, *-kit-preadmission,
+claude-prep-parity, personal-config-flight-recorder-privacy,
+sync-terminal-failure-redaction, claude-mcp-config, claude-argv-golden,
+async-job-manager-flight-recorder) are green and unmodified. `npm test` passes;
+coverage thresholds (70/60) hold.
+"""
+
+[[steps]]
+id = "spec-amendment"
+depends_on = ["refresh-anchors-audit"]
+actor = "assistant"
+action = """
+Amend docs/plans/request-pipeline-tier-b-handler-envelope.spec.md so its section
+5/7 wording "the driver replays states 0..12" is replaced by the design's
+reconciled framing (design section 1): "the driver owns the terminal envelope
+(the request's single try/catch/finally, the execute dispatch, and the terminal
+choreography); each provider injects the front-half work and the leaf parse via
+callbacks, including WHAT runs inside the terminal try so each provider's existing
+error/metric boundary is preserved exactly." Preserve the intent of the spec's
+section 5 (provider entanglement stays in the driver via injected callbacks;
+generic units stay pure); only drop the false uniformity of a 12-state replay.
+Cross-reference the T4 design doc. This is a docs-only edit; keep it tight and do
+NOT restate the whole design. No em dash.
+"""
+idempotent = false
+validation = """
+The spec no longer claims a literal 0..12 replay for T4; it points to the terminal-
+envelope framing and cites docs/plans/request-pipeline-tier-b-t4-driver.design.md.
+`npm run format:check` passes. The change is docs-only (no src/ edits in this step).
+"""
+
+[[steps]]
+id = "verification-gate"
+depends_on = ["boundary-tests", "spec-amendment"]
+actor = "assistant"
+action = """
+Run the full gate and capture exact commands + results in
+docs/plans/request-pipeline-tier-b-t4-driver.verification.md:
+
+  npm run build
+  npm run lint
+  npm run format:check
+  npm test
+  npm run check      # build + lint + format:check + provider-surfaces + site + full test + security audit
+
+`npm run check` is the authoritative gate (it builds first, so site:generate reads
+fresh dist/). If PostgreSQL-backed suites are unavailable locally, run the focused
+non-PG suites and document the missing service explicitly. Confirm the release
+security audit still hard-fails on any `node:sqlite` reference outside
+src/sqlite-driver.ts and any unapproved `fetch` token in dist/**/*.js (this change
+adds neither). Record the test count before/after (new boundary tests should raise it).
+"""
+idempotent = true
+validation = """
+`npm run check` is green (or every locally-available gate is green with any
+unavailable optional-service gap documented). The verification notes list exact
+commands, results, and before/after test counts. No new `node:sqlite` outside the
+adapter; no new `fetch` token in dist.
+"""
+
+[[steps]]
+id = "cross-llm-review-gate"
+depends_on = ["verification-gate"]
+actor = "assistant"
+action = """
+Run the adversarial cross-LLM review gate on the implemented diff (per the standing
+multi-LLM review discipline: Codex + Grok + Mistral, inspected-evidence only, no
+plan-compliance approvals; note Antigravity/Gemini refuses security-flavoured
+review and Codex tends to run away on read-heavy reviews - give it the focused diff).
+Dispatch each reviewer via the gateway with full local FS access (absolute paths in
+the prompt; do NOT pass workingDir/workspace to the reviewer tools - the remote
+workspace shadows local stdio). Give each: the T4 design doc, the amended spec, the
+verification notes, and the exact changed-file list / diff. Reviewers MUST verify
+every claim against the real handlers and the driver body, not against the summary:
+specifically D1 (accept the terminal-envelope amendment over a literal 0..12
+replay), D2 (the runInsideTerminalTry seam preserves BOTH boundaries - no state
+4..8 path changes its metric/cleanup/rollback), and D3 (manager mapping + centralised
+finalize gate + tagged-union outcome resolve all prior findings). If Claude disagrees
+with a finding, respond with code/doc evidence, not assertion. Poll ~every 90s.
+Iterate to UNCONDITIONAL approval from each, or a concrete unresolvable blocker.
+Never give a same-repo claude_request reviewer write access.
+"""
+idempotent = true
+validation = """
+The verification notes record each reviewer's dispatch id, every round's findings
+and the code/doc-evidenced response or fix, and a final UNCONDITIONAL approval from
+Codex, Grok, and Mistral (or a concrete documented blocker). D1/D2/D3 are each
+explicitly ratified against inspected code. Only then is the PR ready to open.
+"""
+
+[[steps]]
+id = "open-pr"
+depends_on = ["cross-llm-review-gate"]
+actor = "assistant"
+action = """
+Open ONE PR from the current branch (feature/prep-pipeline-tier-b-t4) to master
+via werner_veriai (gh-as/git-as), per the release-process discipline (PR + checks,
+never admin bypass). The PR contains: runKitTerminalEnvelope + KitTerminalEnvelope +
+KitTerminalHooks + KitStageOutcome; both handler rewrites; all new boundary tests;
+the spec amendment. Title and body: no em dash, no Co-Authored-By trailer, match
+repo commit style. Body summarises the terminal-envelope extraction, the dual
+topology (claude 4..8 inside / codex 4..8 outside via the seam), and links the
+design doc + verification notes. This is the last Tier-B slice; note the stack is
+now fully merged through T3 on master and T4 is the terminal driver.
+"""
+idempotent = false
+validation = """
+The PR is open against master with the driver + both rewrites + tests + spec
+amendment, green required checks, and a body that cites the design and verification
+notes. No admin bypass. Commit/PR text is em-dash-free with no attribution trailer.
+"""
+
+[rollback]
+guidance = """
+The change is a pure internal refactor: byte-behaviour-preserving for both
+providers with no new tool, config, or data flow. To revert, drop
+runKitTerminalEnvelope + the three types and restore the two handlers' inline
+terminal try/catch/finally from the base commit (e94ae13); the RequestTerminalLedger
+/ FlightOwnership classes and the T3 H-DoubleComplete fence are unaffected and must
+NOT be rolled back. There is no schema, resource, or release-surface change, so no
+migration or discovery-artifact regeneration is involved. If any reviewer holds that
+a literal 0..12 replay must ship despite the verified topology break, that is a
+design-level blocker (D1) to resolve before coding - not a rollback.
+"""
