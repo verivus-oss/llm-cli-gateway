@@ -187,9 +187,18 @@ The envelope is generic machinery: no provider logic, no gateway-server import
    (15703, 15900) and `kitJobHandedOff`-gated (15908), so those flags are ledger
    inputs, not handler-local afterthoughts.
 
-The driver replays states 0..12 against these units. Provider entanglement (Kit,
-per-provider parse) stays in the driver via injected callbacks, not inside the
-generic units.
+The T4 driver owns the terminal envelope (the request's single
+`try/catch/finally`, the execute dispatch, and the deferred/failure/success
+terminal choreography); each provider injects the front-half work and the leaf
+parse via callbacks, including WHAT runs inside the terminal try so each
+provider's existing error/metric boundary is preserved exactly. Provider
+entanglement (Kit, per-provider parse) stays in the driver via injected
+callbacks, not inside the generic units. (This supersedes an earlier framing of
+"replay states 0..12": the two Kit handlers do NOT share a single 0..12
+try/finally topology, so a literal replay would silently change codex's
+metric/cleanup/rollback boundary. See
+`docs/plans/request-pipeline-tier-b-t4-driver.design.md` section 1 for the
+verified evidence.)
 
 ## 6. Codebase reality that reshapes the plan
 
@@ -263,8 +272,15 @@ that function once claude is extracted.
   methods. Handler holds one ledger object instead of five locals.
 - **Stage T3: introduce `FlightOwnership`** wrapping the mode selection + the
   inline-complete / arm decisions.
-- **Stage T4: the driver.** Replay states 0..12 against the two units; the
-  handler body shrinks to the driver call plus provider/Kit callbacks.
+- **Stage T4: the driver.** Extract the terminal envelope (the single
+  `try/catch/finally`, the execute dispatch, and the deferred/failure/success
+  terminal choreography) into `runKitTerminalEnvelope`, with a
+  `runInsideTerminalTry` seam so claude keeps states 4..8 inside the envelope try
+  and codex keeps them outside in their own dedicated catches; the handler body
+  shrinks to the driver call plus provider/Kit callbacks. The front half (states
+  0..8) is genuinely divergent between the two handlers and stays inline per
+  handler rather than hidden behind a prepare callback. See
+  `docs/plans/request-pipeline-tier-b-t4-driver.design.md`.
 - **Stage T5: generalize** to the other handlers. NOTE: they are SIBLINGS, not
   byte-identical. Gemini's settle is `if (sessionAdmission)` (9618..9621) with no
   `|| kitSession`, its executor `onComplete` is the bare `worktreeLifecycle.onTerminal`

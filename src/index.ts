@@ -2438,6 +2438,266 @@ class FlightOwnership {
   }
 }
 
+/**
+ * Tier-B T4: the terminal-envelope driver.
+ *
+ * `runKitTerminalEnvelope` owns the ONE genuinely shared piece of the two sync
+ * Kit request handlers (claude, codex-sync): the terminal envelope. That is
+ * exactly one `try/catch/finally` around the execute dispatch, plus the
+ * deferred/failure/success terminal choreography, the exception catch, and the
+ * finally performance metric. It centralises the shared `ledger` + `flight` call
+ * order and gating (including the T3 H-DoubleComplete fence: transfer completion
+ * to the manager BEFORE settle) so no leaf can drift.
+ *
+ * The front half (states 0..8) is genuinely divergent between the two handlers
+ * (opposite prep-vs-kitSession ordering, mint-vs-empty effectiveSessionId,
+ * claude-only MCP plumbing, and OPPOSITE try scopes) and stays inline per
+ * handler. `runInsideTerminalTry` is the topology seam that preserves BOTH
+ * boundaries byte-for-byte: claude passes states 4..8 there (so their failures
+ * reach the envelope catch + finally metric exactly as today), while codex
+ * passes a trivial passthrough that returns the worktree resolution it already
+ * computed OUTSIDE the try (so a codex state 4..8 failure is handled entirely by
+ * codex's own dedicated early-return catches and NEVER enters the envelope: no
+ * new metric, no dropped cleanup, correct managers). Returning `{ ok:false }`
+ * early-returns through the finally (matching claude's in-try early returns); a
+ * throw reaches the catch. The "invoked" log is provider-owned (each provider
+ * logs it inside its own state-8 code); the driver never logs it.
+ *
+ * Generic machinery: no provider literals beyond the `provider: CliType` label,
+ * no gateway-server import (same discipline as RequestTerminalLedger /
+ * FlightOwnership). The manager-selection fields
+ * (usageUpdate/failureRollback/exceptionRollback + fireRequestCleanupInCatch)
+ * are per-context, NOT hard-coded: the two handlers deliberately target
+ * different session managers per call-site and the ledger already takes the
+ * manager as an argument. `kitJobHandedOff` is driver-local (set inside the
+ * envelope, read only by the envelope catch), preserving today's per-handler
+ * semantics. Design: docs/plans/request-pipeline-tier-b-t4-driver.design.md.
+ */
+type KitStageOutcome<T> =
+  { ok: true; value: T } | { ok: false; earlyResponse: ExtendedToolResponse };
+
+/** The `awaitJobOrDefer` result the execute hook returns; `isDeferredResponse` narrows it. */
+type KitTerminalExecuteResult = InlineJobResponse | DeferredJobResponse;
+
+/** The narrowed non-deferred (inline) arm of a `KitTerminalExecuteResult`. */
+type KitTerminalInlineResult = InlineJobResponse;
+
+/** The `buildTerminalCliFailure` result shape (response + error + provider session/stop). */
+type KitTerminalFailure = ReturnType<typeof buildTerminalCliFailure>;
+
+/** Terminal-envelope inputs: already-owned request-scoped objects the driver only sequences. */
+interface KitTerminalEnvelope {
+  runtime: GatewayServerRuntime;
+  /** "claude" | "codex": log + recordRequest label + catch error id. */
+  provider: CliType;
+  corrId: string;
+  kit: PersonalKitRequestContext | null;
+  kitSession: PersonalKitSessionResolution | null;
+  effectiveSessionId: string | undefined;
+  ledger: RequestTerminalLedger;
+  flight: FlightOwnership;
+  startTime: number;
+  /** optimizePrompt || optimizeResponse (the only var in the shared fail/catch completeInline). */
+  optimizationApplied: boolean;
+  /** Fed to buildTerminalCliFailure on the failure path. */
+  outputFormat: string | undefined;
+  /** claude deps.sessionManager; codex runtime.sessionManager. */
+  usageUpdateManager: ISessionManager;
+  /** claude deps.sessionManager; codex runtime.sessionManager. */
+  failureRollbackManager: ISessionManager;
+  /** claude runtime.sessionManager; codex deps.sessionManager. */
+  exceptionRollbackManager: ISessionManager;
+  /** claude true; codex false. */
+  fireRequestCleanupInCatch: boolean;
+}
+
+/**
+ * Provider-injected leaves. `TFacts` is the provider's opaque state-10c
+ * pre-finalize facts type (codex: its `{ codexUsage, costUsd, costBasis,
+ * codexMeta }`; claude: `undefined`).
+ */
+interface KitTerminalHooks<TFacts = undefined> {
+  /**
+   * WHAT runs INSIDE the terminal try, BEFORE execute (the topology seam).
+   * Claude passes states 4..8 (worktree resolve + argv/asserts + session
+   * admission + worktree materialize + installWorktree + flight.start + its
+   * "invoked" log, which sits AFTER flight.start). Codex passes a trivial
+   * passthrough returning the worktree resolution it already computed outside
+   * the try. `{ ok:false }` early-returns through the finally; a throw reaches
+   * the catch.
+   */
+  runInsideTerminalTry(): Promise<KitStageOutcome<{ worktreeResolution: ResolvedWorktree }>>;
+
+  /** State 9: the provider's full awaitJobOrDefer(...) inside runWithPersonalKitAttemptLease. */
+  execute(worktreeResolution: ResolvedWorktree): Promise<KitTerminalExecuteResult>;
+
+  /** State 10a decorate: claude attaches warnings; codex omits (hook optional). */
+  decorateDeferred?(deferred: ExtendedToolResponse): ExtendedToolResponse;
+
+  /**
+   * State 10c pre-finalize facts. REQUIRED so extract-before-finalize is
+   * type-enforced. Called on the success path BEFORE finalizeKit. Codex extracts
+   * usage/cost/provider-metadata here so a parse/extraction throw leaves the Kit
+   * session UN-finalized exactly as today. Claude (TFacts = undefined)
+   * implements it as a no-op and parses inside buildSuccessResponse AFTER
+   * finalize.
+   */
+  computeSuccessFacts(stdout: string, result: KitTerminalInlineResult): Promise<TFacts> | TFacts;
+
+  /**
+   * Kit terminal finalize. The driver owns the gate `kit && kitSession &&
+   * !result.jobId` and calls this ONLY when it holds; the hook supplies the
+   * provider-specific finalize params (claude includes initialNativeSessionId,
+   * codex omits it; success builds terminalMetadata from stdout).
+   */
+  finalizeKit(args: {
+    completed: boolean;
+    stdout: string;
+    result: KitTerminalInlineResult;
+  }): Promise<void>;
+
+  /** State 10b response build (the failure completeInline is written by the driver). */
+  buildFailureResponse(args: {
+    code: number;
+    stdout: string;
+    stderr: string;
+    terminalFailure: KitTerminalFailure;
+    result: KitTerminalInlineResult;
+  }): ExtendedToolResponse;
+
+  /**
+   * State 10c parse + OWN success completeInline + response build (the success
+   * completeInline metadata is provider-specific, so it stays in the leaf; the
+   * driver has already run settle + usage-update + computeSuccessFacts +
+   * finalizeKit before calling this). `facts` is the computeSuccessFacts result
+   * (codex uses it; claude, with TFacts = undefined, ignores it and parses
+   * stdout itself).
+   */
+  buildSuccessResponse(args: {
+    worktreeResolution: ResolvedWorktree;
+    stdout: string;
+    durationMs: number;
+    facts: TFacts;
+  }): ExtendedToolResponse;
+}
+
+async function runKitTerminalEnvelope<TFacts>(
+  env: KitTerminalEnvelope,
+  hooks: KitTerminalHooks<TFacts>
+): Promise<ExtendedToolResponse> {
+  const { runtime, provider, corrId, kit, kitSession, effectiveSessionId, ledger, flight } = env;
+  const logger = runtime.logger;
+  let durationMs = 0;
+  let wasSuccessful = false;
+  let kitJobHandedOff = false;
+  try {
+    const staged = await hooks.runInsideTerminalTry();
+    if (!staged.ok) return staged.earlyResponse;
+    const { worktreeResolution } = staged.value;
+
+    const result = await hooks.execute(worktreeResolution);
+    kitJobHandedOff = !isDeferredResponse(result) && result.jobId !== undefined;
+
+    // Deferred: job still running, return async reference.
+    if (isDeferredResponse(result)) {
+      kitJobHandedOff = true;
+      // Mode A to B: awaitJobOrDefer armed the manager to own the flight
+      // completion. Transfer BEFORE settle so that if settle's finishHandler()
+      // rejects into the catch, the inline completion no-ops instead of
+      // double-completing (H-DoubleComplete fence, T3).
+      flight.transferCompletionToManager();
+      ledger.sessionAdmissionCommitted = true;
+      await ledger.settle(kitSession);
+      if (!kitSession) {
+        await safeUpdateSessionUsageAfterJobAdmission(
+          env.usageUpdateManager,
+          effectiveSessionId,
+          runtime
+        );
+      }
+      const deferred = buildDeferredToolResponse(result, effectiveSessionId);
+      return hooks.decorateDeferred ? hooks.decorateDeferred(deferred) : deferred;
+    }
+
+    const { stdout, stderr, code } = result;
+    durationMs = Math.max(0, Date.now() - env.startTime);
+
+    if (code !== 0) {
+      await ledger.rollbackOnFailure(kitSession, env.failureRollbackManager);
+      const terminalFailure = buildTerminalCliFailure(
+        provider,
+        stdout,
+        stderr,
+        code,
+        env.outputFormat
+      );
+      if (kit && kitSession && !result.jobId) {
+        await hooks.finalizeKit({ completed: false, stdout, result });
+      }
+      logger.info(`[${corrId}] ${provider}_request failed in ${durationMs}ms`);
+      flight.completeInline({
+        ...terminalFailure,
+        durationMs,
+        retryCount: 0,
+        circuitBreakerState: "closed",
+        optimizationApplied: env.optimizationApplied,
+        exitCode: code,
+        status: "failed",
+      });
+      return hooks.buildFailureResponse({ code, stdout, stderr, terminalFailure, result });
+    }
+
+    wasSuccessful = true;
+    ledger.sessionAdmissionCommitted = true;
+    await ledger.settle(kitSession);
+    if (!kitSession) {
+      await safeUpdateSessionUsageAfterJobAdmission(
+        env.usageUpdateManager,
+        effectiveSessionId,
+        runtime
+      );
+    }
+    logger.info(`[${corrId}] ${provider}_request completed successfully in ${durationMs}ms`);
+    // Pre-finalize facts: codex extracts usage/cost/metadata BEFORE finalize
+    // (an extraction throw leaves the Kit session un-finalized, as today);
+    // claude's no-op returns undefined and parses AFTER finalize inside
+    // buildSuccessResponse. Always present (required hook) so no unsound cast.
+    const facts: TFacts = await hooks.computeSuccessFacts(stdout, result);
+    if (kit && kitSession && !result.jobId) {
+      await hooks.finalizeKit({ completed: true, stdout, result });
+    }
+    return hooks.buildSuccessResponse({ worktreeResolution, stdout, durationMs, facts });
+  } catch (error) {
+    await ledger.rollbackOnException(kitSession, env.exceptionRollbackManager);
+    await ledger.cleanupOnException(
+      kitJobHandedOff,
+      error,
+      kitSession,
+      env.fireRequestCleanupInCatch
+    );
+    const elapsedMs = Math.max(0, Date.now() - env.startTime);
+    logger.info(`[${corrId}] ${provider}_request threw exception after ${elapsedMs}ms`);
+    // A no-op once the request deferred (Mode B): the manager owns completion,
+    // so a rejecting post-handoff finishHandler() reaching here no longer writes
+    // a second flight completion (H-DoubleComplete fence, T3).
+    flight.completeInline({
+      response: "",
+      durationMs: elapsedMs,
+      retryCount: 0,
+      circuitBreakerState: "closed",
+      optimizationApplied: env.optimizationApplied,
+      exitCode: 1,
+      errorMessage: (error as Error).message,
+      status: "failed",
+    });
+    return kitAwareErrorResponse(provider, 1, "", corrId, error as Error, kit);
+  } finally {
+    await ledger.worktreeLifecycle?.finishHandler();
+    const finalizedDurationMs = Math.max(0, durationMs || Date.now() - env.startTime);
+    runtime.performanceMetrics.recordRequest(provider, finalizedDurationMs, wasSuccessful);
+  }
+}
+
 async function persistResolvedSessionScope(
   sessionManager: ISessionManager,
   sessionId: string,
@@ -10007,8 +10267,6 @@ export async function handleClaudeRequest(
     }
   }
   const baseRequestCleanup = composeRequestCleanup(runtime, prep.cleanup, kit?.artifact?.cleanup);
-  let durationMs = 0;
-  let wasSuccessful = false;
   // Tier-B T2: the request's terminal-cleanup state (request cleanup, worktree
   // lifecycle, session-admission mutation, committed latch) behind one Kit-gated
   // ledger. Populated progressively as the handler admits a session / resolves a
@@ -10085,210 +10343,219 @@ export async function handleClaudeRequest(
     metadata => safePersonalKitFlightComplete(corrId, metadata, kit, runtime)
   );
 
-  let kitJobHandedOff = false;
-  try {
-    // Slice λ: resolve worktree directive into spawn cwd. Done after
-    // session resolution so resume reuse can read metadata.worktreePath.
-    let worktreeResolution: ResolvedWorktree = {};
-    try {
-      worktreeResolution = await resolveWorkspaceAndWorktreeForRequest({
-        provider: "claude",
-        workspace,
-        worktree,
-        sessionId: effectiveSessionId,
-        runtime,
-        workingDir,
-        addDir,
-        requireStableCwd: useContinue,
-        deferWorktree: true,
-      });
-    } catch (err) {
-      ledger.requestCleanup?.();
-      await discardPendingPersonalKitSession(runtime, kitSession);
-      return kitAwareErrorResponse("claude_request", 1, "", corrId, err as Error, kit);
-    }
-    applyEffectiveWorkingDirectory(
-      "claude",
-      args,
-      undefined,
-      undefined,
-      "claude",
-      "--add-dir",
-      worktreeResolution.effectiveAddDirs
-    );
-    assertUpstreamCliArgs("claude", args);
-    assertUpstreamCliEnv("claude", undefined);
-    assertFinalCliProcessAdmission("claude", args, "claude");
-    let admittedSession = existingSession;
-    if (effectiveSessionId) {
-      if (existingSession) {
-        admittedSession = await persistResolvedSessionScope(
-          runtime.sessionManager,
-          effectiveSessionId,
-          worktreeResolution,
+  let effectiveCompress = false;
+
+  const env: KitTerminalEnvelope = {
+    runtime,
+    provider: "claude",
+    corrId,
+    kit,
+    kitSession,
+    effectiveSessionId,
+    ledger,
+    flight,
+    startTime,
+    optimizationApplied: optimizePrompt || optimizeResponse,
+    outputFormat,
+    usageUpdateManager: sessionManager,
+    failureRollbackManager: sessionManager,
+    exceptionRollbackManager: runtime.sessionManager,
+    fireRequestCleanupInCatch: true,
+  };
+
+  const hooks: KitTerminalHooks = {
+    // States 4..8 run INSIDE the envelope try (claude topology): a state 4..7
+    // throw reaches the envelope catch (no-op completeInline on the not-yet-
+    // started flight, id "claude") and the envelope finally records the metric;
+    // the worktree-resolve ok:false early return hits the finally (metric) but
+    // NOT the catch. Both byte-identical to the pre-T4 inline handler.
+    runInsideTerminalTry: async () => {
+      // Slice λ: resolve worktree directive into spawn cwd. Done after
+      // session resolution so resume reuse can read metadata.worktreePath.
+      let worktreeResolution: ResolvedWorktree;
+      try {
+        worktreeResolution = await resolveWorkspaceAndWorktreeForRequest({
+          provider: "claude",
+          workspace,
+          worktree,
+          sessionId: effectiveSessionId,
           runtime,
-          existingSession
-        );
-        if (!kitSession) {
-          ledger.sessionAdmission = { original: existingSession, admitted: admittedSession };
-        }
-      } else if (!kitSession) {
-        const admitted = await createSessionWithResolvedScope(
-          runtime.sessionManager,
-          "claude",
-          "Claude Session",
-          effectiveSessionId,
-          worktreeResolution,
-          runtime
-        );
-        admittedSession = admitted.session;
-        ledger.sessionAdmission = {
-          original: admitted.previousSession,
-          admitted: admitted.session,
+          workingDir,
+          addDir,
+          requireStableCwd: useContinue,
+          deferWorktree: true,
+        });
+      } catch (err) {
+        ledger.requestCleanup?.();
+        await discardPendingPersonalKitSession(runtime, kitSession);
+        return {
+          ok: false,
+          earlyResponse: kitAwareErrorResponse("claude_request", 1, "", corrId, err as Error, kit),
         };
       }
-    }
-    if (worktree) {
-      worktreeResolution = await resolveWorkspaceAndWorktreeForRequest({
-        provider: "claude",
-        workspace,
-        worktree,
-        sessionId: admittedSession ? effectiveSessionId : undefined,
-        runtime,
-        workingDir,
-        addDir,
-        requireStableCwd: useContinue,
-        expectedSession: admittedSession ?? undefined,
-      });
-      if (ledger.sessionAdmission) {
-        advanceSessionAdmissionWorktree(ledger.sessionAdmission, worktreeResolution);
-      } else if (kitSession && worktreeResolution.boundSession) {
-        worktreeResolution.requestOwnedWorktree = undefined;
+      applyEffectiveWorkingDirectory(
+        "claude",
+        args,
+        undefined,
+        undefined,
+        "claude",
+        "--add-dir",
+        worktreeResolution.effectiveAddDirs
+      );
+      assertUpstreamCliArgs("claude", args);
+      assertUpstreamCliEnv("claude", undefined);
+      assertFinalCliProcessAdmission("claude", args, "claude");
+      let admittedSession = existingSession;
+      if (effectiveSessionId) {
+        if (existingSession) {
+          admittedSession = await persistResolvedSessionScope(
+            runtime.sessionManager,
+            effectiveSessionId,
+            worktreeResolution,
+            runtime,
+            existingSession
+          );
+          if (!kitSession) {
+            ledger.sessionAdmission = { original: existingSession, admitted: admittedSession };
+          }
+        } else if (!kitSession) {
+          const admitted = await createSessionWithResolvedScope(
+            runtime.sessionManager,
+            "claude",
+            "Claude Session",
+            effectiveSessionId,
+            worktreeResolution,
+            runtime
+          );
+          admittedSession = admitted.session;
+          ledger.sessionAdmission = {
+            original: admitted.previousSession,
+            admitted: admitted.session,
+          };
+        }
       }
-    }
-    ledger.installWorktree(createRequestOwnedWorktreeLifecycle(worktreeResolution, runtime, true));
-    // State 8 (flight start): after session resolution so the flight row reads the
-    // prior session's lastWriteAt, not the row about to be written (spec section 8).
-    flight.start();
-    logger.info(
-      `[${corrId}] claude_request invoked with model=${prep.resolvedModel || "default"}, outputFormat=${outputFormat}, prompt length=${prep.effectivePrompt.length}, sessionId=${effectiveSessionId}, cacheControlBlocks=${prep.cacheControlBlocks ?? 0}`
-    );
-
-    // Idle timeout only for stream-json (text/json produce no output until done)
-    const effectiveIdleTimeout =
-      outputFormat === "stream-json" ? resolveIdleTimeout("claude", idleTimeoutMs) : undefined;
-    const effectiveCompress = resolveEffectiveCompression(runtime.compression, {
-      compressResponse,
-      outputFormat,
-      outputSchemaDeclared: false,
-    });
-    const claudeSyncFrHandoff = buildAsyncFlightRecorderHandoff(
-      "claude",
-      prep,
-      effectiveSessionId,
-      outputFormat,
-      optimizePrompt
-    );
-    claudeSyncFrHandoff.flightRecorderEntry = personalKitFlightRecorderEntry(
-      claudeSyncFrHandoff.flightRecorderEntry,
-      kit
-    );
-    const result = await runWithPersonalKitAttemptLease({
-      runtime,
-      session: kitSession,
-      artifact: kit?.artifact,
-      heartbeat: true,
-      run: () =>
-        awaitJobOrDefer(
-          "claude",
-          args,
-          corrId,
-          effectiveIdleTimeout,
-          outputFormat,
-          kitSession ? true : forceRefresh,
+      if (worktree) {
+        worktreeResolution = await resolveWorkspaceAndWorktreeForRequest({
+          provider: "claude",
+          workspace,
+          worktree,
+          sessionId: admittedSession ? effectiveSessionId : undefined,
           runtime,
-          undefined,
-          ledger.requestCleanup,
-          claudeSyncFrHandoff.flightRecorderEntry,
-          claudeSyncFrHandoff.extractUsage,
-          prep.stdinPayload,
-          kit?.context.scope.cwd ?? worktreeResolution.cwd ?? workingDir,
-          effectiveCompress,
-          kit?.context.execution ?? null,
-          kit && kitSession
-            ? event =>
-                finalizePersonalKitTerminalEvent({
-                  event,
-                  runtime,
-                  provider: "claude",
-                  gatewaySessionId: kitSession!.gatewaySessionId,
-                  execution: kit!.context.execution,
-                  attemptId: kitSession!.attemptId,
-                  initialNativeSessionId:
-                    kitSession!.nativeSessionId ?? kitSession!.gatewaySessionId,
-                })
-            : undefined,
-          kitSession?.gatewaySessionId,
-          kitSession?.attemptKind === "durable" ? kitSession.attemptId : undefined,
-          sessionBoundDedupArgs(buildClaudeMcpDedupArgs(args, mcpConfig), effectiveSessionId),
-          undefined,
-          mcpConfig?.cleanup ? mcpConfig.path : undefined,
-          mcpConfig?.cleanup ? mcpConfig.artifactScope : undefined
-        ),
-    });
-    kitJobHandedOff = !isDeferredResponse(result) && result.jobId !== undefined;
-
-    // Deferred — job still running, return async reference
-    if (isDeferredResponse(result)) {
-      kitJobHandedOff = true;
-      // Mode A to B: awaitJobOrDefer armed the manager to own the flight
-      // completion (index.ts:1719). Transfer BEFORE settle so that if settle's
-      // finishHandler() rejects into the catch, the inline completion no-ops
-      // instead of double-completing (H-DoubleComplete fence).
-      flight.transferCompletionToManager();
-      ledger.sessionAdmissionCommitted = true;
-      await ledger.settle(kitSession);
-      if (!kitSession) {
-        await safeUpdateSessionUsageAfterJobAdmission(sessionManager, effectiveSessionId, runtime);
+          workingDir,
+          addDir,
+          requireStableCwd: useContinue,
+          expectedSession: admittedSession ?? undefined,
+        });
+        if (ledger.sessionAdmission) {
+          advanceSessionAdmissionWorktree(ledger.sessionAdmission, worktreeResolution);
+        } else if (kitSession && worktreeResolution.boundSession) {
+          worktreeResolution.requestOwnedWorktree = undefined;
+        }
       }
-      const deferred = buildDeferredToolResponse(result, effectiveSessionId);
+      ledger.installWorktree(
+        createRequestOwnedWorktreeLifecycle(worktreeResolution, runtime, true)
+      );
+      // State 8 (flight start): after session resolution so the flight row reads
+      // the prior session's lastWriteAt, not the row about to be written (spec
+      // section 8).
+      flight.start();
+      logger.info(
+        `[${corrId}] claude_request invoked with model=${prep.resolvedModel || "default"}, outputFormat=${outputFormat}, prompt length=${prep.effectivePrompt.length}, sessionId=${effectiveSessionId}, cacheControlBlocks=${prep.cacheControlBlocks ?? 0}`
+      );
+      return { ok: true, value: { worktreeResolution } };
+    },
+    execute: async worktreeResolution => {
+      // Pre-awaitJobOrDefer state-9 setup stays inside the terminal try (moved
+      // into the execute hook so the try boundary is unchanged).
+      // Idle timeout only for stream-json (text/json produce no output until done).
+      const effectiveIdleTimeout =
+        outputFormat === "stream-json" ? resolveIdleTimeout("claude", idleTimeoutMs) : undefined;
+      effectiveCompress = resolveEffectiveCompression(runtime.compression, {
+        compressResponse,
+        outputFormat,
+        outputSchemaDeclared: false,
+      });
+      const claudeSyncFrHandoff = buildAsyncFlightRecorderHandoff(
+        "claude",
+        prep,
+        effectiveSessionId,
+        outputFormat,
+        optimizePrompt
+      );
+      claudeSyncFrHandoff.flightRecorderEntry = personalKitFlightRecorderEntry(
+        claudeSyncFrHandoff.flightRecorderEntry,
+        kit
+      );
+      return runWithPersonalKitAttemptLease({
+        runtime,
+        session: kitSession,
+        artifact: kit?.artifact,
+        heartbeat: true,
+        run: () =>
+          awaitJobOrDefer(
+            "claude",
+            args,
+            corrId,
+            effectiveIdleTimeout,
+            outputFormat,
+            kitSession ? true : forceRefresh,
+            runtime,
+            undefined,
+            ledger.requestCleanup,
+            claudeSyncFrHandoff.flightRecorderEntry,
+            claudeSyncFrHandoff.extractUsage,
+            prep.stdinPayload,
+            kit?.context.scope.cwd ?? worktreeResolution.cwd ?? workingDir,
+            effectiveCompress,
+            kit?.context.execution ?? null,
+            kit && kitSession
+              ? event =>
+                  finalizePersonalKitTerminalEvent({
+                    event,
+                    runtime,
+                    provider: "claude",
+                    gatewaySessionId: kitSession!.gatewaySessionId,
+                    execution: kit!.context.execution,
+                    attemptId: kitSession!.attemptId,
+                    initialNativeSessionId:
+                      kitSession!.nativeSessionId ?? kitSession!.gatewaySessionId,
+                  })
+              : undefined,
+            kitSession?.gatewaySessionId,
+            kitSession?.attemptKind === "durable" ? kitSession.attemptId : undefined,
+            sessionBoundDedupArgs(buildClaudeMcpDedupArgs(args, mcpConfig), effectiveSessionId),
+            undefined,
+            mcpConfig?.cleanup ? mcpConfig.path : undefined,
+            mcpConfig?.cleanup ? mcpConfig.artifactScope : undefined
+          ),
+      });
+    },
+    decorateDeferred: deferred => {
       if (warnings.length > 0) {
         deferred.warnings = warnings;
       }
       return deferred;
-    }
-
-    const { stdout, stderr, code } = result;
-    durationMs = Math.max(0, Date.now() - startTime);
-
-    if (code !== 0) {
-      await ledger.rollbackOnFailure(kitSession, sessionManager);
-      const terminalFailure = buildTerminalCliFailure("claude", stdout, stderr, code, outputFormat);
-      if (kit && kitSession && !result.jobId) {
-        await finalizePersonalKitSessionOrThrow({
-          runtime,
-          provider: "claude",
-          gatewaySessionId: kitSession.gatewaySessionId,
-          execution: kit.context.execution,
-          terminalMetadata: null,
-          completed: false,
-          attemptId: kitSession.attemptId,
-          initialNativeSessionId: kitSession.nativeSessionId ?? kitSession.gatewaySessionId,
-        });
-      }
-      logger.info(`[${corrId}] claude_request failed in ${durationMs}ms`);
-      flight.completeInline({
-        ...terminalFailure,
-        durationMs,
-        retryCount: 0,
-        circuitBreakerState: "closed",
-        optimizationApplied: optimizePrompt || optimizeResponse,
-        exitCode: code,
-        status: "failed",
+    },
+    computeSuccessFacts: () => undefined,
+    finalizeKit: async ({ completed, stdout }) => {
+      if (!kit || !kitSession) return;
+      await finalizePersonalKitSessionOrThrow({
+        runtime,
+        provider: "claude",
+        gatewaySessionId: kitSession.gatewaySessionId,
+        execution: kit.context.execution,
+        terminalMetadata: completed
+          ? createPersonalKitTerminalMetadata("claude", stdout, outputFormat)
+          : null,
+        completed,
+        attemptId: kitSession.attemptId,
+        initialNativeSessionId: kitSession.nativeSessionId ?? kitSession.gatewaySessionId,
       });
-      // Slice 3: attach any computed warnings to the error response so
-      // the caller still sees cache_ttl_expiring_soon when the CLI
-      // happens to fail for an unrelated reason.
+    },
+    buildFailureResponse: ({ code, stderr, terminalFailure, result }) => {
+      // Slice 3: attach any computed warnings to the error response so the
+      // caller still sees cache_ttl_expiring_soon when the CLI happens to fail
+      // for an unrelated reason.
       const errResp = kitAwareErrorResponse(
         "claude",
         code,
@@ -10305,150 +10572,109 @@ export async function handleClaudeRequest(
         (errResp as ExtendedToolResponse).warnings = warnings;
       }
       return errResp;
-    }
-    wasSuccessful = true;
-    ledger.sessionAdmissionCommitted = true;
-    await ledger.settle(kitSession);
-    if (!kitSession) {
-      await safeUpdateSessionUsageAfterJobAdmission(sessionManager, effectiveSessionId, runtime);
-    }
-
-    logger.info(`[${corrId}] claude_request completed successfully in ${durationMs}ms`);
-
-    if (kit && kitSession && !result.jobId) {
-      await finalizePersonalKitSessionOrThrow({
-        runtime,
-        provider: "claude",
-        gatewaySessionId: kitSession.gatewaySessionId,
-        execution: kit.context.execution,
-        terminalMetadata: createPersonalKitTerminalMetadata("claude", stdout, outputFormat),
-        completed: true,
-        attemptId: kitSession.attemptId,
-        initialNativeSessionId: kitSession.nativeSessionId ?? kitSession.gatewaySessionId,
-      });
-    }
-
-    // Parse stream-json NDJSON output to extract result text
-    if (outputFormat === "stream-json") {
-      const parsed = parseStreamJson(stdout);
-      if (parsed.costUsd !== null) {
-        logger.debug(
-          `[${corrId}] stream-json cost=$${parsed.costUsd}, model=${parsed.model}, turns=${parsed.numTurns}`
+    },
+    buildSuccessResponse: ({ worktreeResolution, stdout, durationMs }) => {
+      // Parse stream-json NDJSON output to extract result text
+      if (outputFormat === "stream-json") {
+        const parsed = parseStreamJson(stdout);
+        if (parsed.costUsd !== null) {
+          logger.debug(
+            `[${corrId}] stream-json cost=$${parsed.costUsd}, model=${parsed.model}, turns=${parsed.numTurns}`
+          );
+        }
+        // LCR: label cost_basis. Claude is T1, so a reported total_cost_usd is
+        // provider-reported; a rare missing cost with counts is derived-from-tokens.
+        const { costUsd: claudeCostUsd, costBasis: claudeCostBasis } = deriveCostBasis(
+          "claude",
+          prep.resolvedModel || "default",
+          {
+            inputTokens: parsed.usage?.inputTokens,
+            outputTokens: parsed.usage?.outputTokens,
+            cacheReadTokens: parsed.usage?.cacheReadInputTokens || undefined,
+            cacheCreationTokens: parsed.usage?.cacheCreationInputTokens || undefined,
+            costUsd: parsed.costUsd ?? undefined,
+          }
         );
-      }
-      // LCR: label cost_basis. Claude is T1, so a reported total_cost_usd is
-      // provider-reported; a rare missing cost with counts is derived-from-tokens.
-      const { costUsd: claudeCostUsd, costBasis: claudeCostBasis } = deriveCostBasis(
-        "claude",
-        prep.resolvedModel || "default",
-        {
+        flight.completeInline({
+          response: parsed.text,
           inputTokens: parsed.usage?.inputTokens,
           outputTokens: parsed.usage?.outputTokens,
           cacheReadTokens: parsed.usage?.cacheReadInputTokens || undefined,
           cacheCreationTokens: parsed.usage?.cacheCreationInputTokens || undefined,
-          costUsd: parsed.costUsd ?? undefined,
+          durationMs,
+          retryCount: 0,
+          circuitBreakerState: "closed",
+          costUsd: claudeCostUsd,
+          costBasis: claudeCostBasis,
+          optimizationApplied: optimizePrompt || optimizeResponse,
+          exitCode: 0,
+          status: "completed",
+          // Phase 7: the terminal result event carries the session id +
+          // Anthropic stop_reason; persist both for durable resume/audit.
+          providerSessionId: parsed.sessionId ?? undefined,
+          stopReason: parsed.stopReason ?? undefined,
+        });
+        const streamResponse = buildCliResponse(
+          "claude",
+          parsed.text,
+          optimizeResponse,
+          corrId,
+          effectiveSessionId,
+          prep,
+          durationMs,
+          undefined,
+          outputFormat ?? "stream-json",
+          warnings,
+          effectiveCompress
+        );
+        safeRecordCompression(corrId, streamResponse.compression, runtime, kit !== null);
+        if (worktreeResolution.worktreePath) {
+          const first = streamResponse.content[0];
+          if (first && first.type === "text") {
+            first.text = formatWorktreePrefix(worktreeResolution.worktreePath) + first.text;
+          }
         }
-      );
+        return streamResponse;
+      }
+      // Phase 7: non-stream claude (json/text). parseStreamJson also scans a
+      // single json result object; plain text yields no fields (capability fact).
+      const claudeMeta = extractProviderOutputMetadata("claude", stdout, outputFormat);
       flight.completeInline({
-        response: parsed.text,
-        inputTokens: parsed.usage?.inputTokens,
-        outputTokens: parsed.usage?.outputTokens,
-        cacheReadTokens: parsed.usage?.cacheReadInputTokens || undefined,
-        cacheCreationTokens: parsed.usage?.cacheCreationInputTokens || undefined,
+        response: stdout,
         durationMs,
         retryCount: 0,
         circuitBreakerState: "closed",
-        costUsd: claudeCostUsd,
-        costBasis: claudeCostBasis,
         optimizationApplied: optimizePrompt || optimizeResponse,
         exitCode: 0,
         status: "completed",
-        // Phase 7: the terminal result event carries the session id +
-        // Anthropic stop_reason; persist both for durable resume/audit.
-        providerSessionId: parsed.sessionId ?? undefined,
-        stopReason: parsed.stopReason ?? undefined,
+        providerSessionId: claudeMeta.sessionId,
+        stopReason: claudeMeta.stopReason,
       });
-      const streamResponse = buildCliResponse(
+      const nonStreamResponse = buildCliResponse(
         "claude",
-        parsed.text,
+        stdout,
         optimizeResponse,
         corrId,
         effectiveSessionId,
         prep,
         durationMs,
         undefined,
-        outputFormat ?? "stream-json",
+        outputFormat,
         warnings,
         effectiveCompress
       );
-      safeRecordCompression(corrId, streamResponse.compression, runtime, kit !== null);
+      safeRecordCompression(corrId, nonStreamResponse.compression, runtime, kit !== null);
       if (worktreeResolution.worktreePath) {
-        const first = streamResponse.content[0];
+        const first = nonStreamResponse.content[0];
         if (first && first.type === "text") {
           first.text = formatWorktreePrefix(worktreeResolution.worktreePath) + first.text;
         }
       }
-      return streamResponse;
-    }
-    // Phase 7: non-stream claude (json/text). parseStreamJson also scans a
-    // single json result object; plain text yields no fields (capability fact).
-    const claudeMeta = extractProviderOutputMetadata("claude", stdout, outputFormat);
-    flight.completeInline({
-      response: stdout,
-      durationMs,
-      retryCount: 0,
-      circuitBreakerState: "closed",
-      optimizationApplied: optimizePrompt || optimizeResponse,
-      exitCode: 0,
-      status: "completed",
-      providerSessionId: claudeMeta.sessionId,
-      stopReason: claudeMeta.stopReason,
-    });
-    const nonStreamResponse = buildCliResponse(
-      "claude",
-      stdout,
-      optimizeResponse,
-      corrId,
-      effectiveSessionId,
-      prep,
-      durationMs,
-      undefined,
-      outputFormat,
-      warnings,
-      effectiveCompress
-    );
-    safeRecordCompression(corrId, nonStreamResponse.compression, runtime, kit !== null);
-    if (worktreeResolution.worktreePath) {
-      const first = nonStreamResponse.content[0];
-      if (first && first.type === "text") {
-        first.text = formatWorktreePrefix(worktreeResolution.worktreePath) + first.text;
-      }
-    }
-    return nonStreamResponse;
-  } catch (error) {
-    await ledger.rollbackOnException(kitSession, runtime.sessionManager);
-    await ledger.cleanupOnException(kitJobHandedOff, error, kitSession, true);
-    const elapsedMs = Math.max(0, Date.now() - startTime);
-    logger.info(`[${corrId}] claude_request threw exception after ${elapsedMs}ms`);
-    // A no-op once the request deferred (Mode B): the manager owns completion,
-    // so a rejecting post-handoff finishHandler() reaching here no longer writes
-    // a second flight completion (H-DoubleComplete fence, spec section 4).
-    flight.completeInline({
-      response: "",
-      durationMs: elapsedMs,
-      retryCount: 0,
-      circuitBreakerState: "closed",
-      optimizationApplied: optimizePrompt || optimizeResponse,
-      exitCode: 1,
-      errorMessage: (error as Error).message,
-      status: "failed",
-    });
-    return kitAwareErrorResponse("claude", 1, "", corrId, error as Error, kit);
-  } finally {
-    await ledger.worktreeLifecycle?.finishHandler();
-    const finalizedDurationMs = Math.max(0, durationMs || Date.now() - startTime);
-    runtime.performanceMetrics.recordRequest("claude", finalizedDurationMs, wasSuccessful);
-  }
+      return nonStreamResponse;
+    },
+  };
+
+  return runKitTerminalEnvelope(env, hooks);
 }
 
 export interface CodexRequestParams {
@@ -10687,8 +10913,6 @@ export async function handleCodexRequest(
   const { corrId, args } = prep;
   const prepCleanup =
     "cleanup" in prep && typeof prep.cleanup === "function" ? prep.cleanup : undefined;
-  let durationMs = 0;
-  let wasSuccessful = false;
   let effectiveSessionId = kitSession?.gatewaySessionId ?? sessionId;
 
   // U26 fix: pass the outputSchema cleanup to awaitJobOrDefer, which
@@ -10850,118 +11074,124 @@ export async function handleCodexRequest(
     `[${corrId}] codex_request invoked with model=${prep.resolvedModel || "default"}, fullAuto=${fullAuto}, prompt length=${prep.effectivePrompt.length}`
   );
 
-  let kitJobHandedOff = false;
-  try {
-    const effectiveCompress = resolveEffectiveCompression(runtime.compression, {
-      compressResponse,
-      outputFormat: effectiveOutputFormat,
-      outputSchemaDeclared: outputSchema !== undefined,
-    });
-    const codexSyncFrHandoff = buildAsyncFlightRecorderHandoff(
-      "codex",
-      prep,
-      effectiveSessionId,
-      effectiveOutputFormat,
-      optimizePrompt
-    );
-    codexSyncFrHandoff.flightRecorderEntry = personalKitFlightRecorderEntry(
-      codexSyncFrHandoff.flightRecorderEntry,
-      kit
-    );
-    const result = await runWithPersonalKitAttemptLease({
-      runtime,
-      session: kitSession,
-      artifact: kit?.artifact,
-      heartbeat: true,
-      run: () =>
-        awaitJobOrDefer(
-          "codex",
-          args,
-          corrId,
-          resolveIdleTimeout("codex", idleTimeoutMs),
-          effectiveOutputFormat,
-          kitSession ? true : forceRefresh,
-          runtime,
-          kit?.codexIsolation?.env,
-          ledger.requestCleanup,
-          codexSyncFrHandoff.flightRecorderEntry,
-          codexSyncFrHandoff.extractUsage,
-          prep.stdinPayload,
-          kit?.codexIsolation?.cwd ?? worktreeResolution.cwd,
-          effectiveCompress,
-          kit?.context.execution ?? null,
-          kit && kitSession
-            ? event =>
-                finalizePersonalKitTerminalEvent({
-                  event,
-                  runtime,
-                  provider: "codex",
-                  gatewaySessionId: kitSession!.gatewaySessionId,
-                  execution: kit!.context.execution,
-                  attemptId: kitSession!.attemptId,
-                })
-            : undefined,
-          kitSession?.gatewaySessionId,
-          kitSession?.attemptKind === "durable" ? kitSession.attemptId : undefined,
-          sessionBoundDedupArgs(args, effectiveSessionId)
-        ),
-    });
-    kitJobHandedOff = !isDeferredResponse(result) && result.jobId !== undefined;
+  let effectiveCompress = false;
 
-    // Deferred — job still running, return async reference. Cleanup
-    // ownership belongs to AsyncJobManager via onComplete.
-    if (isDeferredResponse(result)) {
-      kitJobHandedOff = true;
-      // Mode A to B: awaitJobOrDefer armed the manager to own the flight
-      // completion (index.ts:1719). Transfer BEFORE settle so that if settle's
-      // finishHandler() rejects into the catch, the inline completion no-ops
-      // instead of double-completing (H-DoubleComplete fence).
-      flight.transferCompletionToManager();
-      ledger.sessionAdmissionCommitted = true;
-      await ledger.settle(kitSession);
-      if (!kitSession) {
-        await safeUpdateSessionUsageAfterJobAdmission(
-          runtime.sessionManager,
-          effectiveSessionId,
-          runtime
-        );
-      }
-      return buildDeferredToolResponse(result, effectiveSessionId);
-    }
+  const env: KitTerminalEnvelope = {
+    runtime,
+    provider: "codex",
+    corrId,
+    kit,
+    kitSession,
+    effectiveSessionId,
+    ledger,
+    flight,
+    startTime,
+    optimizationApplied: optimizePrompt || optimizeResponse,
+    outputFormat: effectiveOutputFormat,
+    usageUpdateManager: runtime.sessionManager,
+    failureRollbackManager: runtime.sessionManager,
+    exceptionRollbackManager: deps.sessionManager,
+    fireRequestCleanupInCatch: false,
+  };
 
-    const { stdout, stderr, code } = result;
-    durationMs = Math.max(0, Date.now() - startTime);
-
-    if (code !== 0) {
-      await ledger.rollbackOnFailure(kitSession, runtime.sessionManager);
-      const terminalFailure = buildTerminalCliFailure(
-        "codex",
-        stdout,
-        stderr,
-        code,
-        effectiveOutputFormat
-      );
-      if (kit && kitSession && !result.jobId) {
-        await finalizePersonalKitSessionOrThrow({
-          runtime,
-          provider: "codex",
-          gatewaySessionId: kitSession.gatewaySessionId,
-          execution: kit.context.execution,
-          terminalMetadata: null,
-          completed: false,
-          attemptId: kitSession.attemptId,
-        });
-      }
-      logger.info(`[${corrId}] codex_request failed in ${durationMs}ms`);
-      flight.completeInline({
-        ...terminalFailure,
-        durationMs,
-        retryCount: 0,
-        circuitBreakerState: "closed",
-        optimizationApplied: optimizePrompt || optimizeResponse,
-        exitCode: code,
-        status: "failed",
+  const hooks: KitTerminalHooks<{
+    codexUsage: ReturnType<typeof extractUsageAndCost>;
+    cost: ReturnType<typeof deriveCostBasis>;
+    codexMeta: ReturnType<typeof extractProviderOutputMetadata>;
+  }> = {
+    // States 4..8 run OUTSIDE the envelope try (codex topology): they stay
+    // inline above with codex's three dedicated early-return catches and NO
+    // metric, so this passthrough can neither throw nor return ok:false and a
+    // codex front-half failure never enters the envelope. Byte-identical to the
+    // pre-T4 inline handler.
+    runInsideTerminalTry: async () => ({ ok: true, value: { worktreeResolution } }),
+    execute: async worktreeResolution => {
+      // Pre-awaitJobOrDefer state-9 setup stays inside the terminal try (moved
+      // into the execute hook so the try boundary is unchanged).
+      effectiveCompress = resolveEffectiveCompression(runtime.compression, {
+        compressResponse,
+        outputFormat: effectiveOutputFormat,
+        outputSchemaDeclared: outputSchema !== undefined,
       });
+      const codexSyncFrHandoff = buildAsyncFlightRecorderHandoff(
+        "codex",
+        prep,
+        effectiveSessionId,
+        effectiveOutputFormat,
+        optimizePrompt
+      );
+      codexSyncFrHandoff.flightRecorderEntry = personalKitFlightRecorderEntry(
+        codexSyncFrHandoff.flightRecorderEntry,
+        kit
+      );
+      return runWithPersonalKitAttemptLease({
+        runtime,
+        session: kitSession,
+        artifact: kit?.artifact,
+        heartbeat: true,
+        run: () =>
+          awaitJobOrDefer(
+            "codex",
+            args,
+            corrId,
+            resolveIdleTimeout("codex", idleTimeoutMs),
+            effectiveOutputFormat,
+            kitSession ? true : forceRefresh,
+            runtime,
+            kit?.codexIsolation?.env,
+            ledger.requestCleanup,
+            codexSyncFrHandoff.flightRecorderEntry,
+            codexSyncFrHandoff.extractUsage,
+            prep.stdinPayload,
+            kit?.codexIsolation?.cwd ?? worktreeResolution.cwd,
+            effectiveCompress,
+            kit?.context.execution ?? null,
+            kit && kitSession
+              ? event =>
+                  finalizePersonalKitTerminalEvent({
+                    event,
+                    runtime,
+                    provider: "codex",
+                    gatewaySessionId: kitSession!.gatewaySessionId,
+                    execution: kit!.context.execution,
+                    attemptId: kitSession!.attemptId,
+                  })
+              : undefined,
+            kitSession?.gatewaySessionId,
+            kitSession?.attemptKind === "durable" ? kitSession.attemptId : undefined,
+            sessionBoundDedupArgs(args, effectiveSessionId)
+          ),
+      });
+    },
+    // Codex extracts usage/cost/provider-metadata BEFORE finalize so a parse or
+    // extraction throw leaves the Kit session UN-finalized exactly as today.
+    computeSuccessFacts: stdout => {
+      const codexUsage = extractUsageAndCost("codex", stdout, effectiveOutputFormat);
+      // LCR: label cost_basis (codex is T2, so a counts-only completion is
+      // derived-from-tokens; a rare reported cost_usd stays provider-reported);
+      // parity with the async/deferred handoff.
+      const cost = deriveCostBasis("codex", prep.resolvedModel || "default", codexUsage);
+      // Phase 7: capture codex's thread id (session) from the JSONL stream so
+      // the FR row keeps the provider session id. Stop reason is a capability
+      // fact (codex `exec --json` does not emit one), so it stays NULL.
+      const codexMeta = extractProviderOutputMetadata("codex", stdout, effectiveOutputFormat);
+      return { codexUsage, cost, codexMeta };
+    },
+    finalizeKit: async ({ completed, stdout }) => {
+      if (!kit || !kitSession) return;
+      await finalizePersonalKitSessionOrThrow({
+        runtime,
+        provider: "codex",
+        gatewaySessionId: kitSession.gatewaySessionId,
+        execution: kit.context.execution,
+        terminalMetadata: completed
+          ? createPersonalKitTerminalMetadata("codex", stdout, effectiveOutputFormat)
+          : null,
+        completed,
+        attemptId: kitSession.attemptId,
+      });
+    },
+    buildFailureResponse: ({ code, stdout, stderr, terminalFailure, result }) => {
       // Codex reports failures (turn.failed / error events) on the JSONL
       // stdout stream; on a non-zero exit stderr is often empty. Prefer the
       // parsed failure reason (the turn.failed/error text) over the
@@ -10991,113 +11221,57 @@ export async function handleCodexRequest(
         { providerSessionId: terminalFailure.providerSessionId },
         result
       );
-    }
-    wasSuccessful = true;
-    ledger.sessionAdmissionCommitted = true;
-    await ledger.settle(kitSession);
-    if (!kitSession) {
-      await safeUpdateSessionUsageAfterJobAdmission(
-        runtime.sessionManager,
-        effectiveSessionId,
-        runtime
-      );
-    }
-
-    logger.info(`[${corrId}] codex_request completed successfully in ${durationMs}ms`);
-    const codexUsage = extractUsageAndCost("codex", stdout, effectiveOutputFormat);
-    // LCR: label cost_basis (codex is T2, so a counts-only completion is
-    // derived-from-tokens; a rare reported cost_usd stays provider-reported);
-    // parity with the async/deferred handoff.
-    const { costUsd: codexCostUsd, costBasis: codexCostBasis } = deriveCostBasis(
-      "codex",
-      prep.resolvedModel || "default",
-      codexUsage
-    );
-    // Phase 7: capture codex's thread id (session) from the JSONL stream so
-    // the FR row keeps the provider session id. Stop reason is a capability
-    // fact (codex `exec --json` does not emit one), so it stays NULL.
-    const codexMeta = extractProviderOutputMetadata("codex", stdout, effectiveOutputFormat);
-    if (kit && kitSession && !result.jobId) {
-      await finalizePersonalKitSessionOrThrow({
-        runtime,
-        provider: "codex",
-        gatewaySessionId: kitSession.gatewaySessionId,
-        execution: kit.context.execution,
-        terminalMetadata: createPersonalKitTerminalMetadata("codex", stdout, effectiveOutputFormat),
-        completed: true,
-        attemptId: kitSession.attemptId,
+    },
+    buildSuccessResponse: ({ worktreeResolution, stdout, durationMs, facts }) => {
+      // #44: usage is parsed from the raw JSONL `stdout`, but the FR response
+      // column stores the reconstructed reply (== text-mode stdout) so
+      // read-back surfaces (llm_request_result, cache-stats) get plain text,
+      // not the raw event stream. `json` mode persists the raw JSONL verbatim.
+      // This is the sync-in-time / deferral-disabled writer; the deferred and
+      // pure-async writer is AsyncJobManager.logComplete; both use the same
+      // codexFrResponse() helper so the persisted value agrees byte-for-byte.
+      flight.completeInline({
+        response: codexFrResponse(effectiveOutputFormat, stdout),
+        durationMs,
+        retryCount: 0,
+        circuitBreakerState: "closed",
+        optimizationApplied: optimizePrompt || optimizeResponse,
+        exitCode: 0,
+        status: "completed",
+        inputTokens: facts.codexUsage.inputTokens,
+        outputTokens: facts.codexUsage.outputTokens,
+        cacheReadTokens: facts.codexUsage.cacheReadTokens,
+        cacheCreationTokens: facts.codexUsage.cacheCreationTokens,
+        costUsd: facts.cost.costUsd,
+        costBasis: facts.cost.costBasis,
+        providerSessionId: facts.codexMeta.sessionId,
+        stopReason: facts.codexMeta.stopReason,
       });
-    }
-    // #44: usage is parsed from the raw JSONL `stdout`, but the FR response
-    // column stores the reconstructed reply (== text-mode stdout) so
-    // read-back surfaces (llm_request_result, cache-stats) get plain text,
-    // not the raw event stream. `json` mode persists the raw JSONL verbatim.
-    // This is the sync-in-time / deferral-disabled writer; the deferred and
-    // pure-async writer is AsyncJobManager.logComplete — both use the same
-    // codexFrResponse() helper so the persisted value agrees byte-for-byte.
-    flight.completeInline({
-      response: codexFrResponse(effectiveOutputFormat, stdout),
-      durationMs,
-      retryCount: 0,
-      circuitBreakerState: "closed",
-      optimizationApplied: optimizePrompt || optimizeResponse,
-      exitCode: 0,
-      status: "completed",
-      inputTokens: codexUsage.inputTokens,
-      outputTokens: codexUsage.outputTokens,
-      cacheReadTokens: codexUsage.cacheReadTokens,
-      cacheCreationTokens: codexUsage.cacheCreationTokens,
-      costUsd: codexCostUsd,
-      costBasis: codexCostBasis,
-      providerSessionId: codexMeta.sessionId,
-      stopReason: codexMeta.stopReason,
-    });
-    const codexResponse = buildCliResponse(
-      "codex",
-      stdout,
-      optimizeResponse,
-      corrId,
-      effectiveSessionId,
-      prep,
-      durationMs,
-      undefined,
-      effectiveOutputFormat,
-      undefined,
-      effectiveCompress
-    );
-    safeRecordCompression(corrId, codexResponse.compression, runtime, kit !== null);
-    if (worktreeResolution.worktreePath) {
-      const first = codexResponse.content[0];
-      if (first && first.type === "text") {
-        first.text = formatWorktreePrefix(worktreeResolution.worktreePath) + first.text;
+      const codexResponse = buildCliResponse(
+        "codex",
+        stdout,
+        optimizeResponse,
+        corrId,
+        effectiveSessionId,
+        prep,
+        durationMs,
+        undefined,
+        effectiveOutputFormat,
+        undefined,
+        effectiveCompress
+      );
+      safeRecordCompression(corrId, codexResponse.compression, runtime, kit !== null);
+      if (worktreeResolution.worktreePath) {
+        const first = codexResponse.content[0];
+        if (first && first.type === "text") {
+          first.text = formatWorktreePrefix(worktreeResolution.worktreePath) + first.text;
+        }
       }
-    }
-    return codexResponse;
-  } catch (error) {
-    await ledger.rollbackOnException(kitSession, deps.sessionManager);
-    await ledger.cleanupOnException(kitJobHandedOff, error, kitSession, false);
-    const elapsedMs = Math.max(0, Date.now() - startTime);
-    logger.info(`[${corrId}] codex_request threw exception after ${elapsedMs}ms`);
-    // A no-op once the request deferred (Mode B): the manager owns completion,
-    // so a rejecting post-handoff finishHandler() reaching here no longer writes
-    // a second flight completion (H-DoubleComplete fence, spec section 4).
-    flight.completeInline({
-      response: "",
-      durationMs: elapsedMs,
-      retryCount: 0,
-      circuitBreakerState: "closed",
-      optimizationApplied: optimizePrompt || optimizeResponse,
-      exitCode: 1,
-      errorMessage: (error as Error).message,
-      status: "failed",
-    });
-    return kitAwareErrorResponse("codex", 1, "", corrId, error as Error, kit);
-  } finally {
-    await ledger.worktreeLifecycle?.finishHandler();
-    const finalizedDurationMs = Math.max(0, durationMs || Date.now() - startTime);
-    runtime.performanceMetrics.recordRequest("codex", finalizedDurationMs, wasSuccessful);
-    // Cleanup is owned by awaitJobOrDefer's contract; nothing to do here.
-  }
+      return codexResponse;
+    },
+  };
+
+  return runKitTerminalEnvelope(env, hooks);
 }
 
 export async function handleGeminiRequest(
