@@ -2488,7 +2488,17 @@ type KitTerminalFailure = ReturnType<typeof buildTerminalCliFailure>;
 /** Terminal-envelope inputs: already-owned request-scoped objects the driver only sequences. */
 interface KitTerminalEnvelope {
   runtime: GatewayServerRuntime;
-  /** "claude" | "codex": log + recordRequest label + catch error id. */
+  /**
+   * The sink for the three terminal log lines (failed / completed / threw). Kept
+   * per-context because the handlers differ: claude/codex log via
+   * runtime.logger, the non-Kit siblings (gemini/grok/...) via deps.logger. At
+   * the registered-tool path the two are the same object; this preserves the
+   * exact sink for a direct-handler caller with a mismatched deps.logger.
+   * Typed as the (looser) HandlerDeps logger shape so deps.logger fits directly;
+   * the driver only calls logger.info.
+   */
+  logger: HandlerDeps["logger"];
+  /** provider label used for the log prefix, recordRequest, and catch error id. */
   provider: CliType;
   corrId: string;
   kit: PersonalKitRequestContext | null;
@@ -2596,7 +2606,7 @@ async function runKitTerminalEnvelope<TFacts>(
   hooks: KitTerminalHooks<TFacts>
 ): Promise<ExtendedToolResponse> {
   const { runtime, provider, corrId, kit, kitSession, effectiveSessionId, ledger, flight } = env;
-  const logger = runtime.logger;
+  const logger = env.logger;
   let durationMs = 0;
   let wasSuccessful = false;
   let kitJobHandedOff = false;
@@ -10357,6 +10367,7 @@ export async function handleClaudeRequest(
 
   const env: KitTerminalEnvelope = {
     runtime,
+    logger: runtime.logger,
     provider: "claude",
     corrId,
     kit,
@@ -11089,6 +11100,7 @@ export async function handleCodexRequest(
 
   const env: KitTerminalEnvelope = {
     runtime,
+    logger: runtime.logger,
     provider: "codex",
     corrId,
     kit,
@@ -11374,6 +11386,7 @@ export async function handleGeminiRequest(
 
   const env: KitTerminalEnvelope = {
     runtime,
+    logger: deps.logger,
     provider: "gemini",
     corrId,
     kit: null,
@@ -12058,182 +12071,193 @@ export async function handleGrokRequest(
   } catch (error) {
     return createErrorResponse("grok_request", 1, "", corrId, error as Error);
   }
-  let durationMs = 0;
-  let wasSuccessful = false;
-  let worktreeLifecycle: RequestOwnedWorktreeLifecycle | undefined;
-  let sessionAdmission: SessionAdmissionMutation | undefined;
-  let sessionAdmissionCommitted = false;
-
-  try {
-    // Session arg planning (pure, no I/O)
-    const existingSession = sessionResult.userProvidedSession
-      ? await getExistingSessionForProvider(
-          deps.sessionManager,
-          sessionResult.effectiveSessionId,
-          "grok",
-          { requireTrackedRemoteSession: true }
-        )
-      : null;
-    let worktreeResolution: ResolvedWorktree = {};
-    try {
-      worktreeResolution = await resolveWorkspaceAndWorktreeForRequest({
-        provider: "grok",
-        workspace: params.workspace,
-        worktree: params.worktree,
-        sessionId: sessionResult.effectiveSessionId,
-        runtime,
-        workingDir: params.workingDir,
-        requireStableCwd: sessionResult.resumeArgs.includes("--continue"),
-        deferWorktree: true,
-      });
-    } catch (err) {
-      return createErrorResponse("grok_request", 1, "", corrId, err as Error);
-    }
-    applyEffectiveWorkingDirectory(
-      "grok",
-      args,
-      "--cwd",
-      worktreeResolution.effectiveWorkingDir,
-      "grok"
-    );
-    assertUpstreamCliArgs("grok", args);
-    assertUpstreamCliEnv("grok", undefined);
-    assertFinalCliProcessAdmission("grok", args, "grok");
-    let effectiveSessionId = sessionResult.effectiveSessionId;
-    if (!params.createNewSession && !effectiveSessionId) {
-      effectiveSessionId = `${GATEWAY_SESSION_PREFIX}${randomUUID()}`;
-    }
-    if (effectiveSessionId) {
-      if (existingSession) {
-        const admitted = await persistResolvedSessionScope(
-          deps.sessionManager,
-          effectiveSessionId,
-          worktreeResolution,
-          runtime,
-          existingSession
-        );
-        sessionAdmission = { original: existingSession, admitted };
-      } else if (sessionResult.userProvidedSession || !params.createNewSession) {
-        const admitted = await createSessionWithResolvedScope(
-          deps.sessionManager,
-          "grok",
-          "Grok Session",
-          effectiveSessionId,
-          worktreeResolution,
-          runtime
-        );
-        sessionAdmission = { original: admitted.previousSession, admitted: admitted.session };
-      }
-    }
-    if (params.worktree) {
-      worktreeResolution = await resolveWorkspaceAndWorktreeForRequest({
-        provider: "grok",
-        workspace: params.workspace,
-        worktree: params.worktree,
-        sessionId: sessionAdmission ? effectiveSessionId : undefined,
-        runtime,
-        workingDir: params.workingDir,
-        requireStableCwd: sessionResult.resumeArgs.includes("--continue"),
-        expectedSession: sessionAdmission?.admitted,
-      });
-      advanceSessionAdmissionWorktree(sessionAdmission, worktreeResolution);
-    }
-    worktreeLifecycle = createRequestOwnedWorktreeLifecycle(worktreeResolution, runtime, true);
-    safeFlightStart(
-      {
-        correlationId: corrId,
-        cli: "grok",
-        model: prep.resolvedModel || "default",
-        prompt: prep.effectivePrompt,
-        sessionId: effectiveSessionId,
-        stablePrefixHash: prep.stablePrefixHash ?? undefined,
-        stablePrefixTokens: prep.stablePrefixTokens ?? undefined,
-      },
-      runtime
-    );
-    deps.logger.info(
-      `[${corrId}] grok_request invoked with model=${prep.resolvedModel || "default"}, permissionMode=${params.permissionMode}, prompt length=${prep.effectivePrompt.length}`
-    );
-
-    const effectiveCompress = resolveEffectiveCompression(runtime.compression, {
-      compressResponse: params.compressResponse,
-      outputFormat: params.outputFormat,
-      outputSchemaDeclared: false,
-    });
-    const grokFrHandoff = buildAsyncFlightRecorderHandoff(
-      "grok",
-      prep,
-      effectiveSessionId,
-      params.outputFormat,
-      params.optimizePrompt
-    );
-    const result = await awaitJobOrDefer(
-      "grok",
-      args,
-      corrId,
-      resolveIdleTimeout("grok", params.idleTimeoutMs),
-      params.outputFormat,
-      params.forceRefresh,
-      runtime,
-      undefined,
-      worktreeLifecycle.onTerminal,
-      grokFrHandoff.flightRecorderEntry,
-      grokFrHandoff.extractUsage,
-      undefined,
-      worktreeResolution.cwd,
-      effectiveCompress,
-      undefined,
-      undefined,
-      undefined,
-      undefined,
-      sessionBoundDedupArgs(args, effectiveSessionId)
-    );
-
-    // Deferred — job still running, return async reference
-    if (isDeferredResponse(result)) {
-      sessionAdmissionCommitted = true;
-      if (sessionAdmission) worktreeLifecycle.transfer();
-      else await worktreeLifecycle.finishHandler();
-      await safeUpdateSessionUsageAfterJobAdmission(
-        deps.sessionManager,
-        sessionResult.userProvidedSession ? effectiveSessionId : undefined,
-        runtime
-      );
-      return buildDeferredToolResponse(result, effectiveSessionId);
-    }
-
-    const { stdout, stderr, code } = result;
-    durationMs = Math.max(0, Date.now() - startTime);
-
-    if (code !== 0) {
-      await rollbackSessionAndWorktreeAdmission(
-        deps.sessionManager,
-        sessionAdmission,
-        worktreeLifecycle,
-        runtime
-      );
-      deps.logger.info(`[${corrId}] grok_request failed in ${durationMs}ms`);
-      const terminalFailure = buildTerminalCliFailure(
-        "grok",
-        stdout,
-        stderr,
-        code,
-        params.outputFormat
-      );
-      safeFlightComplete(
-        corrId,
+  // Tier-B T5b: route grok (a non-Kit sibling) through the shared terminal
+  // envelope with kit=null. grok has claude's in-try topology (states 4..8 inside
+  // runInsideTerminalTry). The ACP branch and rejectUnreachableGatewayWorktree
+  // guard above stay OUTSIDE the envelope. grok is the first slice to use the D4
+  // usageUpdateSessionId split: the durable usage update is skipped for a
+  // gateway-minted session (userProvidedSession ? effectiveSessionId : undefined)
+  // while the deferred response still returns the minted effectiveSessionId. The
+  // effectiveSessionId mint is a pure, non-throwing derivation (randomUUID + a
+  // string), so it is hoisted before the env; the pre-mint sessionResult.
+  // effectiveSessionId still feeds worktree-resolve #1 and the existing-session
+  // lookup inside runInsideTerminalTry, exactly as before.
+  let effectiveSessionId = sessionResult.effectiveSessionId;
+  if (!params.createNewSession && !effectiveSessionId) {
+    effectiveSessionId = `${GATEWAY_SESSION_PREFIX}${randomUUID()}`;
+  }
+  let effectiveCompress = false;
+  const ledger = new RequestTerminalLedger(runtime, undefined);
+  const flight = new FlightOwnership(
+    () =>
+      safeFlightStart(
         {
-          ...terminalFailure,
-          durationMs,
-          retryCount: 0,
-          circuitBreakerState: "closed",
-          optimizationApplied: false,
-          exitCode: code,
-          status: "failed",
+          correlationId: corrId,
+          cli: "grok",
+          model: prep.resolvedModel || "default",
+          prompt: prep.effectivePrompt,
+          sessionId: effectiveSessionId,
+          stablePrefixHash: prep.stablePrefixHash ?? undefined,
+          stablePrefixTokens: prep.stablePrefixTokens ?? undefined,
         },
         runtime
+      ),
+    metadata => safeFlightComplete(corrId, metadata, runtime)
+  );
+
+  const env: KitTerminalEnvelope = {
+    runtime,
+    logger: deps.logger,
+    provider: "grok",
+    corrId,
+    kit: null,
+    kitSession: null,
+    effectiveSessionId,
+    usageUpdateSessionId: sessionResult.userProvidedSession ? effectiveSessionId : undefined,
+    ledger,
+    flight,
+    startTime,
+    optimizationApplied: false,
+    outputFormat: params.outputFormat,
+    usageUpdateManager: deps.sessionManager,
+    failureRollbackManager: deps.sessionManager,
+    exceptionRollbackManager: deps.sessionManager,
+    fireRequestCleanupInCatch: false,
+  };
+
+  const hooks: KitTerminalHooks<{
+    grokMeta: ReturnType<typeof extractProviderOutputMetadata>;
+  }> = {
+    runInsideTerminalTry: async () => {
+      // Session arg planning (pure, no I/O)
+      const existingSession = sessionResult.userProvidedSession
+        ? await getExistingSessionForProvider(
+            deps.sessionManager,
+            sessionResult.effectiveSessionId,
+            "grok",
+            { requireTrackedRemoteSession: true }
+          )
+        : null;
+      let worktreeResolution: ResolvedWorktree;
+      try {
+        worktreeResolution = await resolveWorkspaceAndWorktreeForRequest({
+          provider: "grok",
+          workspace: params.workspace,
+          worktree: params.worktree,
+          sessionId: sessionResult.effectiveSessionId,
+          runtime,
+          workingDir: params.workingDir,
+          requireStableCwd: sessionResult.resumeArgs.includes("--continue"),
+          deferWorktree: true,
+        });
+      } catch (err) {
+        return {
+          ok: false,
+          earlyResponse: createErrorResponse("grok_request", 1, "", corrId, err as Error),
+        };
+      }
+      applyEffectiveWorkingDirectory(
+        "grok",
+        args,
+        "--cwd",
+        worktreeResolution.effectiveWorkingDir,
+        "grok"
       );
-      return createErrorResponse(
+      assertUpstreamCliArgs("grok", args);
+      assertUpstreamCliEnv("grok", undefined);
+      assertFinalCliProcessAdmission("grok", args, "grok");
+      if (effectiveSessionId) {
+        if (existingSession) {
+          const admitted = await persistResolvedSessionScope(
+            deps.sessionManager,
+            effectiveSessionId,
+            worktreeResolution,
+            runtime,
+            existingSession
+          );
+          ledger.sessionAdmission = { original: existingSession, admitted };
+        } else if (sessionResult.userProvidedSession || !params.createNewSession) {
+          const admitted = await createSessionWithResolvedScope(
+            deps.sessionManager,
+            "grok",
+            "Grok Session",
+            effectiveSessionId,
+            worktreeResolution,
+            runtime
+          );
+          ledger.sessionAdmission = {
+            original: admitted.previousSession,
+            admitted: admitted.session,
+          };
+        }
+      }
+      if (params.worktree) {
+        worktreeResolution = await resolveWorkspaceAndWorktreeForRequest({
+          provider: "grok",
+          workspace: params.workspace,
+          worktree: params.worktree,
+          sessionId: ledger.sessionAdmission ? effectiveSessionId : undefined,
+          runtime,
+          workingDir: params.workingDir,
+          requireStableCwd: sessionResult.resumeArgs.includes("--continue"),
+          expectedSession: ledger.sessionAdmission?.admitted,
+        });
+        advanceSessionAdmissionWorktree(ledger.sessionAdmission, worktreeResolution);
+      }
+      ledger.installWorktree(
+        createRequestOwnedWorktreeLifecycle(worktreeResolution, runtime, true)
+      );
+      flight.start();
+      deps.logger.info(
+        `[${corrId}] grok_request invoked with model=${prep.resolvedModel || "default"}, permissionMode=${params.permissionMode}, prompt length=${prep.effectivePrompt.length}`
+      );
+      return { ok: true, value: { worktreeResolution } };
+    },
+    execute: async worktreeResolution => {
+      effectiveCompress = resolveEffectiveCompression(runtime.compression, {
+        compressResponse: params.compressResponse,
+        outputFormat: params.outputFormat,
+        outputSchemaDeclared: false,
+      });
+      const grokFrHandoff = buildAsyncFlightRecorderHandoff(
+        "grok",
+        prep,
+        effectiveSessionId,
+        params.outputFormat,
+        params.optimizePrompt
+      );
+      return awaitJobOrDefer(
+        "grok",
+        args,
+        corrId,
+        resolveIdleTimeout("grok", params.idleTimeoutMs),
+        params.outputFormat,
+        params.forceRefresh,
+        runtime,
+        undefined,
+        ledger.worktreeLifecycle?.onTerminal,
+        grokFrHandoff.flightRecorderEntry,
+        grokFrHandoff.extractUsage,
+        undefined,
+        worktreeResolution.cwd,
+        effectiveCompress,
+        undefined,
+        undefined,
+        undefined,
+        undefined,
+        sessionBoundDedupArgs(args, effectiveSessionId)
+      );
+    },
+    // Grok json/streaming-json carries a provider-native session id and stop
+    // reason for local terminal evidence. A gateway gw-* tracking id is not a
+    // substitute for that native handle and is never advertised as resumable.
+    computeSuccessFacts: stdout => {
+      const grokMeta = extractProviderOutputMetadata("grok", stdout, params.outputFormat);
+      return { grokMeta };
+    },
+    finalizeKit: async () => {},
+    buildFailureResponse: ({ code, stderr, terminalFailure, result }) =>
+      createErrorResponse(
         "grok",
         code,
         stderr,
@@ -12244,46 +12268,29 @@ export async function handleGrokRequest(
           providerSessionId: terminalFailure.providerSessionId,
         },
         result
+      ),
+    buildSuccessResponse: ({ worktreeResolution, stdout, durationMs, facts }) => {
+      const response = buildCliResponse(
+        "grok",
+        stdout,
+        params.optimizeResponse ?? false,
+        corrId,
+        effectiveSessionId,
+        prep,
+        durationMs,
+        sessionResult.userProvidedSession,
+        params.outputFormat,
+        undefined,
+        effectiveCompress
       );
-    }
-    wasSuccessful = true;
-    sessionAdmissionCommitted = true;
-    if (sessionAdmission) worktreeLifecycle.transfer();
-    else await worktreeLifecycle.finishHandler();
-    await safeUpdateSessionUsageAfterJobAdmission(
-      deps.sessionManager,
-      sessionResult.userProvidedSession ? effectiveSessionId : undefined,
-      runtime
-    );
-
-    deps.logger.info(`[${corrId}] grok_request completed successfully in ${durationMs}ms`);
-    const response = buildCliResponse(
-      "grok",
-      stdout,
-      params.optimizeResponse ?? false,
-      corrId,
-      effectiveSessionId,
-      prep,
-      durationMs,
-      sessionResult.userProvidedSession,
-      params.outputFormat,
-      undefined,
-      effectiveCompress
-    );
-    safeRecordCompression(corrId, response.compression, runtime);
-    if (worktreeResolution.worktreePath) {
-      const first = response.content[0];
-      if (first && first.type === "text") {
-        first.text = formatWorktreePrefix(worktreeResolution.worktreePath) + first.text;
+      safeRecordCompression(corrId, response.compression, runtime);
+      if (worktreeResolution.worktreePath) {
+        const first = response.content[0];
+        if (first && first.type === "text") {
+          first.text = formatWorktreePrefix(worktreeResolution.worktreePath) + first.text;
+        }
       }
-    }
-    // Grok json/streaming-json carries a provider-native session id and stop
-    // reason for local terminal evidence. A gateway gw-* tracking id is not a
-    // substitute for that native handle and is never advertised as resumable.
-    const grokMeta = extractProviderOutputMetadata("grok", stdout, params.outputFormat);
-    safeFlightComplete(
-      corrId,
-      {
+      flight.completeInline({
         response: stdout,
         durationMs,
         retryCount: 0,
@@ -12292,43 +12299,14 @@ export async function handleGrokRequest(
         optimizationApplied: params.optimizePrompt || (params.optimizeResponse ?? false),
         exitCode: 0,
         status: "completed",
-        providerSessionId: grokMeta.sessionId,
-        stopReason: grokMeta.stopReason,
-      },
-      runtime
-    );
-    return response;
-  } catch (error) {
-    if (!sessionAdmissionCommitted) {
-      await rollbackSessionAndWorktreeAdmission(
-        deps.sessionManager,
-        sessionAdmission,
-        worktreeLifecycle,
-        runtime
-      );
-    }
-    const elapsedMs = Math.max(0, Date.now() - startTime);
-    deps.logger.info(`[${corrId}] grok_request threw exception after ${elapsedMs}ms`);
-    safeFlightComplete(
-      corrId,
-      {
-        response: "",
-        durationMs: elapsedMs,
-        retryCount: 0,
-        circuitBreakerState: "closed",
-        optimizationApplied: false,
-        exitCode: 1,
-        errorMessage: (error as Error).message,
-        status: "failed",
-      },
-      runtime
-    );
-    return createErrorResponse("grok", 1, "", corrId, error as Error);
-  } finally {
-    await worktreeLifecycle?.finishHandler();
-    const finalizedDurationMs = Math.max(0, durationMs || Date.now() - startTime);
-    runtime.performanceMetrics.recordRequest("grok", finalizedDurationMs, wasSuccessful);
-  }
+        providerSessionId: facts.grokMeta.sessionId,
+        stopReason: facts.grokMeta.stopReason,
+      });
+      return response;
+    },
+  };
+
+  return runKitTerminalEnvelope(env, hooks);
 }
 
 export async function handleGrokRequestAsync(
