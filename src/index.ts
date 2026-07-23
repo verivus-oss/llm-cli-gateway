@@ -12830,157 +12830,169 @@ export async function handleDevinRequest(
   } catch (error) {
     return createErrorResponse("devin_request", 1, "", corrId, error as Error);
   }
-  let durationMs = 0;
-  let wasSuccessful = false;
-  let worktreeLifecycle: RequestOwnedWorktreeLifecycle | undefined;
-  let sessionAdmission: SessionAdmissionMutation | undefined;
-  let sessionAdmissionCommitted = false;
-  try {
-    const existingSession = sessionResult.userProvidedSession
-      ? await getExistingSessionForProvider(
-          deps.sessionManager,
-          sessionResult.effectiveSessionId,
-          "devin",
-          { requireTrackedRemoteSession: true }
-        )
-      : null;
-    let worktreeResolution = await resolveWorkspaceAndWorktreeForRequest({
-      provider: "devin",
-      workspace: params.workspace,
-      worktree: params.worktree,
-      sessionId: sessionResult.effectiveSessionId,
-      runtime,
-      workingDir: params.workingDir,
-      requireStableCwd: sessionResult.resumeArgs.includes("--continue"),
-      deferWorktree: true,
-    });
-    assertUpstreamCliArgs("devin", args);
-    assertUpstreamCliEnv("devin", undefined);
-    assertFinalCliProcessAdmission("devin", args, "devin");
-    let effectiveSessionId = sessionResult.effectiveSessionId;
-    if (!params.createNewSession && !effectiveSessionId) {
-      effectiveSessionId = `${GATEWAY_SESSION_PREFIX}${randomUUID()}`;
-    }
-    if (effectiveSessionId) {
-      if (existingSession) {
-        const admitted = await persistResolvedSessionScope(
-          deps.sessionManager,
-          effectiveSessionId,
-          worktreeResolution,
-          runtime,
-          existingSession
-        );
-        sessionAdmission = { original: existingSession, admitted };
-      } else if (sessionResult.userProvidedSession || !params.createNewSession) {
-        const admitted = await createSessionWithResolvedScope(
-          deps.sessionManager,
-          "devin",
-          "Devin Session",
-          effectiveSessionId,
-          worktreeResolution,
-          runtime
-        );
-        sessionAdmission = { original: admitted.previousSession, admitted: admitted.session };
-      }
-    }
-    if (params.worktree) {
-      worktreeResolution = await resolveWorkspaceAndWorktreeForRequest({
+  // Tier-B T5c: route devin (a non-Kit sibling) through the shared terminal
+  // envelope with kit=null. devin has claude's in-try topology; the ACP branch +
+  // rejectUnreachableGatewayWorktree stay OUTSIDE. Unlike gemini/grok, devin has
+  // NO inline worktree-resolve catch (a resolve throw reaches the envelope catch,
+  // id "devin") and NO applyEffectiveWorkingDirectory / invoked log. It uses the
+  // D4 usageUpdateSessionId split and its deferred response is decorated with the
+  // approval decision + review-integrity. D5: the driver's three terminal log
+  // lines (failed/completed/threw, via deps.logger) are NEW for devin, which
+  // logged none today; a benign stderr-only observability addition.
+  let effectiveSessionId = sessionResult.effectiveSessionId;
+  if (!params.createNewSession && !effectiveSessionId) {
+    effectiveSessionId = `${GATEWAY_SESSION_PREFIX}${randomUUID()}`;
+  }
+  let effectiveCompress = false;
+  const ledger = new RequestTerminalLedger(runtime, undefined);
+  const flight = new FlightOwnership(
+    () =>
+      safeFlightStart(
+        {
+          correlationId: corrId,
+          cli: "devin",
+          model: prep.resolvedModel || "default",
+          prompt: prep.effectivePrompt,
+          sessionId: effectiveSessionId,
+        },
+        runtime
+      ),
+    metadata => safeFlightComplete(corrId, metadata, runtime)
+  );
+
+  const env: KitTerminalEnvelope = {
+    runtime,
+    logger: deps.logger,
+    provider: "devin",
+    corrId,
+    kit: null,
+    kitSession: null,
+    effectiveSessionId,
+    usageUpdateSessionId: sessionResult.userProvidedSession ? effectiveSessionId : undefined,
+    ledger,
+    flight,
+    startTime,
+    optimizationApplied: false,
+    outputFormat: undefined,
+    usageUpdateManager: deps.sessionManager,
+    failureRollbackManager: deps.sessionManager,
+    exceptionRollbackManager: deps.sessionManager,
+    fireRequestCleanupInCatch: false,
+  };
+
+  const hooks: KitTerminalHooks = {
+    runInsideTerminalTry: async () => {
+      const existingSession = sessionResult.userProvidedSession
+        ? await getExistingSessionForProvider(
+            deps.sessionManager,
+            sessionResult.effectiveSessionId,
+            "devin",
+            { requireTrackedRemoteSession: true }
+          )
+        : null;
+      let worktreeResolution = await resolveWorkspaceAndWorktreeForRequest({
         provider: "devin",
         workspace: params.workspace,
         worktree: params.worktree,
-        sessionId: sessionAdmission ? effectiveSessionId : undefined,
+        sessionId: sessionResult.effectiveSessionId,
         runtime,
         workingDir: params.workingDir,
         requireStableCwd: sessionResult.resumeArgs.includes("--continue"),
-        expectedSession: sessionAdmission?.admitted,
+        deferWorktree: true,
       });
-      advanceSessionAdmissionWorktree(sessionAdmission, worktreeResolution);
-    }
-    worktreeLifecycle = createRequestOwnedWorktreeLifecycle(worktreeResolution, runtime, true);
-    safeFlightStart(
-      {
-        correlationId: corrId,
-        cli: "devin",
-        model: prep.resolvedModel || "default",
-        prompt: prep.effectivePrompt,
-        sessionId: effectiveSessionId,
-      },
-      runtime
-    );
-
-    const effectiveCompress = resolveEffectiveCompression(runtime.compression, {
-      compressResponse: params.compressResponse,
-      outputFormat: undefined,
-      outputSchemaDeclared: false,
-    });
-    const devinFrHandoff = buildAsyncFlightRecorderHandoff(
-      "devin",
-      prep,
-      effectiveSessionId,
-      undefined,
-      params.optimizePrompt
-    );
-    const result = await awaitJobOrDefer(
-      "devin",
-      args,
-      corrId,
-      resolveIdleTimeout("devin", params.idleTimeoutMs),
-      undefined,
-      params.forceRefresh,
-      runtime,
-      undefined,
-      worktreeLifecycle.onTerminal,
-      devinFrHandoff.flightRecorderEntry,
-      devinFrHandoff.extractUsage,
-      undefined,
-      worktreeResolution.cwd ?? params.workingDir,
-      effectiveCompress,
-      undefined,
-      undefined,
-      undefined,
-      undefined,
-      sessionBoundDedupArgs(args, effectiveSessionId)
-    );
-    if (isDeferredResponse(result)) {
-      sessionAdmissionCommitted = true;
-      if (sessionAdmission) worktreeLifecycle.transfer();
-      else await worktreeLifecycle.finishHandler();
-      await safeUpdateSessionUsageAfterJobAdmission(
-        deps.sessionManager,
-        sessionResult.userProvidedSession ? effectiveSessionId : undefined,
-        runtime
+      assertUpstreamCliArgs("devin", args);
+      assertUpstreamCliEnv("devin", undefined);
+      assertFinalCliProcessAdmission("devin", args, "devin");
+      if (effectiveSessionId) {
+        if (existingSession) {
+          const admitted = await persistResolvedSessionScope(
+            deps.sessionManager,
+            effectiveSessionId,
+            worktreeResolution,
+            runtime,
+            existingSession
+          );
+          ledger.sessionAdmission = { original: existingSession, admitted };
+        } else if (sessionResult.userProvidedSession || !params.createNewSession) {
+          const admitted = await createSessionWithResolvedScope(
+            deps.sessionManager,
+            "devin",
+            "Devin Session",
+            effectiveSessionId,
+            worktreeResolution,
+            runtime
+          );
+          ledger.sessionAdmission = {
+            original: admitted.previousSession,
+            admitted: admitted.session,
+          };
+        }
+      }
+      if (params.worktree) {
+        worktreeResolution = await resolveWorkspaceAndWorktreeForRequest({
+          provider: "devin",
+          workspace: params.workspace,
+          worktree: params.worktree,
+          sessionId: ledger.sessionAdmission ? effectiveSessionId : undefined,
+          runtime,
+          workingDir: params.workingDir,
+          requireStableCwd: sessionResult.resumeArgs.includes("--continue"),
+          expectedSession: ledger.sessionAdmission?.admitted,
+        });
+        advanceSessionAdmissionWorktree(ledger.sessionAdmission, worktreeResolution);
+      }
+      ledger.installWorktree(
+        createRequestOwnedWorktreeLifecycle(worktreeResolution, runtime, true)
       );
-      const deferred = buildDeferredToolResponse(result, effectiveSessionId);
+      flight.start();
+      return { ok: true, value: { worktreeResolution } };
+    },
+    execute: async worktreeResolution => {
+      effectiveCompress = resolveEffectiveCompression(runtime.compression, {
+        compressResponse: params.compressResponse,
+        outputFormat: undefined,
+        outputSchemaDeclared: false,
+      });
+      const devinFrHandoff = buildAsyncFlightRecorderHandoff(
+        "devin",
+        prep,
+        effectiveSessionId,
+        undefined,
+        params.optimizePrompt
+      );
+      return awaitJobOrDefer(
+        "devin",
+        args,
+        corrId,
+        resolveIdleTimeout("devin", params.idleTimeoutMs),
+        undefined,
+        params.forceRefresh,
+        runtime,
+        undefined,
+        ledger.worktreeLifecycle?.onTerminal,
+        devinFrHandoff.flightRecorderEntry,
+        devinFrHandoff.extractUsage,
+        undefined,
+        worktreeResolution.cwd ?? params.workingDir,
+        effectiveCompress,
+        undefined,
+        undefined,
+        undefined,
+        undefined,
+        sessionBoundDedupArgs(args, effectiveSessionId)
+      );
+    },
+    decorateDeferred: deferred => {
       deferred.approval = prep.approvalDecision;
       if (prep.reviewIntegrity && prep.reviewIntegrity.violations.length > 0) {
         deferred.reviewIntegrity = prep.reviewIntegrity;
       }
       return deferred;
-    }
-    const { stdout, stderr, code } = result;
-    durationMs = Math.max(0, Date.now() - startTime);
-    if (code !== 0) {
-      await rollbackSessionAndWorktreeAdmission(
-        deps.sessionManager,
-        sessionAdmission,
-        worktreeLifecycle,
-        runtime
-      );
-      const terminalFailure = buildTerminalCliFailure("devin", stdout, stderr, code, undefined);
-      safeFlightComplete(
-        corrId,
-        {
-          ...terminalFailure,
-          durationMs,
-          retryCount: 0,
-          circuitBreakerState: "closed",
-          optimizationApplied: false,
-          exitCode: code,
-          status: "failed",
-        },
-        runtime
-      );
-      return createErrorResponse(
+    },
+    computeSuccessFacts: () => undefined,
+    finalizeKit: async () => {},
+    buildFailureResponse: ({ code, stderr, terminalFailure, result }) =>
+      createErrorResponse(
         "devin",
         code,
         stderr,
@@ -12991,36 +13003,23 @@ export async function handleDevinRequest(
           providerSessionId: terminalFailure.providerSessionId,
         },
         result
+      ),
+    buildSuccessResponse: ({ stdout, durationMs }) => {
+      const response = buildCliResponse(
+        "devin",
+        stdout,
+        params.optimizeResponse ?? false,
+        corrId,
+        effectiveSessionId,
+        prep,
+        durationMs,
+        sessionResult.userProvidedSession,
+        undefined,
+        undefined,
+        effectiveCompress
       );
-    }
-    wasSuccessful = true;
-    sessionAdmissionCommitted = true;
-    if (sessionAdmission) worktreeLifecycle.transfer();
-    else await worktreeLifecycle.finishHandler();
-
-    await safeUpdateSessionUsageAfterJobAdmission(
-      deps.sessionManager,
-      sessionResult.userProvidedSession ? effectiveSessionId : undefined,
-      runtime
-    );
-
-    const response = buildCliResponse(
-      "devin",
-      stdout,
-      params.optimizeResponse ?? false,
-      corrId,
-      effectiveSessionId,
-      prep,
-      durationMs,
-      sessionResult.userProvidedSession,
-      undefined,
-      undefined,
-      effectiveCompress
-    );
-    safeRecordCompression(corrId, response.compression, runtime);
-    safeFlightComplete(
-      corrId,
-      {
+      safeRecordCompression(corrId, response.compression, runtime);
+      flight.completeInline({
         response: stdout,
         durationMs,
         retryCount: 0,
@@ -13029,43 +13028,12 @@ export async function handleDevinRequest(
         optimizationApplied: params.optimizePrompt || (params.optimizeResponse ?? false),
         exitCode: 0,
         status: "completed",
-      },
-      runtime
-    );
-    return response;
-  } catch (error) {
-    if (!sessionAdmissionCommitted) {
-      await rollbackSessionAndWorktreeAdmission(
-        deps.sessionManager,
-        sessionAdmission,
-        worktreeLifecycle,
-        runtime
-      );
-    }
-    const elapsedMs = Math.max(0, Date.now() - startTime);
-    safeFlightComplete(
-      corrId,
-      {
-        response: "",
-        durationMs: elapsedMs,
-        retryCount: 0,
-        circuitBreakerState: "closed",
-        optimizationApplied: false,
-        exitCode: 1,
-        errorMessage: (error as Error).message,
-        status: "failed",
-      },
-      runtime
-    );
-    return createErrorResponse("devin", 1, "", corrId, error as Error);
-  } finally {
-    await worktreeLifecycle?.finishHandler();
-    runtime.performanceMetrics.recordRequest(
-      "devin",
-      Math.max(0, durationMs || Date.now() - startTime),
-      wasSuccessful
-    );
-  }
+      });
+      return response;
+    },
+  };
+
+  return runKitTerminalEnvelope(env, hooks);
 }
 
 export async function handleDevinRequestAsync(
