@@ -1,0 +1,290 @@
+# Implementation plan: Tier-B T5a - route handleGeminiRequest through the terminal envelope.
+#
+# Goal: the FIRST T5 slice. Rewrite handleGeminiRequest (the canonical non-Kit
+# "gemini-family sibling") to build an `env` + `hooks` and call the already-shipped
+# `runKitTerminalEnvelope` driver with kit=null, establishing the non-Kit wiring
+# template the other four siblings (grok, devin, mistral, cursor) will follow.
+# Byte-behaviour-preserving EXCEPT the one deliberate, visible, tested change:
+# installing the T3 FlightOwnership fence for gemini's pre-existing (unfenced)
+# H-DoubleComplete hazard. Adds a gemini-handler-terminal-net characterization net.
+# One PR: the handler rewrite + the net. Nothing deferred.
+#
+# Context:
+#   Design: docs/plans/request-pipeline-tier-b-t5-generalize.design.md (rev 1,
+#   cross-LLM unconditionally approved). It covers all five siblings and the
+#   D1/D2/D3 decisions; this DAG decomposes ONLY the gemini slice (T5a).
+#   The driver runKitTerminalEnvelope + RequestTerminalLedger + FlightOwnership
+#   already exist (T2/T3/T4, PR #218, master 18f06e3) and are used by claude/codex.
+#
+#   Verified gemini structure at 18f06e3 (handleGeminiRequest 11277..11610):
+#     - deps.sessionManager used uniformly for all session I/O.
+#     - main try opens 11336, wraps states 4..12; catch 11579; finally 11605..11609
+#       (worktreeLifecycle?.finishHandler() 11606, recordRequest("gemini") 11608).
+#     - worktree-resolve #1 has an inline early-return catch (11359, id
+#       "gemini_request"); every other front-half throw reaches the main catch.
+#     - installWorktree analog: createRequestOwnedWorktreeLifecycle 11408;
+#       safeFlightStart 11409; invoked log 11421.
+#     - deferred 11460 (committed=true 11461; settle if(sessionAdmission)transfer
+#       else finishHandler 11462/11463; usage(deps) 11464; return 11469).
+#     - failure code!=0 11475 (rollback(deps) 11476; raw safeFlightComplete 11490;
+#       createErrorResponse 11503).
+#     - success 11516 (wasSuccessful=true 11516; settle 11518/11519; usage(deps)
+#       11522; buildCliResponse 11525; usage/cost/meta 11545..11555; raw
+#       safeFlightComplete 11556; return 11578).
+#     - catch 11579 (rollback if !committed 11580; UNCONDITIONAL raw
+#       safeFlightComplete 11590; createErrorResponse 11604).
+#   RE-VERIFY these anchors at implementation HEAD before every edit; T4 shifted
+#   the file and later merges may shift it again.
+
+[meta]
+name = "Tier-B T5a - gemini terminal-envelope routing"
+schema_version = "1.1"
+owner = "verivus-oss"
+slice = "request-pipeline-tier-b-t5a-gemini"
+target_branch = "master"
+base_commit = "18f06e3"
+providers = ["gemini"]
+acceptance_resource = """
+handleGeminiRequest builds an `env` (kit=null, kitSession=null, all three manager
+fields = deps.sessionManager, fireRequestCleanupInCatch=false) + `hooks` and
+returns runKitTerminalEnvelope(env, hooks); states 4..8 run inside
+runInsideTerminalTry (gemini keeps claude's in-try topology); the inline
+worktree-resolve #1 catch becomes an ok:false earlyResponse (id "gemini_request");
+computeSuccessFacts carries gemini's usage/cost/meta, finalizeKit is a no-op, and
+buildSuccessResponse owns the success flight.completeInline; the pre-existing
+H-DoubleComplete is now fenced by a per-handler FlightOwnership (a visible, tested
+flip); every other path is byte-behaviour-preserving per the design section-5
+matrix; a new gemini-handler-terminal-net.test.ts pins the terminal choreography;
+all existing gemini nets stay green and unmodified; and `npm run check` is green.
+"""
+invariant_sources = [
+  "docs/plans/request-pipeline-tier-b-t5-generalize.design.md",
+  "docs/plans/request-pipeline-tier-b-handler-envelope.spec.md",
+  "src/index.ts",
+]
+predecessor_plan = "docs/plans/request-pipeline-tier-b-t5-generalize.design.md"
+
+[decision]
+route = "handleGeminiRequest routes through the EXISTING runKitTerminalEnvelope (kit=null); no new driver, no new abstraction beyond per-handler wiring"
+manager_collapse = "usageUpdateManager = failureRollbackManager = exceptionRollbackManager = deps.sessionManager; fireRequestCleanupInCatch = false (gemini uses deps uniformly and fires no request cleanup in its catch)"
+topology = "gemini has claude's in-try topology: states 4..8 go inside runInsideTerminalTry; the worktree-resolve #1 inline catch returns { ok:false, earlyResponse } (id gemini_request); other front-half throws reach the envelope catch"
+flight_ownership_fence = "gemini gets a per-handler FlightOwnership wrapping its safeFlightStart + safeFlightComplete closures; the deferred branch transfers completion ownership BEFORE settle, so a post-handoff finishHandler() rejection into the catch no longer double-completes. This is the intended, visible H-DoubleComplete fence (spec section 8: never a silent fix)."
+success_facts = "computeSuccessFacts extracts gemini's { usage, cost, meta } (extractUsageAndCost + deriveCostBasis + extractProviderOutputMetadata) BEFORE the no-op finalizeKit; buildSuccessResponse consumes them in its flight.completeInline. Non-Kit, so no extract-before-finalize hazard."
+inertness = "kit=null makes the driver's Kit machinery inert and byte-preserving: finalize gate kit && kitSession && !result.jobId is always false; cleanupOnException(_, _, null, false) is a no-op; kitAwareErrorResponse(provider,1,\"\",corrId,error,null) == createErrorResponse(provider,1,\"\",corrId,error)"
+single_pr_no_deferral = "one PR: the gemini handler rewrite + the gemini-handler-terminal-net; no path or test deferred"
+
+[[steps]]
+id = "refresh-anchors-audit"
+depends_on = []
+actor = "assistant"
+action = """
+Re-verify every gemini anchor in [meta]/[decision] against the real code at the
+implementation HEAD (base master 18f06e3; handleGeminiRequest at src/index.ts:11277).
+Confirm: deps.sessionManager is used at every session site; the main try / catch /
+finally lines; the worktree-resolve #1 inline early-return catch vs the other
+front-half throws reaching the main catch; the deferred / failure / success / catch
+branch anchors and their settle predicate (sessionAdmission alone), managers (deps),
+and raw safeFlightComplete sites; that gemini has NO kit surface; and that the
+driver runKitTerminalEnvelope + RequestTerminalLedger + FlightOwnership +
+settleWorktreeOnTerminal + kitAwareErrorResponse + createErrorResponse are in scope
+with the signatures the wiring will call. Correct any anchor that moved. No product
+code changes in this step.
+"""
+idempotent = true
+validation = """
+An audit note lists the real current file:line for every gemini anchor, confirms
+the deps-uniform managers + sessionAdmission-only settle + raw-flight-complete +
+no-kit facts, and confirms the driver/ledger/flight/helper signatures match what
+the wiring invokes. No product code changed.
+"""
+
+[[steps]]
+id = "add-usage-update-session-id"
+depends_on = ["refresh-anchors-audit"]
+actor = "assistant"
+action = """
+Add the `usageUpdateSessionId: string | undefined` field to `KitTerminalEnvelope`
+(design rev 2, D4) and change `runKitTerminalEnvelope` to read it at BOTH
+usage-update sites (the deferred branch ~2611 and the success branch ~2653),
+keeping `effectiveSessionId` for `buildDeferredToolResponse`. Re-wire the two
+SHIPPED Kit-sibling env blocks (claude ~10360, codex ~11090) to set
+`usageUpdateSessionId: effectiveSessionId` so the driver call is byte-identical to
+today (claude/codex pass `effectiveSessionId` to the usage update unconditionally;
+confirm neither gates usage on a userProvidedSession flag, so no information is
+lost by the single field for them). This is a prerequisite for T5b..T5e (which set
+`usageUpdateSessionId = userProvidedSession ? effectiveSessionId : undefined`);
+gemini itself sets it equal to `effectiveSessionId` in wire-gemini-handler.
+"""
+idempotent = false
+validation = """
+`npm run build` passes. The driver reads `env.usageUpdateSessionId` at both
+usage-update sites and `effectiveSessionId` at the deferred response. claude/codex
+env blocks set `usageUpdateSessionId: effectiveSessionId`. The claude/codex
+characterization nets (claude-handler-terminal-net, codex-handler-terminal-net,
+claude-handler, codex-handler) stay green and unmodified (byte-inert change). Lint
++ format:check pass.
+"""
+
+[[steps]]
+id = "wire-gemini-handler"
+depends_on = ["add-usage-update-session-id"]
+actor = "assistant"
+action = """
+Rewrite handleGeminiRequest to build `env` + `hooks` and
+`return runKitTerminalEnvelope(env, hooks)`, keeping states 0..3 + ledger/flight
+construction inline. Construct a RequestTerminalLedger(runtime, undefined) (gemini
+composes no request cleanup) and a FlightOwnership wrapping gemini's safeFlightStart
+and safeFlightComplete closures.
+
+  - env: provider "gemini"; kit=null; kitSession=null; usageUpdateManager =
+    failureRollbackManager = exceptionRollbackManager = deps.sessionManager;
+    fireRequestCleanupInCatch=false; effectiveSessionId = gemini's
+    effectiveSessionIdHint (fed to the deferred response); usageUpdateSessionId =
+    effectiveSessionIdHint (gemini uses one value for both, so no split);
+    optimizationApplied = false (gemini's fail/exception safeFlightComplete
+    hard-codes false; the real optimizePrompt||optimizeResponse flag lives only in
+    the success completeInline inside buildSuccessResponse); ledger; flight;
+    startTime; outputFormat.
+  - runInsideTerminalTry: gemini's states 4..8 (worktree resolve with its inline
+    catch returning { ok:false, earlyResponse: createErrorResponse("gemini_request",
+    ...) }, applyEffectiveWorkingDirectory + asserts, session admission, worktree
+    materialize, ledger.installWorktree(lifecycle), flight.start(), invoked log).
+    Returns { ok:true, value:{ worktreeResolution } }.
+  - execute: gemini's direct awaitJobOrDefer(...) with its bare
+    worktreeLifecycle.onTerminal onComplete, INCLUDING the pre-dispatch
+    effectiveCompress + FR-handoff setup (moved into execute to keep the try
+    boundary).
+  - decorateDeferred: omitted (gemini returns the bare deferred).
+  - computeSuccessFacts: extract gemini { usage, cost, meta }.
+  - finalizeKit: no-op async () => {}.
+  - buildFailureResponse: gemini's buildTerminalCliFailure + createErrorResponse body.
+  - buildSuccessResponse: gemini's buildCliResponse + worktree-prefix +
+    safeRecordCompression + OWN success flight.completeInline consuming facts.
+
+Because gemini has claude's topology, a state 4..7 throw reaches the envelope catch
+(rollbackOnException(deps) + no-op cleanupOnException + flight.completeInline +
+createErrorResponse via kitAwareErrorResponse(...,null)) and the finally records the
+metric; the worktree-resolve ok:false early return hits the finally but not the
+catch. The deferred branch now transfers flight-completion ownership before settle
+(the H-DoubleComplete fence).
+"""
+idempotent = false
+validation = """
+`npm run build` passes. handleGeminiRequest ends in
+`return runKitTerminalEnvelope(env, hooks)` and has no second try/finally around
+execute. Manual diff-read confirms deps.sessionManager on every manager seam,
+sessionAdmission-only settle via ledger.settle(null), the no-op finalize, and the
+FlightOwnership fence. Existing gemini nets (gemini-handler, gemini-argv-golden,
+gemini-async-handler) stay green untouched. `npm run lint` + `npm run format:check`
+pass.
+"""
+
+[[steps]]
+id = "gemini-terminal-net"
+depends_on = ["wire-gemini-handler"]
+actor = "assistant"
+action = """
+Add src/__tests__/gemini-handler-terminal-net.test.ts (mirroring
+claude/codex-handler-terminal-net) driving handleGeminiRequest directly:
+  - inline success / failure / exception: logStart + logComplete once each, the
+    async manager never armed, recordRequest once with the right wasSuccessful.
+  - deferred (Mode B): the manager IS armed and the handler does NOT inline-complete
+    (the FlightOwnership fence); recordRequest once with wasSuccessful=false.
+  - worktree latch: session-admitted transfer keeps + binds vs no-admission finish
+    removes (real git repo + call-through removeWorktree spy).
+  - H-DoubleComplete: a deferred-then-rejecting finishHandler() asserts NO second
+    logComplete (the fence). Pin reachability: if gemini can reach finishHandler on
+    a deferral (sessionAdmission falsy) the test drives the real flip; if the
+    mint-always case makes it defensive (codex-style), document the reachability
+    chain in a comment as codex-handler-terminal-net does.
+  - state-4..8 boundary: worktree-resolve #1 failure asserts the ok:false seam
+    (id "gemini_request", catch not taken, metric via finally); an argv/assert or
+    admission throw asserts the envelope catch (id "gemini", metric via finally).
+Existing nets stay green + unmodified.
+"""
+idempotent = false
+validation = """
+The gemini-handler-terminal-net passes and pins success/failure/exception/deferred/
+worktree-latch/H-DoubleComplete + the state-4..8 boundary. All existing gemini nets
+(gemini-handler, gemini-argv-golden, gemini-async-handler) and the shared nets stay
+green and unmodified. `npm test` passes; coverage thresholds (70/60) hold.
+"""
+
+[[steps]]
+id = "verification-gate"
+depends_on = ["gemini-terminal-net"]
+actor = "assistant"
+action = """
+Run the full gate and capture exact commands + results in
+docs/plans/request-pipeline-tier-b-t5a-gemini.verification.md:
+  npm run build
+  npm run lint
+  npm run format:check
+  npm test
+  npm run check    # authoritative (builds first, so site:generate reads fresh dist)
+Also run the CI-only gates not in `npm run check`: typos (allowlist any legitimate
+hits in _typos.toml first) and, if installed, gitleaks. Document any unavailable
+optional service. Record the test count before/after (the new terminal net raises
+it). Confirm no new node:sqlite outside the adapter and no new fetch token in dist.
+"""
+idempotent = true
+validation = """
+`npm run check` is green (or every locally-available gate is green with any
+unavailable optional-service gap documented). The verification notes list exact
+commands, results, and before/after test counts.
+"""
+
+[[steps]]
+id = "cross-llm-review-gate"
+depends_on = ["verification-gate"]
+actor = "assistant"
+action = """
+Run the adversarial cross-LLM review gate on the implemented gemini diff (Codex +
+Grok + Mistral, inspected-evidence only, fresh sessions, absolute paths in-prompt,
+no workingDir/workspace fields). Give each: the T5 design, this DAG, the
+verification notes, and the exact gemini diff (git diff master -- src/index.ts +
+the new test). Reviewers verify D1 (kit=null inertness / byte-preservation), D2
+(the H-DoubleComplete fence is correct + its reachability is pinned), and D3 (the
+gemini divergences and the manager collapse are preserved) against the real
+handler and the driver. Poll ~every 90s; read Codex's full verdict via
+llm_request_result. Iterate to UNCONDITIONAL approval from all three, or a concrete
+unresolvable blocker. Never give a same-repo claude_request reviewer write access.
+"""
+idempotent = true
+validation = """
+The verification notes record each reviewer's dispatch id, every round's findings
+and the code/doc-evidenced response or fix, and a final UNCONDITIONAL approval from
+Codex, Grok, and Mistral (or a concrete documented blocker). D1/D2/D3 are each
+explicitly ratified against inspected code.
+"""
+
+[[steps]]
+id = "open-pr"
+depends_on = ["cross-llm-review-gate"]
+actor = "assistant"
+action = """
+Open ONE PR from the T5a branch to master via werner_veriai (gh-as/git-as; PR +
+checks, never admin bypass; --merge not --squash on the internal repo). The PR
+contains the gemini handler rewrite + the gemini-handler-terminal-net. Title and
+body: no em dash, no Co-Authored-By trailer, match repo commit style. Body
+summarises the non-Kit envelope routing (kit=null), the deliberate H-DoubleComplete
+fence, and links the T5 design + verification notes. Note this is the first of five
+T5 slices (grok, devin, mistral, cursor follow, each its own PR citing the T5 design).
+"""
+idempotent = false
+validation = """
+The PR is open against master with the gemini rewrite + net, green required checks,
+and a body citing the T5 design and verification notes. No admin bypass. Commit/PR
+text is em-dash-free with no attribution trailer.
+"""
+
+[rollback]
+guidance = """
+Pure internal refactor of one handler: byte-behaviour-preserving except the
+intended H-DoubleComplete fence. To revert, restore handleGeminiRequest's inline
+terminal try/catch/finally from the base commit and drop the new terminal net; the
+shared driver/ledger/flight (used by claude/codex) are untouched. No schema,
+resource, or release-surface change. If any reviewer holds that the H-DoubleComplete
+fence must NOT ship for gemini (e.g. a proven behaviour regression), that is a
+design-level blocker (D2) to resolve before coding, not a rollback.
+"""

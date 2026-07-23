@@ -2493,7 +2493,17 @@ interface KitTerminalEnvelope {
   corrId: string;
   kit: PersonalKitRequestContext | null;
   kitSession: PersonalKitSessionResolution | null;
+  /** The caller-facing session id fed to buildDeferredToolResponse. */
   effectiveSessionId: string | undefined;
+  /**
+   * The session id fed to safeUpdateSessionUsageAfterJobAdmission on the deferred
+   * and success paths. Equal to effectiveSessionId for claude/codex/gemini; the
+   * non-Kit siblings that skip the durable usage update for gateway-minted
+   * sessions pass `userProvidedSession ? effectiveSessionId : undefined` here so a
+   * minted session gets the deferred id but NO durable usage update, exactly as
+   * before the envelope. Decoupled from effectiveSessionId per T5 design D4.
+   */
+  usageUpdateSessionId: string | undefined;
   ledger: RequestTerminalLedger;
   flight: FlightOwnership;
   startTime: number;
@@ -2611,7 +2621,7 @@ async function runKitTerminalEnvelope<TFacts>(
       if (!kitSession) {
         await safeUpdateSessionUsageAfterJobAdmission(
           env.usageUpdateManager,
-          effectiveSessionId,
+          env.usageUpdateSessionId,
           runtime
         );
       }
@@ -2653,7 +2663,7 @@ async function runKitTerminalEnvelope<TFacts>(
     if (!kitSession) {
       await safeUpdateSessionUsageAfterJobAdmission(
         env.usageUpdateManager,
-        effectiveSessionId,
+        env.usageUpdateSessionId,
         runtime
       );
     }
@@ -10357,6 +10367,7 @@ export async function handleClaudeRequest(
     startTime,
     optimizationApplied: optimizePrompt || optimizeResponse,
     outputFormat,
+    usageUpdateSessionId: effectiveSessionId,
     usageUpdateManager: sessionManager,
     failureRollbackManager: sessionManager,
     exceptionRollbackManager: runtime.sessionManager,
@@ -11088,6 +11099,7 @@ export async function handleCodexRequest(
     startTime,
     optimizationApplied: optimizePrompt || optimizeResponse,
     outputFormat: effectiveOutputFormat,
+    usageUpdateSessionId: effectiveSessionId,
     usageUpdateManager: runtime.sessionManager,
     failureRollbackManager: runtime.sessionManager,
     exceptionRollbackManager: deps.sessionManager,
@@ -11328,179 +11340,201 @@ export async function handleGeminiRequest(
   } catch (error) {
     return createErrorResponse("gemini_request", 1, "", corrId, error as Error);
   }
-  let durationMs = 0;
-  let wasSuccessful = false;
-  let worktreeLifecycle: RequestOwnedWorktreeLifecycle | undefined;
-  let sessionAdmission: SessionAdmissionMutation | undefined;
-  let sessionAdmissionCommitted = false;
-  try {
-    // Antigravity CLI supports `--conversation`, but not a supported fresh
-    // session-id flag. Fresh sessions emit no session flag.
-    const userProvidedSession = sessionPlan.resumed;
-    const effectiveSessionIdHint = sessionPlan.resumed ? params.sessionId : undefined;
-    const existingSession = effectiveSessionIdHint
-      ? await getExistingSessionForProvider(deps.sessionManager, effectiveSessionIdHint, "gemini", {
-          requireTrackedRemoteSession: true,
-        })
-      : null;
-    let worktreeResolution: ResolvedWorktree = {};
-    try {
-      worktreeResolution = await resolveWorkspaceAndWorktreeForRequest({
-        provider: "gemini",
-        workspace: params.workspace,
-        worktree: params.worktree,
-        sessionId: effectiveSessionIdHint,
-        runtime,
-        addDir: params.includeDirs,
-        requireStableCwd: sessionPlan.args.includes("--continue"),
-        deferWorktree: true,
-      });
-    } catch (err) {
-      return createErrorResponse("gemini_request", 1, "", corrId, err as Error);
-    }
-    applyEffectiveWorkingDirectory(
-      "agy",
-      args,
-      undefined,
-      undefined,
-      "gemini",
-      "--add-dir",
-      worktreeResolution.effectiveAddDirs
-    );
-    assertUpstreamCliArgs("gemini", args);
-    assertUpstreamCliEnv("gemini", undefined);
-    assertFinalCliProcessAdmission("agy", args, "gemini");
-    if (effectiveSessionIdHint) {
-      if (existingSession) {
-        const admitted = await persistResolvedSessionScope(
-          deps.sessionManager,
-          effectiveSessionIdHint,
-          worktreeResolution,
-          runtime,
-          existingSession
-        );
-        sessionAdmission = { original: existingSession, admitted };
-      } else {
-        const admitted = await createSessionWithResolvedScope(
-          deps.sessionManager,
-          "gemini",
-          "Gemini Session",
-          effectiveSessionIdHint,
-          worktreeResolution,
-          runtime
-        );
-        sessionAdmission = { original: admitted.previousSession, admitted: admitted.session };
-      }
-    }
-    if (params.worktree) {
-      worktreeResolution = await resolveWorkspaceAndWorktreeForRequest({
-        provider: "gemini",
-        workspace: params.workspace,
-        worktree: params.worktree,
-        sessionId: effectiveSessionIdHint,
-        runtime,
-        addDir: params.includeDirs,
-        requireStableCwd: sessionPlan.args.includes("--continue"),
-        expectedSession: sessionAdmission?.admitted,
-      });
-      advanceSessionAdmissionWorktree(sessionAdmission, worktreeResolution);
-    }
-    worktreeLifecycle = createRequestOwnedWorktreeLifecycle(worktreeResolution, runtime, true);
-    safeFlightStart(
-      {
-        correlationId: corrId,
-        cli: "gemini",
-        model: prep.resolvedModel || "default",
-        prompt: prep.effectivePrompt,
-        sessionId: effectiveSessionIdHint,
-        stablePrefixHash: prep.stablePrefixHash ?? undefined,
-        stablePrefixTokens: prep.stablePrefixTokens ?? undefined,
-      },
-      runtime
-    );
-    deps.logger.info(
-      `[${corrId}] gemini_request invoked with model=${prep.resolvedModel || "default"}, approvalMode=${params.approvalMode}, prompt length=${prep.effectivePrompt.length}`
-    );
+  // Antigravity CLI supports `--conversation`, but not a supported fresh
+  // session-id flag. Fresh sessions emit no session flag. These are pure
+  // derivations of the session plan and cannot throw, so they sit before the
+  // envelope (the env needs effectiveSessionId at construction time).
+  const userProvidedSession = sessionPlan.resumed;
+  const effectiveSessionIdHint = sessionPlan.resumed ? params.sessionId : undefined;
 
-    const effectiveCompress = resolveEffectiveCompression(runtime.compression, {
-      compressResponse: params.compressResponse,
-      outputFormat: params.outputFormat,
-      outputSchemaDeclared: false,
-    });
-    const geminiFrHandoff = buildAsyncFlightRecorderHandoff(
-      "gemini",
-      prep,
-      params.sessionId,
-      params.outputFormat,
-      params.optimizePrompt
-    );
-    const result = await awaitJobOrDefer(
-      "gemini",
-      args,
-      corrId,
-      resolveIdleTimeout("gemini", params.idleTimeoutMs),
-      params.outputFormat,
-      params.forceRefresh,
-      runtime,
-      undefined,
-      worktreeLifecycle.onTerminal,
-      geminiFrHandoff.flightRecorderEntry,
-      geminiFrHandoff.extractUsage,
-      undefined,
-      worktreeResolution.cwd,
-      effectiveCompress,
-      undefined,
-      undefined,
-      undefined,
-      undefined,
-      sessionBoundDedupArgs(args, effectiveSessionIdHint)
-    );
-
-    // Deferred — job still running, return async reference
-    if (isDeferredResponse(result)) {
-      sessionAdmissionCommitted = true;
-      if (sessionAdmission) worktreeLifecycle.transfer();
-      else await worktreeLifecycle.finishHandler();
-      await safeUpdateSessionUsageAfterJobAdmission(
-        deps.sessionManager,
-        effectiveSessionIdHint,
-        runtime
-      );
-      return buildDeferredToolResponse(result, effectiveSessionIdHint);
-    }
-
-    const { stdout, stderr, code } = result;
-    durationMs = Math.max(0, Date.now() - startTime);
-
-    if (code !== 0) {
-      await rollbackSessionAndWorktreeAdmission(
-        deps.sessionManager,
-        sessionAdmission,
-        worktreeLifecycle,
-        runtime
-      );
-      deps.logger.info(`[${corrId}] gemini_request failed in ${durationMs}ms`);
-      const terminalFailure = buildTerminalCliFailure(
-        "gemini",
-        stdout,
-        stderr,
-        code,
-        params.outputFormat
-      );
-      safeFlightComplete(
-        corrId,
+  // Tier-B T5a: route gemini (a non-Kit sibling) through the shared terminal
+  // envelope with kit=null. gemini has claude's in-try topology, so states 4..8
+  // run inside runInsideTerminalTry. The FlightOwnership wraps gemini's raw
+  // safeFlightStart/safeFlightComplete so the deferred branch now transfers
+  // completion ownership before settle (the T3 H-DoubleComplete fence, a visible
+  // change). The ledger has no base request cleanup (gemini composes none).
+  let effectiveCompress = false;
+  const ledger = new RequestTerminalLedger(runtime, undefined);
+  const flight = new FlightOwnership(
+    () =>
+      safeFlightStart(
         {
-          ...terminalFailure,
-          durationMs,
-          retryCount: 0,
-          circuitBreakerState: "closed",
-          optimizationApplied: false,
-          exitCode: code,
-          status: "failed",
+          correlationId: corrId,
+          cli: "gemini",
+          model: prep.resolvedModel || "default",
+          prompt: prep.effectivePrompt,
+          sessionId: effectiveSessionIdHint,
+          stablePrefixHash: prep.stablePrefixHash ?? undefined,
+          stablePrefixTokens: prep.stablePrefixTokens ?? undefined,
         },
         runtime
+      ),
+    metadata => safeFlightComplete(corrId, metadata, runtime)
+  );
+
+  const env: KitTerminalEnvelope = {
+    runtime,
+    provider: "gemini",
+    corrId,
+    kit: null,
+    kitSession: null,
+    effectiveSessionId: effectiveSessionIdHint,
+    usageUpdateSessionId: effectiveSessionIdHint,
+    ledger,
+    flight,
+    startTime,
+    optimizationApplied: false,
+    outputFormat: params.outputFormat,
+    usageUpdateManager: deps.sessionManager,
+    failureRollbackManager: deps.sessionManager,
+    exceptionRollbackManager: deps.sessionManager,
+    fireRequestCleanupInCatch: false,
+  };
+
+  const hooks: KitTerminalHooks<{
+    geminiUsage: ReturnType<typeof extractUsageAndCost>;
+    cost: ReturnType<typeof deriveCostBasis>;
+    geminiMeta: ReturnType<typeof extractProviderOutputMetadata>;
+  }> = {
+    // States 4..8 run INSIDE the envelope try (claude topology): a state 4..7
+    // throw reaches the envelope catch and the finally records the metric; the
+    // worktree-resolve ok:false early return hits the finally but not the catch.
+    runInsideTerminalTry: async () => {
+      const existingSession = effectiveSessionIdHint
+        ? await getExistingSessionForProvider(
+            deps.sessionManager,
+            effectiveSessionIdHint,
+            "gemini",
+            {
+              requireTrackedRemoteSession: true,
+            }
+          )
+        : null;
+      let worktreeResolution: ResolvedWorktree;
+      try {
+        worktreeResolution = await resolveWorkspaceAndWorktreeForRequest({
+          provider: "gemini",
+          workspace: params.workspace,
+          worktree: params.worktree,
+          sessionId: effectiveSessionIdHint,
+          runtime,
+          addDir: params.includeDirs,
+          requireStableCwd: sessionPlan.args.includes("--continue"),
+          deferWorktree: true,
+        });
+      } catch (err) {
+        return {
+          ok: false,
+          earlyResponse: createErrorResponse("gemini_request", 1, "", corrId, err as Error),
+        };
+      }
+      applyEffectiveWorkingDirectory(
+        "agy",
+        args,
+        undefined,
+        undefined,
+        "gemini",
+        "--add-dir",
+        worktreeResolution.effectiveAddDirs
       );
-      return createErrorResponse(
+      assertUpstreamCliArgs("gemini", args);
+      assertUpstreamCliEnv("gemini", undefined);
+      assertFinalCliProcessAdmission("agy", args, "gemini");
+      if (effectiveSessionIdHint) {
+        if (existingSession) {
+          const admitted = await persistResolvedSessionScope(
+            deps.sessionManager,
+            effectiveSessionIdHint,
+            worktreeResolution,
+            runtime,
+            existingSession
+          );
+          ledger.sessionAdmission = { original: existingSession, admitted };
+        } else {
+          const admitted = await createSessionWithResolvedScope(
+            deps.sessionManager,
+            "gemini",
+            "Gemini Session",
+            effectiveSessionIdHint,
+            worktreeResolution,
+            runtime
+          );
+          ledger.sessionAdmission = {
+            original: admitted.previousSession,
+            admitted: admitted.session,
+          };
+        }
+      }
+      if (params.worktree) {
+        worktreeResolution = await resolveWorkspaceAndWorktreeForRequest({
+          provider: "gemini",
+          workspace: params.workspace,
+          worktree: params.worktree,
+          sessionId: effectiveSessionIdHint,
+          runtime,
+          addDir: params.includeDirs,
+          requireStableCwd: sessionPlan.args.includes("--continue"),
+          expectedSession: ledger.sessionAdmission?.admitted,
+        });
+        advanceSessionAdmissionWorktree(ledger.sessionAdmission, worktreeResolution);
+      }
+      ledger.installWorktree(
+        createRequestOwnedWorktreeLifecycle(worktreeResolution, runtime, true)
+      );
+      flight.start();
+      deps.logger.info(
+        `[${corrId}] gemini_request invoked with model=${prep.resolvedModel || "default"}, approvalMode=${params.approvalMode}, prompt length=${prep.effectivePrompt.length}`
+      );
+      return { ok: true, value: { worktreeResolution } };
+    },
+    execute: async worktreeResolution => {
+      effectiveCompress = resolveEffectiveCompression(runtime.compression, {
+        compressResponse: params.compressResponse,
+        outputFormat: params.outputFormat,
+        outputSchemaDeclared: false,
+      });
+      const geminiFrHandoff = buildAsyncFlightRecorderHandoff(
+        "gemini",
+        prep,
+        params.sessionId,
+        params.outputFormat,
+        params.optimizePrompt
+      );
+      return awaitJobOrDefer(
+        "gemini",
+        args,
+        corrId,
+        resolveIdleTimeout("gemini", params.idleTimeoutMs),
+        params.outputFormat,
+        params.forceRefresh,
+        runtime,
+        undefined,
+        ledger.worktreeLifecycle?.onTerminal,
+        geminiFrHandoff.flightRecorderEntry,
+        geminiFrHandoff.extractUsage,
+        undefined,
+        worktreeResolution.cwd,
+        effectiveCompress,
+        undefined,
+        undefined,
+        undefined,
+        undefined,
+        sessionBoundDedupArgs(args, effectiveSessionIdHint)
+      );
+    },
+    computeSuccessFacts: stdout => {
+      const geminiUsage = extractUsageAndCost("gemini", stdout, params.outputFormat);
+      // LCR: label cost_basis (gemini is T2, so a counts-only completion is
+      // derived-from-tokens); parity with the async/deferred handoff.
+      const cost = deriveCostBasis("gemini", prep.resolvedModel || "default", geminiUsage);
+      // Phase 7: Gemini stream-json carries a session id (init event) + result
+      // status; persist them so a deferred/fresh session stays resumable.
+      const geminiMeta = extractProviderOutputMetadata("gemini", stdout, params.outputFormat);
+      return { geminiUsage, cost, geminiMeta };
+    },
+    finalizeKit: async () => {},
+    buildFailureResponse: ({ code, stderr, terminalFailure, result }) =>
+      createErrorResponse(
         "gemini",
         code,
         stderr,
@@ -11511,51 +11545,29 @@ export async function handleGeminiRequest(
           providerSessionId: terminalFailure.providerSessionId,
         },
         result
+      ),
+    buildSuccessResponse: ({ worktreeResolution, stdout, durationMs, facts }) => {
+      const response = buildCliResponse(
+        "gemini",
+        stdout,
+        params.optimizeResponse ?? false,
+        corrId,
+        effectiveSessionIdHint,
+        prep,
+        durationMs,
+        userProvidedSession,
+        params.outputFormat,
+        undefined,
+        effectiveCompress
       );
-    }
-    wasSuccessful = true;
-    sessionAdmissionCommitted = true;
-    if (sessionAdmission) worktreeLifecycle.transfer();
-    else await worktreeLifecycle.finishHandler();
-
-    const effectiveSessionId = effectiveSessionIdHint;
-    await safeUpdateSessionUsageAfterJobAdmission(deps.sessionManager, effectiveSessionId, runtime);
-
-    deps.logger.info(`[${corrId}] gemini_request completed successfully in ${durationMs}ms`);
-    const response = buildCliResponse(
-      "gemini",
-      stdout,
-      params.optimizeResponse ?? false,
-      corrId,
-      effectiveSessionId,
-      prep,
-      durationMs,
-      userProvidedSession,
-      params.outputFormat,
-      undefined,
-      effectiveCompress
-    );
-    safeRecordCompression(corrId, response.compression, runtime);
-    if (worktreeResolution.worktreePath) {
-      const first = response.content[0];
-      if (first && first.type === "text") {
-        first.text = formatWorktreePrefix(worktreeResolution.worktreePath) + first.text;
+      safeRecordCompression(corrId, response.compression, runtime);
+      if (worktreeResolution.worktreePath) {
+        const first = response.content[0];
+        if (first && first.type === "text") {
+          first.text = formatWorktreePrefix(worktreeResolution.worktreePath) + first.text;
+        }
       }
-    }
-    const geminiUsage = extractUsageAndCost("gemini", stdout, params.outputFormat);
-    // LCR: label cost_basis (gemini is T2, so a counts-only completion is
-    // derived-from-tokens); parity with the async/deferred handoff.
-    const { costUsd: geminiCostUsd, costBasis: geminiCostBasis } = deriveCostBasis(
-      "gemini",
-      prep.resolvedModel || "default",
-      geminiUsage
-    );
-    // Phase 7: Gemini stream-json carries a session id (init event) + result
-    // status; persist them so a deferred/fresh session stays resumable.
-    const geminiMeta = extractProviderOutputMetadata("gemini", stdout, params.outputFormat);
-    safeFlightComplete(
-      corrId,
-      {
+      flight.completeInline({
         response: stdout,
         durationMs,
         retryCount: 0,
@@ -11564,49 +11576,20 @@ export async function handleGeminiRequest(
         optimizationApplied: params.optimizePrompt || (params.optimizeResponse ?? false),
         exitCode: 0,
         status: "completed",
-        inputTokens: geminiUsage.inputTokens,
-        outputTokens: geminiUsage.outputTokens,
-        cacheReadTokens: geminiUsage.cacheReadTokens,
-        cacheCreationTokens: geminiUsage.cacheCreationTokens,
-        costUsd: geminiCostUsd,
-        costBasis: geminiCostBasis,
-        providerSessionId: geminiMeta.sessionId,
-        stopReason: geminiMeta.stopReason,
-      },
-      runtime
-    );
-    return response;
-  } catch (error) {
-    if (!sessionAdmissionCommitted) {
-      await rollbackSessionAndWorktreeAdmission(
-        deps.sessionManager,
-        sessionAdmission,
-        worktreeLifecycle,
-        runtime
-      );
-    }
-    const elapsedMs = Math.max(0, Date.now() - startTime);
-    deps.logger.info(`[${corrId}] gemini_request threw exception after ${elapsedMs}ms`);
-    safeFlightComplete(
-      corrId,
-      {
-        response: "",
-        durationMs: elapsedMs,
-        retryCount: 0,
-        circuitBreakerState: "closed",
-        optimizationApplied: false,
-        exitCode: 1,
-        errorMessage: (error as Error).message,
-        status: "failed",
-      },
-      runtime
-    );
-    return createErrorResponse("gemini", 1, "", corrId, error as Error);
-  } finally {
-    await worktreeLifecycle?.finishHandler();
-    const finalizedDurationMs = Math.max(0, durationMs || Date.now() - startTime);
-    runtime.performanceMetrics.recordRequest("gemini", finalizedDurationMs, wasSuccessful);
-  }
+        inputTokens: facts.geminiUsage.inputTokens,
+        outputTokens: facts.geminiUsage.outputTokens,
+        cacheReadTokens: facts.geminiUsage.cacheReadTokens,
+        cacheCreationTokens: facts.geminiUsage.cacheCreationTokens,
+        costUsd: facts.cost.costUsd,
+        costBasis: facts.cost.costBasis,
+        providerSessionId: facts.geminiMeta.sessionId,
+        stopReason: facts.geminiMeta.stopReason,
+      });
+      return response;
+    },
+  };
+
+  return runKitTerminalEnvelope(env, hooks);
 }
 
 export async function handleGeminiRequestAsync(
