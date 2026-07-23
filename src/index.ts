@@ -201,6 +201,7 @@ import {
   type AsyncJobFlightRecorderEntry,
   type AsyncJobUsageExtractor,
   type AsyncJobErrorCategory,
+  type AsyncJobSnapshot,
 } from "./async-job-manager.js";
 import { createJobStore, type JobStore } from "./job-store.js";
 import {
@@ -2715,6 +2716,99 @@ async function runKitTerminalEnvelope<TFacts>(
     await ledger.worktreeLifecycle?.finishHandler();
     const finalizedDurationMs = Math.max(0, durationMs || Date.now() - env.startTime);
     runtime.performanceMetrics.recordRequest(provider, finalizedDurationMs, wasSuccessful);
+  }
+}
+
+/**
+ * RequestPipeline (async): the async-enqueue envelope.
+ *
+ * `runAsyncEnqueueEnvelope` owns the one genuinely shared piece of the five non-Kit
+ * `*_request_async` handlers (gemini, grok, devin, mistral, cursor): the enqueue
+ * envelope. Unlike the sync `runKitTerminalEnvelope`, these handlers are pure Mode C
+ * (fire-and-forget `startJob`; the AsyncJobManager owns the flight recorder and the
+ * terminal metric), so there is NO inline/deferred/success terminal choreography, NO
+ * in-handler flight completion, NO `recordRequest`, NO finally, and NO H-DoubleComplete
+ * fence. The envelope is exactly: run states 4..8 (`runInsideTry`), enqueue the job
+ * (`enqueue`), commit the handoff latch, settle the worktree, update usage, log, and
+ * build the success response; on a throw BEFORE the handoff, roll back.
+ *
+ * It reuses the Tier-B `RequestTerminalLedger`: the inline `if (sessionAdmission)
+ * transfer() else finishHandler()` is `ledger.settle(null)`, and the `if (!jobHandedOff)
+ * rollback` catch is `ledger.rollbackOnException(null, manager)` once the driver commits
+ * `ledger.sessionAdmissionCommitted = true` at the same instant it sets the local
+ * `jobHandedOff` latch. The two worktree-resolve `ok:false` seams and the pre-try front
+ * half stay in the provider handler (front half OUTSIDE the driver; the seams return
+ * `{ ok:false }` from `runInsideTry`). The two Kit async handlers (codex standalone,
+ * inline claude) are NOT routed here - their attempt-lease wrapper, composed
+ * requestCleanup, kit-tail startJob args, and kit-aware discard are a different envelope.
+ * Design: docs/plans/request-pipeline-async-envelope.design.md.
+ */
+interface AsyncEnqueueEnvelope {
+  runtime: GatewayServerRuntime;
+  /** Sink for the single "started job" log line; per-context (deps.logger for all five). */
+  logger: HandlerDeps["logger"];
+  /** Provider label + the "<provider>_request_async" catch error id. */
+  provider: CliType;
+  corrId: string;
+  /**
+   * The session id fed to safeUpdateSessionUsageAfterJobAdmission. Provably equal to its
+   * pre-mint form (the mint fires only when !userProvided, where this is undefined), so
+   * it is a plain pre-hook field even though the mint runs inside runInsideTry. gemini
+   * passes its id directly (no split); the other four pass userProvided ? id : undefined.
+   */
+  usageUpdateSessionId: string | undefined;
+  ledger: RequestTerminalLedger;
+  /** deps.sessionManager for all five. */
+  usageUpdateManager: ISessionManager;
+  /** deps.sessionManager for all five. */
+  rollbackManager: ISessionManager;
+}
+
+interface AsyncEnqueueHooks<TValue> {
+  /**
+   * States 4..8: existing-session lookup, worktree resolve (its ok:false catch returns
+   * { ok:false, earlyResponse }), applyEffectiveWorkingDirectory, asserts, session
+   * admission (sets ledger.sessionAdmission), worktree materialize + ledger.installWorktree
+   * (non-cursor). Returns the value the enqueue + success hooks need (incl. the post-mint
+   * effectiveSessionId and worktreeResolution).
+   */
+  runInsideTry(): Promise<KitStageOutcome<TValue>>;
+  /**
+   * Build the FR handoff and call deps.asyncJobManager.startJob(...) with the provider's
+   * exact positional args (arg #9 onComplete = ledger.worktreeLifecycle?.onTerminal, NOT
+   * a composed requestCleanup). Returns the started job snapshot.
+   */
+  enqueue(value: TValue): Promise<AsyncJobSnapshot>;
+  /** The provider-specific "job started" success JSON. */
+  buildSuccessResponse(args: { value: TValue; job: AsyncJobSnapshot }): ExtendedToolResponse;
+}
+
+async function runAsyncEnqueueEnvelope<TValue>(
+  env: AsyncEnqueueEnvelope,
+  hooks: AsyncEnqueueHooks<TValue>
+): Promise<ExtendedToolResponse> {
+  let jobHandedOff = false;
+  try {
+    const staged = await hooks.runInsideTry();
+    if (!staged.ok) return staged.earlyResponse;
+    const job = await hooks.enqueue(staged.value);
+    // Handoff committed: the manager owns the job (and the flight recorder). Commit the
+    // ledger latch at the SAME instant as the local jobHandedOff so the catch's
+    // rollbackOnException(null) no-ops from here on, exactly as the pre-envelope
+    // `if (!jobHandedOff)` gate did.
+    jobHandedOff = true;
+    env.ledger.sessionAdmissionCommitted = true;
+    await env.ledger.settle(null);
+    await safeUpdateSessionUsageAfterJobAdmission(
+      env.usageUpdateManager,
+      env.usageUpdateSessionId,
+      env.runtime
+    );
+    env.logger.info(`[${env.corrId}] ${env.provider}_request_async started job ${job.id}`);
+    return hooks.buildSuccessResponse({ value: staged.value, job });
+  } catch (error) {
+    if (!jobHandedOff) await env.ledger.rollbackOnException(null, env.rollbackManager);
+    return createErrorResponse(`${env.provider}_request_async`, 1, "", env.corrId, error as Error);
   }
 }
 
@@ -13796,123 +13890,150 @@ export async function handleCursorRequestAsync(
   } catch (error) {
     return createErrorResponse("cursor_request_async", 1, "", corrId, error as Error);
   }
-  let sessionAdmission: SessionAdmissionMutation | undefined;
-  let jobHandedOff = false;
-  try {
-    let effectiveSessionId = sessionResult.effectiveSessionId;
-    const existingSession = sessionResult.userProvidedSession
-      ? await getExistingSessionForProvider(deps.sessionManager, effectiveSessionId, "cursor", {
-          requireTrackedRemoteSession: true,
-        })
-      : undefined;
+  // RequestPipeline async A1: route cursor (the minimal non-Kit async sibling)
+  // through the shared async-enqueue envelope. cursor installs NO request-owned
+  // worktree lifecycle, so ledger.settle(null) is a no-op and the catch rollback
+  // passes an undefined worktree - byte-identical to the pre-envelope handler. The
+  // mint stays in runInsideTry and rides to buildSuccessResponse via TValue; the
+  // usage id is the pre-mint form (userProvided ? id : undefined). The ACP-less
+  // front half (managed-MCP reject, workspace selection, session args, prep,
+  // insertAndAdmit) stays OUTSIDE the envelope.
+  const ledger = new RequestTerminalLedger(runtime, undefined);
+  const env: AsyncEnqueueEnvelope = {
+    runtime,
+    logger: deps.logger,
+    provider: "cursor",
+    corrId,
+    usageUpdateSessionId: sessionResult.userProvidedSession
+      ? sessionResult.effectiveSessionId
+      : undefined,
+    ledger,
+    usageUpdateManager: deps.sessionManager,
+    rollbackManager: deps.sessionManager,
+  };
 
-    let worktreeResolution: Awaited<ReturnType<typeof resolveWorkspaceAndWorktreeForRequest>> = {};
-    try {
-      worktreeResolution = await resolveWorkspaceAndWorktreeForRequest({
-        provider: "cursor",
-        workspace: cursorWorkspace.registryAlias,
-        sessionId: effectiveSessionId,
-        runtime,
-        workingDir: cursorWorkspace.cwd,
-        addDir: params.addDir,
-        suppressImplicitWorkspace: cursorWorkspace.localWorkspaceInput !== undefined,
-        requireStableCwd: sessionResult.resumeArgs.includes("--continue"),
-        deferWorktree: true,
-      });
-    } catch (err) {
-      return createErrorResponse("cursor_request_async", 1, "", corrId, err as Error);
-    }
-    applyEffectiveWorkingDirectory(
-      "cursor-agent",
-      args,
-      undefined,
-      undefined,
-      "cursor",
-      "--add-dir",
-      worktreeResolution.effectiveAddDirs
-    );
+  const hooks: AsyncEnqueueHooks<{
+    worktreeResolution: ResolvedWorktree;
+    effectiveSessionId: string | undefined;
+  }> = {
+    runInsideTry: async () => {
+      let effectiveSessionId = sessionResult.effectiveSessionId;
+      const existingSession = sessionResult.userProvidedSession
+        ? await getExistingSessionForProvider(deps.sessionManager, effectiveSessionId, "cursor", {
+            requireTrackedRemoteSession: true,
+          })
+        : undefined;
 
-    assertUpstreamCliArgs("cursor", args);
-    assertUpstreamCliEnv("cursor", undefined);
-    assertFinalCliProcessAdmission("cursor-agent", args, "cursor");
-    if (sessionResult.userProvidedSession && effectiveSessionId) {
-      if (!existingSession) {
+      let worktreeResolution: ResolvedWorktree;
+      try {
+        worktreeResolution = await resolveWorkspaceAndWorktreeForRequest({
+          provider: "cursor",
+          workspace: cursorWorkspace.registryAlias,
+          sessionId: effectiveSessionId,
+          runtime,
+          workingDir: cursorWorkspace.cwd,
+          addDir: params.addDir,
+          suppressImplicitWorkspace: cursorWorkspace.localWorkspaceInput !== undefined,
+          requireStableCwd: sessionResult.resumeArgs.includes("--continue"),
+          deferWorktree: true,
+        });
+      } catch (err) {
+        return {
+          ok: false,
+          earlyResponse: createErrorResponse("cursor_request_async", 1, "", corrId, err as Error),
+        };
+      }
+      applyEffectiveWorkingDirectory(
+        "cursor-agent",
+        args,
+        undefined,
+        undefined,
+        "cursor",
+        "--add-dir",
+        worktreeResolution.effectiveAddDirs
+      );
+
+      assertUpstreamCliArgs("cursor", args);
+      assertUpstreamCliEnv("cursor", undefined);
+      assertFinalCliProcessAdmission("cursor-agent", args, "cursor");
+      if (sessionResult.userProvidedSession && effectiveSessionId) {
+        if (!existingSession) {
+          const admitted = await createSessionWithResolvedScope(
+            deps.sessionManager,
+            "cursor",
+            "Cursor Session",
+            effectiveSessionId,
+            worktreeResolution,
+            runtime
+          );
+          ledger.sessionAdmission = {
+            original: admitted.previousSession,
+            admitted: admitted.session,
+          };
+        } else {
+          const admitted = await persistResolvedSessionScope(
+            deps.sessionManager,
+            effectiveSessionId,
+            worktreeResolution,
+            runtime,
+            existingSession
+          );
+          ledger.sessionAdmission = { original: existingSession, admitted };
+        }
+      } else if (!params.createNewSession && !effectiveSessionId) {
+        const newSessionId = `${GATEWAY_SESSION_PREFIX}${randomUUID()}`;
         const admitted = await createSessionWithResolvedScope(
           deps.sessionManager,
           "cursor",
           "Cursor Session",
-          effectiveSessionId,
+          newSessionId,
           worktreeResolution,
           runtime
         );
-        sessionAdmission = {
+        effectiveSessionId = newSessionId;
+        ledger.sessionAdmission = {
           original: admitted.previousSession,
           admitted: admitted.session,
         };
-      } else {
-        const admitted = await persistResolvedSessionScope(
-          deps.sessionManager,
-          effectiveSessionId,
-          worktreeResolution,
-          runtime,
-          existingSession
-        );
-        sessionAdmission = { original: existingSession, admitted };
       }
-    } else if (!params.createNewSession && !effectiveSessionId) {
-      const newSessionId = `${GATEWAY_SESSION_PREFIX}${randomUUID()}`;
-      const admitted = await createSessionWithResolvedScope(
-        deps.sessionManager,
+      return { ok: true, value: { worktreeResolution, effectiveSessionId } };
+    },
+    enqueue: async ({ worktreeResolution, effectiveSessionId }) => {
+      const effectiveCompress = resolveEffectiveCompression(runtime.compression, {
+        compressResponse: params.compressResponse,
+        outputFormat: params.outputFormat,
+        outputSchemaDeclared: false,
+      });
+      const cursorAsyncFrHandoff = buildAsyncFlightRecorderHandoff(
         "cursor",
-        "Cursor Session",
-        newSessionId,
-        worktreeResolution,
-        runtime
+        prep,
+        effectiveSessionId,
+        params.outputFormat,
+        params.optimizePrompt
       );
-      effectiveSessionId = newSessionId;
-      sessionAdmission = { original: admitted.previousSession, admitted: admitted.session };
-    }
-    const effectiveCompress = resolveEffectiveCompression(runtime.compression, {
-      compressResponse: params.compressResponse,
-      outputFormat: params.outputFormat,
-      outputSchemaDeclared: false,
-    });
-    const cursorAsyncFrHandoff = buildAsyncFlightRecorderHandoff(
-      "cursor",
-      prep,
-      effectiveSessionId,
-      params.outputFormat,
-      params.optimizePrompt
-    );
-    const job = deps.asyncJobManager.startJob(
-      "cursor",
-      args,
-      corrId,
-      cursorWorkspace.cwd ?? worktreeResolution.cwd,
-      resolveIdleTimeout("cursor", params.idleTimeoutMs),
-      params.outputFormat,
-      params.forceRefresh,
-      undefined,
-      undefined,
-      cursorAsyncFrHandoff.flightRecorderEntry,
-      cursorAsyncFrHandoff.extractUsage,
-      true,
-      undefined,
-      effectiveCompress,
-      undefined,
-      undefined,
-      undefined,
-      undefined,
-      sessionBoundDedupArgs(args, effectiveSessionId)
-    );
-    jobHandedOff = true;
-    await safeUpdateSessionUsageAfterJobAdmission(
-      deps.sessionManager,
-      sessionResult.userProvidedSession ? effectiveSessionId : undefined,
-      runtime
-    );
-    deps.logger.info(`[${corrId}] cursor_request_async started job ${job.id}`);
-    return {
+      return deps.asyncJobManager.startJob(
+        "cursor",
+        args,
+        corrId,
+        cursorWorkspace.cwd ?? worktreeResolution.cwd,
+        resolveIdleTimeout("cursor", params.idleTimeoutMs),
+        params.outputFormat,
+        params.forceRefresh,
+        undefined,
+        ledger.worktreeLifecycle?.onTerminal,
+        cursorAsyncFrHandoff.flightRecorderEntry,
+        cursorAsyncFrHandoff.extractUsage,
+        true,
+        undefined,
+        effectiveCompress,
+        undefined,
+        undefined,
+        undefined,
+        undefined,
+        sessionBoundDedupArgs(args, effectiveSessionId)
+      );
+    },
+    buildSuccessResponse: ({ job, value: { effectiveSessionId } }) => ({
       content: [
         {
           type: "text" as const,
@@ -13930,18 +14051,10 @@ export async function handleCursorRequestAsync(
           ),
         },
       ],
-    };
-  } catch (error) {
-    if (!jobHandedOff) {
-      await rollbackSessionAndWorktreeAdmission(
-        deps.sessionManager,
-        sessionAdmission,
-        undefined,
-        runtime
-      );
-    }
-    return createErrorResponse("cursor_request_async", 1, "", corrId, error as Error);
-  }
+    }),
+  };
+
+  return runAsyncEnqueueEnvelope(env, hooks);
 }
 
 export interface MistralRequestParams {
