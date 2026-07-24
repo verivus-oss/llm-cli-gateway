@@ -89,6 +89,7 @@ describe("mistral Kit context delivery (prompt prefix + digest drift)", () => {
       contextPrefix: CONTEXT,
       apiKey: "k",
       homeRoot: root,
+      sessionDir: join(root, "sessions"),
     });
   });
   afterEach(() => {

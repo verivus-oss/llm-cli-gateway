@@ -1,6 +1,14 @@
 import { createHash } from "crypto";
-import { mkdtempSync, mkdirSync, writeFileSync, existsSync, readdirSync } from "fs";
-import { join } from "path";
+import {
+  mkdtempSync,
+  mkdirSync,
+  writeFileSync,
+  existsSync,
+  readdirSync,
+  statSync,
+  realpathSync,
+} from "fs";
+import { isAbsolute, join } from "path";
 import { tmpdir } from "os";
 
 /**
@@ -68,8 +76,17 @@ const HOME_FORBIDDEN: readonly string[] = [
 export interface MistralKitIsolationPlan {
   /** Gateway-owned ephemeral home; `HOME` points here (so `~/.agents` relocates). */
   readonly home: string;
-  /** `<home>/.vibe`; `VIBE_HOME` points here (config, logs/session, trust store). */
+  /** `<home>/.vibe`; `VIBE_HOME` points here (config, trust store). */
   readonly vibeHome: string;
+  /**
+   * Gateway-owned STABLE session-log dir written into the config as
+   * `[session_logging] save_dir`. Unlike the ephemeral `home`, this persists across
+   * requests for the same Kit execution so `vibe --resume <uuid>` (which globs
+   * `config.save_dir`) finds a prior turn. It is the disk-capture source for the
+   * native handle. Keeping it OUTSIDE the ephemeral home is what lets the home stay
+   * strictly manifested (vibe writes session logs here, not into VIBE_HOME).
+   */
+  readonly sessionDir: string;
   /** The provider working dir (the Kit scope root). Left UNTRUSTED (no `--trust`). */
   readonly cwd: string;
   /**
@@ -100,6 +117,13 @@ export interface MistralKitIsolationOptions {
   contextPrefix: string;
   /** The resolved Mistral API key, provisioned into the child env only. */
   apiKey: string;
+  /**
+   * Absolute, gateway-owned STABLE session-log dir keyed by the Kit execution.
+   * Created (0700) and asserted here, then written into the config as
+   * `[session_logging] save_dir`. Enables native `--resume` continuity while the
+   * home stays ephemeral. Must be an absolute path.
+   */
+  sessionDir: string;
   /** Base dir to allocate the ephemeral home under (default: os.tmpdir()). */
   homeRoot?: string;
 }
@@ -116,7 +140,7 @@ function digestContextPrefix(contextPrefix: string): string {
  * experimental_enable_registry_skills) ride on VIBE_* env, which is the robust
  * EnvironmentLayer lever; no absolute skill/tool/agent paths are declared.
  */
-function buildKitVibeConfigToml(): string {
+function buildKitVibeConfigToml(sessionDir: string): string {
   return [
     "# Gateway-owned Personal Agent Config Kit baseline (mistral). Constructed per",
     "# attempt under a redirected VIBE_HOME; never the user's real ~/.vibe.",
@@ -124,6 +148,10 @@ function buildKitVibeConfigToml(): string {
     "",
     "[session_logging]",
     "enabled = true",
+    // Relocate session logs OUT of the ephemeral VIBE_HOME into a stable
+    // gateway-owned dir so `vibe --resume <uuid>` finds prior turns. The value is a
+    // gateway-derived path (layout dir + hex), emitted as a TOML basic string.
+    `save_dir = ${JSON.stringify(sessionDir)}`,
     "",
   ].join("\n");
 }
@@ -159,16 +187,37 @@ export function createMistralKitIsolationPlan(
       "mistral Kit isolation requires a non-empty MISTRAL_API_KEY (keyring fallback is forbidden)"
     );
   }
+  if (!options.sessionDir || !isAbsolute(options.sessionDir)) {
+    throw new MistralKitIsolationError(
+      "mistral Kit isolation requires an absolute gateway-owned sessionDir"
+    );
+  }
+
+  // Create + assert the STABLE session-log dir. It is gateway-owned (0700) and must
+  // resolve to a real directory (a pre-existing non-dir or symlink-to-non-dir fails
+  // closed). Unlike the home it persists across requests for native --resume.
+  const sessionDir = options.sessionDir;
+  mkdirSync(sessionDir, { recursive: true, mode: 0o700 });
+  let realSessionDir: string;
+  try {
+    realSessionDir = realpathSync(sessionDir);
+  } catch {
+    throw new MistralKitIsolationError(`mistral Kit sessionDir is not resolvable: ${sessionDir}`);
+  }
+  if (!statSync(realSessionDir).isDirectory()) {
+    throw new MistralKitIsolationError(`mistral Kit sessionDir is not a directory: ${sessionDir}`);
+  }
 
   const base = options.homeRoot ?? tmpdir();
   const home = mkdtempSync(join(base, "gw-mistral-kit-home-"));
   const vibeHome = join(home, ".vibe");
   mkdirSync(vibeHome, { recursive: true, mode: 0o700 });
-  writeFileSync(join(vibeHome, "config.toml"), buildKitVibeConfigToml(), { mode: 0o600 });
+  writeFileSync(join(vibeHome, "config.toml"), buildKitVibeConfigToml(sessionDir), { mode: 0o600 });
 
   const plan: MistralKitIsolationPlan = {
     home,
     vibeHome,
+    sessionDir,
     cwd: options.cwd,
     env: Object.freeze(buildKitEnv(home, vibeHome, options.apiKey)),
     scrubKeys: MISTRAL_KIT_ENV_SCRUB,

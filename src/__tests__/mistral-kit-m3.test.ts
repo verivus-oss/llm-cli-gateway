@@ -212,17 +212,18 @@ describe("Mistral Kit M3 admission + wiring", () => {
     expect(getOrCreateKitSession).toHaveBeenCalled();
     expect(startJobWithDedup).toHaveBeenCalledOnce();
 
-    // The isolation home is threaded for deferred disk-based native capture, and
-    // the immutable Kit identity + durable session binding ride with the job.
+    // The stable gateway-owned session dir is threaded for deferred disk-based
+    // native capture (survives across requests, so --resume works), and the
+    // immutable Kit identity + durable session binding ride with the job.
     const opts = startJobWithDedup.mock.calls[0]![3] as {
       kitExecution?: unknown;
       kitSessionId?: unknown;
-      kitNativeCaptureHome?: unknown;
+      kitNativeCaptureSessionDir?: unknown;
     };
     expect(opts.kitExecution).toBeTruthy();
     expect(typeof opts.kitSessionId).toBe("string");
-    expect(typeof opts.kitNativeCaptureHome).toBe("string");
-    expect(opts.kitNativeCaptureHome as string).toContain("gw-mistral-kit-home-");
+    expect(typeof opts.kitNativeCaptureSessionDir).toBe("string");
+    expect(opts.kitNativeCaptureSessionDir as string).toContain("mistral-kit-sessions");
   });
 
   it("fails closed when MISTRAL_API_KEY is absent, before any session or job side effect", async () => {
@@ -308,11 +309,13 @@ describe("mistralKitSpawnEnvFragment (M3 executor-merge projection)", () => {
 
   it("deletes ambient VIBE_*/scrub keys and applies only the gateway levers", () => {
     const cwd = mkdtempSync(join(tmpdir(), "mistral-kit-frag-cwd-"));
+    const sessionDir = join(cwd, "sessions");
     try {
       const plan = createMistralKitIsolationPlan({
         cwd,
         contextPrefix: "<gateway-personal-config>ctx</gateway-personal-config>",
         apiKey: "sk-fragment-test",
+        sessionDir,
       });
       const base: NodeJS.ProcessEnv = {
         PATH: "/usr/bin",

@@ -195,23 +195,23 @@ export function parseVibeMetaJson(home: string, sessionId: string | undefined): 
 }
 
 /**
- * Mistral Kit M0: resolve the newest Vibe native session id under a
- * gateway-owned home. Vibe writes each session's UUID to
- * `<home>/.vibe/logs/session/session_<ts>_<first8>/meta.json` (`session_id`).
- * Returns the `session_id` of the most-recently-modified session dir whose
- * meta.json is in-tree, whose id is a broad vibe UUID, AND whose dir basename
- * `first8` matches the id's first 8 hex chars (the on-disk integrity check the
- * host probe verified holds for all 2892 sampled sessions). Any failure
- * (missing dir, out-of-tree symlink target, bad JSON, shape/integrity miss)
- * falls through to the next candidate, then returns undefined. Reads route
- * through `readInBase` so a symlink escape is rejected at the boundary.
+ * Mistral Kit M0/M3: resolve the newest Vibe native session id under the
+ * gateway-owned STABLE session-log dir (config.session_logging.save_dir, which
+ * M3 relocates out of the ephemeral VIBE_HOME). Vibe writes each session's UUID
+ * to `<sessionDir>/session_<ts>_<first8>/meta.json` (`session_id`). Returns the
+ * `session_id` of the most-recently-modified session dir whose meta.json is
+ * in-tree, whose id is a broad vibe UUID, AND whose dir basename `first8`
+ * matches the id's first 8 hex chars (the on-disk integrity check the host probe
+ * verified holds for all 2892 sampled sessions). Any failure (missing dir,
+ * out-of-tree symlink target, bad JSON, shape/integrity miss) falls through to
+ * the next candidate, then returns undefined. Reads route through `readInBase`
+ * so a symlink escape is rejected at the boundary.
  *
  * Pure with respect to the caller (only reads the filesystem). This is the
- * disk-capture source for the mistral Kit native handle; it is not wired into
- * any live handler until the Kit gate opens.
+ * disk-capture source for the mistral Kit native handle.
  */
-export function resolveNewestVibeNativeSessionId(home: string): string | undefined {
-  const baseDir = resolve(join(home, ".vibe", "logs", "session"));
+export function resolveNewestVibeNativeSessionId(sessionDir: string): string | undefined {
+  const baseDir = resolve(sessionDir);
   let realBase: string;
   try {
     realBase = realpathSync(baseDir);

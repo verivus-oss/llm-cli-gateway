@@ -1556,11 +1556,11 @@ async function awaitJobOrDefer(
   /** Scope captured with the gateway-generated Claude MCP config artifact. */
   mcpArtifactScope?: string,
   /**
-   * Mistral Kit (M3): gateway-owned ephemeral home for disk-based native session
-   * capture on the deferred path. Process-local, never persisted. Set only for
-   * mistral Kit jobs; undefined for every other request.
+   * Mistral Kit (M3): gateway-owned stable session-log dir for disk-based native
+   * session capture on the deferred path. Process-local, never persisted. Set only
+   * for mistral Kit jobs; undefined for every other request.
    */
-  kitNativeCaptureHome?: string
+  kitNativeCaptureSessionDir?: string
 ): Promise<InlineJobResponse | DeferredJobResponse> {
   // U26 fix: ownership of onComplete is a contract. Once this function returns
   // OR throws, the caller MUST consider onComplete consumed — i.e. it has
@@ -1674,7 +1674,7 @@ async function awaitJobOrDefer(
       kitExecution,
       onTerminal,
       kitSessionId,
-      kitNativeCaptureHome,
+      kitNativeCaptureSessionDir,
       jobId: kitJobId,
       dedupArgs,
       mcpArtifactPath,
@@ -14317,10 +14317,24 @@ export async function handleMistralRequest(
         );
       }
       kitPrefix = kitContextPrefix(kit.context);
+      // Native continuity: vibe --resume reads sessions from config.session_logging.save_dir
+      // (verified: session_loader.find_session_by_id globs config.save_dir). VIBE_HOME stays
+      // a fresh ephemeral dir per request (full-manifest isolation preserved), but the
+      // session log dir is a STABLE gateway-owned path keyed by the immutable execution, so
+      // a later --resume finds the prior turn. Keyed by scope+configStamp so a config change
+      // (new execution) starts fresh, exactly as the Kit execution-current fence requires.
+      const kitSessionDir = join(
+        runtime.personalConfig.layout.runtimeDir,
+        "mistral-kit-sessions",
+        createHash("sha256")
+          .update(`${kit.context.execution.scopeRoot ?? ""} ${kit.context.execution.configStamp}`)
+          .digest("hex")
+      );
       kit.mistralIsolation = createMistralKitIsolationPlan({
         cwd: kit.context.scope.cwd,
         contextPrefix: kitPrefix,
         apiKey,
+        sessionDir: kitSessionDir,
       });
     }
   } catch (error) {
@@ -14337,11 +14351,21 @@ export async function handleMistralRequest(
   } catch (error) {
     return createErrorResponse("mistral_request", 1, "", params.correlationId, error as Error);
   }
+  // Apply the personal baseline's Kit preferences (model_default + max_turns_cap)
+  // exactly as claude/codex do; without this a Kit model_default is ignored and the
+  // baseline turn cap is unenforced. outputFormat is conflict-rejected so it stays a
+  // baseline concern only; we read back model + maxTurns.
+  const kitPreferences = kit
+    ? applyKitPreferences(
+        { model: params.model, maxTurns: params.maxTurns },
+        kit.context.preferences
+      )
+    : { model: params.model, maxTurns: params.maxTurns };
   const prep = prepareMistralRequest(
     {
       prompt: params.prompt,
       promptParts: params.promptParts,
-      model: params.model,
+      model: kitPreferences.model as string | undefined,
       // Kit conflict-rejects outputFormat/workingDir/addDir/permissionMode; force
       // the managed agent posture and the Kit-owned prompt prefix.
       outputFormat: kit ? undefined : params.outputFormat,
@@ -14355,7 +14379,7 @@ export async function handleMistralRequest(
       optimizePrompt: params.optimizePrompt,
       operation: "mistral_request",
       trust: params.trust,
-      maxTurns: params.maxTurns,
+      maxTurns: kitPreferences.maxTurns as number | undefined,
       maxPrice: params.maxPrice,
       maxTokens: params.maxTokens,
       workingDir: kit ? undefined : params.workingDir,
@@ -14657,7 +14681,7 @@ export async function handleMistralRequest(
           undefined,
           undefined,
           undefined,
-          kit?.mistralIsolation?.home
+          kit?.mistralIsolation?.sessionDir
         );
       // The Kit heartbeat keeps the attempt lease alive until deferral or terminal
       // state; a null kitSession runs the dispatch directly.
@@ -14735,9 +14759,9 @@ export async function handleMistralRequest(
         gatewaySessionId: kitSession.gatewaySessionId,
         execution: kit.context.execution,
         // Vibe emits no stdout session id; the native UUID is captured from disk
-        // under the gateway-owned isolation home (process-local, never persisted).
+        // under the gateway-owned stable session dir (process-local handle).
         terminalMetadata: completed
-          ? createVibeKitTerminalMetadata(kit.mistralIsolation!.home)
+          ? createVibeKitTerminalMetadata(kit.mistralIsolation!.sessionDir)
           : null,
         completed,
         attemptId: kitSession.attemptId,
