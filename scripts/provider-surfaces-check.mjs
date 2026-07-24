@@ -66,7 +66,8 @@ const LITERAL_RESOURCE_URI = new RegExp(`"(?:sessions|models)://(?:${PROVIDER_NA
  * admission and were caught only by cross-LLM review, because the messages are
  * redacted before any caller (and therefore any test) can observe them.
  */
-const LITERAL_KIT_TOOL_LIST = /\b(?:claude|codex|mistral)_request(?:_async)?\b[^\n]*\bor\s+(?:claude|codex|mistral)_request(?:_async)?\b/;
+const LITERAL_KIT_TOOL_LIST =
+  /\b(?:claude|codex|mistral)_request(?:_async)?\b[^\n]*\bor\s+(?:claude|codex|mistral)_request(?:_async)?\b/;
 
 /**
  * Pattern (5): a two-way provider ternary that yields a provider LABEL, e.g.
