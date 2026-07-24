@@ -87,23 +87,43 @@ const LITERAL_RESOURCE_URI = new RegExp(`"(?:sessions|models)://(?:${PROVIDER_NA
 const REQUEST_TOOL_TOKEN = new RegExp(`\\b(${PROVIDER_NAME})_request(?:_async)?\\b`, "g");
 
 function findCrossProviderToolList(content) {
-  for (const rawLine of content.split("\n")) {
+  const hits = [];
+  const lines = content.split("\n");
+  for (let i = 0; i < lines.length; i++) {
     const providers = new Set();
-    for (const m of rawLine.matchAll(REQUEST_TOOL_TOKEN)) providers.add(m[1]);
-    if (providers.size >= 2) {
-      return { 0: rawLine.trim().slice(0, 120), index: content.indexOf(rawLine) };
-    }
+    for (const m of lines[i].matchAll(REQUEST_TOOL_TOKEN)) providers.add(m[1]);
+    if (providers.size >= 2) hits.push({ snippet: lines[i].trim().slice(0, 120), line: i + 1 });
   }
-  return null;
+  return hits;
+}
+
+/** Every match of a plain regex, with 1-based line numbers. */
+function findAllRegex(content, regex) {
+  const hits = [];
+  const lines = content.split("\n");
+  for (let i = 0; i < lines.length; i++) {
+    const m = lines[i].match(regex);
+    if (m) hits.push({ snippet: m[0].slice(0, 120), line: i + 1 });
+  }
+  return hits;
 }
 
 /**
  * Pattern (5): a two-way provider ternary that yields a provider LABEL, e.g.
  * `provider === "claude" ? "Claude" : "Codex"`. This silently mislabels every
  * provider outside the pair. Use `getKitProviderLabel(provider)`.
+ *
+ * Deliberately loose about orthography, because cross-LLM review defeated a
+ * stricter first draft three ways: a single-quoted ternary, a different
+ * left-hand side (`cli === ...`), and a NEGATED comparison
+ * (`provider !== "claude" ? "Codex" : "Claude"`, which has the same bug with
+ * the arms swapped). So: any identifier, either equality operator, either quote
+ * style. The `[A-Z]` guard on both arms keeps it to LABELS, so an ordinary
+ * value ternary (`provider === "claude" ? "stream-json" : "json"`) is untouched.
  */
-const PROVIDER_LABEL_TERNARY =
-  /provider\s*===\s*"(?:claude|codex|mistral|gemini|grok|devin|cursor)"\s*\?\s*"[A-Z][a-z]+"\s*:\s*"[A-Z][a-z]+"/;
+const PROVIDER_LABEL_TERNARY = new RegExp(
+  `\\w+\\s*[!=]==\\s*(['"])(?:${PROVIDER_NAME})\\1\\s*\\?\\s*(['"])[A-Z]\\w*\\2\\s*:\\s*(['"])[A-Z]\\w*\\3`
+);
 
 /**
  * A pattern is either a `regex` or a `find(content)` returning a match-like
@@ -159,14 +179,6 @@ function walk(dir) {
   return out;
 }
 
-function lineNumberOf(content, index) {
-  let line = 1;
-  for (let i = 0; i < index && i < content.length; i++) {
-    if (content[i] === "\n") line++;
-  }
-  return line;
-}
-
 const newViolations = [];
 const legacyHits = [];
 
@@ -178,14 +190,17 @@ for (const absPath of walk(srcRoot)) {
   const legacy = LEGACY_ALLOWLIST[relPath];
 
   for (const { kind, regex, find } of PATTERNS) {
-    const match = find ? find(content) : content.match(regex);
-    if (!match) continue;
-    const line = lineNumberOf(content, match.index ?? 0);
-    const record = { relPath, kind, line, snippet: match[0] };
-    if (legacy && legacy.allowedKinds.includes(kind)) {
-      legacyHits.push({ ...record, phase: legacy.phase });
-    } else {
-      newViolations.push(record);
+    // Report EVERY hit, not just the first. Two sibling violations in one file
+    // (e.g. the sync and async LCR guards) must both be named, or fixing the
+    // reported one makes the check look clean while the other survives.
+    const hits = find ? find(content) : findAllRegex(content, regex);
+    for (const hit of hits) {
+      const record = { relPath, kind, line: hit.line, snippet: hit.snippet };
+      if (legacy && legacy.allowedKinds.includes(kind)) {
+        legacyHits.push({ ...record, phase: legacy.phase });
+      } else {
+        newViolations.push(record);
+      }
     }
   }
 }

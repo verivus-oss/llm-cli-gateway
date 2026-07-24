@@ -7781,8 +7781,18 @@ function personalKitErrorResponse(
     );
   }
   // Unexpected Kit errors can include private runtime paths, remote URLs, or
-  // other machine-local details. Keep those details in the local gateway log,
-  // never in either MCP response surface.
+  // other machine-local details, so none of the original error reaches either
+  // MCP response surface.
+  //
+  // NOTE: the original is DISCARDED here, not retained. An earlier version of
+  // this comment claimed the details were kept in the local gateway log; they
+  // are not, because this constructs a fresh Error and the original object is
+  // never logged on this path (found by cross-LLM review). The response text
+  // below still tells an operator to inspect the local logs, which is only
+  // useful when some earlier frame happened to log. Restoring a local-only
+  // diagnostic log here is a deliberate, separately reviewable change to the
+  // Kit privacy boundary, so it is left alone rather than slipped into a
+  // surfacing slice.
   return createErrorResponse(
     operation,
     1,
