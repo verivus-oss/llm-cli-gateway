@@ -76,9 +76,26 @@ const LITERAL_RESOURCE_URI = new RegExp(`"(?:sessions|models)://(?:${PROVIDER_NA
  * claude/codex-only forms of exactly these two strings survived the mistral Kit
  * admission and were caught only by cross-LLM review, because the messages are
  * redacted before any caller (and therefore any test) can observe them.
+ *
+ * Separator-independent by construction: an earlier draft keyed on the word
+ * "or" and was trivially evaded by "and", by a comma list, and by a slash (I
+ * verified all three evasions before settling on this form). The signal is
+ * instead TWO DIFFERENT provider prefixes on one line. A same-provider pair
+ * ("claude_request" + "claude_request_async") is that provider's own tool
+ * surface and is legitimate; a cross-provider pair is a hand-written roster.
  */
-const LITERAL_KIT_TOOL_LIST =
-  /\b(?:claude|codex|mistral)_request(?:_async)?\b[^\n]*\bor\s+(?:claude|codex|mistral)_request(?:_async)?\b/;
+const REQUEST_TOOL_TOKEN = new RegExp(`\\b(${PROVIDER_NAME})_request(?:_async)?\\b`, "g");
+
+function findCrossProviderToolList(content) {
+  for (const rawLine of content.split("\n")) {
+    const providers = new Set();
+    for (const m of rawLine.matchAll(REQUEST_TOOL_TOKEN)) providers.add(m[1]);
+    if (providers.size >= 2) {
+      return { 0: rawLine.trim().slice(0, 120), index: content.indexOf(rawLine) };
+    }
+  }
+  return null;
+}
 
 /**
  * Pattern (5): a two-way provider ternary that yields a provider LABEL, e.g.
@@ -88,11 +105,16 @@ const LITERAL_KIT_TOOL_LIST =
 const PROVIDER_LABEL_TERNARY =
   /provider\s*===\s*"(?:claude|codex|mistral|gemini|grok|devin|cursor)"\s*\?\s*"[A-Z][a-z]+"\s*:\s*"[A-Z][a-z]+"/;
 
+/**
+ * A pattern is either a `regex` or a `find(content)` returning a match-like
+ * `{ 0: snippet, index }`, for signals a single regex cannot express (pattern 4
+ * needs to compare provider prefixes across one line).
+ */
 const PATTERNS = [
   { kind: "literal-provider-array", regex: LITERAL_PROVIDER_ARRAY },
   { kind: "manual-resource-block", regex: MANUAL_RESOURCE_BLOCK },
   { kind: "literal-resource-uri", regex: LITERAL_RESOURCE_URI },
-  { kind: "literal-kit-tool-list", regex: LITERAL_KIT_TOOL_LIST },
+  { kind: "cross-provider-tool-list", find: findCrossProviderToolList },
   { kind: "provider-label-ternary", regex: PROVIDER_LABEL_TERNARY },
 ];
 
@@ -155,8 +177,8 @@ for (const absPath of walk(srcRoot)) {
   const content = readFileSync(absPath, "utf8");
   const legacy = LEGACY_ALLOWLIST[relPath];
 
-  for (const { kind, regex } of PATTERNS) {
-    const match = content.match(regex);
+  for (const { kind, regex, find } of PATTERNS) {
+    const match = find ? find(content) : content.match(regex);
     if (!match) continue;
     const line = lineNumberOf(content, match.index ?? 0);
     const record = { relPath, kind, line, snippet: match[0] };

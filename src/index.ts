@@ -578,9 +578,14 @@ export function buildServerInstructions(
   const deferralLine = asyncJobsEnabled
     ? `- Sync auto-defers at ${SYNC_DEADLINE_MS}ms. Poll deferred jobs via llm_job_status/llm_job_result.`
     : '- Async jobs are DISABLED (persistence.backend = "none"): *_request_async and llm_job_* tools are not registered, and sync requests run to completion (no auto-deferral).';
+  // Derived from the registry: a hand-written roster here goes stale the moment
+  // a provider is added, and this string is the first thing an MCP client reads.
+  const syncRequestToolList = CLI_TYPES.map(
+    id => getProviderDefinition(id).requestSurface.syncToolName
+  ).join(", ");
   return `llm-cli-gateway: Multi-LLM orchestration via MCP.
 
-Tools: claude_request, codex_request, gemini_request, grok_request, mistral_request, devin_request, cursor_request${apiToolsNote} (sync)${asyncToolsNote} | codex_fork_session (fork a Codex session into a new branch)
+Tools: ${syncRequestToolList}${apiToolsNote} (sync)${asyncToolsNote} | codex_fork_session (fork a Codex session into a new branch)
 ${validationLine}${jobsLine}Sessions: session_create, session_list, session_set_active, session_get, session_delete, session_clear_all
 Other: list_models, provider_tool_capabilities, cli_versions, upstream_contracts, provider_subcommands_* (read-only subcommand contract/drift introspection), cli_upgrade, approval_list, llm_process_health, llm_request_result (read back any persisted request, sync or async, by correlationId)
 Workspaces: workspace_create, workspace_list, workspace_get, workspace_register_existing_repo (remote HTTP/OAuth workspace registry only; do not use workspace_* to fix stdio/local provider path access)
