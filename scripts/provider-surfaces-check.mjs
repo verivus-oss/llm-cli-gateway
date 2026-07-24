@@ -14,6 +14,17 @@
  *       `"sessions://<name>"` / `"models://<name>"` string (the
  *       `server.registerResource(...)` form). These must be built from a
  *       provider id via the surface generator, never spelled out per provider.
+ *   (4) hand-written Personal Agent Config Kit request-TOOL lists, e.g.
+ *       "use claude_request or codex_request". Derive from
+ *       `describeKitRequestTools()` instead.
+ *   (5) two-way provider-label ternaries, e.g.
+ *       `provider === "claude" ? "Claude" : "Codex"`, which mislabel every
+ *       provider outside the pair. Use `getKitProviderLabel()` instead.
+ *
+ * (4) and (5) exist because the Kit provider set grew from two to three and the
+ * stale two-provider forms survived in `index.ts`, reachable by no test: those
+ * messages are redacted by `safePersonalKitErrorMessage` before any caller can
+ * observe them, so a static gate is the only thing that can catch them.
  *
  * ALWAYS_ALLOWLIST names the sanctioned places these tokens may appear: the
  * enum source, the registry, the surface generator, generated snapshots, and
