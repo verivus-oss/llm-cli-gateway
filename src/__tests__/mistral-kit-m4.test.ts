@@ -12,7 +12,9 @@ import {
 import {
   CLI_TYPES,
   KIT_SUPPORTED_PROVIDERS,
+  describeKitRequestTools,
   describeKitSupportedProviders,
+  getKitProviderLabel,
   getProviderPersonalConfigKit,
   isKitSupportedProvider,
 } from "../provider-definitions.js";
@@ -48,6 +50,32 @@ describe("Kit provider support is registry-derived", () => {
 
   it("describes the supported providers from the registry order", () => {
     expect(describeKitSupportedProviders()).toBe("Claude, Codex and Mistral");
+  });
+
+  // Operator-facing strings that redirect a caller to the Kit surface must name
+  // the whole admitted set. Hand-written copies of this list went stale when
+  // mistral was admitted (found by cross-LLM review), so they are derived now.
+  it("names every Kit request tool when redirecting a caller", () => {
+    expect(describeKitRequestTools("sync")).toBe(
+      "claude_request, codex_request or mistral_request"
+    );
+    expect(describeKitRequestTools("async")).toBe(
+      "claude_request_async, codex_request_async or mistral_request_async"
+    );
+    for (const provider of KIT_SUPPORTED_PROVIDERS) {
+      expect(describeKitRequestTools("sync")).toContain(`${provider}_request`);
+      expect(describeKitRequestTools("async")).toContain(`${provider}_request_async`);
+    }
+  });
+
+  it("labels a Kit session per provider rather than assuming two providers", () => {
+    // Regression guard: a `provider === "claude" ? "Claude" : "Codex"` ternary
+    // silently labelled every non-claude provider "Codex".
+    expect(KIT_SUPPORTED_PROVIDERS.map(getKitProviderLabel)).toEqual([
+      "Claude",
+      "Codex",
+      "Mistral",
+    ]);
   });
 });
 

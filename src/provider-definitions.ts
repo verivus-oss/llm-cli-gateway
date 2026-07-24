@@ -1362,3 +1362,20 @@ export function describeKitSupportedProviders(): string {
   if (names.length === 1) return names[0];
   return `${names.slice(0, -1).join(", ")} and ${names[names.length - 1]}`;
 }
+
+/**
+ * The Kit-admitted request TOOL names for operator guidance, e.g.
+ * "claude_request, codex_request or mistral_request". Derived from the registry
+ * so a message that redirects a caller to the Kit surface can never name a
+ * stale subset of it.
+ */
+export function describeKitRequestTools(kind: "sync" | "async"): string {
+  const tools = KIT_SUPPORTED_PROVIDERS.map(id =>
+    kind === "sync"
+      ? PROVIDER_DEFINITIONS_BY_ID[id].requestSurface.syncToolName
+      : PROVIDER_DEFINITIONS_BY_ID[id].requestSurface.asyncToolName
+  );
+  if (tools.length === 0) return "no request tools";
+  if (tools.length === 1) return tools[0];
+  return `${tools.slice(0, -1).join(", ")} or ${tools[tools.length - 1]}`;
+}

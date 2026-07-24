@@ -191,6 +191,7 @@ import {
   getProviderPersonalConfigKit,
   getKitProviderLabel,
   describeKitSupportedProviders,
+  describeKitRequestTools,
   isKitSupportedProvider,
   DEVIN_ACP_AGENT_TYPES,
   type DevinAcpAgentType,
@@ -8557,7 +8558,7 @@ async function resolvePersonalKitSession(
             resumeEligible: false,
             attempt,
           },
-          `${provider[0].toUpperCase()}${provider.slice(1)} Kit Session`,
+          `${getKitProviderLabel(provider)} Kit Session`,
           candidateSessionId
         )
       );
@@ -8616,7 +8617,7 @@ async function resolvePersonalKitSession(
     manager.createKitSession(
       provider,
       binding,
-      `${provider === "claude" ? "Claude" : "Codex"} Kit Session`,
+      `${getKitProviderLabel(provider)} Kit Session`,
       randomUUID()
     )
   );
@@ -16099,7 +16100,7 @@ async function runRouteRequest(
       corrId,
       new PersonalConfigError(
         "kit_provider_unsupported",
-        "route_request is unavailable while Personal Agent Config Kit mode is enabled; use claude_request or codex_request"
+        `route_request is unavailable while Personal Agent Config Kit mode is enabled; use ${describeKitRequestTools("sync")}`
       )
     );
   }
@@ -16320,7 +16321,7 @@ async function runRouteRequestAsync(
       corrId,
       new PersonalConfigError(
         "kit_provider_unsupported",
-        "route_request_async is unavailable while Personal Agent Config Kit mode is enabled; use claude_request_async or codex_request_async"
+        `route_request_async is unavailable while Personal Agent Config Kit mode is enabled; use ${describeKitRequestTools("async")}`
       )
     );
   }
