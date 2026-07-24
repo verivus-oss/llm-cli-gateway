@@ -186,6 +186,6 @@ llm_job_result through gtwy. SQLite and Postgres jobs are durable; memory is
 process-lifetime only, and persistence.backend = "none" exposes no async or job
 tools. Do not cancel a mandatory review simply because it is long-running.
 
-Personal Agent Config Kit supports Claude and Codex only and needs durable job
-admission. Treat a requested multi-provider review while Kit is enabled as a
+Personal Agent Config Kit supports Claude, Codex, and Mistral only and needs
+durable job admission. Treat a requested multi-provider review while Kit is enabled as a
 scope blocker, not an opportunity to silently downgrade the review.

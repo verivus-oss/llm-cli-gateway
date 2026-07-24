@@ -276,11 +276,11 @@ process-lifetime only and needs explicit acknowledgement. With
 persistence.backend = "none", async and job tools are absent. Do not interpret
 an unavailable job store as evidence that an assessment completed.
 
-Personal Agent Config Kit supports Claude and Codex only and requires durable
-job admission. A complete seven-provider assessment cannot run in Kit mode;
+Personal Agent Config Kit supports Claude, Codex, and Mistral only and requires
+durable job admission. A complete seven-provider assessment cannot run in Kit mode;
 treat that as a blocker unless the user explicitly changes the required scope.
-The normal Claude `workingDir` target rule does not apply to a Claude Kit
-request: it rejects caller-supplied `workingDir` before context compilation.
+The normal `workingDir` target rule does not apply to a Claude or Mistral Kit
+request: both reject caller-supplied `workingDir` before context compilation.
 `explain_effective_config({workingDir:"<repo>"})` can inspect a candidate scope,
 but Claude Kit execution must use an already configured registered `workspace`
 alias or the configured default workspace. It never inherits the gateway
