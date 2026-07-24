@@ -4,6 +4,37 @@ All notable changes to the llm-cli-gateway project.
 
 ## [Unreleased]
 
+### Added
+
+- **Mistral in the Personal Agent Config Kit.** `mistral_request` and
+  `mistral_request_async` join Claude and Codex as Kit-capable providers, behind
+  the existing enablement gate. Vibe has no bare flag and no prompt-inspection
+  surface, so the Kit builds a controlled environment instead: a redirected
+  `HOME` and `VIBE_HOME` whose exact file manifest is asserted before launch, a
+  gateway-written config, an untrusted working folder, a scrubbed environment,
+  and a stamped context prefix whose digest is bound to the isolation plan.
+  Native continuity resumes from a stable gateway-owned session directory keyed
+  by the Kit execution identity. The redirected home has no keyring, so a Kit
+  turn requires `MISTRAL_API_KEY` in the gateway process environment.
+- **Per-provider Kit eligibility surfaces.** `doctor` reports
+  `personal_config.provider_eligibility` for every provider (Kit support,
+  isolation model, required credential env var by name, and an explicit blocker
+  list), `config_status` reports `kitProviders`, and
+  `provider_tool_capabilities` carries a `personalConfigKit` feature. All of
+  them derive from one registry fact (`personalConfigKit` in
+  `src/provider-definitions.ts`) that the admission gates also read, so no
+  surface can advertise a provider the gates reject. Credential state is
+  presence-only; no value is ever reported.
+
+### Changed
+
+- `client_config.vibe_session_logging` in the doctor report gained a `kit_note`
+  recording that a Mistral Kit turn never reads `~/.vibe/config.toml`, so that
+  file's session-logging setting affects non-Kit `--continue` / `--resume` only.
+- The Kit scope-selection error message is derived from the provider's declared
+  scope rule instead of a Claude-or-Codex branch, so a workspace-only provider
+  is no longer told to supply a `workingDir` its own gate rejects.
+
 ## [3.0.0] - 2026-07-18
 
 ### Added

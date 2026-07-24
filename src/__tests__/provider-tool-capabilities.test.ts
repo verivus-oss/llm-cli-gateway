@@ -3,7 +3,11 @@ import { tmpdir } from "os";
 import { join } from "path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { ResourceProvider } from "../resources.js";
-import { PROVIDER_TARGET_VERSIONS } from "../provider-definitions.js";
+import {
+  CLI_TYPES,
+  PROVIDER_TARGET_VERSIONS,
+  getProviderPersonalConfigKit,
+} from "../provider-definitions.js";
 import {
   clearProviderToolCapabilitiesCache,
   getOneProviderToolCapabilities,
@@ -528,6 +532,35 @@ describe("provider tool capabilities", () => {
     expect(serialized).not.toContain("secret-token");
     expect(serialized).not.toContain("/private/bin/server");
     expect(serialized).not.toContain("/secret/path");
+  });
+
+  it("reports Personal Agent Config Kit support from the provider registry", () => {
+    const capabilities = getProviderToolCapabilities({ refresh: true });
+    for (const provider of CLI_TYPES) {
+      const kit = getProviderPersonalConfigKit(provider);
+      const feature = capabilities[provider]?.features.personalConfigKit;
+      expect(feature).toBeDefined();
+      expect(feature?.supported).toBe(kit.supported);
+      if (kit.supported) {
+        expect(feature?.details).toContain(`${kit.isolationModel} isolation`);
+      }
+      // The credential requirement names the env var, never a value.
+      expect(feature?.values ?? []).toEqual(
+        kit.requiredCredentialEnv ? [`requires:${kit.requiredCredentialEnv}`] : []
+      );
+    }
+    expect(capabilities.mistral?.features.personalConfigKit.supported).toBe(true);
+    expect(capabilities.mistral?.features.personalConfigKit.details).toContain(
+      "controlled-environment"
+    );
+    expect(capabilities.gemini?.features.personalConfigKit.supported).toBe(false);
+  });
+
+  it("reports no Kit route for an API provider", () => {
+    const feature = getProviderToolCapabilities({ cli: "grok_api", refresh: true }).grok_api
+      ?.features.personalConfigKit;
+    expect(feature?.supported).toBe(false);
+    expect(feature?.details).toContain("API providers have no Personal Agent Config Kit route");
   });
 
   it("exposes provider tool capability resources", async () => {

@@ -298,6 +298,52 @@ export interface ProviderRequestSurface {
 }
 
 /**
+ * How the Personal Agent Config Kit strips a provider's ambient configuration
+ * so a Kit turn only ever sees the verified baseline.
+ *
+ * - `bare-flag`: the CLI itself has a first-class "ignore all local state" flag
+ *   (Claude `--bare`).
+ * - `strip-ambient`: the CLI exposes enough individual levers (config exclusion,
+ *   feature disables, env scrubbing) plus a prompt-inspection surface the
+ *   gateway probes before each turn (Codex).
+ * - `controlled-environment`: the CLI has neither, so the gateway CONSTRUCTS the
+ *   complete environment it reads (redirected home, gateway-written config,
+ *   untrusted cwd, asserted file manifest) (Mistral Vibe).
+ * - `null`: the provider is not Kit-supported, so no isolation model applies.
+ */
+export type KitIsolationModel = "bare-flag" | "strip-ambient" | "controlled-environment" | null;
+
+/**
+ * Personal Agent Config Kit facts for a provider. This is the ONLY place Kit
+ * provider support is declared: the admission gates
+ * (`validateKitRequestSurface`, `rejectUnsupportedKitProvider`), the doctor
+ * readiness report, `config_status`, and `provider_tool_capabilities` all derive
+ * from it, so a provider can never be admitted by one surface and reported
+ * unsupported by another.
+ */
+export interface ProviderPersonalConfigKit {
+  /** Whether the Kit admission gates admit this provider. */
+  readonly supported: boolean;
+  /** How ambient provider configuration is neutralised for a Kit turn. */
+  readonly isolationModel: KitIsolationModel;
+  /**
+   * Env var holding the credential a Kit turn REQUIRES, or null when the Kit
+   * uses the provider's normal ambient credentials. Isolation can cut a
+   * provider off from its keychain/OAuth state, in which case an API key in the
+   * gateway process environment is the only remaining channel.
+   */
+  readonly requiredCredentialEnv: string | null;
+  /**
+   * How the Kit selects the canonical working folder. `workspace-only` rejects
+   * a caller `workingDir` outright; `working-dir-or-workspace` accepts an
+   * absolute one.
+   */
+  readonly scopeSelection: "workspace-only" | "working-dir-or-workspace" | null;
+  /** Secret-free operator-facing notes (preconditions, caveats). */
+  readonly notes: readonly string[];
+}
+
+/**
  * The single per-provider source of truth. Every field group here must carry
  * enough to drive request schemas, resources, model/session discovery,
  * capabilities, admin surfaces, upstream contracts, native ACP routing, and
@@ -329,9 +375,22 @@ export interface ProviderDefinition {
   readonly streamingFormats: readonly string[];
   readonly resourcePolicy: ProviderResourcePolicy;
   readonly upstreamContract: ProviderUpstreamLinkage;
+  /** Personal Agent Config Kit support facts (the Kit admission source of truth). */
+  readonly personalConfigKit: ProviderPersonalConfigKit;
   /** `maintain-only` = out of scope for NEW capability (cursor), kept complete. */
   readonly capabilityScope: CapabilityScope;
 }
+
+/** The Kit fact every provider that has no Kit route shares. */
+const KIT_UNSUPPORTED: ProviderPersonalConfigKit = {
+  supported: false,
+  isolationModel: null,
+  requiredCredentialEnv: null,
+  scopeSelection: null,
+  notes: [
+    "No Personal Agent Config Kit route: the gateway cannot yet guarantee this provider reads only the verified baseline, so Kit requests fail closed.",
+  ],
+};
 
 // ---------------------------------------------------------------------------
 // The registry. `satisfies Record<CliType, ProviderDefinition>` is the primary
@@ -469,6 +528,17 @@ const PROVIDER_DEFINITIONS = {
     upstreamContract: {
       targetVersion: PROVIDER_TARGET_VERSIONS.claude,
       helpChecksumRef: "claude--help.txt",
+    },
+    personalConfigKit: {
+      supported: true,
+      isolationModel: "bare-flag",
+      requiredCredentialEnv: "ANTHROPIC_API_KEY",
+      scopeSelection: "workspace-only",
+      notes: [
+        "Kit forces safe mode and `--bare`, so local configuration and keychain discovery cannot add an instruction or credential layer.",
+        "Claude Code OAuth and keychain authentication are unavailable under `--bare`; ANTHROPIC_API_KEY in the gateway process environment is the only credential channel.",
+        "A caller-supplied workingDir is rejected: the folder comes from a registered workspace alias or the configured default workspace.",
+      ],
     },
     capabilityScope: "full",
   },
@@ -621,6 +691,17 @@ const PROVIDER_DEFINITIONS = {
       targetVersion: PROVIDER_TARGET_VERSIONS.codex,
       helpChecksumRef: "codex-exec--help.txt",
     },
+    personalConfigKit: {
+      supported: true,
+      isolationModel: "strip-ambient",
+      requiredCredentialEnv: null,
+      scopeSelection: "working-dir-or-workspace",
+      notes: [
+        "Kit forces user-config and rules exclusion, disables apps, plugins, hooks, multi-agent execution, memories, web search, and project prompt discovery, and removes inherited CODEX_*, endpoint, and proxy redirects before launch.",
+        "Before each turn the gateway probes the installed CLI, disables every discovered skill path, and verifies skills and apps no longer appear in the model-visible prompt; an unrecognised debug format fails closed.",
+        "Native continuity resumes only when the provider's structured output supplies a verified native session ID.",
+      ],
+    },
     capabilityScope: "full",
   },
   gemini: {
@@ -729,6 +810,7 @@ const PROVIDER_DEFINITIONS = {
       targetVersion: PROVIDER_TARGET_VERSIONS.gemini,
       helpChecksumRef: "agy--help.txt",
     },
+    personalConfigKit: KIT_UNSUPPORTED,
     capabilityScope: "full",
   },
   grok: {
@@ -845,6 +927,7 @@ const PROVIDER_DEFINITIONS = {
       targetVersion: PROVIDER_TARGET_VERSIONS.grok,
       helpChecksumRef: "grok--help.txt",
     },
+    personalConfigKit: KIT_UNSUPPORTED,
     capabilityScope: "full",
   },
   mistral: {
@@ -979,6 +1062,18 @@ const PROVIDER_DEFINITIONS = {
       targetVersion: PROVIDER_TARGET_VERSIONS.mistral,
       helpChecksumRef: "vibe--help.txt",
     },
+    personalConfigKit: {
+      supported: true,
+      isolationModel: "controlled-environment",
+      requiredCredentialEnv: "MISTRAL_API_KEY",
+      scopeSelection: "workspace-only",
+      notes: [
+        "Vibe has neither a bare flag nor a prompt-inspection surface, so the gateway constructs the complete environment it reads: HOME and VIBE_HOME are redirected into a fresh per-attempt directory whose exact file manifest is asserted before launch, the working folder is left untrusted, and the bare-name env vars the VIBE_* lever cannot reach are scrubbed.",
+        "The keyring is disabled inside the redirected home, so MISTRAL_API_KEY in the gateway process environment is the only credential channel.",
+        "The Kit writes its own `[session_logging]` block, so the ambient ~/.vibe/config.toml session-logging setting neither enables nor blocks a Kit turn; session logs go to a stable gateway-owned save_dir that native `--resume` reads.",
+        'A caller-supplied workingDir is rejected: the folder comes from a registered workspace alias or the configured default workspace. `transport: "acp"` is rejected because it would route around the isolation environment.',
+      ],
+    },
     capabilityScope: "full",
   },
   devin: {
@@ -1102,6 +1197,7 @@ const PROVIDER_DEFINITIONS = {
       targetVersion: PROVIDER_TARGET_VERSIONS.devin,
       helpChecksumRef: "devin--help.txt",
     },
+    personalConfigKit: KIT_UNSUPPORTED,
     capabilityScope: "full",
   },
   cursor: {
@@ -1193,6 +1289,7 @@ const PROVIDER_DEFINITIONS = {
       targetVersion: PROVIDER_TARGET_VERSIONS.cursor,
       helpChecksumRef: "cursor-agent--help.txt",
     },
+    personalConfigKit: KIT_UNSUPPORTED,
     capabilityScope: "maintain-only",
   },
 } satisfies Record<CliType, ProviderDefinition>;
@@ -1224,4 +1321,44 @@ export function getProviderDisplayName(id: CliType): string {
 /** Short session label for a provider (e.g. "Claude Session"). */
 export function getProviderSessionLabel(id: CliType): string {
   return PROVIDER_DEFINITIONS_BY_ID[id].sessionLabel;
+}
+
+/** Personal Agent Config Kit facts for a provider. */
+export function getProviderPersonalConfigKit(id: CliType): ProviderPersonalConfigKit {
+  return PROVIDER_DEFINITIONS_BY_ID[id].personalConfigKit;
+}
+
+/**
+ * Every Kit-supported provider, in CLI_TYPES order. Derived from the registry:
+ * the admission gates, doctor, `config_status`, and the capability surface all
+ * read this rather than keeping their own provider list.
+ */
+export const KIT_SUPPORTED_PROVIDERS: readonly CliType[] = Object.freeze(
+  CLI_TYPES.filter(id => PROVIDER_DEFINITIONS_BY_ID[id].personalConfigKit.supported)
+);
+
+/** Whether the Kit admission gates admit this provider name. */
+export function isKitSupportedProvider(provider: string): provider is CliType {
+  return (KIT_SUPPORTED_PROVIDERS as readonly string[]).includes(provider);
+}
+
+/**
+ * Short capitalised provider label for Kit operator messages ("Claude"). The
+ * full `displayName` ("Anthropic Claude Code") is too long to read well inside
+ * a sentence about a request field.
+ */
+export function getKitProviderLabel(id: CliType): string {
+  return `${id[0].toUpperCase()}${id.slice(1)}`;
+}
+
+/**
+ * Kit-supported providers as a human-readable list for gate error messages
+ * ("Claude, Codex and Mistral"), derived so a newly supported provider cannot
+ * leave a stale message behind.
+ */
+export function describeKitSupportedProviders(): string {
+  const names = KIT_SUPPORTED_PROVIDERS.map(getKitProviderLabel);
+  if (names.length === 0) return "no providers";
+  if (names.length === 1) return names[0];
+  return `${names.slice(0, -1).join(", ")} and ${names[names.length - 1]}`;
 }

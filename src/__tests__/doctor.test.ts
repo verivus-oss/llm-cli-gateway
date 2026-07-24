@@ -21,6 +21,7 @@ import type { EndpointExposureReport } from "../endpoint-exposure.js";
 import { PERSONAL_CONFIG_SYNC_ERROR_WITHHELD } from "../personal-config.js";
 import type { RemoteSafeWorkspaceSummary } from "../workspace-registry.js";
 import { CLI_TYPES } from "../provider-types.js";
+import { getProviderPersonalConfigKit } from "../provider-definitions.js";
 import { knownProviderCapabilityIds } from "../provider-tool-capabilities.js";
 
 // Layer 6 / U20: doctor JSON schema shape + secret redaction coverage.
@@ -402,7 +403,9 @@ describe("Personal Agent Config doctor readiness", () => {
   });
 
   it("keeps the disabled Kit compact and ready", () => {
-    expect(buildPersonalConfigReadinessReport({ enabled: false })).toEqual({
+    const report = buildPersonalConfigReadinessReport({ enabled: false });
+    const { provider_eligibility: providerEligibility, ...base } = report;
+    expect(base).toEqual({
       enabled: false,
       configuration_valid: true,
       ready: true,
@@ -414,6 +417,65 @@ describe("Personal Agent Config doctor readiness", () => {
       last_sync_error: null,
       durable_async_configured: false,
     });
+    // Eligibility is always complete, so an agent never has to infer a missing
+    // provider's Kit status from silence.
+    expect(Object.keys(providerEligibility).sort()).toEqual([...CLI_TYPES].sort());
+    for (const entry of Object.values(providerEligibility)) {
+      expect(entry.eligible).toBe(false);
+    }
+  });
+
+  it("derives Kit provider eligibility from the provider registry", () => {
+    const report = buildPersonalConfigReadinessReport({ enabled: false });
+    for (const provider of CLI_TYPES) {
+      const kit = getProviderPersonalConfigKit(provider);
+      const entry = report.provider_eligibility[provider];
+      expect(entry.kit_supported).toBe(kit.supported);
+      expect(entry.isolation_model).toBe(kit.isolationModel);
+      expect(entry.required_credential_env).toBe(kit.requiredCredentialEnv);
+      expect(entry.blockers.length).toBeGreaterThan(0);
+    }
+  });
+
+  it("reports mistral Kit eligibility and its credential precondition", () => {
+    const healthy = {
+      enabled: true as const,
+      status: healthyStatus,
+      persistence: { backend: "sqlite" as const, asyncJobsEnabled: true },
+    };
+
+    const withoutKey = buildPersonalConfigReadinessReport(healthy).provider_eligibility.mistral;
+    expect(withoutKey.kit_supported).toBe(true);
+    expect(withoutKey.isolation_model).toBe("controlled-environment");
+    expect(withoutKey.eligible).toBe(false);
+    expect(withoutKey.required_credential_configured).toBe(false);
+    expect(withoutKey.blockers).toEqual([
+      "MISTRAL_API_KEY is not set in the gateway process environment",
+    ]);
+
+    const withKey = buildPersonalConfigReadinessReport({
+      ...healthy,
+      credentialEnvConfigured: { MISTRAL_API_KEY: true },
+    }).provider_eligibility.mistral;
+    expect(withKey.eligible).toBe(true);
+    expect(withKey.required_credential_configured).toBe(true);
+    expect(withKey.blockers).toEqual([]);
+    // Presence only: the report never carries the credential itself.
+    expect(JSON.stringify(withKey)).not.toContain("sk-");
+  });
+
+  it("keeps an unsupported provider ineligible with an explicit blocker", () => {
+    const entry = buildPersonalConfigReadinessReport({
+      enabled: true,
+      status: healthyStatus,
+      persistence: { backend: "sqlite", asyncJobsEnabled: true },
+      credentialEnvConfigured: { MISTRAL_API_KEY: true },
+    }).provider_eligibility.gemini;
+    expect(entry.kit_supported).toBe(false);
+    expect(entry.eligible).toBe(false);
+    expect(entry.blockers).toEqual([
+      "Gemini has no Personal Agent Config Kit route; Kit requests for it fail closed",
+    ]);
   });
 
   it("reports the Claude Kit isolated-auth prerequisite without exposing a credential", () => {
@@ -432,6 +494,30 @@ describe("Personal Agent Config doctor readiness", () => {
       expect.arrayContaining([expect.stringContaining("ANTHROPIC_API_KEY")])
     );
     expect(JSON.stringify(report.personal_config)).not.toContain("ANTHROPIC_API_KEY=");
+    // The Claude credential guidance is emitted exactly once, not duplicated by
+    // the per-provider credential pass.
+    expect(report.next_actions.filter(action => action.includes("ANTHROPIC_API_KEY"))).toHaveLength(
+      1
+    );
+  });
+
+  it("guides a missing Mistral Kit credential even when the legacy ready flag is true", () => {
+    const report = createDoctorReport({
+      personalConfigReadiness: buildPersonalConfigReadinessReport({
+        enabled: true,
+        status: healthyStatus,
+        persistence: { backend: "sqlite", asyncJobsEnabled: true },
+        claudeBareAuthConfigured: true,
+      }),
+    });
+
+    expect(report.personal_config.ready).toBe(true);
+    expect(report.personal_config.provider_eligibility.mistral.eligible).toBe(false);
+    expect(report.next_actions).toEqual(
+      expect.arrayContaining([
+        "Set MISTRAL_API_KEY in the gateway process environment before using Mistral Personal Agent Config Kit requests.",
+      ])
+    );
   });
 });
 

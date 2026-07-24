@@ -188,6 +188,10 @@ import {
 import { getProviderToolCapabilities } from "./provider-tool-capabilities.js";
 import {
   getProviderDefinition,
+  getProviderPersonalConfigKit,
+  getKitProviderLabel,
+  describeKitSupportedProviders,
+  isKitSupportedProvider,
   DEVIN_ACP_AGENT_TYPES,
   type DevinAcpAgentType,
 } from "./provider-definitions.js";
@@ -7905,11 +7909,15 @@ function resolvePersonalKitContext(
       ? params.workingDir
       : requestedWorkspace?.path;
   if (!configuredWorkingDir) {
+    // The accepted inputs follow the registry's `scopeSelection` fact. A
+    // workspace-only provider (claude, mistral) conflict-rejects workingDir, so
+    // naming one in its guidance would recommend a rejected field.
+    const providerLabel = getKitProviderLabel(provider);
     throw new PersonalConfigError(
       "kit_context_conflict",
-      provider === "claude"
-        ? "Claude Kit requests require a registered workspace alias or configured default workspace"
-        : "Codex Kit requests require an absolute workingDir, registered workspace alias, or configured default workspace"
+      getProviderPersonalConfigKit(provider).scopeSelection === "working-dir-or-workspace"
+        ? `${providerLabel} Kit requests require an absolute workingDir, registered workspace alias, or configured default workspace`
+        : `${providerLabel} Kit requests require a registered workspace alias or configured default workspace`
     );
   }
   // Keep the two alias roles distinct. An alias named on this request asserts
@@ -7986,12 +7994,10 @@ function rejectUnsupportedKitProvider(
   operation: string,
   corrId: string
 ): ExtendedToolResponse | null {
-  if (
-    !runtime.personalConfig?.settings.enabled ||
-    provider === "claude" ||
-    provider === "codex" ||
-    provider === "mistral"
-  ) {
+  // Derived from the provider registry (`personalConfigKit.supported`), the
+  // same source `validateKitRequestSurface` reads, so the first-line gate and
+  // the surface gate cannot disagree about which providers are admitted.
+  if (!runtime.personalConfig?.settings.enabled || isKitSupportedProvider(provider)) {
     return null;
   }
   return personalKitErrorResponse(
@@ -7999,7 +8005,7 @@ function rejectUnsupportedKitProvider(
     corrId,
     new PersonalConfigError(
       "kit_provider_unsupported",
-      `Personal Agent Config Kit supports Claude, Codex and Mistral only; ${provider} is unavailable while Kit mode is enabled`
+      `Personal Agent Config Kit supports ${describeKitSupportedProviders()} only; ${provider} is unavailable while Kit mode is enabled`
     )
   );
 }

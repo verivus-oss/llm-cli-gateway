@@ -27,6 +27,14 @@ import { noopLogger } from "./logger.js";
 import { defaultGatewayConfigPath } from "./config.js";
 import type { WorkspaceRepo } from "./workspace-registry.js";
 import type { KitExecutionRef } from "./personal-config-types.js";
+import {
+  CLI_TYPES,
+  describeKitSupportedProviders,
+  getProviderPersonalConfigKit,
+  isKitSupportedProvider,
+  type CliType,
+  type KitIsolationModel,
+} from "./provider-definitions.js";
 
 export const PERSONAL_CONFIG_COMPILER_VERSION = "1";
 export const DEFAULT_PERSONAL_CONFIG_MAX_STALE_HOURS = 168;
@@ -268,6 +276,25 @@ export interface SyncPersonalConfigOptions extends PersonalConfigNetworkOptions 
   branch?: string;
 }
 
+/**
+ * Per-provider Kit availability as `config_status` reports it.
+ *
+ * `kitEligible` covers what this local Kit state can prove: the provider has a
+ * Kit route, the Kit is enabled, a non-stale verified release is active, and
+ * any required credential env var is present. It deliberately does NOT assert
+ * durable job admission, which belongs to the persistence configuration; run
+ * `doctor` for that (`personal_config.provider_eligibility`).
+ */
+export interface PersonalConfigKitProviderStatus {
+  kitSupported: boolean;
+  kitEligible: boolean;
+  isolationModel: KitIsolationModel;
+  /** Env var name (never its value) the Kit requires for this provider. */
+  requiredCredentialEnv: string | null;
+  /** Whether that env var resolves to a non-empty value in this process. */
+  requiredCredentialConfigured: boolean;
+}
+
 export interface PersonalConfigStatus {
   enabled: boolean;
   baselinePresent: boolean;
@@ -276,6 +303,8 @@ export interface PersonalConfigStatus {
   stale: boolean;
   staleAckUntil: string | null;
   lastSyncError: string | null;
+  /** Kit availability for every provider, keyed by CliType. Always complete. */
+  kitProviders: Record<CliType, PersonalConfigKitProviderStatus>;
 }
 
 /**
@@ -1756,20 +1785,55 @@ export function rollbackPersonalConfig(
   });
 }
 
+/**
+ * Project the registry's Kit facts onto the current local baseline state.
+ * Reads only credential env var PRESENCE, never a value.
+ */
+function buildKitProviderStatuses(
+  baselineReady: boolean,
+  env: NodeJS.ProcessEnv = process.env
+): Record<CliType, PersonalConfigKitProviderStatus> {
+  return Object.fromEntries(
+    CLI_TYPES.map(provider => {
+      const kit = getProviderPersonalConfigKit(provider);
+      const credentialConfigured =
+        kit.requiredCredentialEnv !== null && Boolean(env[kit.requiredCredentialEnv]?.trim());
+      return [
+        provider,
+        {
+          kitSupported: kit.supported,
+          kitEligible:
+            kit.supported &&
+            baselineReady &&
+            (kit.requiredCredentialEnv === null || credentialConfigured),
+          isolationModel: kit.isolationModel,
+          requiredCredentialEnv: kit.requiredCredentialEnv,
+          requiredCredentialConfigured: credentialConfigured,
+        },
+      ];
+    })
+  ) as Record<CliType, PersonalConfigKitProviderStatus>;
+}
+
 export function getPersonalConfigStatus(
   layout: KitPathLayout,
   settings: PersonalConfigSettings
 ): PersonalConfigStatus {
   const state = readPersonalConfigState(layout);
   const current = getCurrentPersonalConfigRelease(layout)?.id ?? null;
+  const baselinePresent = isGitRepo(layout.baselineDir);
+  const stale = isKitStale(state, settings.maxStaleHours, Date.now(), current);
   return {
     enabled: settings.enabled,
-    baselinePresent: isGitRepo(layout.baselineDir),
+    baselinePresent,
     currentReleaseId: current,
     lastSuccessAt: state.lastSuccessAt,
-    stale: isKitStale(state, settings.maxStaleHours, Date.now(), current),
+    stale,
     staleAckUntil: state.staleAckUntil,
     lastSyncError: state.lastSyncError,
+    kitProviders: buildKitProviderStatuses(
+      settings.enabled && baselinePresent && current !== null && !stale
+    ),
   };
 }
 
@@ -2550,10 +2614,13 @@ export function validateKitRequestSurface(
   enabled: boolean
 ): void {
   if (!enabled) return;
-  if (provider !== "claude" && provider !== "codex" && provider !== "mistral") {
+  // Kit provider support is declared once, in the provider registry
+  // (`personalConfigKit.supported`). Deriving it here keeps this gate and
+  // `rejectUnsupportedKitProvider` from drifting apart.
+  if (!isKitSupportedProvider(provider)) {
     throw new PersonalConfigError(
       "kit_provider_unsupported",
-      `Personal Agent Config Kit currently supports Claude, Codex and Mistral only, not ${provider}`
+      `Personal Agent Config Kit currently supports ${describeKitSupportedProviders()} only, not ${provider}`
     );
   }
   const fields =
