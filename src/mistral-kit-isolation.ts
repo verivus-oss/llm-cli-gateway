@@ -267,6 +267,46 @@ export function applyMistralKitIsolationEnv(
 }
 
 /**
+ * Mistral Kit (M3): the executor-compatible projection of {@link applyMistralKitIsolationEnv}.
+ *
+ * The gateway executor merges the per-request env fragment OVER the (extended-PATH)
+ * inherited process env (`{ ...baseEnv, ...extraEnv }`); it never replaces the env
+ * wholesale, and `assertUpstreamCliEnv` allowlists every REAL key in the fragment. So
+ * the full controlled env that `applyMistralKitIsolationEnv` returns is the wrong shape
+ * for the spawn: passing it would (a) re-inherit ambient `VIBE_*`/scrub keys that the
+ * merge does not delete, and (b) present every inherited key to the env allowlist.
+ *
+ * This returns a DELETE-FRAGMENT instead: `undefined` for every ambient `VIBE_*` and
+ * bare-name scrub key (the executor drops `undefined` at the spawn boundary, and the
+ * env-contract validator skips them), plus the gateway lever set from `plan.env` as the
+ * only real values. Merged over the extended-PATH base it yields exactly the controlled
+ * env, while keeping the fragment's real keys inside the mistral env allowlist and
+ * leaving PATH to the executor's extended-PATH logic. The gateway's own resolved
+ * `VIBE_ACTIVE_MODEL` (deleted here as an ambient `VIBE_*`) is re-applied by the caller.
+ */
+export function mistralKitSpawnEnvFragment(
+  baseEnv: NodeJS.ProcessEnv,
+  plan: MistralKitIsolationPlan
+): NodeJS.ProcessEnv {
+  if (!isIssuedMistralKitIsolationPlan(plan)) {
+    throw new MistralKitIsolationError(
+      "mistral Kit spawn env fragment requires a plan issued by createMistralKitIsolationPlan"
+    );
+  }
+  const scrub = new Set(plan.scrubKeys);
+  const fragment: NodeJS.ProcessEnv = {};
+  for (const key of Object.keys(baseEnv)) {
+    // Delete ambient VIBE_* injectors and the bare-name BaseSettings vars the
+    // VIBE_* lever cannot reach; the gateway re-adds only its own below.
+    if (/^VIBE_/i.test(key) || scrub.has(key)) fragment[key] = undefined;
+  }
+  // Gateway levers win (HOME/VIBE_HOME redirects, keyring disable, api key, the
+  // gateway's own VIBE_* force-offs). All are inside the mistral env allowlist.
+  Object.assign(fragment, plan.env);
+  return fragment;
+}
+
+/**
  * Mistral Kit (M2): context delivery. Vibe's VIBE_HOME-level `AGENTS.md` channel is
  * gated on `include_project_context`, which the isolation forces OFF, so the compiled
  * Kit context is delivered as a PROMPT PREFIX: the `<gateway-personal-config stamp=...>`

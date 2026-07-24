@@ -2523,8 +2523,12 @@ const CODEX_KIT_CONFLICT_FIELDS = [
 // isolation. `transport` (acp) would route around the CLI isolation env entirely.
 // promptParts.{system,tools,context,cacheControl} and approvalStrategy:mcp_managed are
 // handled by the shared checks below (as for claude/codex).
+// NOTE: `transport` is NOT a plain conflict field. The schema defaults it to
+// "cli" (a present string), so listing it here would reject EVERY Kit request.
+// Only `transport: "acp"` (which routes around the CLI isolation env) is a
+// conflict; it is handled by the special-case below, exactly like
+// `approvalStrategy: "mcp_managed"`.
 const MISTRAL_KIT_CONFLICT_FIELDS = [
-  "transport",
   "sessionId",
   "resumeLatest",
   "createNewSession",
@@ -2563,6 +2567,11 @@ export function validateKitRequestSurface(
   // gateway-managed mode here because it can select a different approval
   // posture than the personal baseline's provider defaults.
   if (params.approvalStrategy === "mcp_managed") conflicts.push("approvalStrategy" as never);
+  // Mistral: the ACP transport routes around the controlled-environment isolation
+  // env entirely, so it is a Kit conflict. `transport: "cli"` / undefined is fine.
+  if (provider === "mistral" && params.transport === "acp") {
+    conflicts.push("transport" as never);
+  }
   const promptParts = params.promptParts;
   if (isRecord(promptParts)) {
     for (const field of ["system", "tools", "context", "cacheControl"]) {

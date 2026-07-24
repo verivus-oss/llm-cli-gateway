@@ -47,6 +47,7 @@ import {
 import { assertMcpArtifactAdmissionInvariant } from "./mcp-artifact-admission.js";
 import {
   createPersonalKitTerminalMetadata,
+  createVibeKitTerminalMetadata,
   extractProviderOutputMetadata,
   redactKnownProviderSessionId,
   type PersonalKitTerminalMetadata,
@@ -782,6 +783,16 @@ interface AsyncJobRecord {
   kitTerminalFinalized: boolean;
   /** Process-local validated continuation fact, never a durable job value. */
   kitTerminalMetadata?: PersonalKitTerminalMetadata | null;
+  /**
+   * Mistral Kit (M3): the gateway-owned ephemeral home whose
+   * `<home>/.vibe/logs/session` holds the native session UUID. Vibe emits no
+   * session id on stdout, so the deferred terminal metadata is captured from
+   * disk under this home. IN-MEMORY ONLY and process-local (like the native
+   * handle itself): never persisted, so a row hydrated after a restart has it
+   * undefined and native continuity is intentionally unavailable, exactly as for
+   * claude/codex. Undefined for every non-mistral-Kit job.
+   */
+  kitNativeCaptureHome?: string;
   /** False only for a row hydrated after a process restart. */
   kitOutputAvailableInMemory?: boolean;
   /** True only after recordComplete has durably recorded this terminal result. */
@@ -1168,6 +1179,12 @@ export interface StartJobOptions {
   kitExecution?: KitExecutionRef | null;
   /** Gateway-owned Kit session. Required whenever `kitExecution` is supplied. */
   kitSessionId?: string;
+  /**
+   * Mistral Kit (M3): gateway-owned ephemeral home for disk-based native session
+   * capture on the deferred path. Process-local, never persisted (see the
+   * `AsyncJobRecord.kitNativeCaptureHome` note). Set only for mistral Kit jobs.
+   */
+  kitNativeCaptureHome?: string;
   /**
    * Caller-reserved durable id for a Kit job. The Kit session records this id
    * before admission, closing the session-to-job crash gap.
@@ -3066,7 +3083,16 @@ export class AsyncJobManager {
     if (job.kitTerminalMetadata !== undefined) return job.kitTerminalMetadata;
     job.kitTerminalMetadata =
       job.status === "completed"
-        ? createPersonalKitTerminalMetadata(job.cli, job.stdout, job.outputFormat)
+        ? // Mistral Vibe emits no session id on stdout; its native UUID lives on
+          // disk under the gateway-owned VIBE_HOME. Capture it there instead of
+          // parsing stdout. The home is process-local (undefined after a restart),
+          // so a hydrated row yields a null handle and native continuity is
+          // unavailable, exactly as for the stdout-based claude/codex path.
+          job.cli === "mistral"
+          ? job.kitNativeCaptureHome
+            ? createVibeKitTerminalMetadata(job.kitNativeCaptureHome)
+            : null
+          : createPersonalKitTerminalMetadata(job.cli, job.stdout, job.outputFormat)
         : null;
     return job.kitTerminalMetadata;
   }
@@ -3403,6 +3429,7 @@ export class AsyncJobManager {
       onTerminal,
       kitExecution,
       kitSessionId,
+      kitNativeCaptureHome,
       jobId,
       flightRecorderEntry,
       extractUsage,
@@ -3537,6 +3564,7 @@ export class AsyncJobManager {
       mcpArtifactScope: durableMcpArtifactScope,
       kitExecution: stableKitExecution,
       kitSessionId: stableKitSessionId,
+      kitNativeCaptureHome: stableKitExecution ? kitNativeCaptureHome : undefined,
       kitOutputAvailableInMemory: stableKitExecution !== null,
       kitTerminalFinalized: false,
       terminalPersistenceAcknowledged: stableKitExecution === null,
