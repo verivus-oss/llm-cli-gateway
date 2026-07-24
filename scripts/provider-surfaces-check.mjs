@@ -117,12 +117,15 @@ function findAllRegex(content, regex) {
  * stricter first draft three ways: a single-quoted ternary, a different
  * left-hand side (`cli === ...`), and a NEGATED comparison
  * (`provider !== "claude" ? "Codex" : "Claude"`, which has the same bug with
- * the arms swapped). So: any identifier, either equality operator, either quote
- * style. The `[A-Z]` guard on both arms keeps it to LABELS, so an ordinary
- * value ternary (`provider === "claude" ? "stream-json" : "json"`) is untouched.
+ * the arms swapped), then a fourth: a PARENTHESISED condition,
+ * `(provider === "claude") ? "Claude" : "Codex"`, which is ordinary TS style
+ * and appears in this tree. So: optional grouping parens, any identifier,
+ * either equality operator, either quote style. The `[A-Z]` guard on both arms
+ * keeps it to LABELS, so an ordinary value ternary
+ * (`provider === "claude" ? "stream-json" : "json"`) is untouched.
  */
 const PROVIDER_LABEL_TERNARY = new RegExp(
-  `\\w+\\s*[!=]==\\s*(['"])(?:${PROVIDER_NAME})\\1\\s*\\?\\s*(['"])[A-Z]\\w*\\2\\s*:\\s*(['"])[A-Z]\\w*\\3`
+  `\\(?\\s*\\w+\\s*[!=]==\\s*(['"])(?:${PROVIDER_NAME})\\1\\s*\\)?\\s*\\?\\s*(['"])[A-Z]\\w*\\2\\s*:\\s*(['"])[A-Z]\\w*\\3`
 );
 
 /**
