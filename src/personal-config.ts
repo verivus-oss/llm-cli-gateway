@@ -2516,19 +2516,48 @@ const CODEX_KIT_CONFLICT_FIELDS = [
   "outputFormat",
 ] as const;
 
+// Mistral Kit (M2): every request field that would inject an instruction/tool/MCP
+// surface, change the managed agent posture, break the untrusted-cwd isolation, or
+// supply a raw native session. `trust` is the most important: it would session-trust
+// the cwd and re-admit project-local .vibe/.agents/AGENTS.md, defeating the M1
+// isolation. `transport` (acp) would route around the CLI isolation env entirely.
+// promptParts.{system,tools,context,cacheControl} and approvalStrategy:mcp_managed are
+// handled by the shared checks below (as for claude/codex).
+const MISTRAL_KIT_CONFLICT_FIELDS = [
+  "transport",
+  "sessionId",
+  "resumeLatest",
+  "createNewSession",
+  "permissionMode",
+  "approvalPolicy",
+  "mcpServers",
+  "allowedTools",
+  "disallowedTools",
+  "trust",
+  "workingDir",
+  "addDir",
+  "worktree",
+  "outputFormat",
+] as const;
+
 export function validateKitRequestSurface(
   provider: string,
   params: Record<string, unknown>,
   enabled: boolean
 ): void {
   if (!enabled) return;
-  if (provider !== "claude" && provider !== "codex") {
+  if (provider !== "claude" && provider !== "codex" && provider !== "mistral") {
     throw new PersonalConfigError(
       "kit_provider_unsupported",
-      `Personal Agent Config Kit currently supports Claude and Codex only, not ${provider}`
+      `Personal Agent Config Kit currently supports Claude, Codex and Mistral only, not ${provider}`
     );
   }
-  const fields = provider === "claude" ? CLAUDE_KIT_CONFLICT_FIELDS : CODEX_KIT_CONFLICT_FIELDS;
+  const fields =
+    provider === "claude"
+      ? CLAUDE_KIT_CONFLICT_FIELDS
+      : provider === "codex"
+        ? CODEX_KIT_CONFLICT_FIELDS
+        : MISTRAL_KIT_CONFLICT_FIELDS;
   const conflicts = fields.filter(field => fieldIsPresent(params[field]));
   // The normal schema default is `legacy`. A caller may not opt into the
   // gateway-managed mode here because it can select a different approval
