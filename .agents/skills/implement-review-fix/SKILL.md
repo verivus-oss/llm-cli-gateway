@@ -186,8 +186,8 @@ its capability record say it is resumable. Do not pass a gateway `gw-*` ID as a
 native session ID. Codex needs a real Codex UUID or `resumeLatest:true`; Gemini
 only reports `resumable:true` for a caller-supplied usable conversation ID.
 
-Personal Agent Config Kit is local-only and supports only Claude/Codex with
-healthy SQLite/PostgreSQL durable admission. It disables validation and
+Personal Agent Config Kit is local-only and supports only
+Claude/Codex/Mistral with healthy SQLite/PostgreSQL durable admission. It disables validation and
 least-cost routing. If an effective Kit profile caps turns or budget, it cannot
 produce an unconditional exhaustive review. Use
 `explain_effective_config({workingDir:"<repo>"})` first, then obtain an

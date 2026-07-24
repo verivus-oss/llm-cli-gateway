@@ -498,11 +498,12 @@ For long-running async loops on a Claude session, treat the warning as a hint to
 - **Durable results outlive in-memory caches** only on SQLite/PostgreSQL. Do not
   hold polling open merely to avoid losing a durable result; memory-backed
   results still disappear on a process exit.
-- When Personal Agent Config Kit is enabled, only Claude/Codex Kit requests are
-  admitted, and they require healthy SQLite/PostgreSQL durable admission.
+- When Personal Agent Config Kit is enabled, only Claude/Codex/Mistral Kit
+  requests are admitted, and they require healthy SQLite/PostgreSQL durable admission.
   Cross-provider validation and least-cost routing are unavailable in Kit mode.
-  The normal Claude `workingDir` targeting rule does not apply to a Claude Kit
-  request: it rejects caller-supplied `workingDir` before context compilation.
+  The normal `workingDir` targeting rule does not apply to a Claude or Mistral
+  Kit request: both reject caller-supplied `workingDir` before context
+  compilation.
   Inspect a candidate folder with `explain_effective_config`, then target Claude
   through an already configured registered `workspace` alias or the configured
   default workspace. It never inherits the gateway process cwd.

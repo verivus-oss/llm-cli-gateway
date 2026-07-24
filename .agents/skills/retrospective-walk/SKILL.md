@@ -268,7 +268,7 @@ backed by a terminal validation run and the validation surface is registered:
   retrospective artifact.
 
 Personal Agent Config Kit disables validation tools and is limited to local
-Claude/Codex execution. Do not expect a validation receipt in Kit mode.
+Claude/Codex/Mistral execution. Do not expect a validation receipt in Kit mode.
 
 ## DAG Plan
 

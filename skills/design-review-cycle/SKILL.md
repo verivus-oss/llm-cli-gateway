@@ -29,14 +29,14 @@ replacement for a source-inspecting required CLI reviewer.
    provider is slow or unavailable.
 3. Verify that every reviewer will inspect the same repository and revision.
    A review of a default or unrelated workspace is invalid.
-4. If Personal Agent Config Kit mode is enabled, it supports Claude and Codex
-   only. route_request and normal cross-provider validation surfaces are
+4. If Personal Agent Config Kit mode is enabled, it supports Claude, Codex, and
+   Mistral only. route_request and normal cross-provider validation surfaces are
    unavailable. A requested seven-provider review is therefore blocked until
    Kit is disabled for that workflow or the user explicitly changes scope.
-   Claude Kit requests also reject caller-supplied `workingDir` before context
-   compilation. `explain_effective_config({workingDir:"<repo>"})` can inspect a
-   candidate scope, but execute Claude Kit work with an already configured
-   registered `workspace` alias or the configured default workspace. It never
+   Claude and Mistral Kit requests also reject caller-supplied `workingDir`
+   before context compilation. `explain_effective_config({workingDir:"<repo>"})`
+   can inspect a candidate scope, but execute that Kit work with an already
+   configured registered `workspace` alias or the configured default workspace. It never
    inherits the gateway process cwd.
 
 Use this local stdio targeting map:

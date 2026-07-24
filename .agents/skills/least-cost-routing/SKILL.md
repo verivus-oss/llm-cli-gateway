@@ -144,9 +144,8 @@ complete review under this repository's no-limit review contract.
 
 `route_request`, `route_request_async`, validation tools, and least-cost
 selection are not registered while Personal Agent Config Kit mode is enabled,
-even if `[least_cost].enabled = true`. Kit is local-only, supports Claude/Codex
-only, and requires durable
-SQLite/PostgreSQL admission. Do not try to route around that boundary; either
+even if `[least_cost].enabled = true`. Kit is local-only, supports
+Claude/Codex/Mistral only, and requires durable SQLite/PostgreSQL admission. Do not try to route around that boundary; either
 use a normal non-Kit gateway only with the user's explicit approval of the
 changed boundary, or report the requested routing unavailable.
 

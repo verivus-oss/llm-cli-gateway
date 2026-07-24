@@ -183,7 +183,7 @@ must be repaired/retried or reported `INCOMPLETE`/`BLOCKED`, never skipped.
 
 ## Personal Agent Config Kit
 
-Kit mode is local-only, supports only Claude/Codex, requires healthy
+Kit mode is local-only, supports only Claude/Codex/Mistral, requires healthy
 SQLite/PostgreSQL durable admission, and retires native continuation after a
 gateway restart. It disables validation and least-cost routing. Use
 `explain_effective_config` before consequential Kit work. If effective Kit caps

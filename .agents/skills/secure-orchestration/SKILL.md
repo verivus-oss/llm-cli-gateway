@@ -197,7 +197,7 @@ token/hash aggregates and cannot restore prompt/response text.
 
 ## Personal Agent Config Kit
 
-Kit is local-only, supports only Claude/Codex, requires healthy durable
+Kit is local-only, supports only Claude/Codex/Mistral, requires healthy durable
 SQLite/PostgreSQL admission, and disables validation and least-cost routing. Its
 effective profile may intentionally cap ordinary work. Before calling a Kit
 security review complete, inspect `explain_effective_config`; a turn/budget cap
