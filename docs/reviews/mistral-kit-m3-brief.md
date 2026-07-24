@@ -60,3 +60,29 @@ request's session logs live in the PRIOR ephemeral home, not the new one.
   session lease owns rollback.
 - Generic-machinery correctness: attempt lease claim/finalize, deferred terminal event,
   recovery fence, no durable persistence of native handles or the capture home.
+
+---
+
+## ROUND 2 (commit b35c55d) — verify the two blocker fixes
+
+Inspect `git -C /srv/repos/internal/verivusai-labs/rvwr/llm-cli-gateway show b35c55d`.
+
+B1 continuity fix: VIBE_HOME stays a fresh mkdtemp per request (isolation home
+strictly manifested, unchanged), but `[session_logging] save_dir` is now set to a
+STABLE gateway-owned dir under `<layout.runtimeDir>/mistral-kit-sessions/<sha256(scopeRoot+configStamp)>`
+(index.ts, in handleMistralRequest before the isolation build). mistral-kit-isolation.ts
+writes save_dir into config.toml, creates it 0700, and asserts it is an absolute real
+directory. Native capture (mistral-meta-json-parser.ts resolveNewestVibeNativeSessionId +
+provider-output-metadata.ts createVibeKitTerminalMetadata) now reads the session dir
+directly; the async job carries `kitNativeCaptureSessionDir` (async-job-manager.ts).
+  - Verify: does this make `vibe --resume <uuid>` on request 2 find the prior session
+    (since find_session_by_id globs config.save_dir)? Is the ephemeral home still strictly
+    isolated (vibe writes sessions to save_dir, not VIBE_HOME)? Is the save_dir key stable
+    across requests for the same execution and reset on a config change?
+
+B2 preferences fix: handleMistralRequest now calls `applyKitPreferences({model, maxTurns},
+kit.context.preferences)` and threads the results into prep (index.ts). Verify model_default
+and max_turns_cap are honoured.
+
+Confirm no regressions to the round-1 verified-correct parts. Give unconditional approval
+or a concrete remaining blocker (file:line + scenario).
