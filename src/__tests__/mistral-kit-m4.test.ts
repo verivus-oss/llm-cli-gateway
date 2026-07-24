@@ -52,9 +52,13 @@ describe("Kit provider support is registry-derived", () => {
     expect(describeKitSupportedProviders()).toBe("Claude, Codex and Mistral");
   });
 
-  // Operator-facing strings that redirect a caller to the Kit surface must name
-  // the whole admitted set. Hand-written copies of this list went stale when
-  // mistral was admitted (found by cross-LLM review), so they are derived now.
+  // SCOPE OF THIS TEST, stated honestly: it pins the HELPER, not its consumers.
+  // Reverting a consumer in index.ts to a hand-written two-provider list would
+  // NOT fail here. That gap is unavoidable for the two LCR guards, whose text is
+  // rewritten by safePersonalKitErrorMessage before any caller can observe it
+  // (pinned instead by the redaction test in route-request-tools.test.ts), so
+  // derivation is the control and this pins the derivation. The observable
+  // consumer, the Kit session label, is covered separately below.
   it("names every Kit request tool when redirecting a caller", () => {
     expect(describeKitRequestTools("sync")).toBe(
       "claude_request, codex_request or mistral_request"

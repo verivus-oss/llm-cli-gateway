@@ -56,10 +56,32 @@ const MANUAL_RESOURCE_BLOCK = new RegExp(
  */
 const LITERAL_RESOURCE_URI = new RegExp(`"(?:sessions|models)://(?:${PROVIDER_NAME})"`);
 
+/**
+ * Pattern (4): a hand-written Kit REQUEST-TOOL list, e.g.
+ * "use claude_request or codex_request". Kit provider support is declared once
+ * in provider-definitions.ts; any message that redirects a caller to the Kit
+ * surface must derive its tool list from `describeKitRequestTools()`, or it goes
+ * stale the moment a provider is admitted. This is not hypothetical: the
+ * claude/codex-only forms of exactly these two strings survived the mistral Kit
+ * admission and were caught only by cross-LLM review, because the messages are
+ * redacted before any caller (and therefore any test) can observe them.
+ */
+const LITERAL_KIT_TOOL_LIST = /\b(?:claude|codex|mistral)_request(?:_async)?\b[^\n]*\bor\s+(?:claude|codex|mistral)_request(?:_async)?\b/;
+
+/**
+ * Pattern (5): a two-way provider ternary that yields a provider LABEL, e.g.
+ * `provider === "claude" ? "Claude" : "Codex"`. This silently mislabels every
+ * provider outside the pair. Use `getKitProviderLabel(provider)`.
+ */
+const PROVIDER_LABEL_TERNARY =
+  /provider\s*===\s*"(?:claude|codex|mistral|gemini|grok|devin|cursor)"\s*\?\s*"[A-Z][a-z]+"\s*:\s*"[A-Z][a-z]+"/;
+
 const PATTERNS = [
   { kind: "literal-provider-array", regex: LITERAL_PROVIDER_ARRAY },
   { kind: "manual-resource-block", regex: MANUAL_RESOURCE_BLOCK },
   { kind: "literal-resource-uri", regex: LITERAL_RESOURCE_URI },
+  { kind: "literal-kit-tool-list", regex: LITERAL_KIT_TOOL_LIST },
+  { kind: "provider-label-ternary", regex: PROVIDER_LABEL_TERNARY },
 ];
 
 /**
