@@ -13211,70 +13211,46 @@ export async function handleDevinRequestAsync(
   } catch (error) {
     return createErrorResponse("devin_request_async", 1, "", corrId, error as Error);
   }
-  let sessionAdmission: SessionAdmissionMutation | undefined;
-  let worktreeLifecycle: RequestOwnedWorktreeLifecycle | undefined;
-  let jobHandedOff = false;
-  try {
-    let effectiveSessionId = sessionResult.effectiveSessionId;
-    const existingSession = sessionResult.userProvidedSession
-      ? await getExistingSessionForProvider(deps.sessionManager, effectiveSessionId, "devin", {
-          requireTrackedRemoteSession: true,
-        })
-      : undefined;
+  // RequestPipeline async A4: route devin (the remote-tracked non-Kit async sibling) through
+  // the shared async-enqueue envelope. devin has a full worktree lifecycle but NO inner
+  // worktree-resolve catch (unlike the other lifecycle siblings): its first resolve is a plain
+  // await, so a throw propagates OUT of runInsideTry to the driver catch, where nothing is
+  // committed yet (sessionAdmissionCommitted=false, worktreeLifecycle undefined) so the
+  // rollback is the same no-op as the old outer catch. devin also has NO
+  // applyEffectiveWorkingDirectory, passes outputFormat as undefined, and its startJob cwd
+  // falls back to params.workingDir. The mint stays in runInsideTry and rides via TValue;
+  // usageUpdateSessionId is the pre-mint D4 split (userProvided ? id : undefined), provably
+  // equal because the mint fires only when !userProvided. arg #9 stays
+  // worktreeLifecycle.onTerminal DIRECT. Front half (unreachable-worktree reject, session
+  // args, prep, insertAndAdmit) stays OUTSIDE the envelope.
+  const ledger = new RequestTerminalLedger(runtime, undefined);
+  const env: AsyncEnqueueEnvelope = {
+    runtime,
+    logger: deps.logger,
+    provider: "devin",
+    corrId,
+    usageUpdateSessionId: sessionResult.userProvidedSession
+      ? sessionResult.effectiveSessionId
+      : undefined,
+    ledger,
+    usageUpdateManager: deps.sessionManager,
+    rollbackManager: deps.sessionManager,
+  };
 
-    let worktreeResolution = await resolveWorkspaceAndWorktreeForRequest({
-      provider: "devin",
-      workspace: params.workspace,
-      worktree: params.worktree,
-      sessionId: effectiveSessionId,
-      runtime,
-      workingDir: params.workingDir,
-      requireStableCwd: sessionResult.resumeArgs.includes("--continue"),
-      deferWorktree: true,
-    });
+  const hooks: AsyncEnqueueHooks<{
+    worktreeResolution: ResolvedWorktree;
+    effectiveSessionId: string | undefined;
+  }> = {
+    runInsideTry: async () => {
+      let effectiveSessionId = sessionResult.effectiveSessionId;
+      const existingSession = sessionResult.userProvidedSession
+        ? await getExistingSessionForProvider(deps.sessionManager, effectiveSessionId, "devin", {
+            requireTrackedRemoteSession: true,
+          })
+        : undefined;
 
-    assertUpstreamCliArgs("devin", args);
-    assertUpstreamCliEnv("devin", undefined);
-    assertFinalCliProcessAdmission("devin", args, "devin");
-    if (sessionResult.userProvidedSession && effectiveSessionId) {
-      if (!existingSession) {
-        const admitted = await createSessionWithResolvedScope(
-          deps.sessionManager,
-          "devin",
-          "Devin Session",
-          effectiveSessionId,
-          worktreeResolution,
-          runtime
-        );
-        sessionAdmission = {
-          original: admitted.previousSession,
-          admitted: admitted.session,
-        };
-      } else {
-        const admitted = await persistResolvedSessionScope(
-          deps.sessionManager,
-          effectiveSessionId,
-          worktreeResolution,
-          runtime,
-          existingSession
-        );
-        sessionAdmission = { original: existingSession, admitted };
-      }
-    } else if (!params.createNewSession && !effectiveSessionId) {
-      const newSessionId = `${GATEWAY_SESSION_PREFIX}${randomUUID()}`;
-      const admitted = await createSessionWithResolvedScope(
-        deps.sessionManager,
-        "devin",
-        "Devin Session",
-        newSessionId,
-        worktreeResolution,
-        runtime
-      );
-      effectiveSessionId = newSessionId;
-      sessionAdmission = { original: admitted.previousSession, admitted: admitted.session };
-    }
-    if (params.worktree) {
-      worktreeResolution = await resolveWorkspaceAndWorktreeForRequest({
+      // devin has NO inner worktree-resolve catch: a throw here propagates to the driver catch.
+      let worktreeResolution = await resolveWorkspaceAndWorktreeForRequest({
         provider: "devin",
         workspace: params.workspace,
         worktree: params.worktree,
@@ -13282,88 +13258,134 @@ export async function handleDevinRequestAsync(
         runtime,
         workingDir: params.workingDir,
         requireStableCwd: sessionResult.resumeArgs.includes("--continue"),
-        expectedSession: sessionAdmission?.admitted,
+        deferWorktree: true,
       });
-      advanceSessionAdmissionWorktree(sessionAdmission, worktreeResolution);
-    }
-    worktreeLifecycle = createRequestOwnedWorktreeLifecycle(worktreeResolution, runtime, true);
-    const effectiveCompress = resolveEffectiveCompression(runtime.compression, {
-      compressResponse: params.compressResponse,
-      outputFormat: undefined,
-      outputSchemaDeclared: false,
-    });
-    const devinAsyncFrHandoff = buildAsyncFlightRecorderHandoff(
-      "devin",
-      prep,
-      effectiveSessionId,
-      undefined,
-      params.optimizePrompt
-    );
-    const job = deps.asyncJobManager.startJob(
-      "devin",
-      args,
-      corrId,
-      worktreeResolution.cwd ?? params.workingDir,
-      resolveIdleTimeout("devin", params.idleTimeoutMs),
-      undefined,
-      params.forceRefresh,
-      undefined,
-      worktreeLifecycle.onTerminal,
-      devinAsyncFrHandoff.flightRecorderEntry,
-      devinAsyncFrHandoff.extractUsage,
-      true,
-      undefined,
-      effectiveCompress,
-      undefined,
-      undefined,
-      undefined,
-      undefined,
-      sessionBoundDedupArgs(args, effectiveSessionId)
-    );
-    jobHandedOff = true;
-    if (sessionAdmission) worktreeLifecycle.transfer();
-    else await worktreeLifecycle.finishHandler();
-    await safeUpdateSessionUsageAfterJobAdmission(
-      deps.sessionManager,
-      sessionResult.userProvidedSession ? effectiveSessionId : undefined,
-      runtime
-    );
-    deps.logger.info(`[${corrId}] devin_request_async started job ${job.id}`);
-    const asyncResponse: Record<string, unknown> = {
-      success: true,
-      job,
-      sessionId: effectiveSessionId || null,
-      ...(isGatewayTrackingOnlySession("devin", effectiveSessionId)
-        ? { gatewaySessionId: effectiveSessionId, resumable: false }
-        : { resumable: sessionResult.userProvidedSession }),
-      approval: approvalDecision,
-      mcpServers: { requested: prep.requestedMcpServers },
-    };
-    if (prep.reviewIntegrity && prep.reviewIntegrity.violations.length > 0) {
-      asyncResponse.reviewIntegrity = prep.reviewIntegrity;
-    }
-    if (worktreeResolution.worktreePath) {
-      asyncResponse.worktreePath = worktreeResolution.worktreePath;
-    }
-    return {
-      content: [
-        {
-          type: "text" as const,
-          text: JSON.stringify(asyncResponse, null, 2),
-        },
-      ],
-    };
-  } catch (error) {
-    if (!jobHandedOff) {
-      await rollbackSessionAndWorktreeAdmission(
-        deps.sessionManager,
-        sessionAdmission,
-        worktreeLifecycle,
-        runtime
+
+      assertUpstreamCliArgs("devin", args);
+      assertUpstreamCliEnv("devin", undefined);
+      assertFinalCliProcessAdmission("devin", args, "devin");
+      if (sessionResult.userProvidedSession && effectiveSessionId) {
+        if (!existingSession) {
+          const admitted = await createSessionWithResolvedScope(
+            deps.sessionManager,
+            "devin",
+            "Devin Session",
+            effectiveSessionId,
+            worktreeResolution,
+            runtime
+          );
+          ledger.sessionAdmission = {
+            original: admitted.previousSession,
+            admitted: admitted.session,
+          };
+        } else {
+          const admitted = await persistResolvedSessionScope(
+            deps.sessionManager,
+            effectiveSessionId,
+            worktreeResolution,
+            runtime,
+            existingSession
+          );
+          ledger.sessionAdmission = { original: existingSession, admitted };
+        }
+      } else if (!params.createNewSession && !effectiveSessionId) {
+        const newSessionId = `${GATEWAY_SESSION_PREFIX}${randomUUID()}`;
+        const admitted = await createSessionWithResolvedScope(
+          deps.sessionManager,
+          "devin",
+          "Devin Session",
+          newSessionId,
+          worktreeResolution,
+          runtime
+        );
+        effectiveSessionId = newSessionId;
+        ledger.sessionAdmission = {
+          original: admitted.previousSession,
+          admitted: admitted.session,
+        };
+      }
+      if (params.worktree) {
+        worktreeResolution = await resolveWorkspaceAndWorktreeForRequest({
+          provider: "devin",
+          workspace: params.workspace,
+          worktree: params.worktree,
+          sessionId: effectiveSessionId,
+          runtime,
+          workingDir: params.workingDir,
+          requireStableCwd: sessionResult.resumeArgs.includes("--continue"),
+          expectedSession: ledger.sessionAdmission?.admitted,
+        });
+        advanceSessionAdmissionWorktree(ledger.sessionAdmission, worktreeResolution);
+      }
+      ledger.installWorktree(
+        createRequestOwnedWorktreeLifecycle(worktreeResolution, runtime, true)
       );
-    }
-    return createErrorResponse("devin_request_async", 1, "", corrId, error as Error);
-  }
+      return { ok: true, value: { worktreeResolution, effectiveSessionId } };
+    },
+    enqueue: async ({ worktreeResolution, effectiveSessionId }) => {
+      const effectiveCompress = resolveEffectiveCompression(runtime.compression, {
+        compressResponse: params.compressResponse,
+        outputFormat: undefined,
+        outputSchemaDeclared: false,
+      });
+      const devinAsyncFrHandoff = buildAsyncFlightRecorderHandoff(
+        "devin",
+        prep,
+        effectiveSessionId,
+        undefined,
+        params.optimizePrompt
+      );
+      return deps.asyncJobManager.startJob(
+        "devin",
+        args,
+        corrId,
+        worktreeResolution.cwd ?? params.workingDir,
+        resolveIdleTimeout("devin", params.idleTimeoutMs),
+        undefined,
+        params.forceRefresh,
+        undefined,
+        ledger.worktreeLifecycle?.onTerminal,
+        devinAsyncFrHandoff.flightRecorderEntry,
+        devinAsyncFrHandoff.extractUsage,
+        true,
+        undefined,
+        effectiveCompress,
+        undefined,
+        undefined,
+        undefined,
+        undefined,
+        sessionBoundDedupArgs(args, effectiveSessionId)
+      );
+    },
+    buildSuccessResponse: ({ job, value: { worktreeResolution, effectiveSessionId } }) => {
+      const asyncResponse: Record<string, unknown> = {
+        success: true,
+        job,
+        sessionId: effectiveSessionId || null,
+        ...(isGatewayTrackingOnlySession("devin", effectiveSessionId)
+          ? { gatewaySessionId: effectiveSessionId, resumable: false }
+          : { resumable: sessionResult.userProvidedSession }),
+        approval: approvalDecision,
+        mcpServers: { requested: prep.requestedMcpServers },
+      };
+      if (prep.reviewIntegrity && prep.reviewIntegrity.violations.length > 0) {
+        asyncResponse.reviewIntegrity = prep.reviewIntegrity;
+      }
+      if (worktreeResolution.worktreePath) {
+        asyncResponse.worktreePath = worktreeResolution.worktreePath;
+      }
+      return {
+        content: [
+          {
+            type: "text" as const,
+            text: JSON.stringify(asyncResponse, null, 2),
+          },
+        ],
+      };
+    },
+  };
+
+  return runAsyncEnqueueEnvelope(env, hooks);
 }
 
 //──────────────────────────────────────────────────────────────────────────────
