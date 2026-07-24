@@ -86,13 +86,34 @@ const LITERAL_RESOURCE_URI = new RegExp(`"(?:sessions|models)://(?:${PROVIDER_NA
  */
 const REQUEST_TOOL_TOKEN = new RegExp(`\\b(${PROVIDER_NAME})_request(?:_async)?\\b`, "g");
 
+/**
+ * Window size for the roster scan. A single-line scan was defeated by splitting
+ * the roster across array elements joined at runtime (cross-LLM review):
+ *
+ *   const list = [
+ *     "In Kit mode, use claude_request",
+ *     "or codex_request.",
+ *   ].join(" ");
+ *
+ * Three lines covers that shape. Verified to add ZERO false positives on the
+ * current tree: no legitimate site mentions two different providers' request
+ * tools within three lines of each other.
+ */
+const ROSTER_WINDOW_LINES = 3;
+
 function findCrossProviderToolList(content) {
   const hits = [];
   const lines = content.split("\n");
   for (let i = 0; i < lines.length; i++) {
     const providers = new Set();
-    for (const m of lines[i].matchAll(REQUEST_TOOL_TOKEN)) providers.add(m[1]);
-    if (providers.size >= 2) hits.push({ snippet: lines[i].trim().slice(0, 120), line: i + 1 });
+    for (const line of lines.slice(i, i + ROSTER_WINDOW_LINES)) {
+      for (const m of line.matchAll(REQUEST_TOOL_TOKEN)) providers.add(m[1]);
+    }
+    if (providers.size >= 2) {
+      hits.push({ snippet: lines[i].trim().slice(0, 120), line: i + 1 });
+      // Skip past this window so one roster is reported once, not N times.
+      i += ROSTER_WINDOW_LINES - 1;
+    }
   }
   return hits;
 }
@@ -119,13 +140,15 @@ function findAllRegex(content, regex) {
  * (`provider !== "claude" ? "Codex" : "Claude"`, which has the same bug with
  * the arms swapped), then a fourth: a PARENTHESISED condition,
  * `(provider === "claude") ? "Claude" : "Codex"`, which is ordinary TS style
- * and appears in this tree. So: optional grouping parens, any identifier,
- * either equality operator, either quote style. The `[A-Z]` guard on both arms
- * keeps it to LABELS, so an ordinary value ternary
- * (`provider === "claude" ? "stream-json" : "json"`) is untouched.
+ * and appears in this tree; and a fifth, a BACKTICK-quoted provider name,
+ * `` provider === `claude` ? "Claude" : "Codex" ``. So: optional grouping
+ * parens, any identifier, either equality operator, and all three quote styles.
+ * The `[A-Z]` guard on both arms keeps it to LABELS, so an ordinary value
+ * ternary (`provider === "claude" ? "stream-json" : "json"`) is untouched.
  */
+const QUOTE = "['\"`]";
 const PROVIDER_LABEL_TERNARY = new RegExp(
-  `\\(?\\s*\\w+\\s*[!=]==\\s*(['"])(?:${PROVIDER_NAME})\\1\\s*\\)?\\s*\\?\\s*(['"])[A-Z]\\w*\\2\\s*:\\s*(['"])[A-Z]\\w*\\3`
+  `\\(?\\s*\\w+\\s*[!=]==\\s*(${QUOTE})(?:${PROVIDER_NAME})\\1\\s*\\)?\\s*\\?\\s*(${QUOTE})[A-Z]\\w*\\2\\s*:\\s*(${QUOTE})[A-Z]\\w*\\3`
 );
 
 /**
