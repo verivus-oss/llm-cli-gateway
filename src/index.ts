@@ -11753,166 +11753,179 @@ export async function handleGeminiRequestAsync(
     return createErrorResponse("gemini_request_async", 1, "", corrId, error as Error);
   }
 
-  let sessionAdmission: SessionAdmissionMutation | undefined;
-  let worktreeLifecycle: RequestOwnedWorktreeLifecycle | undefined;
-  let jobHandedOff = false;
-  try {
-    // Antigravity CLI supports `--conversation`, but fresh sessions emit no session flag.
+  // RequestPipeline async A3: route gemini (the non-Kit async OUTLIER) through the shared
+  // async-enqueue envelope. gemini NEVER mints (effectiveSessionId = sessionPlan.resumed ?
+  // params.sessionId : undefined, a pure const hoisted here), its existing-session lookup is
+  // UNCONDITIONAL (not userProvided-gated), and its usage id is passed DIRECT (no D4 split).
+  // The front half (session plan, prep, args.push + assertFinalCliArgvAdmission) stays OUTSIDE
+  // the envelope. ledger.installWorktree(...) makes ledger.settle(null) reproduce the inline
+  // `if (sessionAdmission) transfer() else finishHandler()`, and the driver catch reproduces
+  // the `if (!jobHandedOff)` rollback; arg #9 stays worktreeLifecycle.onTerminal DIRECT.
+  const effectiveSessionId = sessionPlan.resumed ? params.sessionId : undefined;
+  const ledger = new RequestTerminalLedger(runtime, undefined);
+  const env: AsyncEnqueueEnvelope = {
+    runtime,
+    logger: deps.logger,
+    provider: "gemini",
+    corrId,
+    usageUpdateSessionId: effectiveSessionId,
+    ledger,
+    usageUpdateManager: deps.sessionManager,
+    rollbackManager: deps.sessionManager,
+  };
 
-    // Pre-start session I/O (async handlers: prevent orphaned jobs)
-    const effectiveSessionId = sessionPlan.resumed ? params.sessionId : undefined;
-    const existingSession = await getExistingSessionForProvider(
-      deps.sessionManager,
-      effectiveSessionId,
-      "gemini",
-      { requireTrackedRemoteSession: true }
-    );
-
-    let worktreeResolution: ResolvedWorktree = {};
-    try {
-      worktreeResolution = await resolveWorkspaceAndWorktreeForRequest({
-        provider: "gemini",
-        workspace: params.workspace,
-        worktree: params.worktree,
-        sessionId: effectiveSessionId,
-        runtime,
-        addDir: params.includeDirs,
-        requireStableCwd: sessionPlan.args.includes("--continue"),
-        deferWorktree: true,
-      });
-    } catch (err) {
-      return createErrorResponse("gemini_request_async", 1, "", corrId, err as Error);
-    }
-    applyEffectiveWorkingDirectory(
-      "agy",
-      args,
-      undefined,
-      undefined,
-      "gemini",
-      "--add-dir",
-      worktreeResolution.effectiveAddDirs
-    );
-
-    // Start job only after all session I/O succeeds. U23: forward outputFormat
-    // so AsyncJobManager records it in the durable store (the manager also
-    // surfaces it in the snapshot).
-    assertUpstreamCliArgs("gemini", args);
-    assertUpstreamCliEnv("gemini", undefined);
-    assertFinalCliProcessAdmission("agy", args, "gemini");
-    if (effectiveSessionId) {
-      if (!existingSession) {
-        const admitted = await createSessionWithResolvedScope(
-          deps.sessionManager,
-          "gemini",
-          "Gemini Session",
-          effectiveSessionId,
-          worktreeResolution,
-          runtime
-        );
-        sessionAdmission = {
-          original: admitted.previousSession,
-          admitted: admitted.session,
-        };
-      } else {
-        const admitted = await persistResolvedSessionScope(
-          deps.sessionManager,
-          effectiveSessionId,
-          worktreeResolution,
-          runtime,
-          existingSession
-        );
-        sessionAdmission = { original: existingSession, admitted };
-      }
-    }
-    if (params.worktree) {
-      worktreeResolution = await resolveWorkspaceAndWorktreeForRequest({
-        provider: "gemini",
-        workspace: params.workspace,
-        worktree: params.worktree,
-        sessionId: effectiveSessionId,
-        runtime,
-        addDir: params.includeDirs,
-        requireStableCwd: sessionPlan.args.includes("--continue"),
-        expectedSession: sessionAdmission?.admitted,
-      });
-      advanceSessionAdmissionWorktree(sessionAdmission, worktreeResolution);
-    }
-    worktreeLifecycle = createRequestOwnedWorktreeLifecycle(worktreeResolution, runtime, true);
-    // Slice 1.5: pure async path — no upstream safeFlightStart, so the
-    // manager owns both logStart and logComplete for this corrId.
-    const effectiveCompress = resolveEffectiveCompression(runtime.compression, {
-      compressResponse: params.compressResponse,
-      outputFormat: params.outputFormat,
-      outputSchemaDeclared: false,
-    });
-    const geminiAsyncFrHandoff = buildAsyncFlightRecorderHandoff(
-      "gemini",
-      prep,
-      effectiveSessionId,
-      params.outputFormat,
-      params.optimizePrompt
-    );
-    const job = deps.asyncJobManager.startJob(
-      "gemini",
-      args,
-      corrId,
-      worktreeResolution.cwd,
-      resolveIdleTimeout("gemini", params.idleTimeoutMs),
-      params.outputFormat,
-      params.forceRefresh,
-      undefined,
-      worktreeLifecycle.onTerminal,
-      geminiAsyncFrHandoff.flightRecorderEntry,
-      geminiAsyncFrHandoff.extractUsage,
-      true,
-      undefined,
-      effectiveCompress,
-      undefined,
-      undefined,
-      undefined,
-      undefined,
-      sessionBoundDedupArgs(args, effectiveSessionId)
-    );
-    jobHandedOff = true;
-    if (sessionAdmission) worktreeLifecycle.transfer();
-    else await worktreeLifecycle.finishHandler();
-    await safeUpdateSessionUsageAfterJobAdmission(deps.sessionManager, effectiveSessionId, runtime);
-    deps.logger.info(`[${corrId}] gemini_request_async started job ${job.id}`);
-
-    const asyncResponse: Record<string, unknown> = {
-      success: true,
-      job,
-      sessionId: effectiveSessionId || null,
-      resumable: sessionPlan.resumed,
-      approval: approvalDecision,
-      mcpServers: { requested: requestedMcpServers },
-    };
-    if (prep.reviewIntegrity && prep.reviewIntegrity.violations.length > 0) {
-      asyncResponse.reviewIntegrity = prep.reviewIntegrity;
-    }
-    if (worktreeResolution.worktreePath) {
-      asyncResponse.worktreePath = worktreeResolution.worktreePath;
-    }
-
-    return {
-      content: [
-        {
-          type: "text" as const,
-          text: JSON.stringify(asyncResponse, null, 2),
-        },
-      ],
-    };
-  } catch (error) {
-    if (!jobHandedOff) {
-      await rollbackSessionAndWorktreeAdmission(
+  const hooks: AsyncEnqueueHooks<{ worktreeResolution: ResolvedWorktree }> = {
+    runInsideTry: async () => {
+      // Antigravity CLI supports `--conversation`, but fresh sessions emit no session flag.
+      // gemini's existing-session lookup is UNCONDITIONAL (unlike the userProvided-gated siblings).
+      const existingSession = await getExistingSessionForProvider(
         deps.sessionManager,
-        sessionAdmission,
-        worktreeLifecycle,
-        runtime
+        effectiveSessionId,
+        "gemini",
+        { requireTrackedRemoteSession: true }
       );
-    }
-    return createErrorResponse("gemini_request_async", 1, "", corrId, error as Error);
-  }
+
+      let worktreeResolution: ResolvedWorktree;
+      try {
+        worktreeResolution = await resolveWorkspaceAndWorktreeForRequest({
+          provider: "gemini",
+          workspace: params.workspace,
+          worktree: params.worktree,
+          sessionId: effectiveSessionId,
+          runtime,
+          addDir: params.includeDirs,
+          requireStableCwd: sessionPlan.args.includes("--continue"),
+          deferWorktree: true,
+        });
+      } catch (err) {
+        return {
+          ok: false,
+          earlyResponse: createErrorResponse("gemini_request_async", 1, "", corrId, err as Error),
+        };
+      }
+      applyEffectiveWorkingDirectory(
+        "agy",
+        args,
+        undefined,
+        undefined,
+        "gemini",
+        "--add-dir",
+        worktreeResolution.effectiveAddDirs
+      );
+
+      // Start job only after all session I/O succeeds. U23: forward outputFormat
+      // so AsyncJobManager records it in the durable store (the manager also
+      // surfaces it in the snapshot).
+      assertUpstreamCliArgs("gemini", args);
+      assertUpstreamCliEnv("gemini", undefined);
+      assertFinalCliProcessAdmission("agy", args, "gemini");
+      if (effectiveSessionId) {
+        if (!existingSession) {
+          const admitted = await createSessionWithResolvedScope(
+            deps.sessionManager,
+            "gemini",
+            "Gemini Session",
+            effectiveSessionId,
+            worktreeResolution,
+            runtime
+          );
+          ledger.sessionAdmission = {
+            original: admitted.previousSession,
+            admitted: admitted.session,
+          };
+        } else {
+          const admitted = await persistResolvedSessionScope(
+            deps.sessionManager,
+            effectiveSessionId,
+            worktreeResolution,
+            runtime,
+            existingSession
+          );
+          ledger.sessionAdmission = { original: existingSession, admitted };
+        }
+      }
+      if (params.worktree) {
+        worktreeResolution = await resolveWorkspaceAndWorktreeForRequest({
+          provider: "gemini",
+          workspace: params.workspace,
+          worktree: params.worktree,
+          sessionId: effectiveSessionId,
+          runtime,
+          addDir: params.includeDirs,
+          requireStableCwd: sessionPlan.args.includes("--continue"),
+          expectedSession: ledger.sessionAdmission?.admitted,
+        });
+        advanceSessionAdmissionWorktree(ledger.sessionAdmission, worktreeResolution);
+      }
+      ledger.installWorktree(
+        createRequestOwnedWorktreeLifecycle(worktreeResolution, runtime, true)
+      );
+      return { ok: true, value: { worktreeResolution } };
+    },
+    enqueue: async ({ worktreeResolution }) => {
+      // Slice 1.5: pure async path, no upstream safeFlightStart, so the
+      // manager owns both logStart and logComplete for this corrId.
+      const effectiveCompress = resolveEffectiveCompression(runtime.compression, {
+        compressResponse: params.compressResponse,
+        outputFormat: params.outputFormat,
+        outputSchemaDeclared: false,
+      });
+      const geminiAsyncFrHandoff = buildAsyncFlightRecorderHandoff(
+        "gemini",
+        prep,
+        effectiveSessionId,
+        params.outputFormat,
+        params.optimizePrompt
+      );
+      return deps.asyncJobManager.startJob(
+        "gemini",
+        args,
+        corrId,
+        worktreeResolution.cwd,
+        resolveIdleTimeout("gemini", params.idleTimeoutMs),
+        params.outputFormat,
+        params.forceRefresh,
+        undefined,
+        ledger.worktreeLifecycle?.onTerminal,
+        geminiAsyncFrHandoff.flightRecorderEntry,
+        geminiAsyncFrHandoff.extractUsage,
+        true,
+        undefined,
+        effectiveCompress,
+        undefined,
+        undefined,
+        undefined,
+        undefined,
+        sessionBoundDedupArgs(args, effectiveSessionId)
+      );
+    },
+    buildSuccessResponse: ({ job, value: { worktreeResolution } }) => {
+      const asyncResponse: Record<string, unknown> = {
+        success: true,
+        job,
+        sessionId: effectiveSessionId || null,
+        resumable: sessionPlan.resumed,
+        approval: approvalDecision,
+        mcpServers: { requested: requestedMcpServers },
+      };
+      if (prep.reviewIntegrity && prep.reviewIntegrity.violations.length > 0) {
+        asyncResponse.reviewIntegrity = prep.reviewIntegrity;
+      }
+      if (worktreeResolution.worktreePath) {
+        asyncResponse.worktreePath = worktreeResolution.worktreePath;
+      }
+      return {
+        content: [
+          {
+            type: "text" as const,
+            text: JSON.stringify(asyncResponse, null, 2),
+          },
+        ],
+      };
+    },
+  };
+
+  return runAsyncEnqueueEnvelope(env, hooks);
 }
 
 export interface GrokRequestParams {
