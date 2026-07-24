@@ -12487,175 +12487,194 @@ export async function handleGrokRequestAsync(
     return createErrorResponse("grok_request_async", 1, "", corrId, error as Error);
   }
 
-  let sessionAdmission: SessionAdmissionMutation | undefined;
-  let worktreeLifecycle: RequestOwnedWorktreeLifecycle | undefined;
-  let jobHandedOff = false;
-  try {
-    // Session arg planning (pure, no I/O)
-    let effectiveSessionId = sessionResult.effectiveSessionId;
-    const existingSession = sessionResult.userProvidedSession
-      ? await getExistingSessionForProvider(deps.sessionManager, effectiveSessionId, "grok", {
-          requireTrackedRemoteSession: true,
-        })
-      : undefined;
+  // RequestPipeline async A2: route grok (the fullest non-Kit async sibling: full
+  // worktree lifecycle, two-phase worktree resolve, native-session metadata, D4 usage
+  // split) through the shared async-enqueue envelope. The mint stays inside runInsideTry
+  // and rides to buildSuccessResponse via TValue; usageUpdateSessionId is the pre-mint
+  // form (userProvided ? id : undefined), provably equal because the mint fires only when
+  // !userProvided. ledger.installWorktree(...) makes ledger.settle(null) reproduce the
+  // inline `if (sessionAdmission) transfer() else finishHandler()`, and the driver catch
+  // reproduces the `if (!jobHandedOff)` rollback; arg #9 stays worktreeLifecycle.onTerminal
+  // DIRECT. The front half (unreachable-worktree reject, session args, prep, insertAndAdmit)
+  // stays OUTSIDE the envelope.
+  const ledger = new RequestTerminalLedger(runtime, undefined);
+  const env: AsyncEnqueueEnvelope = {
+    runtime,
+    logger: deps.logger,
+    provider: "grok",
+    corrId,
+    usageUpdateSessionId: sessionResult.userProvidedSession
+      ? sessionResult.effectiveSessionId
+      : undefined,
+    ledger,
+    usageUpdateManager: deps.sessionManager,
+    rollbackManager: deps.sessionManager,
+  };
 
-    let worktreeResolution: ResolvedWorktree = {};
-    try {
-      worktreeResolution = await resolveWorkspaceAndWorktreeForRequest({
-        provider: "grok",
-        workspace: params.workspace,
-        worktree: params.worktree,
-        sessionId: effectiveSessionId,
-        runtime,
-        workingDir: params.workingDir,
-        requireStableCwd: sessionResult.resumeArgs.includes("--continue"),
-        deferWorktree: true,
-      });
-    } catch (err) {
-      return createErrorResponse("grok_request_async", 1, "", corrId, err as Error);
-    }
-    applyEffectiveWorkingDirectory(
-      "grok",
-      args,
-      "--cwd",
-      worktreeResolution.effectiveWorkingDir,
-      "grok"
-    );
+  const hooks: AsyncEnqueueHooks<{
+    worktreeResolution: ResolvedWorktree;
+    effectiveSessionId: string | undefined;
+  }> = {
+    runInsideTry: async () => {
+      let effectiveSessionId = sessionResult.effectiveSessionId;
+      const existingSession = sessionResult.userProvidedSession
+        ? await getExistingSessionForProvider(deps.sessionManager, effectiveSessionId, "grok", {
+            requireTrackedRemoteSession: true,
+          })
+        : undefined;
 
-    // Start job only after all session I/O succeeds
-    assertUpstreamCliArgs("grok", args);
-    assertUpstreamCliEnv("grok", undefined);
-    assertFinalCliProcessAdmission("grok", args, "grok");
-    if (sessionResult.userProvidedSession && effectiveSessionId) {
-      if (!existingSession) {
+      let worktreeResolution: ResolvedWorktree;
+      try {
+        worktreeResolution = await resolveWorkspaceAndWorktreeForRequest({
+          provider: "grok",
+          workspace: params.workspace,
+          worktree: params.worktree,
+          sessionId: effectiveSessionId,
+          runtime,
+          workingDir: params.workingDir,
+          requireStableCwd: sessionResult.resumeArgs.includes("--continue"),
+          deferWorktree: true,
+        });
+      } catch (err) {
+        return {
+          ok: false,
+          earlyResponse: createErrorResponse("grok_request_async", 1, "", corrId, err as Error),
+        };
+      }
+      applyEffectiveWorkingDirectory(
+        "grok",
+        args,
+        "--cwd",
+        worktreeResolution.effectiveWorkingDir,
+        "grok"
+      );
+
+      // Start job only after all session I/O succeeds
+      assertUpstreamCliArgs("grok", args);
+      assertUpstreamCliEnv("grok", undefined);
+      assertFinalCliProcessAdmission("grok", args, "grok");
+      if (sessionResult.userProvidedSession && effectiveSessionId) {
+        if (!existingSession) {
+          const admitted = await createSessionWithResolvedScope(
+            deps.sessionManager,
+            "grok",
+            "Grok Session",
+            effectiveSessionId,
+            worktreeResolution,
+            runtime
+          );
+          ledger.sessionAdmission = {
+            original: admitted.previousSession,
+            admitted: admitted.session,
+          };
+        } else {
+          const admitted = await persistResolvedSessionScope(
+            deps.sessionManager,
+            effectiveSessionId,
+            worktreeResolution,
+            runtime,
+            existingSession
+          );
+          ledger.sessionAdmission = { original: existingSession, admitted };
+        }
+      } else if (!params.createNewSession && !effectiveSessionId) {
+        const newSessionId = `${GATEWAY_SESSION_PREFIX}${randomUUID()}`;
         const admitted = await createSessionWithResolvedScope(
           deps.sessionManager,
           "grok",
           "Grok Session",
-          effectiveSessionId,
+          newSessionId,
           worktreeResolution,
           runtime
         );
-        sessionAdmission = {
+        effectiveSessionId = newSessionId;
+        ledger.sessionAdmission = {
           original: admitted.previousSession,
           admitted: admitted.session,
         };
-      } else {
-        const admitted = await persistResolvedSessionScope(
-          deps.sessionManager,
-          effectiveSessionId,
-          worktreeResolution,
-          runtime,
-          existingSession
-        );
-        sessionAdmission = { original: existingSession, admitted };
       }
-    } else if (!params.createNewSession && !effectiveSessionId) {
-      const newSessionId = `${GATEWAY_SESSION_PREFIX}${randomUUID()}`;
-      const admitted = await createSessionWithResolvedScope(
-        deps.sessionManager,
-        "grok",
-        "Grok Session",
-        newSessionId,
-        worktreeResolution,
-        runtime
+      if (params.worktree) {
+        worktreeResolution = await resolveWorkspaceAndWorktreeForRequest({
+          provider: "grok",
+          workspace: params.workspace,
+          worktree: params.worktree,
+          sessionId: effectiveSessionId,
+          runtime,
+          workingDir: params.workingDir,
+          requireStableCwd: sessionResult.resumeArgs.includes("--continue"),
+          expectedSession: ledger.sessionAdmission?.admitted,
+        });
+        advanceSessionAdmissionWorktree(ledger.sessionAdmission, worktreeResolution);
+      }
+      ledger.installWorktree(
+        createRequestOwnedWorktreeLifecycle(worktreeResolution, runtime, true)
       );
-      effectiveSessionId = newSessionId;
-      sessionAdmission = { original: admitted.previousSession, admitted: admitted.session };
-    }
-    if (params.worktree) {
-      worktreeResolution = await resolveWorkspaceAndWorktreeForRequest({
-        provider: "grok",
-        workspace: params.workspace,
-        worktree: params.worktree,
-        sessionId: effectiveSessionId,
-        runtime,
-        workingDir: params.workingDir,
-        requireStableCwd: sessionResult.resumeArgs.includes("--continue"),
-        expectedSession: sessionAdmission?.admitted,
+      return { ok: true, value: { worktreeResolution, effectiveSessionId } };
+    },
+    enqueue: async ({ worktreeResolution, effectiveSessionId }) => {
+      const effectiveCompress = resolveEffectiveCompression(runtime.compression, {
+        compressResponse: params.compressResponse,
+        outputFormat: params.outputFormat,
+        outputSchemaDeclared: false,
       });
-      advanceSessionAdmissionWorktree(sessionAdmission, worktreeResolution);
-    }
-    worktreeLifecycle = createRequestOwnedWorktreeLifecycle(worktreeResolution, runtime, true);
-    const effectiveCompress = resolveEffectiveCompression(runtime.compression, {
-      compressResponse: params.compressResponse,
-      outputFormat: params.outputFormat,
-      outputSchemaDeclared: false,
-    });
-    const grokAsyncFrHandoff = buildAsyncFlightRecorderHandoff(
-      "grok",
-      prep,
-      effectiveSessionId,
-      params.outputFormat,
-      params.optimizePrompt
-    );
-    const job = deps.asyncJobManager.startJob(
-      "grok",
-      args,
-      corrId,
-      worktreeResolution.cwd,
-      resolveIdleTimeout("grok", params.idleTimeoutMs),
-      params.outputFormat,
-      params.forceRefresh,
-      undefined,
-      worktreeLifecycle.onTerminal,
-      grokAsyncFrHandoff.flightRecorderEntry,
-      grokAsyncFrHandoff.extractUsage,
-      true,
-      undefined,
-      effectiveCompress,
-      undefined,
-      undefined,
-      undefined,
-      undefined,
-      sessionBoundDedupArgs(args, effectiveSessionId)
-    );
-    jobHandedOff = true;
-    if (sessionAdmission) worktreeLifecycle.transfer();
-    else await worktreeLifecycle.finishHandler();
-    await safeUpdateSessionUsageAfterJobAdmission(
-      deps.sessionManager,
-      sessionResult.userProvidedSession ? effectiveSessionId : undefined,
-      runtime
-    );
-    deps.logger.info(`[${corrId}] grok_request_async started job ${job.id}`);
-
-    const asyncResponse: Record<string, unknown> = {
-      success: true,
-      job,
-      sessionId: effectiveSessionId || null,
-      ...(isGatewayTrackingOnlySession("grok", effectiveSessionId)
-        ? { gatewaySessionId: effectiveSessionId, resumable: false }
-        : { resumable: sessionResult.userProvidedSession }),
-      approval: approvalDecision,
-      mcpServers: { requested: requestedMcpServers },
-    };
-    if (prep.reviewIntegrity && prep.reviewIntegrity.violations.length > 0) {
-      asyncResponse.reviewIntegrity = prep.reviewIntegrity;
-    }
-    if (worktreeResolution.worktreePath) {
-      asyncResponse.worktreePath = worktreeResolution.worktreePath;
-    }
-
-    return {
-      content: [
-        {
-          type: "text" as const,
-          text: JSON.stringify(asyncResponse, null, 2),
-        },
-      ],
-    };
-  } catch (error) {
-    if (!jobHandedOff) {
-      await rollbackSessionAndWorktreeAdmission(
-        deps.sessionManager,
-        sessionAdmission,
-        worktreeLifecycle,
-        runtime
+      const grokAsyncFrHandoff = buildAsyncFlightRecorderHandoff(
+        "grok",
+        prep,
+        effectiveSessionId,
+        params.outputFormat,
+        params.optimizePrompt
       );
-    }
-    return createErrorResponse("grok_request_async", 1, "", corrId, error as Error);
-  }
+      return deps.asyncJobManager.startJob(
+        "grok",
+        args,
+        corrId,
+        worktreeResolution.cwd,
+        resolveIdleTimeout("grok", params.idleTimeoutMs),
+        params.outputFormat,
+        params.forceRefresh,
+        undefined,
+        ledger.worktreeLifecycle?.onTerminal,
+        grokAsyncFrHandoff.flightRecorderEntry,
+        grokAsyncFrHandoff.extractUsage,
+        true,
+        undefined,
+        effectiveCompress,
+        undefined,
+        undefined,
+        undefined,
+        undefined,
+        sessionBoundDedupArgs(args, effectiveSessionId)
+      );
+    },
+    buildSuccessResponse: ({ job, value: { worktreeResolution, effectiveSessionId } }) => {
+      const asyncResponse: Record<string, unknown> = {
+        success: true,
+        job,
+        sessionId: effectiveSessionId || null,
+        ...(isGatewayTrackingOnlySession("grok", effectiveSessionId)
+          ? { gatewaySessionId: effectiveSessionId, resumable: false }
+          : { resumable: sessionResult.userProvidedSession }),
+        approval: approvalDecision,
+        mcpServers: { requested: requestedMcpServers },
+      };
+      if (prep.reviewIntegrity && prep.reviewIntegrity.violations.length > 0) {
+        asyncResponse.reviewIntegrity = prep.reviewIntegrity;
+      }
+      if (worktreeResolution.worktreePath) {
+        asyncResponse.worktreePath = worktreeResolution.worktreePath;
+      }
+      return {
+        content: [
+          {
+            type: "text" as const,
+            text: JSON.stringify(asyncResponse, null, 2),
+          },
+        ],
+      };
+    },
+  };
+
+  return runAsyncEnqueueEnvelope(env, hooks);
 }
 
 //──────────────────────────────────────────────────────────────────────────────
