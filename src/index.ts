@@ -7020,6 +7020,18 @@ export function resolveMistralAgentMode(
   return "accept-edits";
 }
 
+/**
+ * Mistral Kit (M2): the FORCED agent posture for a Kit turn. A Kit caller cannot
+ * select the agent mode (`permissionMode` is a Kit conflict field), so the gateway
+ * pins the managed posture regardless of caller input, analogous to
+ * `resolveCodexKitSandboxMode`. `accept-edits` auto-accepts file edits while dangerous
+ * operations (e.g. shell) stay gated, which is the headless-safe managed default.
+ * Dormant until the M3 gate flip wires the mistral Kit request path.
+ */
+export function resolveMistralKitAgentMode(): MistralAgentMode {
+  return "accept-edits";
+}
+
 export function prepareMistralRequest(
   params: {
     prompt?: string;

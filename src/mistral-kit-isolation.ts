@@ -265,3 +265,31 @@ export function applyMistralKitIsolationEnv(
   Object.assign(child, plan.env);
   return child;
 }
+
+/**
+ * Mistral Kit (M2): context delivery. Vibe's VIBE_HOME-level `AGENTS.md` channel is
+ * gated on `include_project_context`, which the isolation forces OFF, so the compiled
+ * Kit context is delivered as a PROMPT PREFIX: the `<gateway-personal-config stamp=...>`
+ * marker precedes the caller task (mirrors the Codex prompt-input delivery). Dormant
+ * until the M3 gate flip wires the mistral Kit request path.
+ */
+export function composeMistralKitPrompt(contextPrefix: string, userPrompt: string): string {
+  return `${contextPrefix}\n\n${userPrompt}`;
+}
+
+/**
+ * Fail-closed drift check: the context prefix delivered at execution MUST match the
+ * digest bound into the plan at build time. A mismatch means the compiled context
+ * drifted from what was admitted, so the run is refused rather than executed with an
+ * unverified instruction layer.
+ */
+export function assertMistralKitContextPrefix(
+  plan: MistralKitIsolationPlan,
+  contextPrefix: string
+): void {
+  if (digestContextPrefix(contextPrefix) !== plan.contextPrefixDigest) {
+    throw new MistralKitIsolationError(
+      "mistral Kit context prefix does not match the digest bound into the isolation plan"
+    );
+  }
+}
