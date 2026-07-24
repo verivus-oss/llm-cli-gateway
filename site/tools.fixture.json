@@ -1674,7 +1674,8 @@
             "type": "string",
             "enum": [
               "claude",
-              "codex"
+              "codex",
+              "mistral"
             ]
           },
           "sessionId": {

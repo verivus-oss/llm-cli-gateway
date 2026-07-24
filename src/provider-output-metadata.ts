@@ -96,16 +96,16 @@ export function createPersonalKitTerminalMetadata(
 }
 
 /**
- * Mistral Kit M0: the disk-capture equivalent of createPersonalKitTerminalMetadata.
+ * Mistral Kit M0/M3: the disk-capture equivalent of createPersonalKitTerminalMetadata.
  * Mistral Vibe emits no session id on stdout (extractProviderOutputMetadata
- * "mistral" names it absent); the native handle lives on disk under a
- * gateway-owned home. This resolves the newest vibe session_id there and gates
- * it on the vibe-scoped broad guard, failing closed to null. Not wired into any
- * live handler until the mistral Kit gate opens; the returned handle is
- * process-local (never persisted) exactly like the stdout variant.
+ * "mistral" names it absent); the native handle lives on disk in the gateway-owned
+ * STABLE session-log dir (config.session_logging.save_dir). This resolves the newest
+ * vibe session_id there and gates it on the vibe-scoped broad guard, failing closed
+ * to null. The returned handle is process-local (never persisted) exactly like the
+ * stdout variant.
  */
-export function createVibeKitTerminalMetadata(home: string): PersonalKitTerminalMetadata {
-  const sessionId = resolveNewestVibeNativeSessionId(home);
+export function createVibeKitTerminalMetadata(sessionDir: string): PersonalKitTerminalMetadata {
+  const sessionId = resolveNewestVibeNativeSessionId(sessionDir);
   return {
     version: 1,
     nativeSessionId: isVibeNativeSessionId(sessionId) ? sessionId : null,

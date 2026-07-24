@@ -2719,6 +2719,52 @@ export const UPSTREAM_CLI_CONTRACTS: Record<CliType, CliContract> = {
         pattern: /^[^\s\p{Cc}]+$/u,
         description: "Active model selector; Vibe uses env instead of a --model flag",
       },
+      // Mistral Kit (M3) controlled-environment isolation levers. Gateway-set only
+      // (callers cannot inject env); enumerated here so the Kit isolation env
+      // fragment passes assertUpstreamCliEnv. HOME redirects Path.home() (hence
+      // ~/.agents); VIBE_HOME redirects the config/logs/trust store; MISTRAL_API_KEY
+      // is the sole credential channel (keyring is forbidden); the VIBE_* force-offs
+      // and keyring disable ride on the EnvironmentLayer. See mistral-kit-isolation.ts.
+      HOME: {
+        arity: "one",
+        pattern: /^[^\s\p{Cc}]+$/u,
+        description: "Kit isolation: redirected home so Path.home()/.agents relocates (M3)",
+      },
+      VIBE_HOME: {
+        arity: "one",
+        pattern: /^[^\s\p{Cc}]+$/u,
+        description: "Kit isolation: redirected Vibe home (config, logs/session, trust store) (M3)",
+      },
+      MISTRAL_API_KEY: {
+        arity: "one",
+        pattern: /^[^\s\p{Cc}]+$/u,
+        description: "Kit isolation: sole credential channel for the redirected home (M3)",
+      },
+      VIBE_TEST_DISABLE_KEYRING: {
+        arity: "one",
+        values: ["1"],
+        description: "Kit isolation: forbid OS-keyring credential fallback (M3)",
+      },
+      VIBE_INCLUDE_PROJECT_CONTEXT: {
+        arity: "one",
+        values: ["true", "false"],
+        description: "Kit isolation: force project-context injection off (M3)",
+      },
+      VIBE_INCLUDE_PROMPT_DETAIL: {
+        arity: "one",
+        values: ["true", "false"],
+        description: "Kit isolation: force prompt-detail injection off (M3)",
+      },
+      VIBE_EXPERIMENTAL_ENABLE_REGISTRY_SKILLS: {
+        arity: "one",
+        values: ["true", "false"],
+        description: "Kit isolation: force experimental registry-skill discovery off (M3)",
+      },
+      VIBE_ACP_LOGGING_ENABLED: {
+        arity: "one",
+        values: ["true", "false"],
+        description: "Kit isolation: assert the ACP-logging lever off in the child env (M3)",
+      },
     },
     conformanceFixtures: [
       {
@@ -2734,6 +2780,23 @@ export const UPSTREAM_CLI_CONTRACTS: Record<CliType, CliContract> = {
         args: ["-p", "hello"],
         env: { CODEX_MODEL: "gpt-5.5" },
         expect: "fail",
+      },
+      {
+        id: "mistral-kit-isolation-env",
+        description: "Mistral Kit (M3) controlled-environment isolation env fragment is accepted",
+        args: ["-p", "hello", "--agent", "accept-edits"],
+        env: {
+          HOME: "/tmp/gw-mistral-kit-home-abc",
+          VIBE_HOME: "/tmp/gw-mistral-kit-home-abc/.vibe",
+          MISTRAL_API_KEY: "sk-kit-fixture",
+          VIBE_TEST_DISABLE_KEYRING: "1",
+          VIBE_INCLUDE_PROJECT_CONTEXT: "false",
+          VIBE_INCLUDE_PROMPT_DETAIL: "false",
+          VIBE_EXPERIMENTAL_ENABLE_REGISTRY_SKILLS: "false",
+          VIBE_ACP_LOGGING_ENABLED: "false",
+          VIBE_ACTIVE_MODEL: "mistral-medium-3.5",
+        },
+        expect: "pass",
       },
       {
         id: "mistral-trust",

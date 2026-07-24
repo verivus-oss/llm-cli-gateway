@@ -90,25 +90,25 @@ describe("resolveNewestVibeNativeSessionId (disk resolver)", () => {
 
   it("returns undefined when there is no session store", () => {
     const empty = mkdtempSync(join(tmpdir(), "vibe-kit-empty-"));
-    expect(resolveNewestVibeNativeSessionId(empty)).toBeUndefined();
+    expect(resolveNewestVibeNativeSessionId(join(empty, "missing"))).toBeUndefined();
     rmSync(empty, { recursive: true, force: true });
   });
 
   it("returns undefined when the session dir is empty", () => {
-    expect(resolveNewestVibeNativeSessionId(home)).toBeUndefined();
+    expect(resolveNewestVibeNativeSessionId(sessionRoot)).toBeUndefined();
   });
 
   it("picks the NEWEST session by mtime", () => {
     makeSession(STRICT, { mtime: new Date("2026-07-24T10:00:00Z") });
     makeSession(VIBE_BROAD, { mtime: new Date("2026-07-24T12:00:00Z") }); // newer
-    expect(resolveNewestVibeNativeSessionId(home)).toBe(VIBE_BROAD);
+    expect(resolveNewestVibeNativeSessionId(sessionRoot)).toBe(VIBE_BROAD);
   });
 
   it("honours the dir-first8 integrity check: a mismatched newest is skipped for a valid older one", () => {
     makeSession(STRICT, { mtime: new Date("2026-07-24T10:00:00Z") }); // valid, older
     // Newest dir's basename first8 does NOT match its meta.json session_id first8.
     makeSession(VIBE_BROAD, { dirFirst8: "deadbeef", mtime: new Date("2026-07-24T12:00:00Z") });
-    expect(resolveNewestVibeNativeSessionId(home)).toBe(STRICT);
+    expect(resolveNewestVibeNativeSessionId(sessionRoot)).toBe(STRICT);
   });
 
   it("skips a non-vibe-shaped id (e.g. gw-*) and bad JSON", () => {
@@ -117,7 +117,7 @@ describe("resolveNewestVibeNativeSessionId (disk resolver)", () => {
       mtime: new Date("2026-07-24T12:00:00Z"),
     });
     makeSession(STRICT, { badJson: true, mtime: new Date("2026-07-24T11:00:00Z") });
-    expect(resolveNewestVibeNativeSessionId(home)).toBeUndefined();
+    expect(resolveNewestVibeNativeSessionId(sessionRoot)).toBeUndefined();
   });
 
   it("rejects an out-of-base meta.json symlink (readInBase boundary)", () => {
@@ -132,34 +132,32 @@ describe("resolveNewestVibeNativeSessionId (disk resolver)", () => {
     // A valid in-tree older session is present too.
     makeSession(STRICT, { mtime: new Date("2026-07-24T10:00:00Z") });
     // The symlinked (out-of-base) newest is rejected; the in-tree older one wins.
-    expect(resolveNewestVibeNativeSessionId(home)).toBe(STRICT);
+    expect(resolveNewestVibeNativeSessionId(sessionRoot)).toBe(STRICT);
     rmSync(outside, { recursive: true, force: true });
   });
 });
 
 describe("createVibeKitTerminalMetadata (disk-capture hook)", () => {
   it("captures the newest vibe id, gated on the broad guard", () => {
-    const home = mkdtempSync(join(tmpdir(), "vibe-kit-cap-"));
-    const dir = join(
-      home,
-      ".vibe",
-      "logs",
-      "session",
-      `session_20260724_120000_${VIBE_BROAD.slice(0, 8)}`
-    );
+    // M3: the capture source is the stable save_dir (session-log dir) directly.
+    const sessionDir = mkdtempSync(join(tmpdir(), "vibe-kit-cap-"));
+    const dir = join(sessionDir, `session_20260724_120000_${VIBE_BROAD.slice(0, 8)}`);
     mkdirSync(dir, { recursive: true });
     writeFileSync(join(dir, "meta.json"), JSON.stringify({ session_id: VIBE_BROAD }));
-    expect(createVibeKitTerminalMetadata(home)).toEqual({
+    expect(createVibeKitTerminalMetadata(sessionDir)).toEqual({
       version: 1,
       nativeSessionId: VIBE_BROAD,
     });
-    rmSync(home, { recursive: true, force: true });
+    rmSync(sessionDir, { recursive: true, force: true });
   });
 
   it("fails closed to null when no vibe id is resolvable", () => {
-    const home = mkdtempSync(join(tmpdir(), "vibe-kit-cap-empty-"));
-    expect(createVibeKitTerminalMetadata(home)).toEqual({ version: 1, nativeSessionId: null });
-    rmSync(home, { recursive: true, force: true });
+    const sessionDir = mkdtempSync(join(tmpdir(), "vibe-kit-cap-empty-"));
+    expect(createVibeKitTerminalMetadata(sessionDir)).toEqual({
+      version: 1,
+      nativeSessionId: null,
+    });
+    rmSync(sessionDir, { recursive: true, force: true });
   });
 });
 

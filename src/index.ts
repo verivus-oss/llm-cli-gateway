@@ -31,12 +31,20 @@ import { parseStreamJson } from "./stream-json-parser.js";
 import { parseCodexJsonStream, codexDisplayText, codexFrResponse } from "./codex-json-parser.js";
 import {
   createPersonalKitTerminalMetadata,
+  createVibeKitTerminalMetadata,
   extractProviderOutputMetadata,
   redactKnownProviderSessionId,
   type PersonalKitTerminalMetadata,
 } from "./provider-output-metadata.js";
 import { parseGeminiJson, parseGeminiStreamJson } from "./gemini-json-parser.js";
 import { parseVibeMetaJson } from "./mistral-meta-json-parser.js";
+import {
+  createMistralKitIsolationPlan,
+  mistralKitSpawnEnvFragment,
+  composeMistralKitPrompt,
+  assertMistralKitContextPrefix,
+  type MistralKitIsolationPlan,
+} from "./mistral-kit-isolation.js";
 import { homedir, hostname } from "os";
 import {
   CLI_TYPES,
@@ -1546,7 +1554,13 @@ async function awaitJobOrDefer(
   /** Exact gateway-generated Claude MCP config retained until durable cleanup acknowledgement. */
   mcpArtifactPath?: string,
   /** Scope captured with the gateway-generated Claude MCP config artifact. */
-  mcpArtifactScope?: string
+  mcpArtifactScope?: string,
+  /**
+   * Mistral Kit (M3): gateway-owned stable session-log dir for disk-based native
+   * session capture on the deferred path. Process-local, never persisted. Set only
+   * for mistral Kit jobs; undefined for every other request.
+   */
+  kitNativeCaptureSessionDir?: string
 ): Promise<InlineJobResponse | DeferredJobResponse> {
   // U26 fix: ownership of onComplete is a contract. Once this function returns
   // OR throws, the caller MUST consider onComplete consumed — i.e. it has
@@ -1660,6 +1674,7 @@ async function awaitJobOrDefer(
       kitExecution,
       onTerminal,
       kitSessionId,
+      kitNativeCaptureSessionDir,
       jobId: kitJobId,
       dedupArgs,
       mcpArtifactPath,
@@ -7066,6 +7081,14 @@ export function prepareMistralRequest(
     nativeResumeRequested?: boolean;
     /** Internal handler fact: the gateway will create or reuse a git worktree. */
     gatewayWorktreeRequested?: boolean;
+    /**
+     * Mistral Kit (M3): the exact gateway-owned `<gateway-personal-config ...>`
+     * context prefix. When present, it is prepended to the effective prompt
+     * (vibe has no `--append-system-prompt-file`, so the compiled Kit context
+     * rides as a prompt prefix). The same string is bound into the isolation
+     * plan's digest so drift fails closed.
+     */
+    kitContextPrefix?: string;
   },
   runtime: GatewayServerRuntime = resolveGatewayServerRuntime()
 ): (CliRequestPrep & { mistralEnv: Record<string, string> }) | ExtendedToolResponse {
@@ -7114,6 +7137,11 @@ export function prepareMistralRequest(
     const optimized = optimizePromptText(effectivePrompt);
     logOptimizationTokens("prompt", corrId, effectivePrompt, optimized);
     effectivePrompt = optimized;
+  }
+  // Mistral Kit context delivery: prepend the gateway-owned context prefix AFTER
+  // optimization so the stamp is intact and its digest matches the isolation plan.
+  if (params.kitContextPrefix) {
+    effectivePrompt = composeMistralKitPrompt(params.kitContextPrefix, effectivePrompt);
   }
 
   const requestedMcpServers = normalizeMcpServers(params.mcpServers);
@@ -7654,6 +7682,8 @@ interface PersonalKitRequestContext {
   context: ResolvedKitContext;
   artifact?: ClaudeContextArtifact;
   codexIsolation?: CodexKitIsolationPlan;
+  /** Mistral Kit (M3): the controlled-environment isolation plan for this attempt. */
+  mistralIsolation?: MistralKitIsolationPlan;
 }
 
 const CLAUDE_KIT_PROJECTED_SESSION_ID = "00000000-0000-4000-8000-000000000000";
@@ -7837,7 +7867,7 @@ function safePersonalKitErrorMessage(code: PersonalConfigError["code"]): string 
  */
 function resolvePersonalKitContext(
   runtime: GatewayServerRuntime,
-  provider: "claude" | "codex",
+  provider: "claude" | "codex" | "mistral",
   params: Record<string, unknown>,
   mode: "execution" | "inspection"
 ): PersonalKitRequestContext | null {
@@ -7921,7 +7951,7 @@ function resolvePersonalKitContext(
 
 function resolvePersonalKitRequest(
   runtime: GatewayServerRuntime,
-  provider: "claude" | "codex",
+  provider: "claude" | "codex" | "mistral",
   params: Record<string, unknown>
 ): PersonalKitRequestContext | null {
   return resolvePersonalKitContext(runtime, provider, params, "execution");
@@ -7929,7 +7959,7 @@ function resolvePersonalKitRequest(
 
 function inspectPersonalKitContext(
   runtime: GatewayServerRuntime,
-  provider: "claude" | "codex",
+  provider: "claude" | "codex" | "mistral",
   params: Record<string, unknown>
 ): PersonalKitRequestContext | null {
   return resolvePersonalKitContext(runtime, provider, params, "inspection");
@@ -7956,7 +7986,12 @@ function rejectUnsupportedKitProvider(
   operation: string,
   corrId: string
 ): ExtendedToolResponse | null {
-  if (!runtime.personalConfig?.settings.enabled || provider === "claude" || provider === "codex") {
+  if (
+    !runtime.personalConfig?.settings.enabled ||
+    provider === "claude" ||
+    provider === "codex" ||
+    provider === "mistral"
+  ) {
     return null;
   }
   return personalKitErrorResponse(
@@ -7964,14 +7999,14 @@ function rejectUnsupportedKitProvider(
     corrId,
     new PersonalConfigError(
       "kit_provider_unsupported",
-      `Personal Agent Config Kit supports Claude and Codex only; ${provider} is unavailable while Kit mode is enabled`
+      `Personal Agent Config Kit supports Claude, Codex and Mistral only; ${provider} is unavailable while Kit mode is enabled`
     )
   );
 }
 
 interface PersonalKitSessionResolution {
   /** Provider selected for this immutable gateway session binding. */
-  provider: "claude" | "codex";
+  provider: "claude" | "codex" | "mistral";
   /** Immutable context which the attempt is allowed to update. */
   execution: KitExecutionRef;
   /** Gateway-owned durable session identifier, safe to return to callers. */
@@ -8203,7 +8238,7 @@ function assertKitDurableAdmission(runtime: GatewayServerRuntime): void {
 async function recoverOrRejectKitAttempt(input: {
   runtime: GatewayServerRuntime;
   manager: IKitSessionManager;
-  provider: "claude" | "codex";
+  provider: "claude" | "codex" | "mistral";
   session: Session;
   execution: KitExecutionRef;
 }): Promise<KitSessionBinding> {
@@ -8310,7 +8345,7 @@ async function recoverOrRejectKitAttempt(input: {
 
 async function claimPersonalKitAttempt(input: {
   manager: IKitSessionManager;
-  provider: "claude" | "codex";
+  provider: "claude" | "codex" | "mistral";
   execution: KitExecutionRef;
   session: Session;
   binding: KitSessionBinding;
@@ -8404,7 +8439,7 @@ async function runWithPersonalKitAttemptLease<T>(input: {
  */
 async function resolvePersonalKitSession(
   runtime: GatewayServerRuntime,
-  provider: "claude" | "codex",
+  provider: "claude" | "codex" | "mistral",
   context: ResolvedKitContext,
   requestedSessionId: string | undefined,
   createNewSession: boolean,
@@ -8515,7 +8550,7 @@ async function resolvePersonalKitSession(
             resumeEligible: false,
             attempt,
           },
-          `${provider === "claude" ? "Claude" : "Codex"} Kit Session`,
+          `${provider[0].toUpperCase()}${provider.slice(1)} Kit Session`,
           candidateSessionId
         )
       );
@@ -8599,7 +8634,7 @@ async function resolvePersonalKitSession(
  */
 async function finalizePersonalKitSession(input: {
   runtime: GatewayServerRuntime;
-  provider: "claude" | "codex";
+  provider: "claude" | "codex" | "mistral";
   gatewaySessionId: string;
   execution: KitExecutionRef;
   terminalMetadata: PersonalKitTerminalMetadata | null;
@@ -8720,7 +8755,7 @@ async function finalizePersonalKitSessionOrThrow(
  */
 async function finalizeAndAcknowledgePersonalKitTerminal(input: {
   runtime: GatewayServerRuntime;
-  provider: "claude" | "codex";
+  provider: "claude" | "codex" | "mistral";
   gatewaySessionId: string;
   execution: KitExecutionRef;
   terminalMetadata: PersonalKitTerminalMetadata | null;
@@ -8780,7 +8815,7 @@ async function finalizeAndAcknowledgePersonalKitTerminal(input: {
  */
 async function releaseAcknowledgedPersonalKitAttempt(input: {
   runtime: GatewayServerRuntime;
-  provider: "claude" | "codex";
+  provider: "claude" | "codex" | "mistral";
   gatewaySessionId: string;
   execution: KitExecutionRef;
   attemptId: string;
@@ -8915,7 +8950,7 @@ function requestContextForDurableOwner(ownerPrincipal: string | null): {
 async function finalizePersonalKitTerminalEvent(input: {
   event: AsyncJobTerminalEvent;
   runtime: GatewayServerRuntime;
-  provider: "claude" | "codex";
+  provider: "claude" | "codex" | "mistral";
   gatewaySessionId: string;
   execution: KitExecutionRef;
   attemptId: string;
@@ -8958,7 +8993,7 @@ async function reconcilePendingPersonalKitFinalizations(
         );
         continue;
       }
-      if (pending.cli !== "claude" && pending.cli !== "codex") {
+      if (pending.cli !== "claude" && pending.cli !== "codex" && pending.cli !== "mistral") {
         runtime.logger.error(
           `Kit terminal job ${pending.jobId} has unsupported provider ${pending.cli}; retaining its release pin`
         );
@@ -8988,13 +9023,17 @@ async function reconcilePendingPersonalKitFinalizations(
       }
     }
     for (const acknowledged of runtime.asyncJobManager.getAcknowledgedKitAttemptReleases()) {
-      if (acknowledged.cli !== "claude" && acknowledged.cli !== "codex") {
+      if (
+        acknowledged.cli !== "claude" &&
+        acknowledged.cli !== "codex" &&
+        acknowledged.cli !== "mistral"
+      ) {
         runtime.logger.error(
           `Kit acknowledged terminal job ${acknowledged.jobId} has unsupported provider ${acknowledged.cli}; retaining its attempt`
         );
         continue;
       }
-      const provider = acknowledged.cli as "claude" | "codex";
+      const provider = acknowledged.cli as "claude" | "codex" | "mistral";
       try {
         await runWithRequestContext(
           requestContextForDurableOwner(acknowledged.ownerPrincipal),
@@ -14195,6 +14234,20 @@ export async function handleMistralRequest(
 ): Promise<ExtendedToolResponse> {
   // Slice B7: route through the native ACP transport when explicitly selected.
   if (params.transport === "acp") {
+    // The ACP branch precedes Kit resolution, so reject it here when Kit is
+    // enabled: ACP routes around the controlled-environment isolation env and
+    // would be an isolation bypass.
+    const acpRuntime = resolveHandlerRuntime(deps);
+    if (acpRuntime.personalConfig.settings.enabled) {
+      return personalKitErrorResponse(
+        "mistral_request",
+        params.correlationId,
+        new PersonalConfigError(
+          "kit_provider_unsupported",
+          "Mistral Kit does not support the ACP transport; it routes around the controlled-environment isolation"
+        )
+      );
+    }
     const unsupported = rejectUnsupportedMistralAcpParams(params, "mistral_request");
     if (unsupported) return unsupported;
     return runAcpTransport(deps, {
@@ -14216,6 +14269,78 @@ export async function handleMistralRequest(
   if (unreachableWorktree) return unreachableWorktree;
   const runtime = resolveHandlerRuntime(deps);
   const startTime = Date.now();
+
+  // Mistral Kit (M3): resolve the immutable Kit context + the controlled-environment
+  // isolation before any provider work. A zero sync deadline cannot run any Kit
+  // provider preflight, so it fails closed before durable deferral. Every caller
+  // session/worktree/instruction field is conflict-rejected by
+  // validateKitRequestSurface, so a valid Kit request threads NO caller session args:
+  // native continuity is gateway-managed via the active Kit-session pointer.
+  let kit: PersonalKitRequestContext | null = null;
+  let kitSession: PersonalKitSessionResolution | null = null;
+  let kitPrefix: string | undefined;
+  let kitEnvFragment: NodeJS.ProcessEnv | undefined;
+  try {
+    if (runtime.personalConfig.settings.enabled) assertKitSyncDeferralEnabled();
+    kit = resolvePersonalKitRequest(runtime, "mistral", {
+      prompt: params.prompt,
+      promptParts: params.promptParts,
+      model: params.model,
+      outputFormat: params.outputFormat,
+      transport: params.transport,
+      sessionId: params.sessionId,
+      resumeLatest: params.resumeLatest,
+      createNewSession: params.createNewSession,
+      permissionMode: params.permissionMode,
+      approvalStrategy: params.approvalStrategy,
+      approvalPolicy: params.approvalPolicy,
+      mcpServers: params.mcpServers,
+      allowedTools: params.allowedTools,
+      disallowedTools: params.disallowedTools,
+      trust: params.trust,
+      maxTurns: params.maxTurns,
+      maxPrice: params.maxPrice,
+      maxTokens: params.maxTokens,
+      workingDir: params.workingDir,
+      addDir: params.addDir,
+      workspace: params.workspace,
+      worktree: params.worktree,
+    });
+    if (kit) {
+      // The redirected HOME has no OS keyring, so the api key is the sole
+      // credential channel; fail closed when it is absent.
+      const apiKey = process.env.MISTRAL_API_KEY?.trim();
+      if (!apiKey) {
+        throw new PersonalConfigError(
+          "kit_invalid_baseline",
+          "Mistral Kit requires MISTRAL_API_KEY in the gateway environment; the redirected home has no OS keyring fallback"
+        );
+      }
+      kitPrefix = kitContextPrefix(kit.context);
+      // Native continuity: vibe --resume reads sessions from config.session_logging.save_dir
+      // (verified: session_loader.find_session_by_id globs config.save_dir). VIBE_HOME stays
+      // a fresh ephemeral dir per request (full-manifest isolation preserved), but the
+      // session log dir is a STABLE gateway-owned path keyed by the immutable execution, so
+      // a later --resume finds the prior turn. Keyed by scope+configStamp so a config change
+      // (new execution) starts fresh, exactly as the Kit execution-current fence requires.
+      const kitSessionDir = join(
+        runtime.personalConfig.layout.runtimeDir,
+        "mistral-kit-sessions",
+        createHash("sha256")
+          .update(`${kit.context.execution.scopeRoot ?? ""} ${kit.context.execution.configStamp}`)
+          .digest("hex")
+      );
+      kit.mistralIsolation = createMistralKitIsolationPlan({
+        cwd: kit.context.scope.cwd,
+        contextPrefix: kitPrefix,
+        apiKey,
+        sessionDir: kitSessionDir,
+      });
+    }
+  } catch (error) {
+    return personalKitErrorResponse("mistral_request", params.correlationId, error);
+  }
+
   let sessionResult: ReturnType<typeof resolveMistralSessionArgs>;
   try {
     sessionResult = resolveMistralSessionArgs({
@@ -14226,13 +14351,25 @@ export async function handleMistralRequest(
   } catch (error) {
     return createErrorResponse("mistral_request", 1, "", params.correlationId, error as Error);
   }
+  // Apply the personal baseline's Kit preferences (model_default + max_turns_cap)
+  // exactly as claude/codex do; without this a Kit model_default is ignored and the
+  // baseline turn cap is unenforced. outputFormat is conflict-rejected so it stays a
+  // baseline concern only; we read back model + maxTurns.
+  const kitPreferences = kit
+    ? applyKitPreferences(
+        { model: params.model, maxTurns: params.maxTurns },
+        kit.context.preferences
+      )
+    : { model: params.model, maxTurns: params.maxTurns };
   const prep = prepareMistralRequest(
     {
       prompt: params.prompt,
       promptParts: params.promptParts,
-      model: params.model,
-      outputFormat: params.outputFormat,
-      permissionMode: params.permissionMode,
+      model: kitPreferences.model as string | undefined,
+      // Kit conflict-rejects outputFormat/workingDir/addDir/permissionMode; force
+      // the managed agent posture and the Kit-owned prompt prefix.
+      outputFormat: kit ? undefined : params.outputFormat,
+      permissionMode: kit ? resolveMistralKitAgentMode() : params.permissionMode,
       allowedTools: params.allowedTools,
       disallowedTools: params.disallowedTools,
       approvalStrategy: params.approvalStrategy,
@@ -14242,38 +14379,69 @@ export async function handleMistralRequest(
       optimizePrompt: params.optimizePrompt,
       operation: "mistral_request",
       trust: params.trust,
-      maxTurns: params.maxTurns,
+      maxTurns: kitPreferences.maxTurns as number | undefined,
       maxPrice: params.maxPrice,
       maxTokens: params.maxTokens,
-      workingDir: params.workingDir,
-      addDir: params.addDir,
+      workingDir: kit ? undefined : params.workingDir,
+      addDir: kit ? undefined : params.addDir,
       nativeResumeRequested: sessionResult.resumeArgs.length > 0,
       gatewayWorktreeRequested: hasGatewayWorktreeRequest(params.worktree),
+      kitContextPrefix: kit ? kitPrefix : undefined,
     },
     runtime
   );
   if (!("args" in prep)) return prep;
 
   const { corrId, args, mistralEnv } = prep;
-  try {
-    insertAndAdmitFinalSessionArgs("vibe", args, sessionResult.resumeArgs, "mistral");
-  } catch (error) {
-    return createErrorResponse("mistral_request", 1, "", corrId, error as Error);
+
+  // Kit: claim the durable native-continuation lease (gateway-managed continuity)
+  // and build the isolation spawn env fragment + native resume args. Any failure
+  // between the claim and the envelope discards the pending lease so it is not
+  // leaked. Non-Kit: the original single insertAndAdmit path.
+  if (kit) {
+    try {
+      kitSession = await resolvePersonalKitSession(
+        runtime,
+        "mistral",
+        kit.context,
+        undefined,
+        false,
+        personalKitSyncAttemptKind(runtime)
+      );
+    } catch (error) {
+      return personalKitErrorResponse("mistral_request", corrId, error);
+    }
+    try {
+      kitEnvFragment = mistralKitSpawnEnvFragment(process.env, kit.mistralIsolation!);
+      // Re-apply the gateway's OWN resolved model (stripped as an ambient VIBE_*
+      // by the fragment); it is gateway-controlled, not a caller injection.
+      if (mistralEnv.VIBE_ACTIVE_MODEL) {
+        kitEnvFragment.VIBE_ACTIVE_MODEL = mistralEnv.VIBE_ACTIVE_MODEL;
+      }
+      const kitResumeArgs =
+        kitSession.resume && kitSession.nativeSessionId
+          ? ["--resume", kitSession.nativeSessionId]
+          : [];
+      insertAndAdmitFinalSessionArgs("vibe", args, kitResumeArgs, "mistral");
+    } catch (error) {
+      await discardPendingPersonalKitSession(runtime, kitSession);
+      return personalKitErrorResponse("mistral_request", corrId, error);
+    }
+  } else {
+    try {
+      insertAndAdmitFinalSessionArgs("vibe", args, sessionResult.resumeArgs, "mistral");
+    } catch (error) {
+      return createErrorResponse("mistral_request", 1, "", corrId, error as Error);
+    }
   }
-  // Tier-B T5d: route mistral (a non-Kit sibling) through the shared terminal
-  // envelope with kit=null. mistral has claude's in-try topology (states 4..8 in
-  // runInsideTerminalTry, incl. the inline worktree-resolve ok:false seam,
-  // applyEffectiveWorkingDirectory, and the invoked log). The ACP branch +
-  // rejectUnreachableGatewayWorktree stay OUTSIDE. It uses the D4 usageUpdateSessionId
-  // split and env.logger = deps.logger (mistral already logs all three terminal
-  // lines, so there is no D5 delta). The mistral-unique model-selection RETRY loop
-  // (first dispatch; on a stale-model failure rearm the worktree lifecycle and
-  // dispatch once more) folds entirely into the execute hook, which returns the
-  // final result (deferred or inline); the driver's single deferred branch handles
-  // BOTH deferred sites (identical settle + usage-split) and its success/failure
-  // branches handle the final inline result.
-  let effectiveSessionId = sessionResult.effectiveSessionId;
-  if (!params.createNewSession && !effectiveSessionId) {
+  // Tier-B T5d: route mistral through the shared terminal envelope. With kit=null
+  // it keeps its claude-style in-try topology (states 4..8 in runInsideTerminalTry).
+  // Under Kit (M3) the in-try branch skips caller worktree/session admission (the
+  // Kit session owns rollback via the ledger's kitSession path) and runs in the
+  // gateway-owned isolation cwd; the model-selection RETRY loop is Kit-disabled
+  // (durable baseline model, no in-place arg rebuild through the isolation env).
+  let effectiveSessionId = kit ? kitSession!.gatewaySessionId : sessionResult.effectiveSessionId;
+  if (!kit && !params.createNewSession && !effectiveSessionId) {
     effectiveSessionId = `${GATEWAY_SESSION_PREFIX}${randomUUID()}`;
   }
   let effectiveCompress = false;
@@ -14281,18 +14449,21 @@ export async function handleMistralRequest(
   const flight = new FlightOwnership(
     () =>
       safeFlightStart(
-        {
-          correlationId: corrId,
-          cli: "mistral",
-          model: prep.resolvedModel || "default",
-          prompt: prep.effectivePrompt,
-          sessionId: effectiveSessionId,
-          stablePrefixHash: prep.stablePrefixHash ?? undefined,
-          stablePrefixTokens: prep.stablePrefixTokens ?? undefined,
-        },
+        personalKitFlightStart(
+          {
+            correlationId: corrId,
+            cli: "mistral",
+            model: prep.resolvedModel || "default",
+            prompt: prep.effectivePrompt,
+            sessionId: effectiveSessionId,
+            stablePrefixHash: prep.stablePrefixHash ?? undefined,
+            stablePrefixTokens: prep.stablePrefixTokens ?? undefined,
+          },
+          kit
+        ),
         runtime
       ),
-    metadata => safeFlightComplete(corrId, metadata, runtime)
+    metadata => safePersonalKitFlightComplete(corrId, metadata, kit, runtime)
   );
 
   const env: KitTerminalEnvelope = {
@@ -14300,10 +14471,17 @@ export async function handleMistralRequest(
     logger: deps.logger,
     provider: "mistral",
     corrId,
-    kit: null,
-    kitSession: null,
+    kit,
+    kitSession,
     effectiveSessionId,
-    usageUpdateSessionId: sessionResult.userProvidedSession ? effectiveSessionId : undefined,
+    // Kit usage is fenced by the Kit session lease (the envelope skips the
+    // durable usage update when kitSession is present), so this is undefined
+    // under Kit and keeps the D4 minted-session split otherwise.
+    usageUpdateSessionId: kit
+      ? undefined
+      : sessionResult.userProvidedSession
+        ? effectiveSessionId
+        : undefined,
     ledger,
     flight,
     startTime,
@@ -14317,6 +14495,50 @@ export async function handleMistralRequest(
 
   const hooks: KitTerminalHooks = {
     runInsideTerminalTry: async () => {
+      if (kit && kitSession) {
+        // Kit topology: no caller worktree (conflict-rejected) and no ledger
+        // session admission (the Kit session lease owns rollback). Run in the
+        // gateway-owned isolation cwd (the resolved scope root, left untrusted),
+        // and bind that scope onto the durable Kit session for continuity.
+        const isolation = kit.mistralIsolation!;
+        const worktreeResolution: ResolvedWorktree = {
+          cwd: isolation.cwd,
+          effectiveWorkingDir: isolation.cwd,
+          effectiveAddDirs: [],
+        };
+        const existingKitSession = await getCallerOwnedSession(
+          deps.sessionManager,
+          kitSession.gatewaySessionId
+        );
+        if (existingKitSession) {
+          await persistResolvedSessionScope(
+            deps.sessionManager,
+            kitSession.gatewaySessionId,
+            worktreeResolution,
+            runtime,
+            existingKitSession
+          );
+        }
+        applyEffectiveWorkingDirectory(
+          "vibe",
+          args,
+          "--workdir",
+          isolation.cwd,
+          "mistral",
+          "--add-dir",
+          []
+        );
+        assertUpstreamCliArgs("mistral", args);
+        assertUpstreamCliEnv("mistral", kitEnvFragment!);
+        assertFinalCliProcessAdmission("vibe", args, "mistral", kitEnvFragment!);
+        // Fail closed if the compiled context drifted from what the plan admitted.
+        assertMistralKitContextPrefix(isolation, kitPrefix!);
+        flight.start();
+        deps.logger.info(
+          `[${corrId}] mistral_request (Kit) invoked with model=${prep.resolvedModel || "default"}, agent=${resolveMistralKitAgentMode()}, prompt length=${prep.effectivePrompt.length}`
+        );
+        return { ok: true, value: { worktreeResolution } };
+      }
       const existingSession = sessionResult.userProvidedSession
         ? await getExistingSessionForProvider(
             deps.sessionManager,
@@ -14417,32 +14639,66 @@ export async function handleMistralRequest(
         params.outputFormat,
         params.optimizePrompt
       );
-      let result = await awaitJobOrDefer(
-        "mistral",
-        args,
-        corrId,
-        resolveIdleTimeout("mistral", params.idleTimeoutMs),
-        params.outputFormat,
-        params.forceRefresh,
+      // Kit dispatch: the isolation env fragment + isolation cwd, the withheld FR
+      // entry, the immutable Kit identity, the deferred terminal native-capture
+      // callback, the durable session/attempt binding, and the disk-capture home.
+      const dispatchEnv = kit ? kitEnvFragment! : mistralEnv;
+      const dispatchCwd = kit ? kit.mistralIsolation!.cwd : worktreeResolution.cwd;
+      const dispatchFrEntry = kit
+        ? personalKitFlightRecorderEntry(mistralFrHandoff.flightRecorderEntry, kit)
+        : mistralFrHandoff.flightRecorderEntry;
+      const runDispatch = () =>
+        awaitJobOrDefer(
+          "mistral",
+          args,
+          corrId,
+          resolveIdleTimeout("mistral", params.idleTimeoutMs),
+          params.outputFormat,
+          kit ? true : params.forceRefresh,
+          runtime,
+          dispatchEnv,
+          ledger.worktreeLifecycle?.onTerminal,
+          dispatchFrEntry,
+          mistralFrHandoff.extractUsage,
+          undefined,
+          dispatchCwd,
+          effectiveCompress,
+          kit?.context.execution ?? null,
+          kit && kitSession
+            ? event =>
+                finalizePersonalKitTerminalEvent({
+                  event,
+                  runtime,
+                  provider: "mistral",
+                  gatewaySessionId: kitSession!.gatewaySessionId,
+                  execution: kit!.context.execution,
+                  attemptId: kitSession!.attemptId,
+                })
+            : undefined,
+          kitSession?.gatewaySessionId,
+          kitSession?.attemptKind === "durable" ? kitSession.attemptId : undefined,
+          sessionBoundDedupArgs(args, effectiveSessionId),
+          undefined,
+          undefined,
+          undefined,
+          kit?.mistralIsolation?.sessionDir
+        );
+      // The Kit heartbeat keeps the attempt lease alive until deferral or terminal
+      // state; a null kitSession runs the dispatch directly.
+      let result = await runWithPersonalKitAttemptLease({
         runtime,
-        mistralEnv,
-        ledger.worktreeLifecycle?.onTerminal,
-        mistralFrHandoff.flightRecorderEntry,
-        mistralFrHandoff.extractUsage,
-        undefined,
-        worktreeResolution.cwd,
-        effectiveCompress,
-        undefined,
-        undefined,
-        undefined,
-        undefined,
-        sessionBoundDedupArgs(args, effectiveSessionId)
-      );
+        session: kitSession,
+        heartbeat: true,
+        run: runDispatch,
+      });
       // Deferrals (from either dispatch) are handled by the driver's deferred
       // branch (settle + usage-split + buildDeferredToolResponse + the fence).
       if (isDeferredResponse(result)) return result;
 
-      if (result.code !== 0 && isMistralModelSelectionFailure(result.stderr)) {
+      // The stale-model RETRY is a non-Kit path only: a Kit run uses the durable
+      // baseline model, and the retry would need the isolation env/cwd/prefix +
+      // native-capture args rebuilt in place.
+      if (!kit && result.code !== 0 && isMistralModelSelectionFailure(result.stderr)) {
         const recoveryModel = selectMistralRecoveryModel(prep.resolvedModel);
         if (recoveryModel) {
           deps.logger.info(
@@ -14495,15 +14751,30 @@ export async function handleMistralRequest(
       return result;
     },
     computeSuccessFacts: () => undefined,
-    finalizeKit: async () => {},
+    finalizeKit: async ({ completed }) => {
+      if (!kit || !kitSession) return;
+      await finalizePersonalKitSessionOrThrow({
+        runtime,
+        provider: "mistral",
+        gatewaySessionId: kitSession.gatewaySessionId,
+        execution: kit.context.execution,
+        // Vibe emits no stdout session id; the native UUID is captured from disk
+        // under the gateway-owned stable session dir (process-local handle).
+        terminalMetadata: completed
+          ? createVibeKitTerminalMetadata(kit.mistralIsolation!.sessionDir)
+          : null,
+        completed,
+        attemptId: kitSession.attemptId,
+      });
+    },
     buildFailureResponse: ({ code, stderr, terminalFailure, result }) =>
-      createErrorResponse(
+      kitAwareErrorResponse(
         "mistral",
         code,
         stderr,
         corrId,
         undefined,
-        undefined,
+        kit,
         {
           providerSessionId: terminalFailure.providerSessionId,
         },
@@ -14523,7 +14794,7 @@ export async function handleMistralRequest(
         undefined,
         effectiveCompress
       );
-      safeRecordCompression(corrId, response.compression, runtime);
+      safeRecordCompression(corrId, response.compression, runtime, kit !== null);
       if (worktreeResolution.worktreePath) {
         const first = response.content[0];
         if (first && first.type === "text") {
@@ -16134,7 +16405,7 @@ const kitExecutionRecoverySchema = z
  */
 async function recoverUnadmittedPersonalKitAttempt(input: {
   runtime: GatewayServerRuntime;
-  provider: "claude" | "codex";
+  provider: "claude" | "codex" | "mistral";
   sessionId: string;
   attemptId: string;
   execution: KitExecutionRef;
@@ -16357,7 +16628,7 @@ function registerPersonalConfigTools(server: McpServer, runtime: GatewayServerRu
     "config_recover_kit_attempt",
     "Fence and release one exact unadmitted durable Kit attempt after the previous gateway process has been stopped. Copy the execution and attempt identity from local session_get output. This action is local-only and cannot recover an existing durable job.",
     {
-      provider: z.enum(["claude", "codex"]),
+      provider: z.enum(["claude", "codex", "mistral"]),
       sessionId: z.string().uuid(),
       attemptId: z.string().uuid(),
       execution: kitExecutionRecoverySchema,

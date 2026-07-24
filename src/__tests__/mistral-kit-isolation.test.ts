@@ -38,6 +38,7 @@ describe("createMistralKitIsolationPlan", () => {
       contextPrefix: CONTEXT,
       apiKey: API_KEY,
       homeRoot: root,
+      sessionDir: join(root, "sessions"),
     });
   }
 
@@ -51,6 +52,30 @@ describe("createMistralKitIsolationPlan", () => {
     expect(cfg).toContain("[session_logging]");
     expect(cfg).toContain("enabled = true");
     expect(isIssuedMistralKitIsolationPlan(plan)).toBe(true);
+  });
+
+  it("relocates the session log dir to the stable gateway-owned save_dir (kept OUT of the home)", () => {
+    const plan = build();
+    const expectedSessionDir = join(root, "sessions");
+    expect(plan.sessionDir).toBe(expectedSessionDir);
+    // The stable dir exists (0700, created here) and is OUTSIDE the ephemeral home,
+    // so vibe writes session logs there and the home stays strictly manifested.
+    expect(existsSync(expectedSessionDir)).toBe(true);
+    expect(plan.sessionDir.startsWith(plan.home)).toBe(false);
+    const cfg = readFileSync(join(plan.vibeHome, "config.toml"), "utf-8");
+    expect(cfg).toContain(`save_dir = ${JSON.stringify(expectedSessionDir)}`);
+  });
+
+  it("fails closed on a non-absolute sessionDir", () => {
+    expect(() =>
+      createMistralKitIsolationPlan({
+        cwd: "/x",
+        contextPrefix: CONTEXT,
+        apiKey: API_KEY,
+        homeRoot: root,
+        sessionDir: "relative/sessions",
+      })
+    ).toThrow(/absolute .*sessionDir/);
   });
 
   it("env fragment carries the full redirect + hardening lever set", () => {
@@ -87,6 +112,7 @@ describe("createMistralKitIsolationPlan", () => {
         contextPrefix: CONTEXT,
         apiKey: "",
         homeRoot: root,
+        sessionDir: join(root, "sessions"),
       })
     ).toThrow(MistralKitIsolationError);
     expect(() =>
@@ -95,6 +121,7 @@ describe("createMistralKitIsolationPlan", () => {
         contextPrefix: CONTEXT,
         apiKey: "  ",
         homeRoot: root,
+        sessionDir: join(root, "sessions"),
       })
     ).toThrow(/MISTRAL_API_KEY/);
   });
@@ -111,6 +138,7 @@ describe("assertMistralKitIsolationManifest (fail-closed)", () => {
       contextPrefix: CONTEXT,
       apiKey: API_KEY,
       homeRoot: root,
+      sessionDir: join(root, "sessions"),
     });
   });
   afterEach(() => {
@@ -169,6 +197,7 @@ describe("applyMistralKitIsolationEnv (strips ambient VIBE_* injectors)", () => 
       contextPrefix: CONTEXT,
       apiKey: API_KEY,
       homeRoot: root,
+      sessionDir: join(root, "sessions"),
     });
   });
   afterEach(() => {
