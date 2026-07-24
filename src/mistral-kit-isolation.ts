@@ -217,6 +217,7 @@ export function assertMistralKitIsolationManifest(plan: MistralKitIsolationPlan)
     "VIBE_INCLUDE_PROJECT_CONTEXT",
     "VIBE_INCLUDE_PROMPT_DETAIL",
     "VIBE_EXPERIMENTAL_ENABLE_REGISTRY_SKILLS",
+    "VIBE_ACP_LOGGING_ENABLED",
   ];
   for (const key of required) {
     if (!plan.env[key]) {

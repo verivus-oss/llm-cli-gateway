@@ -140,11 +140,20 @@ describe("assertMistralKitIsolationManifest (fail-closed)", () => {
     expect(() => assertMistralKitIsolationManifest(tampered)).toThrow(/do not match/);
   });
 
-  it("throws when a lever is missing from the env fragment", () => {
-    const noKeyring = { ...plan };
-    const env = { ...plan.env };
-    delete (env as Record<string, string>).VIBE_TEST_DISABLE_KEYRING;
-    expect(() => assertMistralKitIsolationManifest({ ...noKeyring, env })).toThrow(/missing lever/);
+  it("throws when ANY required lever is missing from the env fragment", () => {
+    const levers = [
+      "VIBE_TEST_DISABLE_KEYRING",
+      "VIBE_INCLUDE_PROJECT_CONTEXT",
+      "VIBE_INCLUDE_PROMPT_DETAIL",
+      "VIBE_EXPERIMENTAL_ENABLE_REGISTRY_SKILLS",
+      "VIBE_ACP_LOGGING_ENABLED",
+      "MISTRAL_API_KEY",
+    ];
+    for (const lever of levers) {
+      const env = { ...plan.env };
+      delete (env as Record<string, string>)[lever];
+      expect(() => assertMistralKitIsolationManifest({ ...plan, env })).toThrow(/missing lever/);
+    }
   });
 });
 
