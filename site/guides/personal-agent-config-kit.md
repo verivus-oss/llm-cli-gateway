@@ -28,11 +28,11 @@ read.
 
 Scope selection is provider specific. `explain_effective_config` accepts an
 absolute `workingDir` for read-only inspection, and a Codex Kit request can use
-it to select its canonical folder. A Claude Kit request deliberately rejects a
+it to select its canonical folder. A Claude or Mistral Kit request deliberately rejects a
 caller-supplied `workingDir`; select its target with an already configured
 registered `workspace` alias or the configured default workspace. A Codex Kit
 request must supply an absolute `workingDir`, select a registered `workspace`,
-or use the configured default. Neither provider uses the gateway process cwd
+or use the configured default. No provider uses the gateway process cwd
 for Kit scope discovery. Relative `workingDir` values are rejected before
 filesystem or Git inspection, and an unscoped request fails before reading an
 overlay or starting a provider.
@@ -90,8 +90,8 @@ legacy state without complete acknowledgement history also requires a sync.
 - Kit provider execution, and recovery of an unadmitted attempt, require healthy
   durable SQLite or PostgreSQL async-job admission. Durable admission protects
   those restart and recovery boundaries.
-- Kit mode currently supports Claude and Codex provider requests, including their
-  async variants. Other provider requests fail closed. Cross-model validation and
+- Kit mode currently supports Claude, Codex, and Mistral provider requests,
+  including their async variants. Other provider requests fail closed. Cross-model validation and
   `route_request` / `route_request_async` are intentionally not registered in Kit
   mode, even when `[least_cost].enabled = true`.
 - Keep the baseline remote private and never store credentials, tokens, or `.env`

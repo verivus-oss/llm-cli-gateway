@@ -504,6 +504,6 @@ For long-running async loops on a Claude session, treat the warning as a hint to
   The normal `workingDir` targeting rule does not apply to a Claude or Mistral
   Kit request: both reject caller-supplied `workingDir` before context
   compilation.
-  Inspect a candidate folder with `explain_effective_config`, then target Claude
-  through an already configured registered `workspace` alias or the configured
-  default workspace. It never inherits the gateway process cwd.
+  Inspect a candidate folder with `explain_effective_config`, then target that
+  provider through an already configured registered `workspace` alias or the
+  configured default workspace. It never inherits the gateway process cwd.

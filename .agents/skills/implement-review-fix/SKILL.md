@@ -194,10 +194,10 @@ produce an unconditional exhaustive review. Use
 uncapped approved profile or explicit user direction rather than silently
 lowering the review scope.
 
-That `workingDir` is valid for read-only Kit inspection only. A Claude Kit
-request rejects caller-supplied `workingDir` before it compiles context. Target
-Claude Kit execution through an already configured registered `workspace` alias
-or the configured default workspace. It never inherits the gateway process cwd.
+That `workingDir` is valid for read-only Kit inspection only. A Claude or
+Mistral Kit request rejects caller-supplied `workingDir` before it compiles
+context. Target that Kit execution through an already configured registered
+`workspace` alias or the configured default workspace. It never inherits the gateway process cwd.
 
 ## Do not do this
 

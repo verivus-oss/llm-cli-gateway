@@ -218,6 +218,6 @@ as a scope blocker unless the user explicitly chooses a different review scope.
 The usual `workingDir` rule does not apply to a Claude or Mistral Kit request:
 both reject caller-supplied `workingDir` before context compilation. Use
 `explain_effective_config({workingDir:"<repo>"})` only to inspect a candidate
-scope, then select Claude's target through an already configured registered
-`workspace` alias or the configured default workspace. It never inherits the
+scope, then select that provider's target through an already configured
+registered `workspace` alias or the configured default workspace. It never inherits the
 gateway process cwd.

@@ -164,6 +164,6 @@ The ordinary `workingDir` targeting rule does not apply to a Claude or Mistral
 Kit request: both reject caller-supplied `workingDir` before context
 compilation.
 Use `explain_effective_config({workingDir:"<repo>"})` to inspect a candidate
-scope, then execute Claude Kit work through an already configured registered
+scope, then execute that Kit work through an already configured registered
 `workspace` alias or the configured default workspace. It never inherits the
 gateway process cwd.

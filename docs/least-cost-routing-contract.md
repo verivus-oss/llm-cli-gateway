@@ -30,7 +30,7 @@ across models than across providers, so LCR never routes a bare provider.
 1. **Dormant by default.** `[least_cost].enabled` defaults false. The
    `route_request` / `route_request_async` tools are **not registered at all**
    unless it is enabled and Personal Agent Config Kit is disabled. Kit admits
-   only its compiled local Claude/Codex path, so LCR cannot advertise a generic
+   only its compiled local Claude/Codex/Mistral path, so LCR cannot advertise a generic
    route surface there: nothing routes until an operator opts in outside Kit
    mode.
 

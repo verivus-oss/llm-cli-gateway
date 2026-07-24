@@ -282,7 +282,7 @@ treat that as a blocker unless the user explicitly changes the required scope.
 The normal `workingDir` target rule does not apply to a Claude or Mistral Kit
 request: both reject caller-supplied `workingDir` before context compilation.
 `explain_effective_config({workingDir:"<repo>"})` can inspect a candidate scope,
-but Claude Kit execution must use an already configured registered `workspace`
+but that Kit execution must use an already configured registered `workspace`
 alias or the configured default workspace. It never inherits the gateway
 process cwd.
 

@@ -204,10 +204,10 @@ security review complete, inspect `explain_effective_config`; a turn/budget cap
 makes an exhaustive no-limit review constrained until an approved uncapped
 profile or explicit user direction is available.
 
-The normal Claude `workingDir` posture guidance does not apply to Kit execution.
-Claude Kit requests reject caller-supplied `workingDir` before context
-compilation. `explain_effective_config({workingDir:"<repo>"})` remains valid for
-read-only inspection; execute Claude Kit work with an already configured
+The normal `workingDir` posture guidance does not apply to Kit execution.
+Claude and Mistral Kit requests reject caller-supplied `workingDir` before
+context compilation. `explain_effective_config({workingDir:"<repo>"})` remains
+valid for read-only inspection; execute that Kit work with an already configured
 registered `workspace` alias or the configured default workspace. It never
 inherits the gateway process cwd.
 
