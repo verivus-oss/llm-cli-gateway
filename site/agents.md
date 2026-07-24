@@ -70,9 +70,11 @@ token deliberately share one principal and are not multi-tenant isolated.
 
 Remote provider calls require a registered workspace. Non-Kit local stdio
 callers can pass local `workingDir`, `addDir`, or provider-native path controls
-directly. Claude requests made with Personal Agent Config Kit enabled are an
+directly. Claude and Mistral requests made with Personal Agent Config Kit enabled are an
 exception: the Kit rejects caller-supplied `workingDir`; use an already
-configured registered `workspace` alias or the configured default workspace.
+configured registered `workspace` alias or the configured default workspace. A
+Codex Kit request is not in that exception set and may supply an absolute
+`workingDir`.
 Kit scope never inherits the gateway process cwd.
 
 An ordinary local CLI request with no resolved target runs in a fresh private

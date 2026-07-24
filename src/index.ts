@@ -7888,8 +7888,9 @@ function resolvePersonalKitContext(
   }
   if (mode === "execution") assertKitDurableAdmission(runtime);
   // Reject baseline-authority conflicts before inspecting any caller-controlled
-  // path. A forbidden Claude workingDir must not influence filesystem probing
-  // or change the error class before Kit rejects it.
+  // path. A forbidden workingDir (claude and mistral reject it outright) must
+  // not influence filesystem probing or change the error class before Kit
+  // rejects it.
   validateKitRequestSurface(provider, params, true);
   const explicitlyRequestedWorkspace =
     typeof params.workspace === "string" ? params.workspace : undefined;
@@ -16754,7 +16755,8 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
     persistence.backend !== "none" && persistence.asyncJobsEnabled && asyncJobManager.hasStore();
   const personalConfigEnabled = runtime.personalConfig.settings.enabled;
   // LCR can select any configured CLI or API candidate. Personal Agent Config
-  // Kit deliberately admits only its compiled, local Claude/Codex path, so an
+  // Kit deliberately admits only its compiled, local Claude/Codex/Mistral path,
+  // so an
   // enabled [least_cost] block must not advertise a route surface that cannot
   // preserve the Kit boundary. The handler-level Kit checks remain as defense
   // in depth for direct internal calls.
@@ -16864,8 +16866,8 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
   // ─── Least-cost routing (LCR) tools ──────────────────────────────────────
   // Dormant by default (contract decision 1): route_request / route_request_async
   // are registered ONLY when [least_cost].enabled is true and Personal Agent
-  // Config Kit is disabled. Kit permits its compiled local Claude/Codex path
-  // only, so the generic route surface must be absent rather than advertise a
+  // Config Kit is disabled. Kit permits its compiled local Claude/Codex/Mistral
+  // path only, so the generic route surface must be absent rather than advertise a
   // request it will reject. Nothing routes until an operator opts in.
   if (leastCostRoutingEnabled) {
     const RouteCandidateShape = z.object({
