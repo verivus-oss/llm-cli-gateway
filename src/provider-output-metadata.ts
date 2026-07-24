@@ -17,7 +17,8 @@ import { parseStreamJson } from "./stream-json-parser.js";
 import { parseCodexJsonStream } from "./codex-json-parser.js";
 import { parseGeminiJson, parseGeminiStreamJson } from "./gemini-json-parser.js";
 import { parseGrokOutput } from "./grok-json-parser.js";
-import { isKitNativeSessionId } from "./personal-config-types.js";
+import { isKitNativeSessionIdForProvider, isVibeNativeSessionId } from "./personal-config-types.js";
+import { resolveNewestVibeNativeSessionId } from "./mistral-meta-json-parser.js";
 
 /** A field the transport genuinely does not emit (typed capability fact). */
 export type ProviderMetadataAbsentField = "sessionId" | "stopReason" | "usage";
@@ -60,13 +61,17 @@ export interface PersonalKitTerminalMetadata {
   nativeSessionId: string | null;
 }
 
-function isPersonalKitTerminalMetadata(value: unknown): value is PersonalKitTerminalMetadata {
+function isPersonalKitTerminalMetadata(
+  value: unknown,
+  provider?: string
+): value is PersonalKitTerminalMetadata {
   if (!value || typeof value !== "object" || Array.isArray(value)) return false;
   const metadata = value as Record<string, unknown>;
   return (
     metadata.version === 1 &&
     (typeof metadata.nativeSessionId === "string" || metadata.nativeSessionId === null) &&
-    (metadata.nativeSessionId === null || isKitNativeSessionId(metadata.nativeSessionId))
+    (metadata.nativeSessionId === null ||
+      isKitNativeSessionIdForProvider(provider, metadata.nativeSessionId))
   );
 }
 
@@ -84,7 +89,26 @@ export function createPersonalKitTerminalMetadata(
   return {
     version: 1,
     nativeSessionId:
-      metadata.sessionId && isKitNativeSessionId(metadata.sessionId) ? metadata.sessionId : null,
+      metadata.sessionId && isKitNativeSessionIdForProvider(cli, metadata.sessionId)
+        ? metadata.sessionId
+        : null,
+  };
+}
+
+/**
+ * Mistral Kit M0: the disk-capture equivalent of createPersonalKitTerminalMetadata.
+ * Mistral Vibe emits no session id on stdout (extractProviderOutputMetadata
+ * "mistral" names it absent); the native handle lives on disk under a
+ * gateway-owned home. This resolves the newest vibe session_id there and gates
+ * it on the vibe-scoped broad guard, failing closed to null. Not wired into any
+ * live handler until the mistral Kit gate opens; the returned handle is
+ * process-local (never persisted) exactly like the stdout variant.
+ */
+export function createVibeKitTerminalMetadata(home: string): PersonalKitTerminalMetadata {
+  const sessionId = resolveNewestVibeNativeSessionId(home);
+  return {
+    version: 1,
+    nativeSessionId: isVibeNativeSessionId(sessionId) ? sessionId : null,
   };
 }
 
@@ -93,12 +117,13 @@ export function createPersonalKitTerminalMetadata(
  * defensive migration handling. Runtime persistence retires this value.
  */
 export function parsePersonalKitTerminalMetadata(
-  value: unknown
+  value: unknown,
+  provider?: string
 ): PersonalKitTerminalMetadata | null {
   if (typeof value !== "string" || value.length === 0) return null;
   try {
     const parsed: unknown = JSON.parse(value);
-    if (!isPersonalKitTerminalMetadata(parsed)) return null;
+    if (!isPersonalKitTerminalMetadata(parsed, provider)) return null;
     // Canonicalize rather than returning the parsed object. A durable metadata
     // record has exactly two fields even if a hand-edited or low-level caller
     // supplied harmless-looking extra JSON keys.
