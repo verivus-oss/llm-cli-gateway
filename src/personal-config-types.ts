@@ -75,6 +75,33 @@ export function isKitNativeSessionId(value: unknown): value is string {
   return typeof value === "string" && KIT_NATIVE_SESSION_ID.test(value);
 }
 
+// Mistral Vibe mints non-RFC-4122 native session ids: they are full 128-bit
+// random hex in 8-4-4-4-12 form but the version/variant nibbles are uniformly
+// random, so ~88% fail the strict KIT_NATIVE_SESSION_ID guard (host probe, 2892
+// on-disk sessions: 11.9% strict-pass, matching the 12.5% expected for random
+// nibbles). A vibe-SCOPED broad guard accepts the lowercase-hex 8-4-4-4-12 shape.
+// Safe because the value is charset-gated (no shell/path metacharacters) and the
+// disk resolver additionally requires an exact on-disk session_id match before it
+// is passed to `--resume`. Claude and Codex stay on the strict guard.
+const VIBE_NATIVE_SESSION_ID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
+export function isVibeNativeSessionId(value: unknown): value is string {
+  return typeof value === "string" && VIBE_NATIVE_SESSION_ID.test(value);
+}
+
+/**
+ * Provider-scoped native-session-id guard. Mistral uses the broad vibe shape;
+ * every other provider (and an unknown/undefined provider) stays strict. This is
+ * the single place the vibe relaxation is scoped, so Claude and Codex validation
+ * is unchanged.
+ */
+export function isKitNativeSessionIdForProvider(
+  provider: string | undefined,
+  value: unknown
+): value is string {
+  return provider === "mistral" ? isVibeNativeSessionId(value) : isKitNativeSessionId(value);
+}
+
 function isValidTimestamp(value: unknown): value is string {
   return typeof value === "string" && Number.isFinite(Date.parse(value));
 }

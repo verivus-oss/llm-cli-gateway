@@ -1,0 +1,222 @@
+# Mistral (Vibe) Personal Agent Config Kit: implementation plan.
+#
+# Goal: make `mistral` the third Kit-eligible provider (today claude + codex only,
+# hard-gated at src/personal-config.ts:2525), so a mistral request can draw the same
+# verified baseline + repository overlay + bounded context as claude/codex.
+#
+# Design basis: docs/plans/kit-provider-generalization-feasibility.draft.md (2026-07-24),
+# which found mistral the single strong candidate of the five non-baseline providers, with
+# BOTH hard primitives de-risked by host probes:
+#   - Continuity: vibe writes a durable native session UUID on disk at
+#     ~/.vibe/logs/session/<dir>/meta.json (probe #1: 2892 sessions, 99.97% present,
+#     deterministic dir resolution). BUT only 11.9% pass the strict isKitNativeSessionId
+#     guard (vibe mints 128-bit random hex, not RFC-4122), so a vibe-scoped broad guard is
+#     mandatory and is already precedented (mistral-meta-json-parser.ts:88).
+#   - Isolation: vibe has no --ignore-user-config flag but a CLEANER lever, VIBE_HOME, which
+#     relocates the entire home (config/MCP/skills/agents/memories + session store).
+#     Probe #2 confirmed empirically: under a clean VIBE_HOME, vibe wrote all home artifacts
+#     into the clean dir, zero into ambient, and did NOT load the ambient mcp_servers entry.
+#
+# Two architectural facts that shape the plan (verified):
+#   1. The Kit runs ONLY on the durable/async transport (doctor.ts:1404 requires
+#      sqlite/postgres + async; sync Kit is rejected) and NEVER touches ACP. So mistral Kit
+#      isolation is the Codex model (CLI-native strip-ambient), delivered through the
+#      existing `mistralEnv` map that prepareMistralRequest already threads (index.ts:7059).
+#   2. 6 of the 9 contract primitives are already generic (context stamp, attempt-lease +
+#      fail-closed recovery, machine binding, session scoping, no-content persistence, the
+#      UUID validator + in-memory handle plumbing). mistral inherits those by joining the
+#      `"claude" | "codex"` unions. The net-new work is 4 provider-specific pieces:
+#      isolation module, conflict list, native-id extractor (disk-resolution), and (only if
+#      it generates gateway-owned artifacts) MCP-artifact provenance (NOT needed: the
+#      VIBE_HOME model writes a home, not a Claude-style --mcp-config artifact).
+#
+# Ordering rationale: the provider gate flip (M3) is LAST. Until it flips, a mistral Kit
+# request is rejected by validateKitRequestSurface, so M0..M2 land as dormant groundwork
+# with zero reachable behaviour change. This mirrors the async-envelope and Tier-B cadence
+# (wire first, flip last). One PR per phase, each with a 3/3 external review gate.
+
+[meta]
+name = "mistral-kit-provider"
+schema_version = "1.2"
+owner = "gateway-maintainers"
+slice = "mistral-kit-provider"
+target_branch = "feature/mistral-kit-provider"
+base_commit = "4d766e3"
+providers = ["mistral"]
+release_version = "UNSET"
+predecessor_plan = "docs/plans/kit-provider-generalization-feasibility.draft.md"
+acceptance_resource = "config://status (mistral shows kit_eligible=true; doctor reports the session_logging precondition)"
+invariant_sources = [
+  "src/personal-config.ts",
+  "src/personal-config-types.ts",
+  "src/codex-kit-isolation.ts",
+  "src/mistral-meta-json-parser.ts",
+  "src/provider-output-metadata.ts",
+  "src/index.ts",
+  "src/request-helpers.ts",
+  "src/provider-definitions.ts",
+  "src/doctor.ts",
+  "docs/guides/PERSONAL_AGENT_CONFIG_KIT.md",
+]
+
+# ---------------------------------------------------------------------------
+# Decisions (the frozen design shape; each was grounded in the feasibility probes)
+# ---------------------------------------------------------------------------
+[decisions]
+isolation_model = "controlled_environment"    # REVISED after round-1 review (Grok+Mistral BLOCKER): VIBE_HOME alone is NOT hermetic. Vibe reads home-relative ambient OUTSIDE VIBE_HOME (~/.agents/skills via AGENTS_HOME = Path.home()/.agents, _agents_home.py:7-11; user+project harness sources, entrypoint.py:350) AND project-relative ambient (.vibe/.agents/AGENTS.md via --trust + include_project_context=true, system_prompt.py:372-416). So the model is: redirect EVERY home-relative default location to a gateway-owned ephemeral dir, run project scope in a gateway-owned checkout, and SYNC the Kit baseline into those redirected locations. Never touch the user's real ~/.agents/~/.vibe/working-tree.
+isolation_delivery = "env_redirect_plus_checkout" # home-relative: set HOME + VIBE_HOME + VIBE_*/LOG_* in the mistralEnv map (index.ts:7059) so Path.home() (hence ~/.agents) AND VIBE_HOME both resolve into the gateway dir. project-relative: run in a gateway-owned worktree/checkout (slice λ) and force include_project_context=false + empty project skills/harness via VIBE_* config overrides + --enabled-tools without the skill tool.
+isolation_failclosed = "full_manifest_all_locations" # assert the COMPLETE contents of every path vibe reads (HOME/.agents, HOME/.vibe or VIBE_HOME, the checkout's project files, and an env allowlist) before launch. Stronger than codex's prompt-probe: the gateway DEFINES every readable location rather than inspecting the effective prompt after the fact. Requires the M1 default-location enumeration probe to be provably complete.
+native_id_guard = "vibe_scoped_broad"         # new isVibeNativeSessionId (8-4-4-4-12 lowercase-hex) used ONLY for mistral; claude/codex stay strict isKitNativeSessionId. Safe (Grok-confirmed): hex-charset-gated + resolution requires exact on-disk session_id match. NOTE: provider-output-metadata.ts:69,87 hard-code isKitNativeSessionId; M0 must make native-id validation provider-aware or disk capture never sticks.
+native_id_source = "disk_resolution"          # resolve the native UUID from the newest session dir under the gateway-owned VIBE_HOME after the run (NOT from stdout, which emits none). Sibling of parseVibeMetaJson.
+context_delivery = "prompt_prefix"            # kitContextPrefix() rides as a prompt prefix (vibe has no --append-system-prompt-file); DECISION gated on the M2 probe of a VIBE_HOME-level instruction file.
+mcp_artifact_provenance = "not_applicable"    # controlled-environment model writes gateway-owned homes/checkouts, not a Claude-style --mcp-config artifact; the mcp-artifact-admission boundary stays claude-only.
+agent_mode = "kit_forced"                     # Kit cannot let the caller pick vibe --agent / --auto-approve; a resolveMistralKitAgentMode analog forces the managed posture.
+auth_provisioning = "env_or_seeded_env_file"  # a redirected HOME/VIBE_HOME lacks credentials; provision auth via api_key_env into the process env OR a gateway-seeded VIBE_HOME/.env. Headless host has no OS keyring, so MCP OAuth cannot persist (doc the static/api_key_env requirement).
+session_logging_precondition = "fail_closed"  # Kit requires session_logging.enabled so meta.json is written; force it via VIBE_* in the redirected home and fail closed if it cannot be asserted on (doctor already checks, doctor.ts:177).
+gate_flip_is_last = true                      # M3 flips BOTH gates: rejectUnsupportedKitProvider (index.ts:7947, the true first-line gate hit at 7061) AND validateKitRequestSurface (personal-config.ts:2525). M0..M2 are unreachable groundwork until then.
+
+# ---------------------------------------------------------------------------
+# Phases (one PR each; depends_on chains them; gate flip last)
+# ---------------------------------------------------------------------------
+
+[[steps]]
+id = "M0-native-session-foundation"
+depends_on = []
+actor = "assistant"
+action = """
+Add the vibe native-session capture, dormant (no gate change, no union widening yet).
+  1. isVibeNativeSessionId(value): broad 8-4-4-4-12 lowercase-hex guard in
+     personal-config-types.ts, sibling to isKitNativeSessionId. Comment: vibe mints
+     non-RFC-4122 random hex (feasibility probe #1); claude/codex stay strict.
+  2. A disk resolver (sibling of parseVibeMetaJson in mistral-meta-json-parser.ts) that,
+     given a gateway-owned VIBE_HOME, returns the newest session dir's meta.json session_id
+     under that home. Reuse the readInBase in-tree security boundary. Exact-match discipline
+     stays (single-candidate not trusted).
+  3. A capture hook the Kit terminal path can call to obtain a verified vibe native id
+     AFTER the run, feeding the existing liveKitNativeHandles WeakMap (in-memory only,
+     retired on restart), gated on isVibeNativeSessionId.
+  4. Make native-id validation PROVIDER-AWARE where it is hard-coded to isKitNativeSessionId
+     (provider-output-metadata.ts:69,87), so the mistral disk-capture path uses the broad
+     guard while claude/codex stay strict (round-1 Grok finding: without this the capture
+     never sticks).
+Do NOT widen the provider unions or flip the gate here.
+"""
+validation = "new unit tests: guard accepts probe-shaped ids + rejects non-hex/gw-*/strict-only cases; resolver picks newest + honours exact session_id match + rejects out-of-base paths. npm run check green. No behaviour reachable yet (mistral still gate-rejected)."
+
+[[steps]]
+id = "M1-isolation-module"
+depends_on = ["M0-native-session-foundation"]
+actor = "assistant"
+action = """
+Build src/mistral-kit-isolation.ts (the controlled-environment analog of
+codex-kit-isolation.ts). REVISED after round-1 review: it is NOT just a clean VIBE_HOME.
+  0. DEFAULT-LOCATION ENUMERATION PROBE (do this FIRST, from the installed vibe source, so
+     the redirect+sync list is provably complete, not whack-a-mole). Round-1 review already
+     surfaced: _vibe_home.py:22-25 (VIBE_HOME|~/.vibe), _agents_home.py:7-11
+     (AGENTS_HOME = Path.home()/.agents, NO env override), harness_files/_paths.py:12 +
+     _harness_manager.py:100-104 (user skill dirs = $VIBE_HOME/skills AND ~/.agents/skills),
+     entrypoint.py:336-350 (user+project harness sources; --trust admits project ambient),
+     system_prompt.py:372-416 + vibe_schema.py:448 (include_project_context defaults true,
+     injects project context + AGENTS.md). Record the COMPLETE set.
+  1. createMistralKitIsolationPlan(...): allocate a gateway-owned ephemeral dir and
+     REDIRECT every home-relative default into it via env: HOME (so Path.home()/.agents
+     relocates too), VIBE_HOME, and the VIBE_*/LOG_* config-override vars. Force
+     include_project_context=false, empty project skills/harness, session_logging.enabled on,
+     and restrict the built-in catalog with --enabled-tools (skill tool off).
+  2. PROJECT scope: run under a gateway-owned worktree/checkout (slice λ) so project-local
+     .vibe/.agents/AGENTS.md are the gateway's, never the user's working tree. SYNC the Kit
+     baseline into the redirected home + checkout.
+  3. FULL-MANIFEST fail-closed: assert the complete contents of EVERY enumerated location
+     (redirected HOME/.agents, HOME/.vibe or VIBE_HOME, the checkout's project files) plus an
+     env allowlist. Throw PersonalConfigError otherwise. Positive construction guarantee over
+     ALL readable locations, not only VIBE_HOME.
+  4. auth provisioning per the auth_provisioning decision (env api key preferred; seeded
+     home .env fallback), and NEVER persist credentials to any durable Kit store.
+  5. Return the env fragment (HOME + VIBE_HOME + VIBE_*/LOG_*) merged into
+     prepareMistralRequest's env map (index.ts:7059) ONLY under Kit execution.
+"""
+validation = "unit tests: the enumerated default-location set is fully redirected (HOME + VIBE_HOME + env); the full manifest across ALL locations is asserted; ~/.agents and the user's real ~/.vibe are NEVER referenced; project ambient is the gateway checkout's, not the user tree's; include_project_context forced false; missing auth fails closed. Host smoke test: a Kit-shaped run with an ambient ~/.agents/skills/<marker> and a project .vibe/AGENTS.md present confirms NEITHER leaks into the effective run (the exact gap round-1 review found). npm run check green."
+
+[[steps]]
+id = "M2-conflict-context-agentmode"
+depends_on = ["M1-isolation-module"]
+actor = "assistant"
+action = """
+The caller-surface + context-delivery half.
+  1. MISTRAL_KIT_CONFLICT_FIELDS: hand-audit the mistral request schema
+     (MistralRequestParams) and enumerate every field that could inject instructions,
+     tools, MCP config, agent posture, or a raw native session; wire a mistral branch into
+     validateKitRequestSurface (personal-config.ts:2519). Mirror the CLAUDE/CODEX lists.
+  2. context delivery: PROBE whether vibe reads a VIBE_HOME-level instruction/AGENTS file
+     the gateway could write into the clean home (system-tier). If yes, prefer that; else
+     implement the prompt_prefix decision (kitContextPrefix() prepended to the -p prompt,
+     carrying the <gateway-personal-config stamp=...> marker). Bind the contextPrefix digest
+     to the isolation plan the way codex does (contextPrefixDigest) so drift fails closed.
+  3. resolveMistralKitAgentMode: force the managed agent posture (Kit cannot honour a
+     caller --agent/--auto-approve), analog to resolveMistralAgentMode (index.ts:7010).
+"""
+validation = "unit tests: each conflict field is rejected in Kit mode; the context stamp is present in the effective prompt and its digest is bound + drift-checked; agent mode is forced regardless of caller input. npm run check green. Still gate-rejected end-to-end (M3 not landed)."
+
+[[steps]]
+id = "M3-union-widen-gate-flip-wire"
+depends_on = ["M2-conflict-context-agentmode"]
+actor = "assistant"
+action = """
+The integration + the flip (the ONLY phase that makes mistral Kit reachable).
+  1. FLIP BOTH gates (round-1 Gemini+Grok BLOCKER: 2525 alone is insufficient):
+     a. rejectUnsupportedKitProvider (index.ts:7941-7958, the hard check at 7947) is the
+        TRUE first-line gate, hit by prepareMistralRequest at index.ts:7061 BEFORE
+        validateKitRequestSurface. Add "mistral" here.
+     b. validateKitRequestSurface (personal-config.ts:2525) becomes
+        `provider !== "claude" && provider !== "codex" && provider !== "mistral"`.
+  2. Widen every `provider: "claude" | "codex"` union to include "mistral". Verified sites in
+     index.ts: 7828, 7912, 7920, 7962, 8194, 8301, 8395, 8590, 8711, 8771, 8906, 8985, the
+     8949/8979 guards, AND index.ts:16071 (recoverUnadmittedPersonalKitAttempt, round-1
+     Gemini finding). CORRECTION: personal-config-types.ts has NO provider union to widen (it
+     only holds the UUID guard, made provider-aware in M0); do not touch it here. Widen the
+     attemptKind / terminal-metadata dispatch (provider-output-metadata.ts) for mistral.
+  3. Add the resolvePersonalKitRequest(runtime, "mistral", {...}) call in handleMistralRequest,
+     mirroring the codex site (index.ts:10900), threading the M1 isolation plan + M0 native-id
+     capture into the terminal envelope + attempt lease.
+  4. Confirm the generic machinery (attempt lease, finalize compare-and-swap, recovery
+     fence, scope key, no-content persistence) accepts mistral unchanged.
+"""
+validation = "integration tests: end-to-end mistral Kit admission on a durable store (proving BOTH gates now admit mistral); attempt-lease claim/finalize with a REAL vibe native id captured from disk; native continuity resume via --resume <uuid>; recoverUnadmittedPersonalKitAttempt handles a mistral attempt; fail-closed on ambient-leak / missing-auth / session_logging-off; principal isolation preserved. Full suite + npm run check green."
+
+[[steps]]
+id = "M4-surfaces-doctor-docs"
+depends_on = ["M3-union-widen-gate-flip-wire"]
+actor = "assistant"
+action = """
+Expose + document.
+  - doctor: report mistral Kit eligibility and the session_logging precondition
+    (extend the existing agy/vibe session_logging check, doctor.ts:177).
+  - config_status / config://status: mistral kit_eligible surface.
+  - provider-tool-capabilities: reflect mistral Kit support + the isolation model.
+  - docs/guides/PERSONAL_AGENT_CONFIG_KIT.md: add the mistral section (controlled-environment
+    isolation: redirected HOME/VIBE_HOME + gateway-owned checkout + full-manifest guarantee,
+    the auth + keyring caveats, the vibe-scoped broad native-id guard). Update the "Claude and
+    Codex only" statements.
+  - provider:surfaces:check + site:generate:check regenerate cleanly.
+"""
+validation = "npm run check (incl provider:surfaces:check, site:generate:check) green; doctor JSON validates against setup/status.schema.json; docs gate passes."
+
+[review]
+cadence = "one PR per phase (M0..M4); each: ultracode multi-lens self-review (isolation-boundary / native-id-guard / union-widening / fail-closed lenses) then a 3/3 external gate."
+external_gate = "Codex(read-only) + Grok + Mistral, evidence-cited against the code, iterate to unconditional approval. Codex runs away on read-heavy reviews (feedback_codex_request_no_model_override): substitute for a 3-model quorum if it will not converge. Do NOT pass a model override to codex_request."
+merge = "werner_veriai --merge (feedback_internal_repo_gh); never admin-bypass (feedback_release_process_discipline)."
+
+[review_notes]
+gate_outcome = "Cross-LLM design gate CONVERGED 2026-07-24: round 2 = 4/4 UNCONDITIONAL APPROVAL (Codex gpt-5.x, Grok 4.5, Gemini, Mistral), each on inspected code / installed vibe source. Round 1 raised two real blockers, both fixed here: (A) isolation incompleteness (Grok+Mistral) -> controlled_environment model; (B) M3 anchor incompleteness incl. rejectUnsupportedKitProvider:7947 + index.ts:16071 (Gemini+Grok) -> M3 flips both gates. Codex round-1 runaway was cancelled and re-dispatched tightly scoped (converged in ~50s)."
+impl_note_home_freeze = "Grok: vibe freezes _DEFAULT_AGENTS_HOME = Path.home()/.agents at import time (_agents_home.py). The isolation module MUST set HOME in the child env BEFORE spawn (which the mistralEnv seam does); a post-start HOME change would not move ~/.agents."
+impl_note_worktree_config = "Grok: a slice-λ worktree's OWN committed .vibe/config.toml + hooks.toml ARE session-trusted (cwd trust) and become the active project layer. M1's full-manifest + baseline SYNC must treat project config/hooks inside the checkout as first-class, not just home files."
+impl_note_parent_walkup = "Grok: layers/project.py walk-up can DISCOVER <repo>/.vibe/config.toml above a λ worktree, but with session-trust only on the worktree it is untrusted (trusted_folders.py:234-254) and not selected as the toml layer, so its content does not apply. No action; documented so a future trust change does not silently open it."
+
+[rollback]
+strategy = "Each phase is an independent PR; revert = git revert the merge commit. Before M3 lands, mistral Kit is unreachable (gate rejects), so reverting M0..M2 is inert. Reverting M3 restores the claude+codex-only gate and unwires the mistral Kit path in one commit. No durable schema migration is introduced (the generic Kit tables already carry a provider dimension), so no data rollback is required."
+
+[open_questions]
+context_delivery_channel = "M2 probe: does vibe read a home-level AGENTS/instruction file (system-tier) the gateway can write into the redirected home, or must the stamp ride as a prompt prefix (user-tier)? Decides context_delivery."
+prompt_verify_residual = "RESOLVED by the controlled-environment revision: vibe has no codex-debug-prompt-input analog, but the full-manifest-across-all-locations guarantee (the gateway DEFINES every readable location: redirected HOME/.agents, HOME/.vibe|VIBE_HOME, the gateway checkout, env allowlist) is a stronger positive substitute than a post-launch prompt check. Contingent on the M1 default-location enumeration probe being complete."
+default_location_completeness = "M1 probe deliverable: enumerate vibe's COMPLETE default-location set from the installed source so the redirect+sync+manifest list cannot miss a channel. Round-1 review seeded it (_agents_home.py, harness_files/_paths.py:12, entrypoint.py:336-350, system_prompt.py:372-416, _vibe_home.py:22-25); confirm no further readable location exists at the pinned vibe version."
+auth_headless = "confirm the api_key_env path works headless (no OS keyring) so the seeded-home fallback is only a convenience, not a requirement."
