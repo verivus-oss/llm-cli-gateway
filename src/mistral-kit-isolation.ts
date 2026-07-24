@@ -235,3 +235,33 @@ export function assertMistralKitIsolationManifest(plan: MistralKitIsolationPlan)
 export function isIssuedMistralKitIsolationPlan(plan: MistralKitIsolationPlan): boolean {
   return issuedPlans.has(plan);
 }
+
+/**
+ * Build the final Kit child env from an inherited base. This is the ONLY safe way to
+ * apply a plan to a spawn: it STRIPS every ambient `VIBE_*` key and the bare-name
+ * scrub vars, THEN applies the gateway env fragment (which re-adds only the gateway's
+ * own `VIBE_*`). Merging `plan.env` on top of an inherited env is NOT sufficient,
+ * because vibe's EnvironmentLayer applies ambient `VIBE_*` ABOVE the gateway
+ * config.toml and `enabled_skills` is ConcatMerge (vibe_schema.py:379): an ambient
+ * `VIBE_ENABLED_SKILLS` / `VIBE_SKILL_PATHS` / `VIBE_TOOL_PATHS` / `VIBE_AGENT_PATHS`
+ * would re-inject skills/paths and defeat the match-nothing lever (verified on vibe
+ * 2.22.0). The M3 spawn wiring MUST route the child env through here.
+ */
+export function applyMistralKitIsolationEnv(
+  baseEnv: NodeJS.ProcessEnv,
+  plan: MistralKitIsolationPlan
+): NodeJS.ProcessEnv {
+  const scrub = new Set(plan.scrubKeys);
+  const child: NodeJS.ProcessEnv = {};
+  for (const [key, value] of Object.entries(baseEnv)) {
+    if (value === undefined) continue;
+    // Drop ambient VIBE_* injectors (the gateway re-adds only its own below) and the
+    // bare-name BaseSettings vars the VIBE_* lever cannot reach.
+    if (/^VIBE_/i.test(key)) continue;
+    if (scrub.has(key)) continue;
+    child[key] = value;
+  }
+  // Gateway levers win, incl. the gateway's own VIBE_* and the redirected HOME.
+  Object.assign(child, plan.env);
+  return child;
+}

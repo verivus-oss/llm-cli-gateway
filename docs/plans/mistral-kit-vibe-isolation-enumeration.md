@@ -40,8 +40,16 @@ Levers: **H** = redirect `HOME`; **V** = redirect `VIBE_HOME`; **E** = control `
    so a match-nothing allowlist is the only way to zero the skill set).
 5. **`VIBE_TEST_DISABLE_KEYRING=1`** + provide `MISTRAL_API_KEY` explicitly in the child env (#8);
    never persist it to a durable Kit store.
-6. **Scrub the bare-name env vars** in #7 from the child env; sanitize the inherited env to an
-   allowlist (reuse `spawn-env-isolation.ts`) so #9 and #7 cannot leak.
+6. **Sanitize the child env: STRIP every ambient `VIBE_*` key AND the bare-name vars in #7,
+   THEN apply the gateway fragment.** This is mandatory, not optional: vibe's EnvironmentLayer
+   applies ambient `VIBE_*` ABOVE the gateway `config.toml`, and `enabled_skills` is
+   ConcatMerge (`vibe_schema.py:379`), so an ambient `VIBE_ENABLED_SKILLS` /
+   `VIBE_SKILL_PATHS` / `VIBE_TOOL_PATHS` / `VIBE_AGENT_PATHS` re-injects skills/paths and
+   defeats the match-nothing lever (verified live on vibe 2.22.0: ambient
+   `VIBE_ENABLED_SKILLS=["vibe"]` => `available_skills=['vibe']`). Merging the gateway env
+   over an inherited env is INSUFFICIENT. The module's `applyMistralKitIsolationEnv` does the
+   strip-then-apply; the M3 spawn wiring MUST route the child env through it. `spawn-env-isolation.ts`
+   is a denylist for URL/proxy redirects and does NOT clear `VIBE_*`, so it cannot be relied on here.
 7. **Full-manifest fail-closed:** after construction, assert the redirected `HOME` and `VIBE_HOME`
    contain EXACTLY the gateway-written files (no `.agents/`, no ambient `config.toml`, no extra
    dirs), and that the env fragment carries the exact lever set above. Throw a fail-closed error
@@ -55,6 +63,12 @@ Levers: **H** = redirect `HOME`; **V** = redirect `VIBE_HOME`; **E** = control `
   `HOME` redirect covers it. New (write-only, low risk, but real).
 - **Keyring fallback + always-present builtin skills:** need `VIBE_TEST_DISABLE_KEYRING=1` and a
   match-nothing `enabled_skills`, not a directory lever. New.
+- **#10 ambient `VIBE_*` config injectors (M1 review, Grok, live-verified):** ambient
+  `VIBE_ENABLED_SKILLS` (ConcatMerge), `VIBE_SKILL_PATHS`, `VIBE_TOOL_PATHS`, `VIBE_AGENT_PATHS`,
+  and other `VIBE_*` survive into the child and the EnvironmentLayer applies them above the
+  gateway `config.toml`, defeating the skills/paths levers. The child env MUST strip ALL
+  ambient `VIBE_*` before re-adding the gateway's own (see lever-set point 6). This is the
+  most important M1-review finding.
 
 Net: the controlled-environment model holds, but the module must additionally (a) scrub the
 bare-name env vars, (b) disable the keyring, and (c) zero skills via `enabled_skills`, not just

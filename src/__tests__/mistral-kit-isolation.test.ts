@@ -7,6 +7,7 @@ import {
   createMistralKitIsolationPlan,
   assertMistralKitIsolationManifest,
   isIssuedMistralKitIsolationPlan,
+  applyMistralKitIsolationEnv,
   MistralKitIsolationError,
   MISTRAL_KIT_ENV_SCRUB,
   type MistralKitIsolationPlan,
@@ -154,6 +155,75 @@ describe("assertMistralKitIsolationManifest (fail-closed)", () => {
       delete (env as Record<string, string>)[lever];
       expect(() => assertMistralKitIsolationManifest({ ...plan, env })).toThrow(/missing lever/);
     }
+  });
+});
+
+describe("applyMistralKitIsolationEnv (strips ambient VIBE_* injectors)", () => {
+  let root: string;
+  let plan: MistralKitIsolationPlan;
+
+  beforeEach(() => {
+    root = mkdtempSync(join(tmpdir(), "m1-iso-env-"));
+    plan = createMistralKitIsolationPlan({
+      cwd: "/x",
+      contextPrefix: CONTEXT,
+      apiKey: API_KEY,
+      homeRoot: root,
+    });
+  });
+  afterEach(() => {
+    rmSync(root, { recursive: true, force: true });
+  });
+
+  it("drops ambient VIBE_* injectors that would defeat the match-nothing skills lever", () => {
+    const baseEnv = {
+      PATH: "/usr/bin",
+      HOME: "/home/victim",
+      VIBE_HOME: "/home/victim/.vibe",
+      // ambient injectors (EnvironmentLayer ConcatMerge / path injection):
+      VIBE_ENABLED_SKILLS: '["vibe"]',
+      VIBE_SKILL_PATHS: '["/tmp/pwn-skills"]',
+      VIBE_TOOL_PATHS: '["/tmp/pwn-tools"]',
+      VIBE_AGENT_PATHS: '["/tmp/pwn-agents"]',
+      VIBE_ACTIVE_MODEL: "attacker-model",
+      // bare-name BaseSettings injector:
+      SAVE_DIR: "/tmp/exfil",
+    };
+    const child = applyMistralKitIsolationEnv(baseEnv, plan);
+
+    // Every ambient VIBE_* the gateway does NOT set is gone.
+    expect(child.VIBE_ENABLED_SKILLS).toBeUndefined();
+    expect(child.VIBE_SKILL_PATHS).toBeUndefined();
+    expect(child.VIBE_TOOL_PATHS).toBeUndefined();
+    expect(child.VIBE_AGENT_PATHS).toBeUndefined();
+    expect(child.VIBE_ACTIVE_MODEL).toBeUndefined();
+    // Bare-name injector scrubbed.
+    expect(child.SAVE_DIR).toBeUndefined();
+    // Safe passthrough preserved.
+    expect(child.PATH).toBe("/usr/bin");
+    // Gateway levers win (redirects + hardening), overriding ambient HOME/VIBE_HOME.
+    expect(child.HOME).toBe(plan.home);
+    expect(child.VIBE_HOME).toBe(plan.vibeHome);
+    expect(child.VIBE_TEST_DISABLE_KEYRING).toBe("1");
+    expect(child.VIBE_INCLUDE_PROJECT_CONTEXT).toBe("false");
+    expect(child.MISTRAL_API_KEY).toBe(API_KEY);
+  });
+
+  it("re-adds ONLY the gateway's own VIBE_* keys", () => {
+    const child = applyMistralKitIsolationEnv({ PATH: "/usr/bin" }, plan);
+    const vibeKeys = Object.keys(child)
+      .filter(k => /^VIBE_/i.test(k))
+      .sort();
+    expect(vibeKeys).toEqual(
+      [
+        "VIBE_ACP_LOGGING_ENABLED",
+        "VIBE_EXPERIMENTAL_ENABLE_REGISTRY_SKILLS",
+        "VIBE_HOME",
+        "VIBE_INCLUDE_PROJECT_CONTEXT",
+        "VIBE_INCLUDE_PROMPT_DETAIL",
+        "VIBE_TEST_DISABLE_KEYRING",
+      ].sort()
+    );
   });
 });
 
