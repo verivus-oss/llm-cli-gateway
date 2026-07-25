@@ -2,8 +2,18 @@
 
 Investigation date: 2026-07-26. Tree: `master` at `0eb325f`.
 
-This separates what was **proved** (reproduced from code, the durable store, or
-a test that fails before a change and passes after) from what was **inferred**.
+This separates what was **proved** from what was **inferred**. Three distinct
+classes of evidence appear below, and they are not equally strong:
+
+1. **Proved from the repo.** Statements about code, verifiable by reading this
+   tree, and behaviour pinned by a test that fails before a change and passes
+   after (each fix hunk was reverted independently to confirm this).
+2. **Measured in this environment.** Every store-query result and every probe
+   timing or byte count. These are real measurements against the live Postgres
+   job store and the provider CLIs installed on this host. A reviewer **cannot**
+   reproduce them from the repo alone, and they depend on provider CLI versions
+   that drift. Treat them as dated observations, not invariants.
+3. **Inferred.** Explicitly labelled at each point of use.
 
 ## Summary
 
@@ -58,6 +68,18 @@ cursor, devin and gemini, *neither* `stdoutBytes` nor `lastActivityAt` moves
 until the job is over. There is no liveness signal at all for those providers,
 which is precisely what the new registry fact declares.
 
+Observed live while running this investigation's own cross-LLM review jobs,
+90 seconds into three concurrent healthy jobs:
+
+| Job | `stdoutBytes` | `lastActivityAt` | capability |
+|---|---|---|---|
+| codex | 631,885 | 21:02:26 (moving) | `structured` |
+| grok | 533 | 21:01:38 (moving) | `activity_only` |
+| **mistral** | **0** | **21:01:17 (frozen at job start)** | `activity_only` |
+
+The mistral row is the claim, reproduced unprompted on a live job that later
+completed successfully.
+
 ### Claim: the capture path is provider-agnostic. CONFIRMED.
 
 `appendOutput` (`src/async-job-manager.ts:4495`), the `child.stdout.on("data")`
@@ -110,13 +132,36 @@ fix only removes the timing-dependence rather than recovering bytes.
   terminal row is committed, later persists route their output through the
   unfenced `recordOutput`, which updates bytes without disturbing the committed
   terminal state. "Last committed terminal state wins" is preserved exactly.
-- `writeFlightComplete` (`:2922`): the row stays eligible for exactly one
-  refresh until `close` proves the process is gone. `logComplete`'s UPDATE is
-  keyed on row id and is idempotent. Scoped to `transport === "process"`, since
-  an http job has no close event to wait for.
+- `writeFlightComplete` (`:2922`): the row stays eligible for a re-write until
+  `close` proves the process is gone. This works because `logComplete`'s two
+  statements differ in fencing: the `requests.response` UPDATE is keyed on row
+  id and **unfenced**, so the refresh lands, while the `gateway_metadata`
+  UPDATE is fenced to `status = 'started'` (`src/flight-recorder.ts:629`) and
+  matches no rows on the second pass. Saying the call is simply "idempotent"
+  overstates it. In practice this is one write at the terminal decision plus
+  one at close. Scoped to `transport === "process"`, since an http job has no
+  close event to wait for.
 
 Both are pinned by tests that fail before and pass after (verified by reverting
 each fix independently).
+
+### End-to-end validation against a real provider
+
+Beyond the synthetic-child unit tests, the patched `dist/` build was run against
+a real `claude` process: stream for ~8 s, cancel mid-flight, then compare.
+
+```
+stdoutBytes known at cancel time:      8030
+in-memory stdout after close:          9406
+DURABLE STORE stdout after close:      9406   <- was capped at the cancel-time value
+store status:                          canceled
+bytes rescued:                         1376
+```
+
+The durable store now agrees with the in-memory buffer byte for byte. Note the
+caveat: 8,030 is the value the *snapshot* exposed at cancel time, and pre-fix a
+lucky unthrottled `recordOutput` could sometimes have carried a little past it.
+The deterministic counterfactual is the unit test, not this number.
 
 ## 3. Per-provider output discipline (the operator table)
 
@@ -134,8 +179,35 @@ process group, SIGTERM mid-flight, then a 5 s grace matching the gateway's.
 | **cursor** | **No** | **No** | **No** | single 8,199 B chunk at 28.5 s; 0 on cancel at 15 s |
 | **devin** | **No** | **No** | **No** | single 6,415 B chunk at 13.9 s; 0 on cancel at 8 s |
 
-Two independent corroborations that this table is right, not an artefact of the
-probe harness:
+### Gateway-level cancel sweep (the operator table)
+
+The table above is the child-process mechanism. This one is the end-to-end
+answer through the gateway itself, run on the **patched** `dist/` build: start a
+job, poll `stdoutBytes` every 2.5 s, cancel at 25 s, then read the durable store.
+
+| Provider | `stdoutBytes` advances before terminal? | Mid-flight cancel preserves? | Bytes rescued by the fix |
+|---|---|---|---|
+| claude | **Yes** (6,176 → 13,602 over 25 s) | **Yes**, 15,005 retained | **+1,403** |
+| codex | Yes in principle, but flat at 101 on this non-agentic prompt | Yes, all 101 | 0 |
+| grok | **Yes**, after a ~10 s silent phase (655 → 5,896) | **Yes**, all of it | 0 (grok does not flush on SIGTERM) |
+| gemini | **No**, flat 0 for 25 s | **No**, 0 retained | 0 |
+| mistral | **No**, flat 0 for 25 s | **No**, 0 retained | 0 |
+| cursor | **No**, flat 0 for 25 s | **No**, 0 retained | 0 |
+| devin | **No**, flat 0 for 25 s | **No**, 0 retained | 0 |
+
+**Operator reading**: claude, codex and grok are safe to cancel and keep a
+usable partial answer. gemini, mistral, cursor and devin are not; cancelling
+them discards the work entirely, and their `stdoutBytes: 0` while running is
+normal rather than a sign of a hung job.
+
+Measurement caveat: `stdoutBytes` in the snapshot is `Buffer.byteLength` (UTF-8
+bytes) while the stored row length is measured in UTF-16 code units, so the two
+columns are not the same unit. grok's raw delta came out at -2 for that reason,
+which is agreement, not loss. Only claude's +1,403 is a real gain, and it is
+corroborated by the independent single-provider run above (+1,376).
+
+Two independent corroborations that the discipline table is right, not an
+artefact of the probe harness:
 
 - **gemini.** The probe's post-SIGTERM output is exactly **36 bytes**. The
   production store's `gemini | canceled` row has `max_len` of exactly **36**.
@@ -213,7 +285,16 @@ the behaviour it describes lives in a child process that no unit test can drive.
 5. **`droppedCount` growth is left as is.** It is correct bounded-ring
    behaviour; changing it would trade a harmless projection gap for unbounded
    memory.
-6. **API providers.** Only one `openai` row exists in the store (4 bytes,
+6. **A canceled row never records the child's exit code.** `cancelJob` writes
+   the terminal row before the process is reaped, so `exit_code` is null, and
+   the late `recordOutput` path deliberately does not write it (writing exit
+   status through the unfenced path would undermine the very fence this change
+   respects). Measured: **all 164 canceled rows in the store have
+   `exit_code IS NULL`**. This is pre-existing and unchanged here. Left as is
+   because `status = 'canceled'` already carries the meaning, and a killed
+   child's exit code is not independently informative. Raised by the grok
+   reviewer.
+7. **API providers.** Only one `openai` row exists in the store (4 bytes,
    completed), so there is no cancellation history to analyse. The http path
    does not spawn a child and cancels by aborting the request
    (`cancelJob`, transport `"http"`), so the fence bug did not apply to it; the

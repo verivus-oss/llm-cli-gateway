@@ -2914,11 +2914,15 @@ export class AsyncJobManager {
       });
       // A terminal status can be decided while the child is still shutting
       // down (cancel, idle timeout, output overflow), so the stdout captured
-      // here is not yet final. Leave the row eligible for exactly one refresh
-      // until `close` proves the process is gone, so bytes a provider flushes
-      // on its way out reach the persisted response too. The logComplete
-      // UPDATE is keyed on the row id and is safely idempotent. Scoped to the
-      // spawn path: an http job has no close event to wait for.
+      // here is not yet final. Stay eligible for a re-write until `close`
+      // proves the process is gone, so bytes a provider flushes on its way out
+      // reach the persisted response too. This is safe because logComplete's
+      // two statements differ: the `requests.response` UPDATE is keyed on row
+      // id and unfenced (so the refresh lands), while the gateway_metadata
+      // UPDATE is fenced to status = 'started' and simply matches no rows on
+      // the second pass. In practice that is one write at the terminal
+      // decision plus one at close. Scoped to the spawn path: an http job has
+      // no close event to wait for.
       if (job.transport === "process" && !job.exited) return;
       // Only mark complete on successful write so a thrown logComplete
       // can be retried by the next terminal callback.
