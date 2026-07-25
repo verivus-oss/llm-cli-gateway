@@ -9,6 +9,7 @@ import { getAvailableCliInfo, type CliInfo } from "./model-registry.js";
 import {
   CLI_TYPES,
   getProviderDefinition,
+  getProviderPersonalConfigKit,
   PROVIDER_TARGET_VERSIONS,
   type CliType,
 } from "./provider-definitions.js";
@@ -1505,6 +1506,10 @@ function buildOneProviderToolCapabilities(
     ? extractProviderTools(cli, discoveredSkills)
     : [];
   const features = { ...definition.features };
+  // Personal Agent Config Kit support is a registry fact, not a per-provider
+  // literal here, so the capability surface can never claim Kit support the
+  // admission gates would reject (or vice versa).
+  features.personalConfigKit = buildPersonalConfigKitFeature(cli);
   const gatewayRequestTools =
     cli === "grok_api" && !isXaiProviderEnabled(providersConfigForQuery(query))
       ? []
@@ -1726,7 +1731,10 @@ function buildApiProviderToolCapabilities(
       docs: ACP_DOCS_REFERENCE,
     },
     controls: cloneControls(definition.controls),
-    features: { ...definition.features },
+    features: {
+      ...definition.features,
+      personalConfigKit: buildPersonalConfigKitFeature(runtime.name),
+    },
     discoveredSkills: [],
     discoveredProviderTools: [],
     configSurfaces: apiProviderConfigSurfaces(runtime),
@@ -1947,6 +1955,36 @@ function baseFeatures(overrides: Record<string, boolean>): ProviderFeatureMap {
       },
     ])
   );
+}
+
+/**
+ * Personal Agent Config Kit support for a capability id, projected from the
+ * provider registry. `grok_api` and generic `[providers.<name>]` API providers
+ * have no Kit route: the Kit compiles a local CLI execution environment, so an
+ * HTTP provider is outside its isolation model entirely.
+ */
+function buildPersonalConfigKitFeature(cli: ProviderCapabilityId): ProviderFeatureCapability {
+  if (!isCliProviderCapabilityId(cli)) {
+    return {
+      supported: false,
+      details:
+        "API providers have no Personal Agent Config Kit route; the Kit isolates a local provider CLI execution environment.",
+      values: [],
+    };
+  }
+  const kit = getProviderPersonalConfigKit(cli);
+  return {
+    supported: kit.supported,
+    details: kit.supported
+      ? `Kit-supported with ${kit.isolationModel} isolation. ${kit.notes.join(" ")}`
+      : kit.notes.join(" "),
+    values: kit.requiredCredentialEnv ? [`requires:${kit.requiredCredentialEnv}`] : [],
+  };
+}
+
+/** Whether a capability id is one of the CLI providers in the registry. */
+function isCliProviderCapabilityId(cli: ProviderCapabilityId): cli is CliType {
+  return (CLI_TYPES as readonly string[]).includes(cli);
 }
 
 function cloneControls(controls: ProviderCapabilityControls): ProviderCapabilityControls {

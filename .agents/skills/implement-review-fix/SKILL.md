@@ -186,18 +186,18 @@ its capability record say it is resumable. Do not pass a gateway `gw-*` ID as a
 native session ID. Codex needs a real Codex UUID or `resumeLatest:true`; Gemini
 only reports `resumable:true` for a caller-supplied usable conversation ID.
 
-Personal Agent Config Kit is local-only and supports only Claude/Codex with
-healthy SQLite/PostgreSQL durable admission. It disables validation and
+Personal Agent Config Kit is local-only and supports only
+Claude/Codex/Mistral with healthy SQLite/PostgreSQL durable admission. It disables validation and
 least-cost routing. If an effective Kit profile caps turns or budget, it cannot
 produce an unconditional exhaustive review. Use
 `explain_effective_config({workingDir:"<repo>"})` first, then obtain an
 uncapped approved profile or explicit user direction rather than silently
 lowering the review scope.
 
-That `workingDir` is valid for read-only Kit inspection only. A Claude Kit
-request rejects caller-supplied `workingDir` before it compiles context. Target
-Claude Kit execution through an already configured registered `workspace` alias
-or the configured default workspace. It never inherits the gateway process cwd.
+That `workingDir` is valid for read-only Kit inspection only. A Claude or
+Mistral Kit request rejects caller-supplied `workingDir` before it compiles
+context. Target that Kit execution through an already configured registered
+`workspace` alias or the configured default workspace. It never inherits the gateway process cwd.
 
 ## Do not do this
 

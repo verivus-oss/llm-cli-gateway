@@ -188,6 +188,11 @@ import {
 import { getProviderToolCapabilities } from "./provider-tool-capabilities.js";
 import {
   getProviderDefinition,
+  getProviderPersonalConfigKit,
+  getKitProviderLabel,
+  describeKitSupportedProviders,
+  describeKitRequestTools,
+  isKitSupportedProvider,
   DEVIN_ACP_AGENT_TYPES,
   type DevinAcpAgentType,
 } from "./provider-definitions.js";
@@ -573,9 +578,14 @@ export function buildServerInstructions(
   const deferralLine = asyncJobsEnabled
     ? `- Sync auto-defers at ${SYNC_DEADLINE_MS}ms. Poll deferred jobs via llm_job_status/llm_job_result.`
     : '- Async jobs are DISABLED (persistence.backend = "none"): *_request_async and llm_job_* tools are not registered, and sync requests run to completion (no auto-deferral).';
+  // Derived from the registry: a hand-written roster here goes stale the moment
+  // a provider is added, and this string is the first thing an MCP client reads.
+  const syncRequestToolList = CLI_TYPES.map(
+    id => getProviderDefinition(id).requestSurface.syncToolName
+  ).join(", ");
   return `llm-cli-gateway: Multi-LLM orchestration via MCP.
 
-Tools: claude_request, codex_request, gemini_request, grok_request, mistral_request, devin_request, cursor_request${apiToolsNote} (sync)${asyncToolsNote} | codex_fork_session (fork a Codex session into a new branch)
+Tools: ${syncRequestToolList}${apiToolsNote} (sync)${asyncToolsNote} | codex_fork_session (fork a Codex session into a new branch)
 ${validationLine}${jobsLine}Sessions: session_create, session_list, session_set_active, session_get, session_delete, session_clear_all
 Other: list_models, provider_tool_capabilities, cli_versions, upstream_contracts, provider_subcommands_* (read-only subcommand contract/drift introspection), cli_upgrade, approval_list, llm_process_health, llm_request_result (read back any persisted request, sync or async, by correlationId)
 Workspaces: workspace_create, workspace_list, workspace_get, workspace_register_existing_repo (remote HTTP/OAuth workspace registry only; do not use workspace_* to fix stdio/local provider path access)
@@ -7771,8 +7781,18 @@ function personalKitErrorResponse(
     );
   }
   // Unexpected Kit errors can include private runtime paths, remote URLs, or
-  // other machine-local details. Keep those details in the local gateway log,
-  // never in either MCP response surface.
+  // other machine-local details, so none of the original error reaches either
+  // MCP response surface.
+  //
+  // NOTE: the original is DISCARDED here, not retained. An earlier version of
+  // this comment claimed the details were kept in the local gateway log; they
+  // are not, because this constructs a fresh Error and the original object is
+  // never logged on this path (found by cross-LLM review). The response text
+  // below still tells an operator to inspect the local logs, which is only
+  // useful when some earlier frame happened to log. Restoring a local-only
+  // diagnostic log here is a deliberate, separately reviewable change to the
+  // Kit privacy boundary, so it is left alone rather than slipped into a
+  // surfacing slice.
   return createErrorResponse(
     operation,
     1,
@@ -7884,8 +7904,9 @@ function resolvePersonalKitContext(
   }
   if (mode === "execution") assertKitDurableAdmission(runtime);
   // Reject baseline-authority conflicts before inspecting any caller-controlled
-  // path. A forbidden Claude workingDir must not influence filesystem probing
-  // or change the error class before Kit rejects it.
+  // path. A forbidden workingDir (claude and mistral reject it outright) must
+  // not influence filesystem probing or change the error class before Kit
+  // rejects it.
   validateKitRequestSurface(provider, params, true);
   const explicitlyRequestedWorkspace =
     typeof params.workspace === "string" ? params.workspace : undefined;
@@ -7905,11 +7926,15 @@ function resolvePersonalKitContext(
       ? params.workingDir
       : requestedWorkspace?.path;
   if (!configuredWorkingDir) {
+    // The accepted inputs follow the registry's `scopeSelection` fact. A
+    // workspace-only provider (claude, mistral) conflict-rejects workingDir, so
+    // naming one in its guidance would recommend a rejected field.
+    const providerLabel = getKitProviderLabel(provider);
     throw new PersonalConfigError(
       "kit_context_conflict",
-      provider === "claude"
-        ? "Claude Kit requests require a registered workspace alias or configured default workspace"
-        : "Codex Kit requests require an absolute workingDir, registered workspace alias, or configured default workspace"
+      getProviderPersonalConfigKit(provider).scopeSelection === "working-dir-or-workspace"
+        ? `${providerLabel} Kit requests require an absolute workingDir, registered workspace alias, or configured default workspace`
+        : `${providerLabel} Kit requests require a registered workspace alias or configured default workspace`
     );
   }
   // Keep the two alias roles distinct. An alias named on this request asserts
@@ -7986,12 +8011,10 @@ function rejectUnsupportedKitProvider(
   operation: string,
   corrId: string
 ): ExtendedToolResponse | null {
-  if (
-    !runtime.personalConfig?.settings.enabled ||
-    provider === "claude" ||
-    provider === "codex" ||
-    provider === "mistral"
-  ) {
+  // Derived from the provider registry (`personalConfigKit.supported`), the
+  // same source `validateKitRequestSurface` reads, so the first-line gate and
+  // the surface gate cannot disagree about which providers are admitted.
+  if (!runtime.personalConfig?.settings.enabled || isKitSupportedProvider(provider)) {
     return null;
   }
   return personalKitErrorResponse(
@@ -7999,7 +8022,7 @@ function rejectUnsupportedKitProvider(
     corrId,
     new PersonalConfigError(
       "kit_provider_unsupported",
-      `Personal Agent Config Kit supports Claude, Codex and Mistral only; ${provider} is unavailable while Kit mode is enabled`
+      `Personal Agent Config Kit supports ${describeKitSupportedProviders()} only; ${provider} is unavailable while Kit mode is enabled`
     )
   );
 }
@@ -8550,7 +8573,7 @@ async function resolvePersonalKitSession(
             resumeEligible: false,
             attempt,
           },
-          `${provider[0].toUpperCase()}${provider.slice(1)} Kit Session`,
+          `${getKitProviderLabel(provider)} Kit Session`,
           candidateSessionId
         )
       );
@@ -8609,7 +8632,7 @@ async function resolvePersonalKitSession(
     manager.createKitSession(
       provider,
       binding,
-      `${provider === "claude" ? "Claude" : "Codex"} Kit Session`,
+      `${getKitProviderLabel(provider)} Kit Session`,
       randomUUID()
     )
   );
@@ -16092,7 +16115,7 @@ async function runRouteRequest(
       corrId,
       new PersonalConfigError(
         "kit_provider_unsupported",
-        "route_request is unavailable while Personal Agent Config Kit mode is enabled; use claude_request or codex_request"
+        `route_request is unavailable while Personal Agent Config Kit mode is enabled; use ${describeKitRequestTools("sync")}`
       )
     );
   }
@@ -16313,7 +16336,7 @@ async function runRouteRequestAsync(
       corrId,
       new PersonalConfigError(
         "kit_provider_unsupported",
-        "route_request_async is unavailable while Personal Agent Config Kit mode is enabled; use claude_request_async or codex_request_async"
+        `route_request_async is unavailable while Personal Agent Config Kit mode is enabled; use ${describeKitRequestTools("async")}`
       )
     );
   }
@@ -16748,7 +16771,8 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
     persistence.backend !== "none" && persistence.asyncJobsEnabled && asyncJobManager.hasStore();
   const personalConfigEnabled = runtime.personalConfig.settings.enabled;
   // LCR can select any configured CLI or API candidate. Personal Agent Config
-  // Kit deliberately admits only its compiled, local Claude/Codex path, so an
+  // Kit deliberately admits only its compiled, local Claude/Codex/Mistral path,
+  // so an
   // enabled [least_cost] block must not advertise a route surface that cannot
   // preserve the Kit boundary. The handler-level Kit checks remain as defense
   // in depth for direct internal calls.
@@ -16858,8 +16882,8 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
   // ─── Least-cost routing (LCR) tools ──────────────────────────────────────
   // Dormant by default (contract decision 1): route_request / route_request_async
   // are registered ONLY when [least_cost].enabled is true and Personal Agent
-  // Config Kit is disabled. Kit permits its compiled local Claude/Codex path
-  // only, so the generic route surface must be absent rather than advertise a
+  // Config Kit is disabled. Kit permits its compiled local Claude/Codex/Mistral
+  // path only, so the generic route surface must be absent rather than advertise a
   // request it will reject. Nothing routes until an operator opts in.
   if (leastCostRoutingEnabled) {
     const RouteCandidateShape = z.object({

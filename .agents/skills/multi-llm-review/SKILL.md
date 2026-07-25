@@ -155,14 +155,14 @@ not replace the explicit user-authorized full-access protocol below.
   into a deadline. A failed job must be diagnosed and retried or reported
   blocked, never counted as a review.
 - Personal Agent Config Kit is not a seven-provider review mode: it is local
-  only, supports Claude/Codex only, requires healthy SQLite/PostgreSQL durable
-  admission, and disables validation and least-cost routing. Do not disable it
-  or reduce the roster without the user's explicit choice of security boundary.
-  Its normal Claude `workingDir` rule is not available in Kit mode: Claude Kit
-  requests reject caller-supplied `workingDir` before context compilation. Use
-  `explain_effective_config` to inspect a candidate folder, then select Claude's
-  target through an already configured registered `workspace` alias or the
-  configured default workspace. It never inherits the gateway process cwd.
+  only, supports Claude/Codex/Mistral only, requires healthy SQLite/PostgreSQL
+  durable admission, and disables validation and least-cost routing. Do not
+  disable it or reduce the roster without the user's explicit choice of security
+  boundary. The normal `workingDir` rule is not available in Kit mode: Claude and
+  Mistral Kit requests reject caller-supplied `workingDir` before context
+  compilation. Use `explain_effective_config` to inspect a candidate folder, then
+  select the target through an already configured registered `workspace` alias or
+  the configured default workspace. It never inherits the gateway process cwd.
 
 ## Explicit user-authorized full-access review protocol
 

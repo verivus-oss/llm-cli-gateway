@@ -82,12 +82,12 @@ The normal effective context is compiled in this order:
 
 Scope selection depends on the operation and provider. `explain_effective_config`
 accepts an absolute `workingDir` for read-only inspection, and Codex Kit requests
-can use it to select their canonical folder. Claude Kit requests reject caller-supplied
-`workingDir`, because the Kit owns Claude's execution context. A Claude Kit
-request must select an already configured registered `workspace` alias or use
-the configured default workspace. A Codex Kit request must supply an absolute
-`workingDir`, select a registered `workspace`, or use the configured default.
-Neither provider uses the gateway process cwd for Kit scope discovery. Relative
+can use it to select their canonical folder. Claude and Mistral Kit requests reject
+caller-supplied `workingDir`, because the Kit owns their execution context. A Claude
+or Mistral Kit request must select an already configured registered `workspace`
+alias or use the configured default workspace. A Codex Kit request must supply an
+absolute `workingDir`, select a registered `workspace`, or use the configured
+default. No provider uses the gateway process cwd for Kit scope discovery. Relative
 `workingDir` values are rejected before filesystem or Git inspection. Unscoped
 requests fail before an overlay is read or a provider starts. A registered workspace root is
 the scope when it contains the selected folder; otherwise the Git top level is
@@ -120,16 +120,18 @@ calls `config_sync()`.
 
 The Kit currently supports only:
 
-| Provider | Sync             | Async                  |
-| -------- | ---------------- | ---------------------- |
-| Claude   | `claude_request` | `claude_request_async` |
-| Codex    | `codex_request`  | `codex_request_async`  |
+| Provider | Sync              | Async                   |
+| -------- | ----------------- | ----------------------- |
+| Claude   | `claude_request`  | `claude_request_async`  |
+| Codex    | `codex_request`   | `codex_request_async`   |
+| Mistral  | `mistral_request` | `mistral_request_async` |
 
-Gemini, Grok, Mistral, Devin, Cursor, API-provider requests, native ACP, and
-cross-model validation fail closed in Kit mode. Validation tools and least-cost
-routing (`route_request` and `route_request_async`) are intentionally not
-registered, even when `[least_cost].enabled = true`. Do not describe a
-Claude/Codex Kit run as a full multi-provider review. Disable Kit for a normal
+Gemini, Grok, Devin, Cursor, API-provider requests, native ACP (including
+`transport:"acp"` on a Mistral Kit request), and cross-model validation fail
+closed in Kit mode. Validation tools and least-cost routing (`route_request` and
+`route_request_async`) are intentionally not registered, even when
+`[least_cost].enabled = true`. Do not describe a Kit run as a full
+multi-provider review. Disable Kit for a normal
 cross-provider review only when the user explicitly chooses that different
 security boundary.
 
@@ -149,8 +151,14 @@ The Kit owns provider instruction/configuration and rejects caller overrides for
 MCP, tools, permission bypasses, raw provider-session aliases, and other
 high-impact controls. Claude uses a Kit-owned prompt artifact and safe, bare
 execution. Codex is launched with the Kit's isolated configuration and verified
-skill/app exclusions. These controls are designed for a trusted single
-developer's local filesystem, not a hostile-process operating-system boundary.
+skill/app exclusions. Mistral runs in a controlled environment: a redirected
+`HOME` and `VIBE_HOME` whose exact file manifest the gateway asserts before
+launch, an untrusted working folder, a gateway-written config, and a scrubbed
+environment. Because that home has no keyring, a Mistral Kit turn requires
+`MISTRAL_API_KEY` in the gateway process environment, and Claude's bare mode
+likewise requires `ANTHROPIC_API_KEY`. These controls are designed for a trusted
+single developer's local filesystem, not a hostile-process operating-system
+boundary.
 
 ## Sessions, recovery, and rollback
 
@@ -201,11 +209,13 @@ session lease. It neither clears nor authorizes clearing a configuration lock.
   unresolved stale/error state.
 - `explain_effective_config({workingDir:"<absolute-target>"})` shows the intended
   scope, release, provenance, and safe effective preferences. This does not
-  authorize passing `workingDir` to a Claude Kit request.
+  authorize passing `workingDir` to a Claude or Mistral Kit request.
 - The local durable store is SQLite or PostgreSQL and its admission health is
   good.
-- A provider request uses only Claude or Codex and does not supply rejected
-  provider/MCP/tool/session override fields. In particular, a Claude Kit
-  request does not supply `workingDir`.
+- A provider request uses only Claude, Codex, or Mistral and does not supply
+  rejected provider/MCP/tool/session override fields. In particular, a Claude or
+  Mistral Kit request does not supply `workingDir`. `config_status().kitProviders`
+  and `doctor`'s `personal_config.provider_eligibility` report per-provider Kit
+  eligibility and any blocking precondition.
 - A workstation that needs an updated baseline completed `config_sync()` after
   the publisher's successful `config_publish()`.

@@ -212,12 +212,12 @@ process-lifetime only and needs explicit acknowledgement; persistence.backend =
 "none" does not register async or job tools. Do not equate a failed persistence
 surface with a successful review.
 
-Personal Agent Config Kit supports Claude and Codex only and requires durable
-job admission. It cannot run a complete seven-provider consensus. Treat that
+Personal Agent Config Kit supports Claude, Codex, and Mistral only and requires
+durable job admission. It cannot run a complete seven-provider consensus. Treat that
 as a scope blocker unless the user explicitly chooses a different review scope.
-The usual Claude `workingDir` rule does not apply to a Claude Kit request: it
-rejects caller-supplied `workingDir` before context compilation. Use
+The usual `workingDir` rule does not apply to a Claude or Mistral Kit request:
+both reject caller-supplied `workingDir` before context compilation. Use
 `explain_effective_config({workingDir:"<repo>"})` only to inspect a candidate
-scope, then select Claude's target through an already configured registered
-`workspace` alias or the configured default workspace. It never inherits the
+scope, then select that provider's target through an already configured
+registered `workspace` alias or the configured default workspace. It never inherits the
 gateway process cwd.

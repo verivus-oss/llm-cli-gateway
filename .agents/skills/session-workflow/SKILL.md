@@ -183,7 +183,7 @@ must be repaired/retried or reported `INCOMPLETE`/`BLOCKED`, never skipped.
 
 ## Personal Agent Config Kit
 
-Kit mode is local-only, supports only Claude/Codex, requires healthy
+Kit mode is local-only, supports only Claude/Codex/Mistral, requires healthy
 SQLite/PostgreSQL durable admission, and retires native continuation after a
 gateway restart. It disables validation and least-cost routing. Use
 `explain_effective_config` before consequential Kit work. If effective Kit caps
@@ -191,8 +191,8 @@ constrain an exhaustive review, do not claim an unconditional/complete review
 without an approved uncapped profile or explicit user direction.
 
 `explain_effective_config({workingDir:"<repo>"})` can inspect a candidate Kit
-scope. Do not pass that `workingDir` to a Claude Kit request: Kit rejects it
-before compiling context. Select a Claude Kit target through an already
+scope. Do not pass that `workingDir` to a Claude or Mistral Kit request: Kit rejects
+it before compiling context. Select that Kit target through an already
 configured registered `workspace` alias or the configured default workspace. It
 never inherits the gateway process cwd.
 

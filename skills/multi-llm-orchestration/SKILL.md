@@ -156,13 +156,14 @@ process-lifetime only and requires explicit acknowledgement. With
 persistence.backend = "none", sync calls run to completion and async/job tools
 are not registered. Do not cancel a mandatory review because it is slow.
 
-Personal Agent Config Kit supports Claude and Codex only, requires durable job
-admission, and disables route_request and normal cross-provider validation
+Personal Agent Config Kit supports Claude, Codex, and Mistral only, requires
+durable job admission, and disables route_request and normal cross-provider validation
 workflows. A required seven-provider review in Kit mode is a blocker unless the
 user explicitly changes scope.
-The ordinary Claude `workingDir` targeting rule does not apply to a Claude Kit
-request: it rejects caller-supplied `workingDir` before context compilation.
+The ordinary `workingDir` targeting rule does not apply to a Claude or Mistral
+Kit request: both reject caller-supplied `workingDir` before context
+compilation.
 Use `explain_effective_config({workingDir:"<repo>"})` to inspect a candidate
-scope, then execute Claude Kit work through an already configured registered
+scope, then execute that Kit work through an already configured registered
 `workspace` alias or the configured default workspace. It never inherits the
 gateway process cwd.

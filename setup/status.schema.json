@@ -367,12 +367,22 @@
         },
         "vibe_session_logging": {
           "type": "object",
-          "required": ["config_path", "config_present", "session_logging_enabled", "note"],
+          "required": [
+            "config_path",
+            "config_present",
+            "session_logging_enabled",
+            "note",
+            "kit_note"
+          ],
           "properties": {
             "config_path": { "type": "string" },
             "config_present": { "type": "boolean" },
             "session_logging_enabled": { "type": "boolean" },
-            "note": { "type": "string" }
+            "note": { "type": "string" },
+            "kit_note": {
+              "type": "string",
+              "description": "How this ambient setting relates to a Personal Agent Config Kit mistral turn, which runs under a redirected VIBE_HOME and never reads this file."
+            }
           },
           "additionalProperties": false
         }
@@ -551,7 +561,7 @@
     },
     "personal_config": {
       "type": "object",
-      "description": "Secret-free local readiness for the optional Personal Agent Config Kit. durable_async_configured reflects resolved configuration only, not live store admission. claude_bare_auth_configured reports only whether the isolated Claude Kit credential is present.",
+      "description": "Secret-free local readiness for the optional Personal Agent Config Kit. durable_async_configured reflects resolved configuration only, not live store admission. claude_bare_auth_configured reports only whether the isolated Claude Kit credential is present. ready is the legacy aggregate view and still requires the Claude credential; provider_eligibility is authoritative per provider.",
       "required": [
         "enabled",
         "configuration_valid",
@@ -562,7 +572,8 @@
         "last_success_at",
         "stale",
         "last_sync_error",
-        "durable_async_configured"
+        "durable_async_configured",
+        "provider_eligibility"
       ],
       "properties": {
         "enabled": { "type": "boolean" },
@@ -574,7 +585,34 @@
         "last_success_at": { "type": ["string", "null"], "format": "date-time" },
         "stale": { "type": "boolean" },
         "last_sync_error": { "type": ["string", "null"] },
-        "durable_async_configured": { "type": "boolean" }
+        "durable_async_configured": { "type": "boolean" },
+        "provider_eligibility": {
+          "type": "object",
+          "description": "Kit eligibility for every CLI provider, keyed by provider id. kit_supported is a static registry fact; eligible additionally requires the Kit to be enabled and every precondition met. blockers names unmet preconditions and never carries a credential value or a local path.",
+          "additionalProperties": {
+            "type": "object",
+            "required": [
+              "kit_supported",
+              "eligible",
+              "isolation_model",
+              "required_credential_env",
+              "required_credential_configured",
+              "blockers"
+            ],
+            "properties": {
+              "kit_supported": { "type": "boolean" },
+              "eligible": { "type": "boolean" },
+              "isolation_model": {
+                "type": ["string", "null"],
+                "enum": ["bare-flag", "strip-ambient", "controlled-environment", null]
+              },
+              "required_credential_env": { "type": ["string", "null"] },
+              "required_credential_configured": { "type": "boolean" },
+              "blockers": { "type": "array", "items": { "type": "string" } }
+            },
+            "additionalProperties": false
+          }
+        }
       },
       "additionalProperties": false
     },

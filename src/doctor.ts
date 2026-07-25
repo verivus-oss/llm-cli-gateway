@@ -65,6 +65,11 @@ import {
   type PersonalConfigStatus,
 } from "./personal-config.js";
 import { CLI_TYPES, type CliType } from "./session-manager.js";
+import {
+  getProviderPersonalConfigKit,
+  getKitProviderLabel,
+  type KitIsolationModel,
+} from "./provider-definitions.js";
 
 /**
  * Slice 3 cross-cutting: doctor report block summarising the gateway's
@@ -152,7 +157,21 @@ export interface VibeSessionLoggingStatus {
   config_present: boolean;
   session_logging_enabled: boolean;
   note: string;
+  /**
+   * How this ambient setting relates to a Mistral Kit turn. A Kit turn runs
+   * under a redirected VIBE_HOME with a gateway-written config, so this file is
+   * never read there: it can neither enable nor block Kit native continuity.
+   */
+  kit_note: string;
 }
+
+/**
+ * Stated once so the doctor surface cannot drift from the isolation module's
+ * actual behaviour (`buildKitVibeConfigToml` writes `[session_logging] enabled
+ * = true` plus a gateway-owned `save_dir` into the redirected home).
+ */
+const VIBE_KIT_SESSION_LOGGING_NOTE =
+  "Personal Agent Config Kit mistral turns do not read this file: they run under a redirected VIBE_HOME whose gateway-written config always enables session logging and points save_dir at a gateway-owned directory. This setting affects non-Kit mistral_request --continue / --resume only.";
 
 export interface GeminiConfigStatus {
   /** Presence of a project-local `GEMINI.md` in the gateway's cwd. */
@@ -186,6 +205,7 @@ export function checkVibeSessionLogging(home = homedir()): VibeSessionLoggingSta
       config_path: configPath,
       config_present: false,
       session_logging_enabled: true,
+      kit_note: VIBE_KIT_SESSION_LOGGING_NOTE,
       note: "~/.vibe/config.toml not found; current Vibe defaults session_logging.enabled to true. If resume fails, create ~/.vibe/config.toml with [session_logging]\\nenabled = true.",
     };
   }
@@ -197,6 +217,7 @@ export function checkVibeSessionLogging(home = homedir()): VibeSessionLoggingSta
         config_path: configPath,
         config_present: true,
         session_logging_enabled: true,
+        kit_note: VIBE_KIT_SESSION_LOGGING_NOTE,
         note:
           enabled === true
             ? "session_logging.enabled is true; --continue/--resume will work for mistral_request."
@@ -207,6 +228,7 @@ export function checkVibeSessionLogging(home = homedir()): VibeSessionLoggingSta
       config_path: configPath,
       config_present: true,
       session_logging_enabled: false,
+      kit_note: VIBE_KIT_SESSION_LOGGING_NOTE,
       note: "[session_logging] enabled = false. Edit ~/.vibe/config.toml so the [session_logging] block sets enabled = true before using mistral_request --resume / --continue.",
     };
   } catch (err) {
@@ -215,6 +237,7 @@ export function checkVibeSessionLogging(home = homedir()): VibeSessionLoggingSta
       config_path: configPath,
       config_present: true,
       session_logging_enabled: false,
+      kit_note: VIBE_KIT_SESSION_LOGGING_NOTE,
       note: `Could not parse ~/.vibe/config.toml: ${message}. Verify the file is valid TOML.`,
     };
   }
@@ -401,9 +424,38 @@ export interface LeastCostReport {
  * `durable_async_configured` describes resolved configuration only. It does
  * not claim that a running gateway currently has a healthy durable store.
  */
+/**
+ * Per-provider Kit eligibility. `kit_supported` is a static registry fact
+ * (`personalConfigKit.supported`); `eligible` additionally requires the Kit to
+ * be enabled with a valid configuration and every provider-specific
+ * precondition met. `blockers` names the unmet preconditions in operator terms
+ * and never carries a credential value or a local path.
+ */
+export interface ProviderKitEligibility {
+  kit_supported: boolean;
+  eligible: boolean;
+  /** How ambient provider configuration is neutralised, or null when unsupported. */
+  isolation_model: KitIsolationModel;
+  /** Env var name (never its value) the Kit requires, or null when none. */
+  required_credential_env: string | null;
+  /**
+   * Whether `required_credential_env` resolves to a non-empty value in the
+   * gateway process. Always false when `required_credential_env` is null: there
+   * is no such variable, not a satisfied requirement.
+   */
+  required_credential_configured: boolean;
+  blockers: string[];
+}
+
 export interface PersonalConfigReadinessReport {
   enabled: boolean;
   configuration_valid: boolean;
+  /**
+   * Legacy aggregate readiness. Unchanged since the Claude/Codex-only Kit: it
+   * still requires the Claude `--bare` credential, so it reports readiness for
+   * a Claude Kit turn specifically. Read `provider_eligibility` for the truth
+   * about any individual provider.
+   */
   ready: boolean;
   /** Whether Claude Kit's isolated --bare mode has its required API credential. */
   claude_bare_auth_configured: boolean;
@@ -413,6 +465,8 @@ export interface PersonalConfigReadinessReport {
   stale: boolean;
   last_sync_error: string | null;
   durable_async_configured: boolean;
+  /** Kit eligibility for every provider, keyed by CliType. Always complete. */
+  provider_eligibility: Record<CliType, ProviderKitEligibility>;
 }
 
 export interface PersonalConfigReadinessInput {
@@ -420,6 +474,12 @@ export interface PersonalConfigReadinessInput {
   configurationValid?: boolean;
   /** Secret-free presence signal for ANTHROPIC_API_KEY in the gateway process. */
   claudeBareAuthConfigured?: boolean;
+  /**
+   * Secret-free presence signals for each provider's required Kit credential
+   * env var, keyed by env var NAME (e.g. `MISTRAL_API_KEY`). Absent keys are
+   * treated as not configured.
+   */
+  credentialEnvConfigured?: Record<string, boolean>;
   status?: Pick<
     PersonalConfigStatus,
     "baselinePresent" | "currentReleaseId" | "lastSuccessAt" | "stale" | "lastSyncError"
@@ -927,6 +987,67 @@ function redactedTimestamp(value: string | null | undefined): string | null {
  * Untrusted status strings are normalized or withheld before they can reach
  * the doctor JSON surface.
  */
+/**
+ * Kit eligibility for one provider. Every blocker is a condition an operator
+ * can act on; none of them names a path or exposes a credential value.
+ */
+function buildProviderKitEligibility(
+  provider: CliType,
+  input: {
+    enabled: boolean;
+    configurationValid: boolean;
+    baselinePresent: boolean;
+    currentReleaseId: string | null;
+    stale: boolean;
+    durableAsyncConfigured: boolean;
+    credentialEnvConfigured: Record<string, boolean>;
+  }
+): ProviderKitEligibility {
+  const kit = getProviderPersonalConfigKit(provider);
+  const credentialEnv = kit.requiredCredentialEnv;
+  const credentialConfigured =
+    credentialEnv !== null && input.credentialEnvConfigured[credentialEnv] === true;
+  const blockers: string[] = [];
+
+  if (!kit.supported) {
+    blockers.push(
+      `${getKitProviderLabel(provider)} has no Personal Agent Config Kit route; Kit requests for it fail closed`
+    );
+    return {
+      kit_supported: false,
+      eligible: false,
+      isolation_model: kit.isolationModel,
+      required_credential_env: credentialEnv,
+      required_credential_configured: credentialConfigured,
+      blockers,
+    };
+  }
+
+  if (!input.enabled) blockers.push("[personal_config].enabled is false");
+  if (!input.configurationValid) blockers.push("Personal Agent Config settings are unreadable");
+  if (input.enabled && input.configurationValid) {
+    if (!input.baselinePresent) blockers.push("no local baseline Git repository; run config_init");
+    if (input.currentReleaseId === null)
+      blockers.push("no active verified release; run config_sync");
+    if (input.stale) blockers.push("the active release is stale; run config_sync");
+    if (!input.durableAsyncConfigured) {
+      blockers.push("durable job admission is not configured; set [persistence].backend");
+    }
+    if (credentialEnv !== null && !credentialConfigured) {
+      blockers.push(`${credentialEnv} is not set in the gateway process environment`);
+    }
+  }
+
+  return {
+    kit_supported: true,
+    eligible: blockers.length === 0,
+    isolation_model: kit.isolationModel,
+    required_credential_env: credentialEnv,
+    required_credential_configured: credentialConfigured,
+    blockers,
+  };
+}
+
 export function buildPersonalConfigReadinessReport(
   input: PersonalConfigReadinessInput
 ): PersonalConfigReadinessReport {
@@ -945,6 +1066,26 @@ export function buildPersonalConfigReadinessReport(
   const currentReleaseId = redactedReleaseId(status?.currentReleaseId);
   const lastSuccessAt = redactedTimestamp(status?.lastSuccessAt);
   const stale = status?.stale === true;
+  // Claude's credential presence arrives on its own legacy input; fold it into
+  // the generic env map so every provider reads its requirement the same way.
+  const credentialEnvConfigured: Record<string, boolean> = {
+    ...(input.credentialEnvConfigured ?? {}),
+  };
+  if (input.claudeBareAuthConfigured === true) credentialEnvConfigured.ANTHROPIC_API_KEY = true;
+  const providerEligibility = Object.fromEntries(
+    CLI_TYPES.map(provider => [
+      provider,
+      buildProviderKitEligibility(provider, {
+        enabled: input.enabled,
+        configurationValid,
+        baselinePresent,
+        currentReleaseId,
+        stale,
+        durableAsyncConfigured,
+        credentialEnvConfigured,
+      }),
+    ])
+  ) as Record<CliType, ProviderKitEligibility>;
 
   return {
     enabled: input.enabled,
@@ -964,7 +1105,21 @@ export function buildPersonalConfigReadinessReport(
     stale,
     last_sync_error: status?.lastSyncError ? PERSONAL_CONFIG_SYNC_ERROR_WITHHELD : null,
     durable_async_configured: durableAsyncConfigured,
+    provider_eligibility: providerEligibility,
   };
+}
+
+/**
+ * Presence-only signals for every Kit credential env var the registry names.
+ * Reads whether each variable resolves to a non-empty value; never its value.
+ */
+function readKitCredentialEnv(env: NodeJS.ProcessEnv): Record<string, boolean> {
+  const configured: Record<string, boolean> = {};
+  for (const provider of CLI_TYPES) {
+    const name = getProviderPersonalConfigKit(provider).requiredCredentialEnv;
+    if (name) configured[name] = Boolean(env[name]?.trim());
+  }
+  return configured;
 }
 
 function loadPersonalConfigReadinessReport(
@@ -993,6 +1148,7 @@ function loadPersonalConfigReadinessReport(
       status,
       persistence,
       claudeBareAuthConfigured: Boolean(env.ANTHROPIC_API_KEY?.trim()),
+      credentialEnvConfigured: readKitCredentialEnv(env),
     });
   } catch {
     // Do not expose parsing, filesystem, or Git diagnostics through doctor.
@@ -1407,6 +1563,28 @@ export function createDoctorReport(
       report.next_actions.push(
         "Set ANTHROPIC_API_KEY in the gateway process environment before using Claude Personal Agent Config Kit requests."
       );
+    }
+  }
+  if (report.personal_config.enabled) {
+    // `ready` is the legacy Claude-gated aggregate, so a provider whose ONLY
+    // remaining blocker is its own credential would otherwise get no guidance
+    // at all once Claude is configured. Emit it per provider, skipping Claude
+    // when the block above already covered it.
+    for (const [provider, eligibility] of Object.entries(
+      report.personal_config.provider_eligibility
+    )) {
+      const credentialEnv = eligibility.required_credential_env;
+      if (
+        !eligibility.kit_supported ||
+        eligibility.eligible ||
+        credentialEnv === null ||
+        eligibility.required_credential_configured ||
+        eligibility.blockers.length !== 1
+      ) {
+        continue;
+      }
+      const action = `Set ${credentialEnv} in the gateway process environment before using ${getKitProviderLabel(provider as CliType)} Personal Agent Config Kit requests.`;
+      if (!report.next_actions.includes(action)) report.next_actions.push(action);
     }
   }
   report.next_actions.push(...endpointExposure.next_actions);

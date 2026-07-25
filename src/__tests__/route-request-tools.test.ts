@@ -10,6 +10,7 @@ import { noopLogger } from "../logger.js";
 import { PersonalConfigManager, type KitPathLayout } from "../personal-config.js";
 import { FileSessionManager } from "../session-manager.js";
 import { defaultLeastCostConfig, type LeastCostConfig, type PersistenceConfig } from "../config.js";
+import { KIT_SUPPORTED_PROVIDERS, getProviderDefinition } from "../provider-definitions.js";
 import { runWithRequestContext, type GatewayRequestContext } from "../request-context.js";
 
 // Phase_1 route_request / route_request_async: registration gating (dormant by
@@ -147,6 +148,47 @@ describe("route_request / route_request_async registration + fail-closed", () =>
     expect(reg.route_request_async).toBeUndefined();
     expect(reg.claude_request).toBeDefined();
     expect(reg.codex_request).toBeDefined();
+
+    await server.close();
+  });
+
+  // The handler-internal Kit guard is defense in depth for a direct internal
+  // call: registration already omits the tools when Kit is enabled at startup.
+  // Reaching it means registering with Kit OFF, then enabling it, which is what
+  // a live config flip looks like to an already-registered handler.
+  //
+  // What this pins is the REDACTION contract, not the guard's prose. Every
+  // PersonalConfigError is rewritten to a fixed per-code safe message by
+  // safePersonalKitErrorMessage (index.ts), with one allowlisted exception, so
+  // the detailed text those guards build is discarded and never reaches a
+  // caller. That is deliberate: Kit error text can carry local detail. It also
+  // means no caller-visible assertion can pin the guards' tool list, which is
+  // why the tool list is DERIVED from the registry rather than restated.
+  it("redacts the Kit rejection from both route handlers to the safe message", async () => {
+    const personalConfig = new PersonalConfigManager(
+      { enabled: false, baselinePath: join(tmp, "kit-baseline"), maxStaleHours: 24 },
+      kitLayout(tmp)
+    );
+    const server = makeServer({ ...defaultLeastCostConfig(), enabled: true }, personalConfig);
+    const reg = tools(server);
+    expect(reg.route_request).toBeDefined();
+    expect(reg.route_request_async).toBeDefined();
+
+    (personalConfig.settings as { enabled: boolean }).enabled = true;
+
+    for (const tool of ["route_request", "route_request_async"]) {
+      const res = await call(server, tool, { prompt: "hello" });
+      expect(res.isError).toBe(true);
+      expect(res.text).toContain("kit_provider_unsupported");
+      expect(res.text).toContain(
+        "The requested provider or transport is unavailable in Personal Agent Config Kit mode"
+      );
+      // The guard's detailed text (including any provider or tool names it
+      // builds) must NOT survive redaction into the caller's response.
+      for (const provider of KIT_SUPPORTED_PROVIDERS) {
+        expect(res.text).not.toContain(getProviderDefinition(provider).requestSurface.syncToolName);
+      }
+    }
 
     await server.close();
   });

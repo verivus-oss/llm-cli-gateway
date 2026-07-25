@@ -14,6 +14,17 @@
  *       `"sessions://<name>"` / `"models://<name>"` string (the
  *       `server.registerResource(...)` form). These must be built from a
  *       provider id via the surface generator, never spelled out per provider.
+ *   (4) hand-written Personal Agent Config Kit request-TOOL lists, e.g.
+ *       "use claude_request or codex_request". Derive from
+ *       `describeKitRequestTools()` instead.
+ *   (5) two-way provider-label ternaries, e.g.
+ *       `provider === "claude" ? "Claude" : "Codex"`, which mislabel every
+ *       provider outside the pair. Use `getKitProviderLabel()` instead.
+ *
+ * (4) and (5) exist because the Kit provider set grew from two to three and the
+ * stale two-provider forms survived in `index.ts`, reachable by no test: those
+ * messages are redacted by `safePersonalKitErrorMessage` before any caller can
+ * observe them, so a static gate is the only thing that can catch them.
  *
  * ALWAYS_ALLOWLIST names the sanctioned places these tokens may appear: the
  * enum source, the registry, the surface generator, generated snapshots, and
@@ -56,10 +67,101 @@ const MANUAL_RESOURCE_BLOCK = new RegExp(
  */
 const LITERAL_RESOURCE_URI = new RegExp(`"(?:sessions|models)://(?:${PROVIDER_NAME})"`);
 
+/**
+ * Pattern (4): a hand-written Kit REQUEST-TOOL list, e.g.
+ * "use claude_request or codex_request". Kit provider support is declared once
+ * in provider-definitions.ts; any message that redirects a caller to the Kit
+ * surface must derive its tool list from `describeKitRequestTools()`, or it goes
+ * stale the moment a provider is admitted. This is not hypothetical: the
+ * claude/codex-only forms of exactly these two strings survived the mistral Kit
+ * admission and were caught only by cross-LLM review, because the messages are
+ * redacted before any caller (and therefore any test) can observe them.
+ *
+ * Separator-independent by construction: an earlier draft keyed on the word
+ * "or" and was trivially evaded by "and", by a comma list, and by a slash (I
+ * verified all three evasions before settling on this form). The signal is
+ * instead TWO DIFFERENT provider prefixes on one line. A same-provider pair
+ * ("claude_request" + "claude_request_async") is that provider's own tool
+ * surface and is legitimate; a cross-provider pair is a hand-written roster.
+ */
+const REQUEST_TOOL_TOKEN = new RegExp(`\\b(${PROVIDER_NAME})_request(?:_async)?\\b`, "g");
+
+/**
+ * Window size for the roster scan. A single-line scan was defeated by splitting
+ * the roster across array elements joined at runtime (cross-LLM review):
+ *
+ *   const list = [
+ *     "In Kit mode, use claude_request",
+ *     "or codex_request.",
+ *   ].join(" ");
+ *
+ * Three lines covers that shape. Verified to add ZERO false positives on the
+ * current tree: no legitimate site mentions two different providers' request
+ * tools within three lines of each other.
+ */
+const ROSTER_WINDOW_LINES = 3;
+
+function findCrossProviderToolList(content) {
+  const hits = [];
+  const lines = content.split("\n");
+  for (let i = 0; i < lines.length; i++) {
+    const providers = new Set();
+    for (const line of lines.slice(i, i + ROSTER_WINDOW_LINES)) {
+      for (const m of line.matchAll(REQUEST_TOOL_TOKEN)) providers.add(m[1]);
+    }
+    if (providers.size >= 2) {
+      hits.push({ snippet: lines[i].trim().slice(0, 120), line: i + 1 });
+      // Skip past this window so one roster is reported once, not N times.
+      i += ROSTER_WINDOW_LINES - 1;
+    }
+  }
+  return hits;
+}
+
+/** Every match of a plain regex, with 1-based line numbers. */
+function findAllRegex(content, regex) {
+  const hits = [];
+  const lines = content.split("\n");
+  for (let i = 0; i < lines.length; i++) {
+    const m = lines[i].match(regex);
+    if (m) hits.push({ snippet: m[0].slice(0, 120), line: i + 1 });
+  }
+  return hits;
+}
+
+/**
+ * Pattern (5): a two-way provider ternary that yields a provider LABEL, e.g.
+ * `provider === "claude" ? "Claude" : "Codex"`. This silently mislabels every
+ * provider outside the pair. Use `getKitProviderLabel(provider)`.
+ *
+ * Deliberately loose about orthography, because cross-LLM review defeated a
+ * stricter first draft three ways: a single-quoted ternary, a different
+ * left-hand side (`cli === ...`), and a NEGATED comparison
+ * (`provider !== "claude" ? "Codex" : "Claude"`, which has the same bug with
+ * the arms swapped), then a fourth: a PARENTHESISED condition,
+ * `(provider === "claude") ? "Claude" : "Codex"`, which is ordinary TS style
+ * and appears in this tree; and a fifth, a BACKTICK-quoted provider name,
+ * `` provider === `claude` ? "Claude" : "Codex" ``. So: optional grouping
+ * parens, any identifier, either equality operator, and all three quote styles.
+ * The `[A-Z]` guard on both arms keeps it to LABELS, so an ordinary value
+ * ternary (`provider === "claude" ? "stream-json" : "json"`) is untouched.
+ */
+const QUOTE = "['\"`]";
+const PROVIDER_LABEL_TERNARY = new RegExp(
+  `\\(?\\s*\\w+\\s*[!=]==\\s*(${QUOTE})(?:${PROVIDER_NAME})\\1\\s*\\)?\\s*\\?\\s*(${QUOTE})[A-Z]\\w*\\2\\s*:\\s*(${QUOTE})[A-Z]\\w*\\3`
+);
+
+/**
+ * A pattern is either a `regex` or a `find(content)` returning a match-like
+ * `{ 0: snippet, index }`, for signals a single regex cannot express (pattern 4
+ * needs to compare provider prefixes across one line).
+ */
 const PATTERNS = [
   { kind: "literal-provider-array", regex: LITERAL_PROVIDER_ARRAY },
   { kind: "manual-resource-block", regex: MANUAL_RESOURCE_BLOCK },
   { kind: "literal-resource-uri", regex: LITERAL_RESOURCE_URI },
+  { kind: "cross-provider-tool-list", find: findCrossProviderToolList },
+  { kind: "provider-label-ternary", regex: PROVIDER_LABEL_TERNARY },
 ];
 
 /**
@@ -103,14 +205,6 @@ function walk(dir) {
   return out;
 }
 
-function lineNumberOf(content, index) {
-  let line = 1;
-  for (let i = 0; i < index && i < content.length; i++) {
-    if (content[i] === "\n") line++;
-  }
-  return line;
-}
-
 const newViolations = [];
 const legacyHits = [];
 
@@ -121,15 +215,18 @@ for (const absPath of walk(srcRoot)) {
   const content = readFileSync(absPath, "utf8");
   const legacy = LEGACY_ALLOWLIST[relPath];
 
-  for (const { kind, regex } of PATTERNS) {
-    const match = content.match(regex);
-    if (!match) continue;
-    const line = lineNumberOf(content, match.index ?? 0);
-    const record = { relPath, kind, line, snippet: match[0] };
-    if (legacy && legacy.allowedKinds.includes(kind)) {
-      legacyHits.push({ ...record, phase: legacy.phase });
-    } else {
-      newViolations.push(record);
+  for (const { kind, regex, find } of PATTERNS) {
+    // Report EVERY hit, not just the first. Two sibling violations in one file
+    // (e.g. the sync and async LCR guards) must both be named, or fixing the
+    // reported one makes the check look clean while the other survives.
+    const hits = find ? find(content) : findAllRegex(content, regex);
+    for (const hit of hits) {
+      const record = { relPath, kind, line: hit.line, snippet: hit.snippet };
+      if (legacy && legacy.allowedKinds.includes(kind)) {
+        legacyHits.push({ ...record, phase: legacy.phase });
+      } else {
+        newViolations.push(record);
+      }
     }
   }
 }
