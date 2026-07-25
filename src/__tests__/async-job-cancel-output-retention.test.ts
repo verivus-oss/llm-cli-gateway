@@ -248,6 +248,40 @@ while :; do sleep 0.05; done`;
     expect(row?.stdout).not.toContain("LATE_FLUSH_MARKER");
   }, 30_000);
 
+  it("never overwrites a foreign row through the routine throttled flush either", async () => {
+    // The ownership rule has to hold for EVERY route that calls the unfenced
+    // recordOutput, not just the post-terminal one. The routine flush in
+    // maybeFlushOutput is throttled by OUTPUT_FLUSH_INTERVAL_MS (1000ms), so a
+    // chunk arriving after that window is its own way onto the row. This case
+    // deliberately waits past the throttle before the foreign write, which the
+    // post-terminal-only guard does not cover.
+    const job = manager.startJob("sh" as LlmCli, ["-c", FLUSH_ON_SIGTERM], "corr-foreign-flush");
+    await waitFor(() => (manager.getJobSnapshot(job.id)?.stdoutBytes ?? 0) >= 11, 10_000);
+    // Let the flush throttle lapse so the next chunk can flush immediately.
+    await new Promise(r => setTimeout(r, 1300));
+
+    expect(
+      store.recordComplete({
+        id: job.id,
+        status: "completed",
+        exitCode: 0,
+        stdout: "FOREIGN_INSTANCE_RESULT",
+        stderr: "",
+        outputTruncated: false,
+        error: null,
+        finishedAt: new Date().toISOString(),
+      })
+    ).toBe(true);
+
+    manager.cancelJob(job.id);
+    await waitFor(() => manager.getJobSnapshot(job.id)?.exited === true, 10_000);
+    await new Promise(r => setTimeout(r, 800));
+
+    const row = store.getById(job.id);
+    expect(row?.stdout).toBe("FOREIGN_INSTANCE_RESULT");
+    expect(row?.status).toBe("completed");
+  }, 30_000);
+
   it("persists bytes the child emits between an idle-timeout kill and close", async () => {
     // idleTimeoutMs fires because the child stays silent after its first bytes.
     // Keep it under OUTPUT_FLUSH_INTERVAL_MS (1000ms) so the late flush lands

@@ -3006,6 +3006,18 @@ export class AsyncJobManager {
   }
 
   /**
+   * Whether this instance may still write this job's output to the durable
+   * store. `recordOutput` carries no owner predicate in any backend, so the
+   * single rule for EVERY route that calls it is: never write to a row whose
+   * terminal transition another writer won. Before any terminal write is
+   * attempted the row is ours by construction (we hold the lease), so this only
+   * closes once a `recordComplete` of ours has been guard-rejected.
+   */
+  private mayWriteOutputFor(job: AsyncJobRecord): boolean {
+    return !job.terminalPersisted || job.terminalRowOwned;
+  }
+
+  /**
    * Flush in-memory stdout/stderr to the durable store if anything changed
    * since the last flush. Throttled by OUTPUT_FLUSH_INTERVAL_MS to avoid
    * pounding sqlite on every chunk of streaming output.
@@ -3017,6 +3029,14 @@ export class AsyncJobManager {
     // Keep process output in memory until terminal metadata has been extracted;
     // never stream that raw material to the durable job store.
     if (job.kitExecution) return;
+    // The routine flush is an unfenced `recordOutput` too, so it needs the same
+    // ownership rule as the late-output write: once some other writer has
+    // terminalized this row, a child chunk arriving after the throttle window
+    // would otherwise overwrite their result.
+    if (!this.mayWriteOutputFor(job)) {
+      job.outputDirty = false;
+      return;
+    }
     const now = Date.now();
     if (!force && now - job.lastOutputFlushAt < OUTPUT_FLUSH_INTERVAL_MS) return;
     job.outputDirty = false;
@@ -3091,7 +3111,7 @@ export class AsyncJobManager {
     // attempted: if the guard rejected us, another writer owns this row and
     // its output is not ours to overwrite, at close or ever.
     if (job.terminalPersisted) {
-      if (job.terminalRowOwned) this.persistLateOutput(job);
+      if (this.mayWriteOutputFor(job)) this.persistLateOutput(job);
       else job.outputDirty = false;
       return true;
     }

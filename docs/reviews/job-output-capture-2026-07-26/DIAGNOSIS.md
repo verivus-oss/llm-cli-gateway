@@ -364,12 +364,16 @@ the behaviour it describes lives in a child process that no unit test can drive.
    even when the completion guard had **rejected** our terminal write, which is
    precisely the case where another writer owns the row. The codex reviewer
    rejected that as a shared-Postgres hazard and was right: it was a new
-   exposure, not an inherited one. It took two attempts to close, because the
-   first only refused the immediate write and left the close-time one, which
-   the same reviewer caught again. The manager now writes late output only to a
-   row whose terminal transition it won. What remains is the pre-existing
-   property that `recordOutput` itself is unfenced, which every mid-flight
-   flush already relies on.
+   exposure, not an inherited one. It took THREE attempts to close, and each
+   round found a route the previous fix had missed: first the immediate write,
+   then the close-time write, then the ordinary throttled flush in
+   `maybeFlushOutput`, which reaches the same unfenced `recordOutput` by its own
+   path once the 1 s window lapses. Every route now consults one predicate,
+   `mayWriteOutputFor`, so the rule is stated once: never write output to a row
+   whose terminal transition another writer won. Each route is pinned by a test
+   that fails with the guard removed. What remains is the pre-existing property
+   that `recordOutput` has no owner predicate of its own, which is what made
+   the rule necessary in the manager.
 9. **API providers.** Only one `openai` row exists in the store (4 bytes,
    completed), so there is no cancellation history to analyse. The http path
    does not spawn a child and cancels by aborting the request
