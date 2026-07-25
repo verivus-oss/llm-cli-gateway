@@ -392,6 +392,15 @@ export interface ProviderDefinition {
 /**
  * Observed stdout behaviour of a provider CLI while a job is in flight.
  *
+ * SCOPE: this describes the provider's DEFAULT gateway invocation, meaning the
+ * argv built when the caller does not override `outputFormat`. Providers that
+ * expose a streaming output format can behave differently when a caller opts
+ * into it (cursor is the clear case: the gateway spawns `--print` text by
+ * default, under which it buffers, but `cursor_request` will forward
+ * `--output-format stream-json` on request, which is NOT covered by this
+ * classification). Read this as the default-mode fact it is, not as an
+ * invariant over every possible argv.
+ *
  * `incremental`: bytes arrive progressively, so a rising `stdoutBytes` is a
  * true liveness signal and a mid-flight cancel keeps a usable partial answer.
  * `terminal-burst`: the CLI accumulates its whole answer internally and writes
@@ -1352,7 +1361,7 @@ const PROVIDER_DEFINITIONS = {
       streaming: "terminal-burst",
       flushesOnSigterm: false,
       evidence:
-        "Probed 2026-07-26 under the gateway argv (--print --mode plan): a single 8199-byte stdout chunk arrived at 28.5s, immediately before clean exit; SIGTERM at 15s produced zero bytes. Its stream-json mode is unused by the gateway request path.",
+        "Probed 2026-07-26 under the DEFAULT gateway argv (--print, text): a single 8199-byte stdout chunk arrived at 28.5s, immediately before clean exit; SIGTERM at 15s produced zero bytes. A caller CAN pass outputFormat to emit --output-format stream-json, which is expected to stream and is NOT covered by this classification (unmeasured).",
     },
     resourcePolicy: { exposesModelsResource: true, exposesSessionsResource: true },
     upstreamContract: {

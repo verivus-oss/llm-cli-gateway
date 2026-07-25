@@ -3066,26 +3066,26 @@ export class AsyncJobManager {
     if (!job.finishedAt) return false;
     this.ensureTerminalProgress(job);
     this.maybeFlushProgress(job, true);
-    // Cancellation, idle timeout and output overflow all write the row terminal
-    // at the moment the signal is REQUESTED, but the child keeps running until
-    // its close event and may flush its entire accumulated answer in between.
-    // `recordComplete` is fenced to non-terminal rows, so replaying it here
-    // would drop those bytes on the floor. Route them through the unfenced
-    // output write, which cannot disturb the committed terminal state.
+    // Cancellation and idle timeout write the row terminal at the moment the
+    // signal is REQUESTED, but the child keeps running until its close event
+    // and may flush its entire accumulated answer in between. `recordComplete`
+    // is fenced to non-terminal rows, so replaying it here would drop those
+    // bytes on the floor. Route them through the unfenced output write, which
+    // touches only stdout/stderr/output_truncated and so cannot disturb the
+    // committed terminal state.
+    //
+    // (The output-overflow path also terminalizes before close, but it has no
+    // late bytes to rescue: appendOutput returns BEFORE appending the chunk
+    // that crosses the cap, and every later chunk crosses it too.)
     if (job.terminalPersisted) {
-      job.outputDirty = false;
-      if (!job.kitExecution) {
-        this.safeStoreCall("recordOutput", () =>
-          this.store!.recordOutput(job.id, job.stdout, job.stderr, job.outputTruncated)
-        );
-      }
+      this.persistLateOutput(job);
       return true;
     }
     // Make sure the latest output is captured in the same row update.
     job.outputDirty = false;
     const isKit = Boolean(job.kitExecution);
     try {
-      this.store.recordComplete({
+      const applied = this.store.recordComplete({
         id: job.id,
         status: job.status,
         exitCode: job.exitCode,
@@ -3099,17 +3099,37 @@ export class AsyncJobManager {
         httpStatus: job.httpStatus,
         progressJson: this.progressTracker(job).serialize(),
       });
-      // Only a store-acknowledged terminal row closes the fence. A throwing
-      // write must stay retryable through `recordComplete`, not silently
-      // downgrade to the output-only path.
+      // The terminal state is settled either way, so never replay
+      // recordComplete: a throw (not a rejected guard) is what stays retryable.
       job.terminalPersisted = true;
       job.terminalPersistenceAcknowledged = true;
+      // `applied === false` means the guard rejected the write because the row
+      // was already terminal, so this statement matched nothing and our output
+      // never landed. Fall through to the unfenced write for exactly the same
+      // reason the post-terminal branch above does.
+      if (!applied) this.persistLateOutput(job);
       return true;
     } catch (err) {
       this.logger.error(`JobStore.recordComplete failed for ${job.id}`, err);
       if (job.kitExecution) this.scheduleTerminalPersistenceRetry(job);
       return false;
     }
+  }
+
+  /**
+   * Persist output captured after the terminal row was committed.
+   *
+   * Deliberately writes ONLY stdout/stderr/output_truncated: status, exit code
+   * and error stay owned by the fenced terminal write, so "last committed
+   * terminal state wins" (#139) is preserved. Kit jobs are excluded because
+   * their raw process output must never reach the durable store.
+   */
+  private persistLateOutput(job: AsyncJobRecord): void {
+    job.outputDirty = false;
+    if (!this.store || job.kitExecution) return;
+    this.safeStoreCall("recordOutput", () =>
+      this.store!.recordOutput(job.id, job.stdout, job.stderr, job.outputTruncated)
+    );
   }
 
   /**

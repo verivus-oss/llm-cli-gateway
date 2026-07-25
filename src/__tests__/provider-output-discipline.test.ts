@@ -76,4 +76,18 @@ describe("provider output discipline registry fact", () => {
     expect(cursor.streamingFormats).toContain("stream-json");
     expect(cursor.outputDiscipline.streaming).toBe("terminal-burst");
   });
+
+  it("scopes a terminal-burst provider that ships a streaming format to the default argv", () => {
+    // A provider can be terminal-burst by default AND expose a streaming
+    // output format a caller may opt into (cursor). The classification must
+    // say so rather than read as an invariant over every possible argv, or the
+    // capability surface is simply false for the opted-in invocation.
+    for (const cli of CLI_TYPES) {
+      const def = getProviderDefinition(cli);
+      if (def.outputDiscipline.streaming !== "terminal-burst") continue;
+      if (def.streamingFormats.length === 0) continue;
+      expect(def.outputDiscipline.evidence).toMatch(/DEFAULT gateway argv/);
+      expect(def.outputDiscipline.evidence).toMatch(/NOT covered by this classification/);
+    }
+  });
 });

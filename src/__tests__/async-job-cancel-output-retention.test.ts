@@ -30,6 +30,64 @@ const FLUSH_ON_SIGTERM = `trap 'printf "%s" "LATE_FLUSH_MARKER"; exit 0' TERM
 printf "%s" "EARLY_BYTES"
 while :; do sleep 0.05; done`;
 
+describe("recordComplete reports whether the completion guard admitted the write", () => {
+  let tempDir: string;
+  let store: JobStore;
+
+  beforeEach(() => {
+    tempDir = mkdtempSync(join(tmpdir(), "ajm-record-complete-"));
+    store = new SqliteJobStore(join(tempDir, "jobs.db"));
+  });
+
+  afterEach(() => {
+    try {
+      store.close();
+    } catch {
+      /* ignore */
+    }
+    rmSync(tempDir, { recursive: true, force: true });
+  });
+
+  it("returns true on an open row and false once the row is already terminal", () => {
+    const t = new Date().toISOString();
+    store.recordStart({
+      id: "guard-job",
+      correlationId: "guard-corr",
+      requestKey: "guard-key",
+      cli: "claude",
+      args: ["-p", "hi"],
+      startedAt: t,
+      pid: 4242,
+    });
+
+    const terminal = {
+      id: "guard-job",
+      status: "canceled" as const,
+      exitCode: null,
+      stdout: "PARTIAL",
+      stderr: "",
+      outputTruncated: false,
+      error: "canceled by caller",
+      finishedAt: t,
+    };
+
+    // First write lands: the row was still open.
+    expect(store.recordComplete(terminal)).toBe(true);
+    // Second write is rejected by the #139 guard, which is exactly why late
+    // output cannot ride along on a replayed recordComplete.
+    expect(store.recordComplete({ ...terminal, stdout: "PARTIAL+LATE" })).toBe(false);
+    expect(store.getById("guard-job")?.stdout).toBe("PARTIAL");
+
+    // ...but the unfenced output write still lands, without disturbing the
+    // committed terminal state. That is the path persistComplete falls back to.
+    store.recordOutput("guard-job", "PARTIAL+LATE", "", false);
+    const row = store.getById("guard-job");
+    expect(row?.stdout).toBe("PARTIAL+LATE");
+    expect(row?.status).toBe("canceled");
+    expect(row?.error).toBe("canceled by caller");
+  });
+});
+
 describe("late child output survives a terminal-status-before-close transition", () => {
   let tempDir: string;
   let store: JobStore;

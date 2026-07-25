@@ -52,7 +52,13 @@ two of the conclusions drawn from them were wrong.
   **Correction to the prior finding.** `droppedCount` climbing on a healthy job
   is expected ring behaviour, not "an actual loss of events an operator needed".
   The events are a lossy *projection*; the full byte stream is retained
-  separately in `stdout`. Nothing recoverable is lost. No change made.
+  separately in `stdout`. No change made.
+
+  Precision, after review: "nothing recoverable is lost" would overstate it.
+  The progress ring drops only projection events, but `stdout` itself is capped
+  by `max_job_output_bytes` (`outputTruncated`), so a job that overruns the cap
+  genuinely does lose bytes. That is a separate, deliberate limit, not a
+  `droppedCount` effect.
 
 ### Claim: `lastActivityAt` can go stale on a live job. CONFIRMED, and it matters more than stated.
 
@@ -256,14 +262,21 @@ the behaviour it describes lives in a child process that no unit test can drive.
 
 - **SIGTERM grace.** Yes, cancellation is SIGTERM with a 5 s grace before SIGKILL
   (`PROCESS_GROUP_KILL_GRACE_MS`, `src/executor.ts:396`, via
-  `createProcessGroupTerminationFence`). **A longer grace would not help.** The
-  four terminal-burst providers were still writing nothing after a full 5 s, and
-  claude, the one provider that does flush, already completes its flush inside
-  the current window. Lengthening it would only delay every cancel.
+  `createProcessGroupTerminationFence`). **A longer grace would not have helped
+  in any run measured here** (evidence class 2, not a proof): the four
+  terminal-burst providers were still writing nothing after a full 5 s, and
+  claude, the one provider that does flush, completed its flush inside the
+  current window. Lengthening it would delay every cancel for a benefit not
+  observed. This is an argument from measurement, not from the repo, and a
+  future provider version could invalidate it.
 - **`outputTruncated` / 50 MB cap / `max_job_output_bytes`.** No bad interaction
-  found. The overflow path in `appendOutput` sets terminal status before close
-  exactly like cancel, so it shared the same fence bug and is fixed by the same
-  change. The cap itself is applied consistently to the in-memory buffer.
+  found. **Correction after review**: an earlier draft of this document claimed
+  the overflow path shared the late-output loss. It does not. `appendOutput`
+  `return`s **before** appending the chunk that crosses the cap
+  (`src/async-job-manager.ts:4536`), and every later chunk crosses it too, so no
+  late bytes ever accumulate in memory for the fix to rescue. The overflow path
+  does terminalize before close like cancel, so the same code path runs, but it
+  is a no-op there rather than a bug fix. Caught by the codex reviewer.
 
 ## 5. Residual limitations, deliberately not fixed
 
@@ -271,11 +284,15 @@ the behaviour it describes lives in a child process that no unit test can drive.
    The bytes never leave the child. Fixing this needs a provider-side change or
    a different invocation mode, not a gateway change. Now declared as
    `terminal-burst` / `flushesOnSigterm: false` so callers can see it.
-2. **cursor ships a `stream-json` mode the gateway does not use.** This is the
-   one case where the residual is plausibly recoverable: invoking cursor in its
-   streaming mode would likely make it incremental. Not attempted here because
-   it changes cursor's output parsing end to end, which is a separate slice with
-   its own review surface. Recorded in the registry evidence string.
+2. **cursor ships a `stream-json` mode the gateway does not use by default.**
+   Correction after review: `cursor_request` *does* forward
+   `--output-format stream-json` when a caller sets `outputFormat`
+   (`src/index.ts:13550`), so it is reachable, not merely dormant. The
+   classification is therefore explicitly scoped to the default text argv, and
+   the streaming-mode behaviour is **unmeasured**. This is the one residual
+   plausibly recoverable by changing the default invocation, which would change
+   cursor's output parsing end to end and belongs in its own slice. Caught by
+   the codex reviewer.
 3. **codex streams per event, not per token.** A single long non-agentic message
    still emits nothing until it completes, so `stdoutBytes` can sit at 0 on a
    healthy codex job too. Classified `incremental` because that is what it is
@@ -294,7 +311,22 @@ the behaviour it describes lives in a child process that no unit test can drive.
    because `status = 'canceled'` already carries the meaning, and a killed
    child's exit code is not independently informative. Raised by the grok
    reviewer.
-7. **API providers.** Only one `openai` row exists in the store (4 bytes,
+7. **The dead-process (ESRCH) detector finalizes the flight row early.** That
+   path sets `exited = true` and completes the flight-recorder row before the
+   child's `close` callback runs, so the durable job output is still refreshed
+   at close but the flight-recorder `response` is not. Narrow: the process is
+   already confirmed gone at that point, so little should still be in flight.
+   Not fixed here because gating the flight finalization on a distinct
+   "close actually fired" flag is a broader lifecycle change than this fix
+   warrants. Raised by the codex reviewer.
+8. **The late-output write is not fenced to an owner.** `recordOutput` has never
+   carried an owner or version predicate, for any caller, so on a shared
+   Postgres store a confused non-owner could in principle overwrite stdout
+   bytes. It cannot touch status, exit code or error. This change uses the same
+   unfenced primitive every mid-flight flush already uses and so does not widen
+   the exposure, but it does not close it either. Raised by both the codex and
+   grok reviewers.
+9. **API providers.** Only one `openai` row exists in the store (4 bytes,
    completed), so there is no cancellation history to analyse. The http path
    does not spawn a child and cancels by aborting the request
    (`cancelJob`, transport `"http"`), so the fence bug did not apply to it; the
