@@ -126,7 +126,7 @@ describe("AsyncJobManager shutdown fencing", () => {
     store.recordComplete = input => {
       completeCalls += 1;
       if (!allowTerminalWrite) throw new Error("transient terminal-store failure");
-      recordComplete(input);
+      return recordComplete(input);
     };
 
     try {

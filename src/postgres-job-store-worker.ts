@@ -979,7 +979,7 @@ async function op(method: string, args: any[]): Promise<unknown> {
       // #139: guarded completion. A terminal result may only land on a still-open
       // (queued/running) row or a mistakenly-orphaned one; a no-op on an
       // already-terminal row (last committed terminal state wins).
-      await getPool().query(
+      const completeResult = await getPool().query(
         `UPDATE jobs
          SET status = $2, exit_code = $3,
              stdout = CASE WHEN kit_execution_json IS NULL THEN $4 ELSE '' END,
@@ -1014,7 +1014,9 @@ async function op(method: string, args: any[]): Promise<unknown> {
           input.progressJson ?? null,
         ]
       );
-      return null;
+      // Report whether the guard admitted the write, so the caller can tell a
+      // committed terminal row from one the guard rejected as already terminal.
+      return (completeResult.rowCount ?? 0) === 1;
     }
     case "getById": {
       const result = await getPool().query("SELECT * FROM jobs WHERE id = $1", [args[0]]);

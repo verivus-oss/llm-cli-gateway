@@ -774,6 +774,19 @@ export interface JobStore {
   recordProgress(id: string, progressJson: string): void;
   /** Replace progress only while the durable row still has the expected status. */
   recordProgressIfStatus?(id: string, status: JobStoreStatus, progressJson: string): boolean;
+  /**
+   * Write the terminal row. Returns true when the row was actually written,
+   * false when the completion guard rejected it because the row was already
+   * terminal.
+   *
+   * A `false` is NOT a failure to retry: the terminal state is settled and the
+   * caller must not replay `recordComplete`. It is also NOT an invitation to
+   * force the same data in through `recordOutput`. A rejected guard means some
+   * OTHER writer owns this row, and `recordOutput` carries no owner predicate,
+   * so writing there would clobber that writer's result on a shared store.
+   * Only a caller whose own `recordComplete` returned true may follow up with
+   * `recordOutput` to land output captured after the terminal write.
+   */
   recordComplete(input: {
     id: string;
     status: Exclude<JobStoreStatus, "running" | "queued">;
@@ -790,7 +803,7 @@ export interface JobStore {
     progressJson?: string | null;
     /** Compatibility input ignored at the durable persistence boundary. */
     kitTerminalMetadata?: PersonalKitTerminalMetadata | null;
-  }): void;
+  }): boolean;
   getById(id: string): JobRecord | null;
   findByRequestKey(requestKey: string): JobRecord | null;
   /**
@@ -1849,9 +1862,9 @@ export class SqliteJobStore implements JobStore, ValidationRunStore {
     httpStatus?: number | null;
     progressJson?: string | null;
     kitTerminalMetadata?: PersonalKitTerminalMetadata | null;
-  }): void {
+  }): boolean {
     const expiresAt = new Date(Date.parse(input.finishedAt) + this.retentionMs).toISOString();
-    this.updateCompleteStmt.run({
+    const result = this.updateCompleteStmt.run({
       id: input.id,
       status: input.status,
       exit_code: input.exitCode,
@@ -1867,6 +1880,7 @@ export class SqliteJobStore implements JobStore, ValidationRunStore {
       progress_json: input.progressJson ?? null,
       kit_terminal_metadata_json: serializeKitTerminalMetadata(input.kitTerminalMetadata),
     });
+    return Number(result.changes) === 1;
   }
 
   getById(id: string): JobRecord | null {
@@ -2543,13 +2557,15 @@ export class MemoryJobStore implements JobStore {
     httpStatus?: number | null;
     progressJson?: string | null;
     kitTerminalMetadata?: PersonalKitTerminalMetadata | null;
-  }): void {
+  }): boolean {
     const row = this.rows.get(input.id);
-    if (!row) return;
+    if (!row) return false;
     // #139: guarded completion, mirroring the sqlite WHERE guard. A terminal
     // result may land on an open (queued/running) row or a mistakenly-orphaned
     // row, but is a no-op on an already-terminal row (last terminal state wins).
-    if (row.status !== "queued" && row.status !== "running" && row.status !== "orphaned") return;
+    if (row.status !== "queued" && row.status !== "running" && row.status !== "orphaned") {
+      return false;
+    }
     row.status = input.status;
     row.exitCode = input.exitCode;
     row.stdout = row.kitExecution ? "" : input.stdout;
@@ -2572,6 +2588,7 @@ export class MemoryJobStore implements JobStore {
     if (input.progressJson !== undefined && input.progressJson !== null) {
       row.progressJson = input.progressJson;
     }
+    return true;
   }
 
   getById(id: string): JobRecord | null {
@@ -3024,8 +3041,8 @@ export class PostgresJobStore implements JobStore, ValidationRunStore {
     httpStatus?: number | null;
     progressJson?: string | null;
     kitTerminalMetadata?: PersonalKitTerminalMetadata | null;
-  }): void {
-    this.syncCall("recordComplete", input);
+  }): boolean {
+    return this.syncCall<boolean>("recordComplete", input);
   }
 
   getById(id: string): JobRecord | null {

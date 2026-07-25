@@ -373,12 +373,49 @@ export interface ProviderDefinition {
   readonly safetyModes: ProviderSafetyModes;
   readonly outputFormats: readonly string[];
   readonly streamingFormats: readonly string[];
+  /**
+   * How this CLI actually emits output under the argv the gateway spawns for a
+   * job. Distinct from `streamingFormats`, which lists the formats the CLI is
+   * *capable* of streaming: grok streams plain text even though its only
+   * streaming format is json, and cursor buffers under the `--print` text mode
+   * the gateway uses even though it ships a stream-json mode.
+   */
+  readonly outputDiscipline: ProviderOutputDiscipline;
   readonly resourcePolicy: ProviderResourcePolicy;
   readonly upstreamContract: ProviderUpstreamLinkage;
   /** Personal Agent Config Kit support facts (the Kit admission source of truth). */
   readonly personalConfigKit: ProviderPersonalConfigKit;
   /** `maintain-only` = out of scope for NEW capability (cursor), kept complete. */
   readonly capabilityScope: CapabilityScope;
+}
+
+/**
+ * Observed stdout behaviour of a provider CLI while a job is in flight.
+ *
+ * SCOPE: this describes the provider's DEFAULT gateway invocation, meaning the
+ * argv built when the caller does not override `outputFormat`. Providers that
+ * expose a streaming output format can behave differently when a caller opts
+ * into it (cursor is the clear case: the gateway spawns `--print` text by
+ * default, under which it buffers, but `cursor_request` will forward
+ * `--output-format stream-json` on request, which is NOT covered by this
+ * classification). Read this as the default-mode fact it is, not as an
+ * invariant over every possible argv.
+ *
+ * `incremental`: bytes arrive progressively, so a rising `stdoutBytes` is a
+ * true liveness signal and a mid-flight cancel keeps a usable partial answer.
+ * `terminal-burst`: the CLI accumulates its whole answer internally and writes
+ * it in one burst at clean exit, so `stdoutBytes` stays 0 for the entire run
+ * and CANNOT distinguish a healthy job from a hung one. A cancel or idle-kill
+ * of such a provider yields nothing, because the bytes never left the child.
+ *
+ * `flushesOnSigterm` records whether the CLI writes pending output when it is
+ * signalled, which is what decides whether cancellation can retain anything.
+ */
+export interface ProviderOutputDiscipline {
+  readonly streaming: "incremental" | "terminal-burst";
+  readonly flushesOnSigterm: boolean;
+  /** How the classification was established, so it can be re-verified. */
+  readonly evidence: string;
 }
 
 /** The Kit fact every provider that has no Kit route shares. */
@@ -524,6 +561,12 @@ const PROVIDER_DEFINITIONS = {
     },
     outputFormats: ["text", "json", "stream-json"],
     streamingFormats: ["stream-json"],
+    outputDiscipline: {
+      streaming: "incremental",
+      flushesOnSigterm: true,
+      evidence:
+        "Probed 2026-07-26 under the gateway argv (-p --output-format stream-json --include-partial-messages): 24KB streamed within 10s, and a further 1889 to 8258 bytes arrived AFTER SIGTERM and before close, which is why cancellation must persist post-signal bytes.",
+    },
     resourcePolicy: { exposesModelsResource: true, exposesSessionsResource: true },
     upstreamContract: {
       targetVersion: PROVIDER_TARGET_VERSIONS.claude,
@@ -686,6 +729,12 @@ const PROVIDER_DEFINITIONS = {
     },
     outputFormats: ["text", "json"],
     streamingFormats: ["jsonl"],
+    outputDiscipline: {
+      streaming: "incremental",
+      flushesOnSigterm: false,
+      evidence:
+        "Probed 2026-07-26 under the gateway argv (exec --json): 8 jsonl event chunks spread over 0.15s to 18.0s on an agentic prompt. Streams per EVENT, not per token, so a single long non-agentic message still emits nothing until it completes.",
+    },
     resourcePolicy: { exposesModelsResource: true, exposesSessionsResource: true },
     upstreamContract: {
       targetVersion: PROVIDER_TARGET_VERSIONS.codex,
@@ -805,6 +854,12 @@ const PROVIDER_DEFINITIONS = {
     },
     outputFormats: ["text"],
     streamingFormats: [],
+    outputDiscipline: {
+      streaming: "terminal-burst",
+      flushesOnSigterm: false,
+      evidence:
+        "Probed 2026-07-26 under the gateway argv (--print): the answer arrived as one late burst; SIGTERM produced only a 36-byte diagnostic line, which is exactly the 36-byte max capture of every canceled gemini job in the durable store.",
+    },
     resourcePolicy: { exposesModelsResource: true, exposesSessionsResource: true },
     upstreamContract: {
       targetVersion: PROVIDER_TARGET_VERSIONS.gemini,
@@ -922,6 +977,12 @@ const PROVIDER_DEFINITIONS = {
     },
     outputFormats: ["text", "json"],
     streamingFormats: ["json"],
+    outputDiscipline: {
+      streaming: "incremental",
+      flushesOnSigterm: false,
+      evidence:
+        "Probed 2026-07-26 under the gateway argv (-p=): 164 stdout chunks spread over 9.9s to 18.5s. Streams plain text despite json being its only declared streaming format. Emits nothing during its initial think phase (first byte at 7s to 10s), so an early cancel still captures nothing.",
+    },
     resourcePolicy: { exposesModelsResource: true, exposesSessionsResource: true },
     upstreamContract: {
       targetVersion: PROVIDER_TARGET_VERSIONS.grok,
@@ -1057,6 +1118,12 @@ const PROVIDER_DEFINITIONS = {
     },
     outputFormats: ["text", "json"],
     streamingFormats: [],
+    outputDiscipline: {
+      streaming: "terminal-burst",
+      flushesOnSigterm: false,
+      evidence:
+        "Probed 2026-07-26 under the gateway argv (-p=): zero bytes over a 30s run, and SIGTERM produced zero bytes before close. Matches 85 of 85 non-completed mistral jobs capturing nothing in the durable store.",
+    },
     resourcePolicy: { exposesModelsResource: true, exposesSessionsResource: true },
     upstreamContract: {
       targetVersion: PROVIDER_TARGET_VERSIONS.mistral,
@@ -1192,6 +1259,12 @@ const PROVIDER_DEFINITIONS = {
     },
     outputFormats: ["text", "json"],
     streamingFormats: [],
+    outputDiscipline: {
+      streaming: "terminal-burst",
+      flushesOnSigterm: false,
+      evidence:
+        "Probed 2026-07-26 under the gateway argv (-p): a single 6415-byte stdout chunk arrived at 13.9s at clean exit; SIGTERM at 8s produced zero bytes.",
+    },
     resourcePolicy: { exposesModelsResource: true, exposesSessionsResource: true },
     upstreamContract: {
       targetVersion: PROVIDER_TARGET_VERSIONS.devin,
@@ -1284,6 +1357,12 @@ const PROVIDER_DEFINITIONS = {
     },
     outputFormats: ["text", "json", "stream-json"],
     streamingFormats: ["stream-json"],
+    outputDiscipline: {
+      streaming: "terminal-burst",
+      flushesOnSigterm: false,
+      evidence:
+        "Probed 2026-07-26 under the DEFAULT gateway argv (--print, text): a single 8199-byte stdout chunk arrived at 28.5s, immediately before clean exit; SIGTERM at 15s produced zero bytes. A caller CAN pass outputFormat to emit --output-format stream-json, which is expected to stream and is NOT covered by this classification (unmeasured).",
+    },
     resourcePolicy: { exposesModelsResource: true, exposesSessionsResource: true },
     upstreamContract: {
       targetVersion: PROVIDER_TARGET_VERSIONS.cursor,

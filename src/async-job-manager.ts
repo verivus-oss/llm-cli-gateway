@@ -841,6 +841,21 @@ interface AsyncJobRecord {
   outputDirty: boolean; // true if stdout/stderr changed since last DB flush
   lastOutputFlushAt: number;
   /**
+   * True once a terminal `recordComplete` has been attempted without throwing,
+   * whether or not the store's guard admitted it. Gates REPLAY: the terminal
+   * state is settled, so the call is never repeated.
+   */
+  terminalPersisted: boolean;
+  /**
+   * True only when THIS instance's terminal write won the store's guard. The
+   * store fences `recordComplete` to non-terminal rows ("last committed
+   * terminal state wins"), so a later persist cannot carry output in that way
+   * and must use the unfenced output write instead. That write has no owner
+   * predicate, so it is licensed by this flag alone: a row some other writer
+   * terminalized is never ours to overwrite.
+   */
+  terminalRowOwned: boolean;
+  /**
    * Slice 1.5: data retained for the terminal-state flight-recorder write.
    * Cleared after writeFlightComplete succeeds so the GC can reclaim the
    * extractUsage closure's captured primitives.
@@ -2506,6 +2521,8 @@ export class AsyncJobManager {
       terminalHookCompletion: terminalHookCompletion.promise,
       resolveTerminalHookCompletion: terminalHookCompletion.resolve,
       outputDirty: false,
+      terminalPersisted: false,
+      terminalRowOwned: false,
       lastOutputFlushAt: Date.now(),
       flightRecorderEntry,
       extractUsage,
@@ -2904,6 +2921,18 @@ export class AsyncJobManager {
         providerSessionId: providerMeta?.sessionId,
         stopReason: providerMeta?.stopReason,
       });
+      // A terminal status can be decided while the child is still shutting
+      // down (cancel, idle timeout, output overflow), so the stdout captured
+      // here is not yet final. Stay eligible for a re-write until `close`
+      // proves the process is gone, so bytes a provider flushes on its way out
+      // reach the persisted response too. This is safe because logComplete's
+      // two statements differ: the `requests.response` UPDATE is keyed on row
+      // id and unfenced (so the refresh lands), while the gateway_metadata
+      // UPDATE is fenced to status = 'started' and simply matches no rows on
+      // the second pass. In practice that is one write at the terminal
+      // decision plus one at close. Scoped to the spawn path: an http job has
+      // no close event to wait for.
+      if (job.transport === "process" && !job.exited) return;
       // Only mark complete on successful write so a thrown logComplete
       // can be retried by the next terminal callback.
       job.flightRecorderComplete = true;
@@ -2977,6 +3006,18 @@ export class AsyncJobManager {
   }
 
   /**
+   * Whether this instance may still write this job's output to the durable
+   * store. `recordOutput` carries no owner predicate in any backend, so the
+   * single rule for EVERY route that calls it is: never write to a row whose
+   * terminal transition another writer won. Before any terminal write is
+   * attempted the row is ours by construction (we hold the lease), so this only
+   * closes once a `recordComplete` of ours has been guard-rejected.
+   */
+  private mayWriteOutputFor(job: AsyncJobRecord): boolean {
+    return !job.terminalPersisted || job.terminalRowOwned;
+  }
+
+  /**
    * Flush in-memory stdout/stderr to the durable store if anything changed
    * since the last flush. Throttled by OUTPUT_FLUSH_INTERVAL_MS to avoid
    * pounding sqlite on every chunk of streaming output.
@@ -2988,6 +3029,14 @@ export class AsyncJobManager {
     // Keep process output in memory until terminal metadata has been extracted;
     // never stream that raw material to the durable job store.
     if (job.kitExecution) return;
+    // The routine flush is an unfenced `recordOutput` too, so it needs the same
+    // ownership rule as the late-output write: once some other writer has
+    // terminalized this row, a child chunk arriving after the throttle window
+    // would otherwise overwrite their result.
+    if (!this.mayWriteOutputFor(job)) {
+      job.outputDirty = false;
+      return;
+    }
     const now = Date.now();
     if (!force && now - job.lastOutputFlushAt < OUTPUT_FLUSH_INTERVAL_MS) return;
     job.outputDirty = false;
@@ -3046,11 +3095,31 @@ export class AsyncJobManager {
     if (!job.finishedAt) return false;
     this.ensureTerminalProgress(job);
     this.maybeFlushProgress(job, true);
+    // Cancellation, idle timeout and output overflow write the row terminal at
+    // the moment the signal is REQUESTED, but the child keeps running until its
+    // close event and may flush its entire accumulated answer in between.
+    // `recordComplete` is fenced to non-terminal rows, so replaying it here
+    // would drop those bytes on the floor. Route them through the unfenced
+    // output write, which touches only stdout/stderr/output_truncated and so
+    // cannot disturb the committed terminal state.
+    //
+    // Overflow is included deliberately: appendOutput rejects only the chunk
+    // that would cross the cap, so a later SMALLER chunk that still fits IS
+    // appended and does need rescuing. Pinned by the overflow test.
+    //
+    // Gated on OWNERSHIP, not merely on the terminal write having been
+    // attempted: if the guard rejected us, another writer owns this row and
+    // its output is not ours to overwrite, at close or ever.
+    if (job.terminalPersisted) {
+      if (this.mayWriteOutputFor(job)) this.persistLateOutput(job);
+      else job.outputDirty = false;
+      return true;
+    }
     // Make sure the latest output is captured in the same row update.
     job.outputDirty = false;
     const isKit = Boolean(job.kitExecution);
     try {
-      this.store.recordComplete({
+      const applied = this.store.recordComplete({
         id: job.id,
         status: job.status,
         exitCode: job.exitCode,
@@ -3064,13 +3133,52 @@ export class AsyncJobManager {
         httpStatus: job.httpStatus,
         progressJson: this.progressTracker(job).serialize(),
       });
+      // The terminal state is settled either way, so never replay
+      // recordComplete: a throw (not a rejected guard) is what stays retryable.
+      job.terminalPersisted = true;
       job.terminalPersistenceAcknowledged = true;
+      // Ownership is a SEPARATE fact from settlement, and only ownership
+      // licenses the unfenced late-output write (here and at close).
+      job.terminalRowOwned = applied;
+      if (!applied) {
+        // The guard rejected this write, which means SOME OTHER writer already
+        // committed a terminal state for this row. On a shared Postgres store
+        // that writer is another gateway instance, and `recordOutput` carries
+        // no owner predicate, so forcing our bytes in here would overwrite an
+        // outcome we do not own. Leave the row alone and say so: losing our
+        // copy of the output is strictly better than corrupting theirs.
+        this.logger.info(
+          `Job ${job.id} terminal write rejected: row was already terminal, leaving its output untouched`,
+          { correlationId: job.correlationId }
+        );
+      }
       return true;
     } catch (err) {
       this.logger.error(`JobStore.recordComplete failed for ${job.id}`, err);
       if (job.kitExecution) this.scheduleTerminalPersistenceRetry(job);
       return false;
     }
+  }
+
+  /**
+   * Persist output captured after THIS instance committed the terminal row.
+   *
+   * Deliberately writes ONLY stdout/stderr/output_truncated: status, exit code
+   * and error stay owned by the fenced terminal write, so "last committed
+   * terminal state wins" (#139) is preserved. Kit jobs are excluded because
+   * their raw process output must never reach the durable store.
+   *
+   * Only ever called on a row whose terminal transition this instance won. A
+   * row terminalized by someone else is left untouched, because `recordOutput`
+   * has no owner predicate and could otherwise clobber another instance's
+   * result on a shared Postgres store.
+   */
+  private persistLateOutput(job: AsyncJobRecord): void {
+    job.outputDirty = false;
+    if (!this.store || job.kitExecution) return;
+    this.safeStoreCall("recordOutput", () =>
+      this.store!.recordOutput(job.id, job.stdout, job.stderr, job.outputTruncated)
+    );
   }
 
   /**
@@ -3246,6 +3354,8 @@ export class AsyncJobManager {
       lastProgressFlushAt: Date.now(),
       hydratedFromStore: true,
       outputDirty: false,
+      terminalPersisted: false,
+      terminalRowOwned: false,
       lastOutputFlushAt: Date.now(),
     };
     this.jobs.set(row.id, reconstituted);
@@ -3584,6 +3694,8 @@ export class AsyncJobManager {
       terminalHookCompletion: terminalHookCompletion.promise,
       resolveTerminalHookCompletion: terminalHookCompletion.resolve,
       outputDirty: false,
+      terminalPersisted: false,
+      terminalRowOwned: false,
       lastOutputFlushAt: Date.now(),
       flightRecorderEntry: durableFlightRecorderEntry,
       extractUsage,
