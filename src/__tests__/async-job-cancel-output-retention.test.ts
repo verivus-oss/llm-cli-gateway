@@ -207,31 +207,46 @@ while :; do sleep 0.05; done`;
     expect(row?.stdout).toBe("X");
   }, 30_000);
 
-  it("leaves a row alone when the completion guard rejects this instance's write", () => {
-    // A rejected guard means another writer already committed a terminal state
-    // for this row. recordOutput has no owner predicate, so the manager must
-    // NOT force its bytes in over an outcome it does not own.
-    const lateWrites: string[] = [];
-    const realRecordOutput = store.recordOutput.bind(store);
-    // Simulate another writer having already committed this row's terminal
-    // state: the guard rejects our completion.
-    store.recordComplete = () => false;
-    store.recordOutput = (id, stdout, stderr, truncated) => {
-      lateWrites.push(stdout);
-      realRecordOutput(id, stdout, stderr, truncated);
-    };
+  it("never overwrites a row another writer terminalized, including at close", async () => {
+    // The dangerous sequence, which a single-persist test does NOT reach:
+    //   1. another writer (another gateway instance on a shared Postgres store)
+    //      commits this row's terminal state;
+    //   2. our cancel calls recordComplete and the guard REJECTS it;
+    //   3. the child then closes, and persistComplete runs a SECOND time.
+    // Step 3 is where an ownership-blind implementation writes our stdout over
+    // their result. recordOutput has no owner predicate, so nothing downstream
+    // would catch it.
+    const job = manager.startJob("sh" as LlmCli, ["-c", FLUSH_ON_SIGTERM], "corr-foreign-row");
+    await waitFor(() => (manager.getJobSnapshot(job.id)?.stdoutBytes ?? 0) >= 11, 10_000);
 
-    const job = manager.startJob("sh" as LlmCli, ["-c", "printf OURS"], "corr-foreign-row");
+    // Step 1: a genuinely foreign terminal row, written straight to the store.
+    const foreignFinishedAt = new Date().toISOString();
+    expect(
+      store.recordComplete({
+        id: job.id,
+        status: "completed",
+        exitCode: 0,
+        stdout: "FOREIGN_INSTANCE_RESULT",
+        stderr: "",
+        outputTruncated: false,
+        error: null,
+        finishedAt: foreignFinishedAt,
+      })
+    ).toBe(true);
 
-    return waitFor(() => manager.getJobSnapshot(job.id)?.exited === true, 10_000).then(async () => {
-      await new Promise(r => setTimeout(r, 300));
-      // Throttled mid-flight flushes may legitimately have written; what must
-      // NOT happen is a post-terminal write forced in over a row we lost.
-      const row = store.getById(job.id);
-      expect(row?.status).not.toBe("completed");
-      expect(lateWrites.filter(w => w === "OURS").length).toBe(0);
-    });
-  }, 20_000);
+    // Steps 2 and 3.
+    manager.cancelJob(job.id);
+    await waitFor(() => manager.getJobSnapshot(job.id)?.exited === true, 10_000);
+    await new Promise(r => setTimeout(r, 500));
+
+    const row = store.getById(job.id);
+    expect(row?.stdout).toBe("FOREIGN_INSTANCE_RESULT");
+    expect(row?.status).toBe("completed");
+    expect(row?.exitCode).toBe(0);
+    // Our own bytes must not have leaked in through the unfenced write.
+    expect(row?.stdout).not.toContain("EARLY_BYTES");
+    expect(row?.stdout).not.toContain("LATE_FLUSH_MARKER");
+  }, 30_000);
 
   it("persists bytes the child emits between an idle-timeout kill and close", async () => {
     // idleTimeoutMs fires because the child stays silent after its first bytes.

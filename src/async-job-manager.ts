@@ -841,12 +841,20 @@ interface AsyncJobRecord {
   outputDirty: boolean; // true if stdout/stderr changed since last DB flush
   lastOutputFlushAt: number;
   /**
-   * True once a terminal row has been written for this job. The store fences
-   * `recordComplete` to non-terminal rows ("last committed terminal state
-   * wins"), so every later terminal persist must route its output through the
-   * unfenced output write instead of silently dropping it.
+   * True once a terminal `recordComplete` has been attempted without throwing,
+   * whether or not the store's guard admitted it. Gates REPLAY: the terminal
+   * state is settled, so the call is never repeated.
    */
   terminalPersisted: boolean;
+  /**
+   * True only when THIS instance's terminal write won the store's guard. The
+   * store fences `recordComplete` to non-terminal rows ("last committed
+   * terminal state wins"), so a later persist cannot carry output in that way
+   * and must use the unfenced output write instead. That write has no owner
+   * predicate, so it is licensed by this flag alone: a row some other writer
+   * terminalized is never ours to overwrite.
+   */
+  terminalRowOwned: boolean;
   /**
    * Slice 1.5: data retained for the terminal-state flight-recorder write.
    * Cleared after writeFlightComplete succeeds so the GC can reclaim the
@@ -2514,6 +2522,7 @@ export class AsyncJobManager {
       resolveTerminalHookCompletion: terminalHookCompletion.resolve,
       outputDirty: false,
       terminalPersisted: false,
+      terminalRowOwned: false,
       lastOutputFlushAt: Date.now(),
       flightRecorderEntry,
       extractUsage,
@@ -3077,8 +3086,13 @@ export class AsyncJobManager {
     // Overflow is included deliberately: appendOutput rejects only the chunk
     // that would cross the cap, so a later SMALLER chunk that still fits IS
     // appended and does need rescuing. Pinned by the overflow test.
+    //
+    // Gated on OWNERSHIP, not merely on the terminal write having been
+    // attempted: if the guard rejected us, another writer owns this row and
+    // its output is not ours to overwrite, at close or ever.
     if (job.terminalPersisted) {
-      this.persistLateOutput(job);
+      if (job.terminalRowOwned) this.persistLateOutput(job);
+      else job.outputDirty = false;
       return true;
     }
     // Make sure the latest output is captured in the same row update.
@@ -3103,6 +3117,9 @@ export class AsyncJobManager {
       // recordComplete: a throw (not a rejected guard) is what stays retryable.
       job.terminalPersisted = true;
       job.terminalPersistenceAcknowledged = true;
+      // Ownership is a SEPARATE fact from settlement, and only ownership
+      // licenses the unfenced late-output write (here and at close).
+      job.terminalRowOwned = applied;
       if (!applied) {
         // The guard rejected this write, which means SOME OTHER writer already
         // committed a terminal state for this row. On a shared Postgres store
@@ -3318,6 +3335,7 @@ export class AsyncJobManager {
       hydratedFromStore: true,
       outputDirty: false,
       terminalPersisted: false,
+      terminalRowOwned: false,
       lastOutputFlushAt: Date.now(),
     };
     this.jobs.set(row.id, reconstituted);
@@ -3657,6 +3675,7 @@ export class AsyncJobManager {
       resolveTerminalHookCompletion: terminalHookCompletion.resolve,
       outputDirty: false,
       terminalPersisted: false,
+      terminalRowOwned: false,
       lastOutputFlushAt: Date.now(),
       flightRecorderEntry: durableFlightRecorderEntry,
       extractUsage,

@@ -146,11 +146,14 @@ fix only removes the timing-dependence rather than recovering bytes.
 
   `recordComplete` now **returns whether the guard admitted the write** across
   all three backends, because the manager cannot otherwise tell "I committed
-  this row" from "someone else already did". That distinction decides the late
-  write: if the guard rejected us, the row belongs to another writer and we
-  deliberately leave its output alone, since `recordOutput` carries no owner
-  predicate and would otherwise clobber a result we do not own on a shared
-  Postgres store. Losing our copy beats corrupting theirs.
+  this row" from "someone else already did". Settlement and ownership are
+  tracked as two separate flags (`terminalPersisted` and `terminalRowOwned`),
+  and only ownership licenses the unfenced late-output write. A first revision
+  of this fix tracked one flag and refused only the IMMEDIATE write after a
+  rejected guard, which still let the close-time persist overwrite the other
+  writer's row. That is now pinned by a test which seeds a genuinely foreign
+  terminal row and drives the full cancel-then-close sequence. Losing our copy
+  beats corrupting theirs.
 - `writeFlightComplete` (`:2922`): the row stays eligible for a re-write until
   `close` proves the process is gone. This works because `logComplete`'s two
   statements differ in fencing: the `requests.response` UPDATE is keyed on row
@@ -361,9 +364,12 @@ the behaviour it describes lives in a child process that no unit test can drive.
    even when the completion guard had **rejected** our terminal write, which is
    precisely the case where another writer owns the row. The codex reviewer
    rejected that as a shared-Postgres hazard and was right: it was a new
-   exposure, not an inherited one. The manager now leaves such a row untouched
-   and logs it. What remains is the pre-existing property that `recordOutput`
-   itself is unfenced, which every mid-flight flush already relies on.
+   exposure, not an inherited one. It took two attempts to close, because the
+   first only refused the immediate write and left the close-time one, which
+   the same reviewer caught again. The manager now writes late output only to a
+   row whose terminal transition it won. What remains is the pre-existing
+   property that `recordOutput` itself is unfenced, which every mid-flight
+   flush already relies on.
 9. **API providers.** Only one `openai` row exists in the store (4 bytes,
    completed), so there is no cancellation history to analyse. The http path
    does not spawn a child and cancels by aborting the request

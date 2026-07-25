@@ -777,10 +777,15 @@ export interface JobStore {
   /**
    * Write the terminal row. Returns true when the row was actually written,
    * false when the completion guard rejected it because the row was already
-   * terminal. A `false` is NOT a failure to retry: the terminal state is
-   * settled and the caller must not replay `recordComplete`. It does mean that
-   * any output captured after that state was committed needs a separate
-   * `recordOutput` call to land, since this statement matched nothing.
+   * terminal.
+   *
+   * A `false` is NOT a failure to retry: the terminal state is settled and the
+   * caller must not replay `recordComplete`. It is also NOT an invitation to
+   * force the same data in through `recordOutput`. A rejected guard means some
+   * OTHER writer owns this row, and `recordOutput` carries no owner predicate,
+   * so writing there would clobber that writer's result on a shared store.
+   * Only a caller whose own `recordComplete` returned true may follow up with
+   * `recordOutput` to land output captured after the terminal write.
    */
   recordComplete(input: {
     id: string;
