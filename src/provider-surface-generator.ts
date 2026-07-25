@@ -101,6 +101,13 @@ export interface ProviderCapabilityRow {
   readonly trust: boolean;
   readonly outputFormats: readonly string[];
   readonly streamingFormats: readonly string[];
+  /**
+   * Whether this provider's stdout advances during a job. Callers need it to
+   * read `stdoutBytes`: under `terminal-burst` a 0 is normal for a healthy run
+   * and says nothing about liveness, and a cancel retains nothing.
+   */
+  readonly outputStreaming: string;
+  readonly flushesOnSigterm: boolean;
   readonly capabilityScope: string;
 }
 
@@ -298,6 +305,8 @@ export function generateProviderCapabilityRows(
     trust: def.safetyModes.trust,
     outputFormats: def.outputFormats,
     streamingFormats: def.streamingFormats,
+    outputStreaming: def.outputDiscipline.streaming,
+    flushesOnSigterm: def.outputDiscipline.flushesOnSigterm,
     capabilityScope: def.capabilityScope,
   }));
 }

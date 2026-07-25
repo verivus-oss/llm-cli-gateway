@@ -841,6 +841,13 @@ interface AsyncJobRecord {
   outputDirty: boolean; // true if stdout/stderr changed since last DB flush
   lastOutputFlushAt: number;
   /**
+   * True once a terminal row has been written for this job. The store fences
+   * `recordComplete` to non-terminal rows ("last committed terminal state
+   * wins"), so every later terminal persist must route its output through the
+   * unfenced output write instead of silently dropping it.
+   */
+  terminalPersisted: boolean;
+  /**
    * Slice 1.5: data retained for the terminal-state flight-recorder write.
    * Cleared after writeFlightComplete succeeds so the GC can reclaim the
    * extractUsage closure's captured primitives.
@@ -2506,6 +2513,7 @@ export class AsyncJobManager {
       terminalHookCompletion: terminalHookCompletion.promise,
       resolveTerminalHookCompletion: terminalHookCompletion.resolve,
       outputDirty: false,
+      terminalPersisted: false,
       lastOutputFlushAt: Date.now(),
       flightRecorderEntry,
       extractUsage,
@@ -2904,6 +2912,14 @@ export class AsyncJobManager {
         providerSessionId: providerMeta?.sessionId,
         stopReason: providerMeta?.stopReason,
       });
+      // A terminal status can be decided while the child is still shutting
+      // down (cancel, idle timeout, output overflow), so the stdout captured
+      // here is not yet final. Leave the row eligible for exactly one refresh
+      // until `close` proves the process is gone, so bytes a provider flushes
+      // on its way out reach the persisted response too. The logComplete
+      // UPDATE is keyed on the row id and is safely idempotent. Scoped to the
+      // spawn path: an http job has no close event to wait for.
+      if (job.transport === "process" && !job.exited) return;
       // Only mark complete on successful write so a thrown logComplete
       // can be retried by the next terminal callback.
       job.flightRecorderComplete = true;
@@ -3046,6 +3062,21 @@ export class AsyncJobManager {
     if (!job.finishedAt) return false;
     this.ensureTerminalProgress(job);
     this.maybeFlushProgress(job, true);
+    // Cancellation, idle timeout and output overflow all write the row terminal
+    // at the moment the signal is REQUESTED, but the child keeps running until
+    // its close event and may flush its entire accumulated answer in between.
+    // `recordComplete` is fenced to non-terminal rows, so replaying it here
+    // would drop those bytes on the floor. Route them through the unfenced
+    // output write, which cannot disturb the committed terminal state.
+    if (job.terminalPersisted) {
+      job.outputDirty = false;
+      if (!job.kitExecution) {
+        this.safeStoreCall("recordOutput", () =>
+          this.store!.recordOutput(job.id, job.stdout, job.stderr, job.outputTruncated)
+        );
+      }
+      return true;
+    }
     // Make sure the latest output is captured in the same row update.
     job.outputDirty = false;
     const isKit = Boolean(job.kitExecution);
@@ -3064,6 +3095,10 @@ export class AsyncJobManager {
         httpStatus: job.httpStatus,
         progressJson: this.progressTracker(job).serialize(),
       });
+      // Only a store-acknowledged terminal row closes the fence. A throwing
+      // write must stay retryable through `recordComplete`, not silently
+      // downgrade to the output-only path.
+      job.terminalPersisted = true;
       job.terminalPersistenceAcknowledged = true;
       return true;
     } catch (err) {
@@ -3246,6 +3281,7 @@ export class AsyncJobManager {
       lastProgressFlushAt: Date.now(),
       hydratedFromStore: true,
       outputDirty: false,
+      terminalPersisted: false,
       lastOutputFlushAt: Date.now(),
     };
     this.jobs.set(row.id, reconstituted);
@@ -3584,6 +3620,7 @@ export class AsyncJobManager {
       terminalHookCompletion: terminalHookCompletion.promise,
       resolveTerminalHookCompletion: terminalHookCompletion.resolve,
       outputDirty: false,
+      terminalPersisted: false,
       lastOutputFlushAt: Date.now(),
       flightRecorderEntry: durableFlightRecorderEntry,
       extractUsage,
