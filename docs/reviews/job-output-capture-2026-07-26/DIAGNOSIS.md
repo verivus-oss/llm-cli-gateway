@@ -22,7 +22,9 @@ Two things were wrong, and they are different in kind.
 1. **A real gateway data-loss bug**, in two surfaces. Cancellation, idle timeout
    and output overflow write the job terminal at the moment the signal is
    *requested*, but the child lives on until its `close` event and may flush
-   output in between. Both durable surfaces refused to record those bytes. Fixed.
+   output in between. Both durable surfaces refused to record those bytes.
+   Fixed, and all three paths are now covered by tests (see §4 for why the
+   overflow case is subtler than it looks).
 2. **A provider property that is not a gateway defect.** Four of the seven CLIs
    accumulate their whole answer internally and write it in one burst at clean
    exit. For those, a cancel genuinely has nothing to retain, because the bytes
@@ -31,9 +33,11 @@ Two things were wrong, and they are different in kind.
 
 ## 1. The prior findings, re-derived
 
-Both store queries from the prior session reproduce **exactly**, digit for digit
-(28 rows and 11 rows respectively). The claims are therefore reproducible, but
-two of the conclusions drawn from them were wrong.
+Both store queries from the prior session reproduce exactly, digit for digit
+(28 rows and 11 rows respectively). *Evidence class 2*: this is a re-run against
+the same live Postgres instance, not something a reader can verify from the
+repo. The claims are therefore reproducible **here**, but two of the conclusions
+drawn from them were wrong.
 
 ### Claim: three signals disagree. CONFIRMED, with one correction.
 
@@ -133,11 +137,20 @@ fix only removes the timing-dependence rather than recovering bytes.
 ### The fix
 
 - `persistComplete` (`src/async-job-manager.ts:3048`): a new `terminalPersisted`
-  flag, set **only after a store-acknowledged write**, so a throwing
-  `recordComplete` still retries through the existing Kit retry path. Once the
-  terminal row is committed, later persists route their output through the
+  flag, set after any **non-throwing** `recordComplete`, so a throwing call
+  still retries through the existing Kit retry path while a guard-rejected one
+  does not (the terminal state is settled, just not by us). Once this instance
+  has committed the terminal row, later persists route their output through the
   unfenced `recordOutput`, which updates bytes without disturbing the committed
   terminal state. "Last committed terminal state wins" is preserved exactly.
+
+  `recordComplete` now **returns whether the guard admitted the write** across
+  all three backends, because the manager cannot otherwise tell "I committed
+  this row" from "someone else already did". That distinction decides the late
+  write: if the guard rejected us, the row belongs to another writer and we
+  deliberately leave its output alone, since `recordOutput` carries no owner
+  predicate and would otherwise clobber a result we do not own on a shared
+  Postgres store. Losing our copy beats corrupting theirs.
 - `writeFlightComplete` (`:2922`): the row stays eligible for a re-write until
   `close` proves the process is gone. This works because `logComplete`'s two
   statements differ in fencing: the `requests.response` UPDATE is keyed on row
@@ -148,10 +161,15 @@ fix only removes the timing-dependence rather than recovering bytes.
   one at close. Scoped to `transport === "process"`, since an http job has no
   close event to wait for.
 
-Both are pinned by tests that fail before and pass after (verified by reverting
-each fix independently).
+Both are pinned by tests that fail before and pass after, verified by reverting
+each fix hunk independently. Scope of that claim: it covers the two fix hunks,
+the guard-rejection branch, and the cursor scoping ratchet. It does **not**
+cover MemoryJobStore/PostgresJobStore parity for the new boolean return, which
+is asserted only for `SqliteJobStore` and matches by inspection elsewhere.
 
 ### End-to-end validation against a real provider
+
+*Evidence class 2: a single measured run, not a repeatable repo-level proof.*
 
 Beyond the synthetic-child unit tests, the patched `dist/` build was run against
 a real `claude` process: stream for ~8 s, cancel mid-flight, then compare.
@@ -171,7 +189,7 @@ The deterministic counterfactual is the unit test, not this number.
 
 ## 3. Per-provider output discipline (the operator table)
 
-Each CLI was probed under **the exact argv the gateway spawns** (recovered from
+*Evidence class 2 throughout.* Each CLI was probed under **the exact argv the gateway spawns** (recovered from
 `args_json` of real completed jobs in the store), with piped stdio and its own
 process group, SIGTERM mid-flight, then a 5 s grace matching the gateway's.
 
@@ -187,6 +205,9 @@ process group, SIGTERM mid-flight, then a 5 s grace matching the gateway's.
 
 ### Gateway-level cancel sweep (the operator table)
 
+*Evidence class 2 throughout: measured on this host, against the provider CLI
+versions installed on 2026-07-26.*
+
 The table above is the child-process mechanism. This one is the end-to-end
 answer through the gateway itself, run on the **patched** `dist/` build: start a
 job, poll `stdoutBytes` every 2.5 s, cancel at 25 s, then read the durable store.
@@ -201,10 +222,14 @@ job, poll `stdoutBytes` every 2.5 s, cancel at 25 s, then read the durable store
 | cursor | **No**, flat 0 for 25 s | **No**, 0 retained | 0 |
 | devin | **No**, flat 0 for 25 s | **No**, 0 retained | 0 |
 
-**Operator reading**: claude, codex and grok are safe to cancel and keep a
-usable partial answer. gemini, mistral, cursor and devin are not; cancelling
-them discards the work entirely, and their `stdoutBytes: 0` while running is
-normal rather than a sign of a hung job.
+**Operator reading**: gemini, mistral, cursor and devin retain **nothing** on
+cancel; their `stdoutBytes: 0` while running is normal rather than a sign of a
+hung job. claude, codex and grok retain what they had emitted, with caveats
+worth keeping rather than smoothing away: claude is the only one that also
+flushes on SIGTERM, codex advances per *event* so a long non-agentic message can
+sit at a flat low byte count (101 in this run), and grok emits nothing at all
+during a roughly 7 to 10 s think phase, so a cancel inside that window still
+retains nothing.
 
 Measurement caveat: `stdoutBytes` in the snapshot is `Buffer.byteLength` (UTF-8
 bytes) while the stored row length is measured in UTF-16 code units, so the two
@@ -269,14 +294,25 @@ the behaviour it describes lives in a child process that no unit test can drive.
   current window. Lengthening it would delay every cancel for a benefit not
   observed. This is an argument from measurement, not from the repo, and a
   future provider version could invalidate it.
-- **`outputTruncated` / 50 MB cap / `max_job_output_bytes`.** No bad interaction
-  found. **Correction after review**: an earlier draft of this document claimed
-  the overflow path shared the late-output loss. It does not. `appendOutput`
-  `return`s **before** appending the chunk that crosses the cap
-  (`src/async-job-manager.ts:4536`), and every later chunk crosses it too, so no
-  late bytes ever accumulate in memory for the fix to rescue. The overflow path
-  does terminalize before close like cancel, so the same code path runs, but it
-  is a no-op there rather than a bug fix. Caught by the codex reviewer.
+- **`outputTruncated` / 50 MB cap / `max_job_output_bytes`.** The overflow path
+  **does** share the late-output loss, and the fix rescues it.
+
+  This point was got wrong twice and is worth recording honestly. A second draft
+  claimed overflow could never accumulate late bytes, reasoning that once the
+  cap trips every later chunk must also cross it. That is false: `appendOutput`
+  rejects only the chunk that would cross the cap and never appends it, so the
+  in-memory total does not grow, and a later **smaller** chunk still fits and is
+  appended. One reviewer (codex) reproduced this; another (grok) accepted the
+  incorrect reasoning. It was settled by direct experiment rather than by
+  counting votes, with a 10-byte cap:
+
+  ```
+  11-byte chunk  -> crosses the cap, dropped, job terminalized (exit 126)
+  1-byte SIGTERM flush -> still fits, appended, and now persisted
+  durable row: status=failed outputTruncated=true stdout="X"
+  ```
+
+  That case is now pinned by a test rather than by an argument.
 
 ## 5. Residual limitations, deliberately not fixed
 
@@ -319,13 +355,15 @@ the behaviour it describes lives in a child process that no unit test can drive.
    Not fixed here because gating the flight finalization on a distinct
    "close actually fired" flag is a broader lifecycle change than this fix
    warrants. Raised by the codex reviewer.
-8. **The late-output write is not fenced to an owner.** `recordOutput` has never
-   carried an owner or version predicate, for any caller, so on a shared
-   Postgres store a confused non-owner could in principle overwrite stdout
-   bytes. It cannot touch status, exit code or error. This change uses the same
-   unfenced primitive every mid-flight flush already uses and so does not widen
-   the exposure, but it does not close it either. Raised by both the codex and
-   grok reviewers.
+8. **The late-output write is still unfenced, but is now only used on rows this
+   instance owns.** `recordOutput` has never carried an owner or version
+   predicate, for any caller. An earlier revision of this fix wrote late output
+   even when the completion guard had **rejected** our terminal write, which is
+   precisely the case where another writer owns the row. The codex reviewer
+   rejected that as a shared-Postgres hazard and was right: it was a new
+   exposure, not an inherited one. The manager now leaves such a row untouched
+   and logs it. What remains is the pre-existing property that `recordOutput`
+   itself is unfenced, which every mid-flight flush already relies on.
 9. **API providers.** Only one `openai` row exists in the store (4 bytes,
    completed), so there is no cancellation history to analyse. The http path
    does not spawn a child and cancels by aborting the request

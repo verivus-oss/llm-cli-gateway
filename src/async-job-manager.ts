@@ -3066,17 +3066,17 @@ export class AsyncJobManager {
     if (!job.finishedAt) return false;
     this.ensureTerminalProgress(job);
     this.maybeFlushProgress(job, true);
-    // Cancellation and idle timeout write the row terminal at the moment the
-    // signal is REQUESTED, but the child keeps running until its close event
-    // and may flush its entire accumulated answer in between. `recordComplete`
-    // is fenced to non-terminal rows, so replaying it here would drop those
-    // bytes on the floor. Route them through the unfenced output write, which
-    // touches only stdout/stderr/output_truncated and so cannot disturb the
-    // committed terminal state.
+    // Cancellation, idle timeout and output overflow write the row terminal at
+    // the moment the signal is REQUESTED, but the child keeps running until its
+    // close event and may flush its entire accumulated answer in between.
+    // `recordComplete` is fenced to non-terminal rows, so replaying it here
+    // would drop those bytes on the floor. Route them through the unfenced
+    // output write, which touches only stdout/stderr/output_truncated and so
+    // cannot disturb the committed terminal state.
     //
-    // (The output-overflow path also terminalizes before close, but it has no
-    // late bytes to rescue: appendOutput returns BEFORE appending the chunk
-    // that crosses the cap, and every later chunk crosses it too.)
+    // Overflow is included deliberately: appendOutput rejects only the chunk
+    // that would cross the cap, so a later SMALLER chunk that still fits IS
+    // appended and does need rescuing. Pinned by the overflow test.
     if (job.terminalPersisted) {
       this.persistLateOutput(job);
       return true;
@@ -3103,11 +3103,18 @@ export class AsyncJobManager {
       // recordComplete: a throw (not a rejected guard) is what stays retryable.
       job.terminalPersisted = true;
       job.terminalPersistenceAcknowledged = true;
-      // `applied === false` means the guard rejected the write because the row
-      // was already terminal, so this statement matched nothing and our output
-      // never landed. Fall through to the unfenced write for exactly the same
-      // reason the post-terminal branch above does.
-      if (!applied) this.persistLateOutput(job);
+      if (!applied) {
+        // The guard rejected this write, which means SOME OTHER writer already
+        // committed a terminal state for this row. On a shared Postgres store
+        // that writer is another gateway instance, and `recordOutput` carries
+        // no owner predicate, so forcing our bytes in here would overwrite an
+        // outcome we do not own. Leave the row alone and say so: losing our
+        // copy of the output is strictly better than corrupting theirs.
+        this.logger.info(
+          `Job ${job.id} terminal write rejected: row was already terminal, leaving its output untouched`,
+          { correlationId: job.correlationId }
+        );
+      }
       return true;
     } catch (err) {
       this.logger.error(`JobStore.recordComplete failed for ${job.id}`, err);
@@ -3117,12 +3124,17 @@ export class AsyncJobManager {
   }
 
   /**
-   * Persist output captured after the terminal row was committed.
+   * Persist output captured after THIS instance committed the terminal row.
    *
    * Deliberately writes ONLY stdout/stderr/output_truncated: status, exit code
    * and error stay owned by the fenced terminal write, so "last committed
    * terminal state wins" (#139) is preserved. Kit jobs are excluded because
    * their raw process output must never reach the durable store.
+   *
+   * Only ever called on a row whose terminal transition this instance won. A
+   * row terminalized by someone else is left untouched, because `recordOutput`
+   * has no owner predicate and could otherwise clobber another instance's
+   * result on a shared Postgres store.
    */
   private persistLateOutput(job: AsyncJobRecord): void {
     job.outputDirty = false;

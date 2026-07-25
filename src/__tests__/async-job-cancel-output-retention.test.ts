@@ -175,6 +175,64 @@ describe("late child output survives a terminal-status-before-close transition",
     }
   }, 30_000);
 
+  it("persists bytes the child emits after the output cap trips and before close", async () => {
+    // The overflow branch rejects ONLY the chunk that would cross the cap, so a
+    // later smaller chunk still fits and IS appended. Those bytes need the same
+    // rescue as the cancel path. (An earlier draft of the diagnosis claimed
+    // overflow could never accumulate late bytes; this test is why that was
+    // wrong.)
+    const capped = new AsyncJobManager(undefined, undefined, store, undefined, {
+      maxRunningJobs: 1000,
+      maxRunningJobsPerProvider: 1000,
+      maxQueuedJobs: 1000,
+      queueTimeoutMs: 600_000,
+      completedJobMemoryTtlMs: 3_600_000,
+      maxJobOutputBytes: 10,
+    });
+
+    // 11 bytes crosses the 10-byte cap and is dropped; the 1-byte SIGTERM
+    // flush that follows still fits under it.
+    const script = `trap 'printf "X"; exit 0' TERM
+printf "AAAAAAAAAAA"
+while :; do sleep 0.05; done`;
+
+    const job = capped.startJob("sh" as LlmCli, ["-c", script], "corr-overflow-flush");
+    await waitFor(() => capped.getJobSnapshot(job.id)?.exited === true, 15_000);
+    await waitFor(() => store.getById(job.id)?.status === "failed", 10_000);
+
+    const row = store.getById(job.id);
+    expect(row?.outputTruncated).toBe(true);
+    expect(row?.exitCode).toBe(126);
+    // The post-cap byte reached the durable store.
+    expect(row?.stdout).toBe("X");
+  }, 30_000);
+
+  it("leaves a row alone when the completion guard rejects this instance's write", () => {
+    // A rejected guard means another writer already committed a terminal state
+    // for this row. recordOutput has no owner predicate, so the manager must
+    // NOT force its bytes in over an outcome it does not own.
+    const lateWrites: string[] = [];
+    const realRecordOutput = store.recordOutput.bind(store);
+    // Simulate another writer having already committed this row's terminal
+    // state: the guard rejects our completion.
+    store.recordComplete = () => false;
+    store.recordOutput = (id, stdout, stderr, truncated) => {
+      lateWrites.push(stdout);
+      realRecordOutput(id, stdout, stderr, truncated);
+    };
+
+    const job = manager.startJob("sh" as LlmCli, ["-c", "printf OURS"], "corr-foreign-row");
+
+    return waitFor(() => manager.getJobSnapshot(job.id)?.exited === true, 10_000).then(async () => {
+      await new Promise(r => setTimeout(r, 300));
+      // Throttled mid-flight flushes may legitimately have written; what must
+      // NOT happen is a post-terminal write forced in over a row we lost.
+      const row = store.getById(job.id);
+      expect(row?.status).not.toBe("completed");
+      expect(lateWrites.filter(w => w === "OURS").length).toBe(0);
+    });
+  }, 20_000);
+
   it("persists bytes the child emits between an idle-timeout kill and close", async () => {
     // idleTimeoutMs fires because the child stays silent after its first bytes.
     // Keep it under OUTPUT_FLUSH_INTERVAL_MS (1000ms) so the late flush lands
