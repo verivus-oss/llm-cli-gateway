@@ -120,6 +120,39 @@ and removing it restores each to the major it declares and was tested against.
 
 ## cross-LLM validation (gtwy; independent sessions)
 
-- codex: PENDING
-- grok: PENDING
-- mistral: PENDING
+Four rounds. The dependency decision itself (this contract) was never contested;
+every round-over-round change was to the release-gate code that shipped
+alongside it, so each round invalidated the previous verdicts.
+
+- **codex**: r1 did not converge (>310 KB output on a broad prompt, cancelled,
+  no verdict; re-scoped narrowly thereafter). r2 `CHANGES_REQUIRED` (job
+  2e0c73be, correlationId hono-override-codex-r2): found a fail-open where
+  `pathToFileURL(argv[1])` preserves symlinks while node canonicalizes
+  `import.meta.url`, so `node /proc/self/cwd/scripts/check-consumer-tree.mjs`
+  exited 0 having classified nothing. Reproduced by the author and fixed in
+  abc7789. r3 `CHANGES_REQUIRED` (correlationId hono-override-codex-r3): found
+  the `NODE_OPTIONS=--import` preload forgery. Reproduced and fixed in a74e9d4.
+  **Codex dissented twice and was right both times.**
+- **grok**: r1 `APPROVED_UNCONDITIONALLY` (job c3ac5008) with genuinely
+  independent verification: it re-ran the override-removal experiment, queried
+  OSV, diffed the published tarballs, and independently confirmed the stale-GHSA
+  finding. Its reasoning trace also raised the entry-point comparison but it did
+  not file that as a finding and approved anyway. r3 `CHANGES_REQUIRED`
+  (correlationId hono-override-grok-r3): independently reproduced the
+  NODE_OPTIONS forgery with `--require`, and additionally found that the shell
+  marker test was a substring glob accepting `CONSUMER_TREE_CHECK_OKAY`. Both
+  fixed in 64cfe1a. It also re-confirmed C1 to C7 by experiment.
+- **mistral**: r1 and r2 `APPROVED_UNCONDITIONALLY`, r3 `APPROVED_UNCONDITIONALLY`.
+  Treated as **incomplete, not as approval**, per the runbook's rule that an
+  unavailable research path leaves validation incomplete. In r2 and r3 it
+  asserted "No other fail-open paths remain" while codex was reproducing one in
+  the same round, and in r3 it reported that it could not execute `node`, `git`
+  or `vitest` at all ("Tool execution not permitted"), so its verdict rests on
+  static reading rather than the verification commands it was asked to run.
+
+Author-side verification, recorded because it is what actually settled the
+disputes rather than the vote count: every reviewer finding above was
+reproduced locally before being accepted, and every fix was confirmed by
+reverting it and watching the tests fail. Two defects were found by the release
+gate itself rather than by any reviewer (the nesting-sensitive `invalid` string,
+and the original blocker).

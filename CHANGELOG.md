@@ -90,6 +90,15 @@ All notable changes to the llm-cli-gateway project.
   shipping an unpatched transitive would look like. The one current entry is the
   `@hono/node-server` pin for GHSA-frvp-7c67-39w9, whose exit condition is
   recorded with it.
+- That gate is itself fail-closed now. Its entry-point guard compared two
+  spellings of the same path, so it skipped its whole body and exited 0 having
+  verified nothing whenever the script path contained a URL-escaped character or
+  was reached through a symlink. The second case is reachable in the release
+  script itself, whose `ROOT_DIR` comes from bash's logical `pwd`. Both sides
+  are now canonicalized; the caller requires a positive whole-line marker rather
+  than trusting an exit code from a guard that has been wrong twice; and the
+  checker runs with `NODE_OPTIONS` and `NODE_PATH` cleared, so an inherited
+  preload cannot emit that marker before any classification has happened.
 
 ## [3.0.0] - 2026-07-18
 
