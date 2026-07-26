@@ -59,8 +59,8 @@ All notable changes to the llm-cli-gateway project.
   refreshed once the process is genuinely gone.
 - **Late output cannot overwrite a terminal result whose completion write this
   gateway did not win.** `recordComplete` now reports whether the completion
-  guard admitted the write, and only an admitted write licenses the unfenced
-  output write, on every path that reaches it. On a shared PostgreSQL store this
+  guard admitted the write, and only an admitted completion write licenses a
+  post-terminal unfenced output write, on every path that reaches one. On a shared PostgreSQL store this
   prevents one instance's output from clobbering a result another instance had
   already committed.
 - **The dead-process sweep no longer finalizes a flight-recorder row early.** A
