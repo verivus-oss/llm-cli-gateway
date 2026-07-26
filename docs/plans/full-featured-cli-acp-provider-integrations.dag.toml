@@ -477,8 +477,6 @@ must_cover_cli_flags = [
   "--effort",
   "--reasoning-effort",
   "--max-turns",
-  "--best-of-n",
-  "--check",
   "--permission-mode",
   "--always-approve",
   "--allow",

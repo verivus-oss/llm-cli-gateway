@@ -1,7 +1,7 @@
 {
   "schemaVersion": "upstream-scan-snapshot.v2",
   "cli": "grok",
-  "fetchedAt": "2026-07-16T05:41:35.774Z",
+  "fetchedAt": "2026-07-26T07:37:15.194Z",
   "sources": [
     {
       "url": "https://docs.x.ai/developers/release-notes.md",
@@ -13,18 +13,16 @@
     }
   ],
   "helpSurface": {
-    "probedAt": "2026-07-16T05:41:35.308Z",
+    "probedAt": "2026-07-26T07:37:14.720Z",
     "available": true,
-    "version": "grok 0.2.101 (5bc4b5dfad)",
-    "targetVersion": "grok 0.2.101 (5bc4b5dfad)",
+    "version": "grok 0.2.112 (9bbd559437)",
+    "targetVersion": "grok 0.2.112 (9bbd559437)",
     "versionMatchesTarget": true,
     "discoveredFlags": [
       "--agent",
       "--agents",
       "--allow",
       "--always-approve",
-      "--best-of-n",
-      "--check",
       "--continue",
       "--cwd",
       "--debug",
@@ -63,7 +61,7 @@
       "--worktree",
       "--worktree-ref"
     ],
-    "helpHash": "97bfaefd1a3f20e51f72df3f9b1eefdbd6d941e114068ff9b15b836b1cc9ee84",
+    "helpHash": "f2b2433b5d62def044edff9ca47c04b7d3ca27911bd37b502e8d8295ed600402",
     "extraVsContract": [],
     "missingFromBinary": [],
     "arityMismatches": [],
@@ -73,9 +71,9 @@
     "agent",
     "completions",
     "dashboard",
+    "doctor",
     "export",
     "help",
-    "import",
     "inspect",
     "leader",
     "login",
@@ -97,7 +95,7 @@
       "commandPath": [
         "agent"
       ],
-      "probedAt": "2026-07-16T05:41:24.401Z",
+      "probedAt": "2026-07-26T07:37:03.676Z",
       "available": true,
       "existence": "present",
       "discoveredFlags": [
@@ -132,7 +130,7 @@
         "agent",
         "headless"
       ],
-      "probedAt": "2026-07-16T05:41:25.315Z",
+      "probedAt": "2026-07-26T07:37:04.593Z",
       "available": true,
       "existence": "present",
       "discoveredFlags": [
@@ -157,7 +155,7 @@
         "agent",
         "leader"
       ],
-      "probedAt": "2026-07-16T05:41:25.774Z",
+      "probedAt": "2026-07-26T07:37:05.059Z",
       "available": true,
       "existence": "present",
       "discoveredFlags": [
@@ -170,7 +168,7 @@
         "--no-exit-on-disconnect",
         "--relay-on-demand"
       ],
-      "helpHash": "cabb8548a6031dfd532d453e9aa2d3f4881aa15c399ac584cc77ad78707a4371",
+      "helpHash": "5658bb634617b3e8a8649e1f2b836b7101081acccc79d4af3580c6c3394b764b",
       "extraVsContract": [],
       "missingFromBinary": [],
       "arityMismatches": [],
@@ -185,7 +183,7 @@
         "agent",
         "serve"
       ],
-      "probedAt": "2026-07-16T05:41:26.227Z",
+      "probedAt": "2026-07-26T07:37:05.508Z",
       "available": true,
       "existence": "present",
       "discoveredFlags": [
@@ -213,7 +211,7 @@
         "agent",
         "stdio"
       ],
-      "probedAt": "2026-07-16T05:41:26.665Z",
+      "probedAt": "2026-07-26T07:37:05.959Z",
       "available": true,
       "existence": "present",
       "discoveredFlags": [
@@ -235,7 +233,7 @@
       "commandPath": [
         "completions"
       ],
-      "probedAt": "2026-07-16T05:41:27.120Z",
+      "probedAt": "2026-07-26T07:37:06.415Z",
       "available": true,
       "existence": "present",
       "discoveredFlags": [
@@ -257,7 +255,7 @@
       "commandPath": [
         "dashboard"
       ],
-      "probedAt": "2026-07-16T05:41:27.556Z",
+      "probedAt": "2026-07-26T07:37:06.874Z",
       "available": true,
       "existence": "present",
       "discoveredFlags": [
@@ -275,11 +273,34 @@
       "tier": "inspect",
       "summary": "Open the Agent Dashboard view at startup."
     },
+    "doctor": {
+      "commandPath": [
+        "doctor"
+      ],
+      "probedAt": "2026-07-26T07:37:07.364Z",
+      "available": true,
+      "existence": "present",
+      "discoveredFlags": [
+        "--debug",
+        "--debug-file",
+        "--json",
+        "--leader-socket"
+      ],
+      "helpHash": "43d539914f6906cd6fda8f21d3f1c6e21cfb7a553d37e4bd038167267a9e98a8",
+      "extraVsContract": [],
+      "missingFromBinary": [],
+      "arityMismatches": [],
+      "enumMismatches": [],
+      "risk": "read_only",
+      "exposure": "tracked_only",
+      "tier": "inspect",
+      "summary": "Check terminal, clipboard, color, and input support without starting Grok."
+    },
     "export": {
       "commandPath": [
         "export"
       ],
-      "probedAt": "2026-07-16T05:41:28.084Z",
+      "probedAt": "2026-07-26T07:37:07.815Z",
       "available": true,
       "existence": "present",
       "discoveredFlags": [
@@ -298,35 +319,11 @@
       "tier": "inspect",
       "summary": "Export Grok session data."
     },
-    "import": {
-      "commandPath": [
-        "import"
-      ],
-      "probedAt": "2026-07-16T05:41:28.527Z",
-      "available": true,
-      "existence": "present",
-      "discoveredFlags": [
-        "--debug",
-        "--debug-file",
-        "--json",
-        "--leader-socket",
-        "--list"
-      ],
-      "helpHash": "4b94f8bb8c76b74e9d8c7847939d394154359f17c99c1b1b3e4368bc0ee76dfc",
-      "extraVsContract": [],
-      "missingFromBinary": [],
-      "arityMismatches": [],
-      "enumMismatches": [],
-      "risk": "writes_local_config",
-      "exposure": "tracked_only",
-      "tier": "catalog",
-      "summary": "Import Grok session data."
-    },
     "inspect": {
       "commandPath": [
         "inspect"
       ],
-      "probedAt": "2026-07-16T05:41:28.973Z",
+      "probedAt": "2026-07-26T07:37:08.273Z",
       "available": true,
       "existence": "present",
       "discoveredFlags": [
@@ -349,7 +346,7 @@
       "commandPath": [
         "leader"
       ],
-      "probedAt": "2026-07-16T05:41:29.435Z",
+      "probedAt": "2026-07-26T07:37:08.740Z",
       "available": true,
       "existence": "present",
       "discoveredFlags": [
@@ -357,7 +354,7 @@
         "--debug-file",
         "--leader-socket"
       ],
-      "helpHash": "48380b801c545facb176c333dfe47d7f6bc531c18e91ac3d65900a3daef7943f",
+      "helpHash": "fc0ff010c1bd30df5bae747206e279e8ae4c362168f40b72216de8e8128c25ab",
       "extraVsContract": [],
       "missingFromBinary": [],
       "arityMismatches": [],
@@ -371,7 +368,7 @@
       "commandPath": [
         "login"
       ],
-      "probedAt": "2026-07-16T05:41:29.892Z",
+      "probedAt": "2026-07-26T07:37:09.207Z",
       "available": true,
       "existence": "present",
       "discoveredFlags": [
@@ -395,7 +392,7 @@
       "commandPath": [
         "logout"
       ],
-      "probedAt": "2026-07-16T05:41:30.346Z",
+      "probedAt": "2026-07-26T07:37:09.694Z",
       "available": true,
       "existence": "present",
       "discoveredFlags": [
@@ -417,7 +414,7 @@
       "commandPath": [
         "mcp"
       ],
-      "probedAt": "2026-07-16T05:41:30.825Z",
+      "probedAt": "2026-07-26T07:37:10.159Z",
       "available": true,
       "existence": "present",
       "discoveredFlags": [
@@ -439,7 +436,7 @@
       "commandPath": [
         "memory"
       ],
-      "probedAt": "2026-07-16T05:41:31.254Z",
+      "probedAt": "2026-07-26T07:37:10.616Z",
       "available": true,
       "existence": "present",
       "discoveredFlags": [
@@ -461,7 +458,7 @@
       "commandPath": [
         "models"
       ],
-      "probedAt": "2026-07-16T05:41:31.705Z",
+      "probedAt": "2026-07-26T07:37:11.081Z",
       "available": true,
       "existence": "present",
       "discoveredFlags": [
@@ -483,7 +480,7 @@
       "commandPath": [
         "plugin"
       ],
-      "probedAt": "2026-07-16T05:41:32.159Z",
+      "probedAt": "2026-07-26T07:37:11.532Z",
       "available": true,
       "existence": "present",
       "discoveredFlags": [
@@ -505,7 +502,7 @@
       "commandPath": [
         "sessions"
       ],
-      "probedAt": "2026-07-16T05:41:32.615Z",
+      "probedAt": "2026-07-26T07:37:11.983Z",
       "available": true,
       "existence": "present",
       "discoveredFlags": [
@@ -527,7 +524,7 @@
       "commandPath": [
         "setup"
       ],
-      "probedAt": "2026-07-16T05:41:33.077Z",
+      "probedAt": "2026-07-26T07:37:12.435Z",
       "available": true,
       "existence": "present",
       "discoveredFlags": [
@@ -550,7 +547,7 @@
       "commandPath": [
         "trace"
       ],
-      "probedAt": "2026-07-16T05:41:33.526Z",
+      "probedAt": "2026-07-26T07:37:12.898Z",
       "available": true,
       "existence": "present",
       "discoveredFlags": [
@@ -575,7 +572,7 @@
       "commandPath": [
         "update"
       ],
-      "probedAt": "2026-07-16T05:41:33.974Z",
+      "probedAt": "2026-07-26T07:37:13.340Z",
       "available": true,
       "existence": "present",
       "discoveredFlags": [
@@ -603,7 +600,7 @@
       "commandPath": [
         "version"
       ],
-      "probedAt": "2026-07-16T05:41:34.427Z",
+      "probedAt": "2026-07-26T07:37:13.798Z",
       "available": true,
       "existence": "present",
       "discoveredFlags": [
@@ -626,7 +623,7 @@
       "commandPath": [
         "worktree"
       ],
-      "probedAt": "2026-07-16T05:41:34.869Z",
+      "probedAt": "2026-07-26T07:37:14.269Z",
       "available": true,
       "existence": "present",
       "discoveredFlags": [
@@ -648,7 +645,7 @@
       "commandPath": [
         "wrap"
       ],
-      "probedAt": "2026-07-16T05:41:35.308Z",
+      "probedAt": "2026-07-26T07:37:14.720Z",
       "available": true,
       "existence": "present",
       "discoveredFlags": [

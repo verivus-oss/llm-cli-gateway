@@ -984,8 +984,8 @@ const TOOL_CONTROLS: Record<KnownProviderCapabilityId, ProviderCapabilityStaticD
       },
       agents: {
         supported: true,
-        requestField: "agent/agents/bestOfN/check/todoGate/noSubagents",
-        behavior: "Surfaces Grok agent, evaluation, and subagent controls.",
+        requestField: "agent/agents/todoGate/noSubagents",
+        behavior: "Surfaces Grok agent and subagent controls.",
       },
       webSearch: {
         supported: true,

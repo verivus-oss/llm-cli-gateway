@@ -110,7 +110,7 @@ describe("grok schema fidelity (pre/post cutover)", () => {
 
   it("numeric fields keep MAX_TURNS_SCHEMA bounds (int, positive, safe, max 10000)", () => {
     const schema = grokSchema();
-    for (const f of ["maxTurns", "bestOfN"]) {
+    for (const f of ["maxTurns"]) {
       expect(schema.safeParse({ prompt: "x", [f]: 5 }).success, `${f} accepts 5`).toBe(true);
       expect(schema.safeParse({ prompt: "x", [f]: 10_000 }).success, `${f} accepts 10000`).toBe(
         true
@@ -150,7 +150,7 @@ describe("grok schema fidelity (pre/post cutover)", () => {
       expect(derivedObj.safeParse({ [f]: good }).success, `${f} accept ${good}`).toBe(true);
     }
     // numeric bounds reproduced (== MAX_TURNS_SCHEMA).
-    for (const f of ["maxTurns", "bestOfN"]) {
+    for (const f of ["maxTurns"]) {
       expect(derivedObj.safeParse({ [f]: 5 }).success).toBe(true);
       expect(derivedObj.safeParse({ [f]: 0 }).success).toBe(false);
       expect(derivedObj.safeParse({ [f]: 1.5 }).success).toBe(false);
@@ -161,7 +161,7 @@ describe("grok schema fidelity (pre/post cutover)", () => {
 
   it("boolean + array covered fields accept their types", () => {
     const schema = grokSchema();
-    for (const f of ["check", "verbatim", "oauth", "experimentalMemory", "noPlan"]) {
+    for (const f of ["verbatim", "oauth", "experimentalMemory", "noPlan"]) {
       expect(schema.safeParse({ prompt: "x", [f]: true }).success, `${f} accepts true`).toBe(true);
       expect(schema.safeParse({ prompt: "x", [f]: false }).success, `${f} accepts false`).toBe(
         true

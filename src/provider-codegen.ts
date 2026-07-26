@@ -348,22 +348,6 @@ export const GROK_GEN_MAIN: readonly FlagGenerationMeta[] = [
     describe: "Grok --agent <NAME>: agent name or definition file path.",
   },
   {
-    flag: "--best-of-n",
-    requestParameter: "bestOfN",
-    emit: "value_if_defined",
-    inputType: "number",
-    numeric: MAX_TURNS_NUMERIC,
-    describe:
-      "Grok --best-of-n <N>: run the task N ways in parallel and pick the best (headless only).",
-  },
-  {
-    flag: "--check",
-    requestParameter: "check",
-    emit: "flag_if_true",
-    inputType: "boolean",
-    describe: "Grok --check: append a self-verification loop to the prompt (headless only).",
-  },
-  {
     flag: "--disable-web-search",
     requestParameter: "disableWebSearch",
     emit: "flag_if_true",

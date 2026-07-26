@@ -947,8 +947,6 @@ type GrokGeneratedField =
   | "compactionMode"
   | "compactionDetail"
   | "agent"
-  | "bestOfN"
-  | "check"
   | "disableWebSearch"
   | "todoGate"
   | "verbatim"
@@ -6732,10 +6730,6 @@ export function prepareGrokRequest(
     compactionDetail?: string;
     /** Grok 0.2.x: `--agent <NAME>` agent name or definition file path. */
     agent?: string;
-    /** Grok 0.2.x: `--best-of-n <N>` parallel headless attempts (pick best). */
-    bestOfN?: number;
-    /** Grok 0.2.x: `--check` append self-verification loop (headless only). */
-    check?: boolean;
     /** Grok 0.2.x: `--disable-web-search` disable web search and remote retrieval tools. */
     disableWebSearch?: boolean;
     /** Grok 0.2.x: `--todo-gate` enable runtime turn-end TodoGate for this session. */
@@ -12046,10 +12040,6 @@ export interface GrokRequestParams {
   compactionDetail?: string;
   /** Grok 0.2.x: `--agent <NAME>` agent name or definition file path. */
   agent?: string;
-  /** Grok 0.2.x: `--best-of-n <N>` parallel headless attempts. */
-  bestOfN?: number;
-  /** Grok 0.2.x: `--check` self-verification loop (headless only). */
-  check?: boolean;
   /** Grok 0.2.x: `--disable-web-search`. */
   disableWebSearch?: boolean;
   /** Grok 0.2.x: `--todo-gate` runtime turn-end TodoGate. */
@@ -12133,8 +12123,6 @@ function rejectUnsupportedGrokAcpParams(
     ["compactionMode", hasNonEmptyString(params.compactionMode)],
     ["compactionDetail", hasNonEmptyString(params.compactionDetail)],
     ["agent", hasNonEmptyString(params.agent)],
-    ["bestOfN", params.bestOfN !== undefined],
-    ["check", params.check === true],
     ["disableWebSearch", params.disableWebSearch === true],
     ["todoGate", params.todoGate === true],
     ["verbatim", params.verbatim === true],
@@ -12219,8 +12207,6 @@ export async function handleGrokRequest(
       compactionMode: params.compactionMode,
       compactionDetail: params.compactionDetail,
       agent: params.agent,
-      bestOfN: params.bestOfN,
-      check: params.check,
       disableWebSearch: params.disableWebSearch,
       todoGate: params.todoGate,
       verbatim: params.verbatim,
@@ -12540,8 +12526,6 @@ export async function handleGrokRequestAsync(
       compactionMode: params.compactionMode,
       compactionDetail: params.compactionDetail,
       agent: params.agent,
-      bestOfN: params.bestOfN,
-      check: params.check,
       disableWebSearch: params.disableWebSearch,
       todoGate: params.todoGate,
       verbatim: params.verbatim,
@@ -18359,8 +18343,6 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
       compactionMode,
       compactionDetail,
       agent,
-      bestOfN,
-      check,
       disableWebSearch,
       todoGate,
       verbatim,
@@ -18418,8 +18400,6 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
           compactionMode,
           compactionDetail,
           agent,
-          bestOfN,
-          check,
           disableWebSearch,
           todoGate,
           verbatim,
@@ -20389,13 +20369,6 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
           .min(1)
           .optional()
           .describe("Grok --agent <NAME>: agent name or definition file path."),
-        bestOfN: MAX_TURNS_SCHEMA.optional().describe(
-          "Grok --best-of-n <N>: run the task N ways in parallel and pick the best (headless only)."
-        ),
-        check: z
-          .boolean()
-          .optional()
-          .describe("Grok --check: append a self-verification loop to the prompt (headless only)."),
         disableWebSearch: z
           .boolean()
           .optional()
@@ -20533,8 +20506,6 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
         compactionMode,
         compactionDetail,
         agent,
-        bestOfN,
-        check,
         disableWebSearch,
         todoGate,
         verbatim,
@@ -20590,8 +20561,6 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
             compactionMode,
             compactionDetail,
             agent,
-            bestOfN,
-            check,
             disableWebSearch,
             todoGate,
             verbatim,

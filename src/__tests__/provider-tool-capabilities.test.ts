@@ -282,7 +282,7 @@ describe("provider tool capabilities", () => {
         requestField: "permissionMode",
       },
       approvalStrategy: { supported: false, requestField: "approvalStrategy/approvalPolicy" },
-      agents: { supported: true, requestField: "agent/agents/bestOfN/check/todoGate/noSubagents" },
+      agents: { supported: true, requestField: "agent/agents/todoGate/noSubagents" },
       webSearch: { supported: true, requestField: "disableWebSearch" },
       memoryAndPlan: {
         supported: true,

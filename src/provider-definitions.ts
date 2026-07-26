@@ -448,13 +448,13 @@ const KIT_UNSUPPORTED: ProviderPersonalConfigKit = {
  * all follow automatically.
  */
 export const PROVIDER_TARGET_VERSIONS: Record<CliType, string> = {
-  claude: "claude 2.1.212",
-  codex: "codex-cli 0.144.5",
-  gemini: "agy 1.1.3",
-  grok: "grok 0.2.101 (5bc4b5dfad)",
-  mistral: "vibe 2.20.0",
-  devin: "devin 3000.1.27 (0d4bf12e)",
-  cursor: "cursor-agent 2026.07.16-899851b",
+  claude: "claude 2.1.220",
+  codex: "codex-cli 0.145.0",
+  gemini: "agy 1.1.7",
+  grok: "grok 0.2.112 (9bbd559437)",
+  mistral: "vibe 2.22.0",
+  devin: "devin 3000.2.17 (2c489dfc)",
+  cursor: "cursor-agent 2026.07.23-e383d2b",
 };
 
 const PROVIDER_DEFINITIONS = {

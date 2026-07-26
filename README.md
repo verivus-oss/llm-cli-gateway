@@ -781,8 +781,6 @@ Execute a Grok CLI (xAI) request with session support.
 - `compactionDetail` (string, optional): `none|minimal|balanced|verbose` (segments mode only)
 - `agent` (string, optional): Agent name or definition file path.
 - `agents` (string|object, optional): Inline subagent definitions JSON.
-- `bestOfN` (integer, optional): Run the task N ways in parallel and pick the best (headless only)
-- `check` (boolean, optional): Append a self-verification loop (headless only)
 - `disableWebSearch` (boolean, optional): Disable web search and remote retrieval tools
 - `todoGate` (boolean, optional): Enable runtime turn-end TodoGate (session-scoped)
 - `verbatim` (boolean, optional): Send the prompt exactly as given (also skips gateway prompt optimisation)

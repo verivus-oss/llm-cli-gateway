@@ -1860,7 +1860,9 @@ export const UPSTREAM_CLI_CONTRACTS: Record<CliType, CliContract> = {
     // by `agy --help`, but stays acknowledge-only because custom agents can
     // change tool and permission posture. `--mode` is deliberately wired for
     // the bounded gateway approval profiles above.
-    acknowledgedUpstreamFlags: ["--agent", "--log-file", "--prompt-interactive"],
+    // `--effort` (agy 1.1.7 reasoning effort) is advertised by `agy --help` but
+    // the gateway emits no gemini effort flag, so it stays acknowledge-only.
+    acknowledgedUpstreamFlags: ["--agent", "--effort", "--log-file", "--prompt-interactive"],
     env: {},
     conformanceFixtures: [
       {
@@ -1880,6 +1882,13 @@ export const UPSTREAM_CLI_CONTRACTS: Record<CliType, CliContract> = {
         description:
           "Antigravity 1.1.2 advertises --agent, but gateway request argv stays closed until its security model is explicitly wired",
         args: ["--print", "hello", "--agent", "reviewer"],
+        expect: "fail",
+      },
+      {
+        id: "gemini-effort-acknowledged-not-emitted",
+        description:
+          "Antigravity 1.1.7 advertises --effort, but the gateway emits no gemini effort flag",
+        args: ["--print", "hello", "--effort", "high"],
         expect: "fail",
       },
       {
@@ -2050,11 +2059,14 @@ export const UPSTREAM_CLI_CONTRACTS: Record<CliType, CliContract> = {
           ["--clipboard", "--leader-socket"],
           { tier: "inspect" }
         ),
-        import: subcommand(["import"], "Import Grok session data.", "writes_local_config", [
-          "--json",
-          "--leader-socket",
-          "--list",
-        ]),
+        // grok 0.2.112 replaced `import` with a read-only environment check.
+        doctor: subcommand(
+          ["doctor"],
+          "Check terminal, clipboard, color, and input support without starting Grok.",
+          "read_only",
+          ["--json", "--leader-socket"],
+          { tier: "inspect" }
+        ),
         inspect: subcommand(
           ["inspect"],
           "Inspect Grok local state.",
@@ -2226,8 +2238,6 @@ export const UPSTREAM_CLI_CONTRACTS: Record<CliType, CliContract> = {
       "compactionDetail",
       // Grok 0.2.x headless controls (advertised on `grok --help`)
       "agent",
-      "bestOfN",
-      "check",
       "disableWebSearch",
       "todoGate",
       "verbatim",
@@ -2316,12 +2326,6 @@ export const UPSTREAM_CLI_CONTRACTS: Record<CliType, CliContract> = {
       },
       "--agent": { arity: "one", description: "Agent name or definition file path" },
       "--agents": { arity: "one", description: "Inline subagent definitions JSON" },
-      "--best-of-n": {
-        arity: "one",
-        pattern: /^[1-9][0-9]*$/,
-        description: "Run the task N ways in parallel and pick the best",
-      },
-      "--check": { arity: "none", description: "Append a self-verification loop" },
       "--disable-web-search": {
         arity: "none",
         description: "Disable web search and remote retrieval tools",
@@ -2469,9 +2473,6 @@ export const UPSTREAM_CLI_CONTRACTS: Record<CliType, CliContract> = {
           "reviewer",
           "--agents",
           "{}",
-          "--best-of-n",
-          "2",
-          "--check",
           "--disable-web-search",
           "--experimental-memory",
           "--no-alt-screen",
@@ -2530,16 +2531,12 @@ export const UPSTREAM_CLI_CONTRACTS: Record<CliType, CliContract> = {
       },
       {
         id: "grok-headless-controls",
-        description:
-          "Grok 0.2.x headless flags: agent, best-of-n, check, disable-web-search, todo-gate, verbatim",
+        description: "Grok 0.2.x headless flags: agent, disable-web-search, todo-gate, verbatim",
         args: [
           "-p",
           "hello",
           "--agent",
           "reviewer",
-          "--best-of-n",
-          "3",
-          "--check",
           "--disable-web-search",
           "--todo-gate",
           "--verbatim",
@@ -2975,6 +2972,21 @@ export const UPSTREAM_CLI_CONTRACTS: Record<CliType, CliContract> = {
         exposure: "not_exposed",
         maxPositionals: "variadic",
       }),
+      // devin 3000.2.17 added both of these at the root.
+      migrate: subcommand(
+        ["migrate"],
+        "Migrate configuration from other tools.",
+        "writes_local_config",
+        [],
+        { exposure: "not_exposed", maxPositionals: "variadic" }
+      ),
+      models: subcommand(
+        ["models"],
+        "List the models available to your account.",
+        "read_only",
+        [],
+        { tier: "inspect" }
+      ),
       plugins: subcommand(["plugins"], "Manage Devin plugins.", "writes_local_config", [], {
         exposure: "not_exposed",
         maxPositionals: "variadic",
@@ -3394,6 +3406,11 @@ export const UPSTREAM_CLI_CONTRACTS: Record<CliType, CliContract> = {
     // acknowledged list to genuinely-tracked long flags only.
     acknowledgedUpstreamFlags: [
       "--api-key",
+      // cursor-agent 2026.07.23 API endpoint override (also CURSOR_API_ENDPOINT).
+      // Acknowledge-only: the gateway never redirects the endpoint. Long form
+      // only, per the rule above; the short `-e` alias is not discoverable by
+      // the probe and acknowledging it would warn forever.
+      "--endpoint",
       "--header",
       "--plan",
       "--yolo",
@@ -3449,6 +3466,13 @@ export const UPSTREAM_CLI_CONTRACTS: Record<CliType, CliContract> = {
           "hello",
         ],
         expect: "pass",
+      },
+      {
+        id: "cursor-endpoint-acknowledged-not-emitted",
+        description:
+          "cursor-agent 2026.07.23 advertises -e/--endpoint, but the gateway never redirects the API endpoint",
+        args: ["--print", "hello", "--endpoint", "https://api2.cursor.sh"],
+        expect: "fail",
       },
       {
         id: "cursor-mode-invalid",
