@@ -1835,14 +1835,6 @@ export const UPSTREAM_CLI_CONTRACTS: Record<CliType, CliContract> = {
         arity: "none",
         description: "Auto-approve all tool permission requests without prompting",
       },
-      // Antigravity 1.1.7 added reasoning-effort selection for the session.
-      // Deliberately NOT the shared EFFORT_LEVELS constant: that is grok's set
-      // and includes xhigh/max, which `agy --help` does not advertise.
-      "--effort": {
-        arity: "one",
-        values: ["low", "medium", "high"],
-        description: "Reasoning effort for the current CLI session",
-      },
       "--conversation": { arity: "one", description: "Resume a previous conversation by ID" },
       "--continue": { arity: "none", description: "Continue the most recent conversation" },
       "-c": { arity: "none", description: "Short alias for --continue" },
@@ -1868,7 +1860,9 @@ export const UPSTREAM_CLI_CONTRACTS: Record<CliType, CliContract> = {
     // by `agy --help`, but stays acknowledge-only because custom agents can
     // change tool and permission posture. `--mode` is deliberately wired for
     // the bounded gateway approval profiles above.
-    acknowledgedUpstreamFlags: ["--agent", "--log-file", "--prompt-interactive"],
+    // `--effort` (agy 1.1.7 reasoning effort) is advertised by `agy --help` but
+    // the gateway emits no gemini effort flag, so it stays acknowledge-only.
+    acknowledgedUpstreamFlags: ["--agent", "--effort", "--log-file", "--prompt-interactive"],
     env: {},
     conformanceFixtures: [
       {
@@ -1891,10 +1885,11 @@ export const UPSTREAM_CLI_CONTRACTS: Record<CliType, CliContract> = {
         expect: "fail",
       },
       {
-        id: "gemini-effort-levels",
-        description: "Antigravity 1.1.7 reasoning-effort selection is accepted",
+        id: "gemini-effort-acknowledged-not-emitted",
+        description:
+          "Antigravity 1.1.7 advertises --effort, but the gateway emits no gemini effort flag",
         args: ["--print", "hello", "--effort", "high"],
-        expect: "pass",
+        expect: "fail",
       },
       {
         id: "gemini-antigravity-workspace-flags",
@@ -3386,11 +3381,6 @@ export const UPSTREAM_CLI_CONTRACTS: Record<CliType, CliContract> = {
         description: "Output format for --print mode",
       },
       "--model": { arity: "one", description: "Model to use for the session" },
-      // cursor-agent 2026.07.23 advertises an overridable API endpoint
-      // (also settable via CURSOR_API_ENDPOINT). Declared so the probe stays
-      // quiet; the gateway never emits it.
-      "--endpoint": { arity: "one", description: "Target API endpoint URL" },
-      "-e": { arity: "one", description: "Short alias for --endpoint" },
       "--mode": {
         arity: "one",
         values: ["plan", "ask"],
@@ -3416,6 +3406,10 @@ export const UPSTREAM_CLI_CONTRACTS: Record<CliType, CliContract> = {
     // acknowledged list to genuinely-tracked long flags only.
     acknowledgedUpstreamFlags: [
       "--api-key",
+      // cursor-agent 2026.07.23 API endpoint override (also CURSOR_API_ENDPOINT).
+      // Acknowledge-only: the gateway never redirects the endpoint.
+      "-e",
+      "--endpoint",
       "--header",
       "--plan",
       "--yolo",
@@ -3473,17 +3467,11 @@ export const UPSTREAM_CLI_CONTRACTS: Record<CliType, CliContract> = {
         expect: "pass",
       },
       {
-        id: "cursor-endpoint-override",
+        id: "cursor-endpoint-acknowledged-not-emitted",
         description:
-          "cursor-agent 2026.07.23 API endpoint override is accepted in both long and short form",
+          "cursor-agent 2026.07.23 advertises -e/--endpoint, but the gateway never redirects the API endpoint",
         args: ["--print", "hello", "--endpoint", "https://api2.cursor.sh"],
-        expect: "pass",
-      },
-      {
-        id: "cursor-endpoint-short-alias",
-        description: "Short -e alias for --endpoint is accepted",
-        args: ["--print", "hello", "-e", "https://api2.cursor.sh"],
-        expect: "pass",
+        expect: "fail",
       },
       {
         id: "cursor-mode-invalid",
