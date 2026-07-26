@@ -338,7 +338,7 @@ annotated in place. The rest remain deliberately unfixed, with the reason.
 2. **cursor buffers only under the DEFAULT argv; its streaming modes work.**
    Follow-up measurement, 2026-07-26. `cursor_request` forwards
    `--output-format stream-json` when a caller sets `outputFormat`
-   (`src/index.ts:13550`), and cursor also accepts `--stream-partial-output`.
+   (`src/index.ts:13552`), and cursor also accepts `--stream-partial-output`.
    Probed on the same prompt and a 25 s cancel:
 
    | cursor mode | first byte | chunks | bytes before cancel | reachable via gateway? |
@@ -354,7 +354,7 @@ annotated in place. The rest remain deliberately unfixed, with the reason.
 
    **The last row is a direct-CLI experiment only.** `cursor_request` exposes
    `outputFormat` and the argv builder emits nothing but `--output-format`
-   (`src/index.ts:13550`); `--stream-partial-output` appears only in the
+   (`src/index.ts:13552`); `--stream-partial-output` appears only in the
    upstream-contract help probe, never in a spawn. So the gateway-accessible
    improvement is 1,922 bytes over 10 chunks, not 351 KB. Including that row
    without this caveat overstated what a caller can actually get, which the
