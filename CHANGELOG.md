@@ -26,6 +26,15 @@ All notable changes to the llm-cli-gateway project.
   surface can advertise a provider the gates reject. Credential state is
   presence-only; no value is ever reported.
 
+- **`outputDiscipline` on every provider in the registry**, surfaced through the
+  provider capability rows. It declares whether a provider's stdout advances
+  while a job runs and whether the CLI flushes on SIGTERM, so a caller can tell
+  a healthy job from a hung one. This matters because gemini, mistral, cursor
+  and devin emit nothing until they exit under the default invocation, which
+  means `stdoutBytes` and `lastActivityAt` both stay frozen on a perfectly
+  healthy job and a cancel retains nothing. The fact is scoped to the default
+  argv: cursor does stream when a caller sets `outputFormat`.
+
 ### Changed
 
 - `client_config.vibe_session_logging` in the doctor report gained a `kit_note`
@@ -34,6 +43,29 @@ All notable changes to the llm-cli-gateway project.
 - The Kit scope-selection error message is derived from the provider's declared
   scope rule instead of a Claude-or-Codex branch, so a workspace-only provider
   is no longer told to supply a `workingDir` its own gate rejects.
+
+### Fixed
+
+- **Provider output flushed during shutdown is no longer lost.** Cancellation,
+  idle timeout and the output cap all commit a job's terminal row at the moment
+  the signal is _requested_, but the child lives on through the SIGTERM grace
+  and can still write. Both durable surfaces refused those bytes: the job
+  store's completion write is fenced to non-terminal rows, so the close-time
+  replay matched nothing, and the flight-recorder write was single-shot, so
+  `llm_request_result` kept the pre-cancel snapshot. Claude flushes 1.9 KB to
+  8.3 KB after SIGTERM, and all of it was being dropped. Late output now lands
+  through the unfenced output write, and the flight-recorder response is
+  refreshed once the process is genuinely gone.
+- **A job row is never overwritten by an instance that does not own it.**
+  `recordComplete` now reports whether the completion guard admitted the write,
+  so the gateway can tell "I committed this row" from "another instance already
+  did". Only the former licenses the unfenced output write, on every path that
+  reaches it. On a shared PostgreSQL store this prevents one instance's output
+  from clobbering another's committed result.
+- **The dead-process sweep no longer finalizes a flight-recorder row early.** A
+  vanished pid is not a drained pipe: Node still delivers buffered stdout before
+  emitting `close`. Finalization now waits for the close event rather than the
+  sweep's speculative signal.
 
 ## [3.0.0] - 2026-07-18
 
