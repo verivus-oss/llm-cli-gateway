@@ -150,9 +150,35 @@ alongside it, so each round invalidated the previous verdicts.
   or `vitest` at all ("Tool execution not permitted"), so its verdict rests on
   static reading rather than the verification commands it was asked to run.
 
+**Round 4 on the final commit `334f680`: unanimous.**
+
+- codex `APPROVED_UNCONDITIONALLY` (correlationId hono-override-codex-r4): "a
+  skipped entry point exits 0 but emits no marker, so whole-line grep fails; a
+  direct invocation parses and classifies before it can emit the marker;
+  NODE_OPTIONS/NODE_PATH preloads are cleared." Explicitly accepted the residual
+  as outside a release-gate integrity boundary.
+- grok `APPROVED_UNCONDITIONALLY`, zero findings (correlationId
+  hono-override-grok-r4b): re-ran both of its own round-3 reproducers against
+  the fixed wiring and confirmed each now fails closed, and confirmed a crafted
+  `invalid` string cannot make an unreviewed package match, because name and
+  version come from the tree node rather than from the string. (Three earlier
+  grok attempts stalled with no output, the known prompt-correlated worker
+  flake; resolved by pre-generating the diff and shrinking the prompt.)
+- mistral `APPROVED_UNCONDITIONALLY` (correlationId hono-override-mistral-r4),
+  and this round properly scoped: it stated plainly that it could not execute
+  node, git or vitest, confined its claim to static analysis, and reached the
+  same conclusion by reading the key construction.
+
 Author-side verification, recorded because it is what actually settled the
 disputes rather than the vote count: every reviewer finding above was
 reproduced locally before being accepted, and every fix was confirmed by
 reverting it and watching the tests fail. Two defects were found by the release
 gate itself rather than by any reviewer (the nesting-sensitive `invalid` string,
 and the original blocker).
+
+**Residual, stated rather than defended.** Anyone who can set the release
+process's environment or PATH can subvert this gate, by replacing `env`, `node`
+or the script itself. `env -u NODE_OPTIONS -u NODE_PATH` removes the specific
+ambient-preload vector two reviewers demonstrated, but it is defence in depth,
+not a trust boundary. All three reviewers were asked directly and all three
+accepted that framing.
