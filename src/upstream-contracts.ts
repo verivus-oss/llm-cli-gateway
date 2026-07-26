@@ -3407,8 +3407,9 @@ export const UPSTREAM_CLI_CONTRACTS: Record<CliType, CliContract> = {
     acknowledgedUpstreamFlags: [
       "--api-key",
       // cursor-agent 2026.07.23 API endpoint override (also CURSOR_API_ENDPOINT).
-      // Acknowledge-only: the gateway never redirects the endpoint.
-      "-e",
+      // Acknowledge-only: the gateway never redirects the endpoint. Long form
+      // only, per the rule above; the short `-e` alias is not discoverable by
+      // the probe and acknowledging it would warn forever.
       "--endpoint",
       "--header",
       "--plan",
