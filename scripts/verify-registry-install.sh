@@ -247,16 +247,34 @@ echo "    reported: ${BIN_VERSION}"
 [ "${BIN_VERSION}" = "${EXPECTED_VERSION}" ] \
   || fail "bin --version printed '${BIN_VERSION}', expected '${EXPECTED_VERSION}'"
 
-# --- Assertion (d): consumer `npm ls` exits 0 + node:sqlite runtime smoke -----
-# The out-of-range tar-stream pin that caused ELSPROBLEMS is gone, so the
-# consumer's dependency tree is internally consistent: `npm ls` must exit 0.
-echo "==> assertion (d.1): consumer 'npm ls' exits 0 (no ELSPROBLEMS)"
-if ! npm ls --all >/dev/null 2>&1; then
-  echo "--- npm ls output ---" >&2
-  npm ls --all >&2 || true
-  fail "consumer 'npm ls' exited non-zero (dependency tree inconsistent — out-of-range pin or missing dep)"
-fi
-echo "    npm ls exit 0."
+# --- Assertion (d): consumer tree consistency + node:sqlite runtime smoke -----
+# The consumer's dependency tree must carry exactly the problems we have
+# deliberately reviewed and no others. The classification, its reviewed
+# exception list, and the rationale for each entry live in
+# scripts/check-consumer-tree.mjs (unit-tested by check-consumer-tree.test.mjs),
+# so this stays a thin invocation rather than an untested inline heredoc.
+echo "==> assertion (d.1): consumer tree carries exactly the reviewed problems"
+npm ls --all --json > .npm-ls.json 2>/dev/null || true
+# Require POSITIVE evidence, not just exit 0. The checker prints
+# CONSUMER_TREE_CHECK_OK only after it has actually classified a tree and
+# passed, so any future path that skips its CLI body (two such fail-open bugs
+# have already been found and fixed in its entry-point guard) cannot be read as
+# success here. Exit status is still honoured for the ordinary failure path.
+# `env -u NODE_OPTIONS -u NODE_PATH` because a preload (`--require=` /
+# `--import=`) runs in the same process BEFORE the entry module, so it can print
+# the marker and exit 0 without any classification happening, defeating both the
+# exit status and the marker at once. Anyone able to set those on the release
+# process could subvert the gate more directly, so this is defence in depth
+# rather than a trust boundary, but a verification step should not inherit
+# ambient node preloads in any case.
+CONSUMER_TREE_OUT="$(env -u NODE_OPTIONS -u NODE_PATH node "${ROOT_DIR}/scripts/check-consumer-tree.mjs" .npm-ls.json 2>&1)" \
+  || { echo "${CONSUMER_TREE_OUT}" >&2; fail "consumer dependency tree did not match the reviewed set (see above)"; }
+echo "${CONSUMER_TREE_OUT}"
+# Exact whole-line match, not a substring glob: `*CONSUMER_TREE_CHECK_OK*` would
+# also accept CONSUMER_TREE_CHECK_OKAY or the token embedded in unrelated text.
+printf '%s\n' "${CONSUMER_TREE_OUT}" | grep -qxF "CONSUMER_TREE_CHECK_OK" \
+  || fail "consumer-tree checker exited 0 without confirming it classified a tree (no CONSUMER_TREE_CHECK_OK marker line); treat as an unverified tree, never as a pass"
+rm -f .npm-ls.json
 
 # node:sqlite is what the installed package now uses for persistence. Cheap
 # runtime sanity that the consumer's Node has the built-in module and can open

@@ -150,7 +150,6 @@
   },
   "overrides": {
     "body-parser": "2.3.0",
-    "content-type": "2.0.0",
     "type-is": "2.1.0",
     "fast-uri": "3.1.4",
     "brace-expansion": "5.0.8",
