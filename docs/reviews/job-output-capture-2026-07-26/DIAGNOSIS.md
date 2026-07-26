@@ -166,9 +166,15 @@ fix only removes the timing-dependence rather than recovering bytes.
 
 Both are pinned by tests that fail before and pass after, verified by reverting
 each fix hunk independently. Scope of that claim: it covers the two fix hunks,
-the guard-rejection branch, and the cursor scoping ratchet. It does **not**
-cover MemoryJobStore/PostgresJobStore parity for the new boolean return, which
-is asserted only for `SqliteJobStore` and matches by inspection elsewhere.
+the guard-rejection branch, and the cursor scoping ratchet.
+
+At the time of the first merge it did **not** cover MemoryJobStore or
+PostgresJobStore parity for the new boolean return, which was asserted only for
+`SqliteJobStore`. That gap was closed in the follow-up: `job-store.test.ts` now
+runs the guard-reporting parity across sqlite and memory, and
+`job-store-pg.test.ts` covers Postgres, which is the backend where a wrong
+`true` actually costs something because the store is shared. Each was verified
+to fail when the corresponding backend is made to report the wrong answer.
 
 ### End-to-end validation against a real provider
 
