@@ -41,12 +41,44 @@ export const EXPECTED_TREE_PROBLEMS = [
   {
     name: "@hono/node-server",
     version: "2.0.11",
-    invalid: '"^1.19.9" from node_modules/@modelcontextprotocol/sdk',
+    range: "^1.19.9",
+    requiredBy: "@modelcontextprotocol/sdk",
     reason: "GHSA-frvp-7c67-39w9 security pin; see package.json#overrides",
   },
 ];
 
-const problemKey = entry => `${entry.name}@${entry.version} invalid ${entry.invalid}`;
+/**
+ * Split npm's `invalid` string into the range and the package that demanded it.
+ *
+ * npm writes `"<range>" from <path-to-requiring-package>`, and that path is
+ * position-dependent: in OUR repo the SDK sits at `node_modules/@modelcontext.../sdk`,
+ * but a real consumer nests us, so it reads
+ * `node_modules/llm-cli-gateway/node_modules/@modelcontextprotocol/sdk`.
+ * Matching the raw string therefore breaks purely because of where a consumer
+ * happens to place the package, which is not a fact worth gating a release on.
+ * The load-bearing facts are WHICH package demanded WHICH range, so key on
+ * those and let nesting depth vary.
+ *
+ * @param {string} invalid npm's `invalid` field.
+ * @returns {{range: string, requiredBy: string}}
+ */
+export function parseInvalid(invalid) {
+  const match = /^"([^"]*)"\s+from\s+(.+)$/.exec(invalid ?? "");
+  if (!match) return { range: invalid ?? "", requiredBy: "" };
+  const [, range, from] = match;
+  // Last node_modules segment is the requiring package (scope included).
+  const requiredBy = from.includes("node_modules/")
+    ? from.slice(from.lastIndexOf("node_modules/") + "node_modules/".length)
+    : from;
+  return { range, requiredBy: requiredBy.replace(/\/+$/, "") };
+}
+
+const problemKey = entry => {
+  const { range, requiredBy } = entry.range
+    ? { range: entry.range, requiredBy: entry.requiredBy }
+    : parseInvalid(entry.invalid);
+  return `${entry.name}@${entry.version} needs-to-satisfy ${range} from ${requiredBy}`;
+};
 
 /**
  * Walk an `npm ls --all --json` tree and collect every node npm flagged as
@@ -132,7 +164,9 @@ export function formatConsumerTreeReport(result) {
   if (result.missing.length > 0) {
     errors.push("Reviewed security pin is NO LONGER reaching consumers:");
     for (const e of result.missing) {
-      errors.push(`  expected ${e.name}@${e.version} pinned over ${e.invalid} (${e.reason})`);
+      errors.push(
+        `  expected ${e.name}@${e.version} pinned over "${e.range}" from ${e.requiredBy} (${e.reason})`
+      );
     }
     errors.push(
       "Either the override was dropped or its version moved: re-check the advisory before editing the list."

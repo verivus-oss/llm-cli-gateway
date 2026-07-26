@@ -260,7 +260,13 @@ npm ls --all --json > .npm-ls.json 2>/dev/null || true
 # passed, so any future path that skips its CLI body (two such fail-open bugs
 # have already been found and fixed in its entry-point guard) cannot be read as
 # success here. Exit status is still honoured for the ordinary failure path.
-CONSUMER_TREE_OUT="$(node "${ROOT_DIR}/scripts/check-consumer-tree.mjs" .npm-ls.json 2>&1)" \
+# `env -u NODE_OPTIONS` because a preload (`--import=...`) runs before the entry
+# module, in the same process, and can both print the marker and clear argv[1],
+# so an inherited NODE_OPTIONS could make this report success having classified
+# nothing. Anyone able to set it on the release process could subvert the gate
+# other ways too, so this is defence in depth rather than a trust boundary, but
+# a verification step should not inherit ambient node preloads in any case.
+CONSUMER_TREE_OUT="$(env -u NODE_OPTIONS node "${ROOT_DIR}/scripts/check-consumer-tree.mjs" .npm-ls.json 2>&1)" \
   || { echo "${CONSUMER_TREE_OUT}" >&2; fail "consumer dependency tree did not match the reviewed set (see above)"; }
 echo "${CONSUMER_TREE_OUT}"
 case "${CONSUMER_TREE_OUT}" in

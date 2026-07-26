@@ -14,11 +14,18 @@ import {
   collectInvalidNodes,
   formatConsumerTreeReport,
   isDirectInvocation,
+  parseInvalid,
 } from "./check-consumer-tree.mjs";
 
 const MODULE_PATH = fileURLToPath(new URL("./check-consumer-tree.mjs", import.meta.url));
 
+// The shape npm emits in OUR repo tree (sdk is a direct dependency).
 const HONO_INVALID = '"^1.19.9" from node_modules/@modelcontextprotocol/sdk';
+// The shape npm emits in a REAL consumer, where our package is nested. This
+// is what the live verdaccio gate produced and what an exact-string matcher
+// got wrong; the two must be treated as the same reviewed pin.
+const HONO_INVALID_NESTED =
+  '"^1.19.9" from node_modules/llm-cli-gateway/node_modules/@modelcontextprotocol/sdk';
 
 /** Build a consumer tree shaped like real `npm ls --all --json` output. */
 function treeOf({ honoServer, extraDeps = {}, problems = [] } = {}) {
@@ -332,7 +339,11 @@ describe("EXPECTED_TREE_PROBLEMS", () => {
     for (const entry of EXPECTED_TREE_PROBLEMS) {
       expect(entry.name).toBeTruthy();
       expect(entry.version).toMatch(/^\d+\.\d+\.\d+/);
-      expect(entry.invalid).toBeTruthy();
+      // Keyed on the range and the requiring package, never on npm's raw
+      // path string, which varies with how a consumer nests the package.
+      expect(entry.range).toBeTruthy();
+      expect(entry.requiredBy).toBeTruthy();
+      expect(entry.invalid).toBeUndefined();
       expect(entry.reason && entry.reason.length).toBeGreaterThan(10);
     }
   });
@@ -346,5 +357,64 @@ describe("EXPECTED_TREE_PROBLEMS", () => {
     const [major, minor, patch] = hono.version.split(".").map(Number);
     expect(major).toBeGreaterThanOrEqual(2);
     expect(major > 2 || minor > 0 || patch >= 5).toBe(true);
+  });
+});
+
+describe("parseInvalid / nesting independence", () => {
+  it("extracts the range and requiring package regardless of nesting depth", () => {
+    expect(parseInvalid(HONO_INVALID)).toEqual({
+      range: "^1.19.9",
+      requiredBy: "@modelcontextprotocol/sdk",
+    });
+    expect(parseInvalid(HONO_INVALID_NESTED)).toEqual({
+      range: "^1.19.9",
+      requiredBy: "@modelcontextprotocol/sdk",
+    });
+  });
+
+  it("accepts the reviewed pin in a REAL consumer tree, where our package is nested", () => {
+    // Regression: the live verdaccio gate failed here. npm reports the
+    // requiring path as node_modules/llm-cli-gateway/node_modules/... in a
+    // consumer, and an exact-string match against the repo-local spelling
+    // reported the pin as BOTH unreviewed and missing.
+    const result = classifyConsumerTree(
+      treeOf({ honoServer: { version: "2.0.11", invalid: HONO_INVALID_NESTED } })
+    );
+    expect(result.ok).toBe(true);
+    expect(result.unexpected).toEqual([]);
+    expect(result.missing).toEqual([]);
+  });
+
+  it("still rejects the same package demanded by a DIFFERENT parent", () => {
+    // Nesting depth may vary; which package demanded the range may not.
+    const result = classifyConsumerTree(
+      treeOf({
+        honoServer: {
+          version: "2.0.11",
+          invalid: '"^1.19.9" from node_modules/some-other-pkg',
+        },
+      })
+    );
+    expect(result.ok).toBe(false);
+    expect(result.unexpected).toHaveLength(1);
+    expect(result.missing).toHaveLength(1);
+  });
+
+  it("still rejects a different range from the same parent", () => {
+    const result = classifyConsumerTree(
+      treeOf({
+        honoServer: {
+          version: "2.0.11",
+          invalid:
+            '"^3.0.0" from node_modules/llm-cli-gateway/node_modules/@modelcontextprotocol/sdk',
+        },
+      })
+    );
+    expect(result.ok).toBe(false);
+  });
+
+  it("degrades safely on an unparseable invalid string", () => {
+    expect(parseInvalid("garbage")).toEqual({ range: "garbage", requiredBy: "" });
+    expect(parseInvalid(undefined)).toEqual({ range: "", requiredBy: "" });
   });
 });
