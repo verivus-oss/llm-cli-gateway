@@ -255,8 +255,18 @@ echo "    reported: ${BIN_VERSION}"
 # so this stays a thin invocation rather than an untested inline heredoc.
 echo "==> assertion (d.1): consumer tree carries exactly the reviewed problems"
 npm ls --all --json > .npm-ls.json 2>/dev/null || true
-node "${ROOT_DIR}/scripts/check-consumer-tree.mjs" .npm-ls.json \
-  || fail "consumer dependency tree did not match the reviewed set (see above)"
+# Require POSITIVE evidence, not just exit 0. The checker prints
+# CONSUMER_TREE_CHECK_OK only after it has actually classified a tree and
+# passed, so any future path that skips its CLI body (two such fail-open bugs
+# have already been found and fixed in its entry-point guard) cannot be read as
+# success here. Exit status is still honoured for the ordinary failure path.
+CONSUMER_TREE_OUT="$(node "${ROOT_DIR}/scripts/check-consumer-tree.mjs" .npm-ls.json 2>&1)" \
+  || { echo "${CONSUMER_TREE_OUT}" >&2; fail "consumer dependency tree did not match the reviewed set (see above)"; }
+echo "${CONSUMER_TREE_OUT}"
+case "${CONSUMER_TREE_OUT}" in
+  *CONSUMER_TREE_CHECK_OK*) ;;
+  *) fail "consumer-tree checker exited 0 without confirming it classified a tree (no CONSUMER_TREE_CHECK_OK marker); treat as an unverified tree, never as a pass" ;;
+esac
 rm -f .npm-ls.json
 
 # node:sqlite is what the installed package now uses for persistence. Cheap

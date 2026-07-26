@@ -1,15 +1,22 @@
 // Offline unit tests for the consumer dependency-tree tripwire. Pure
 // classification over injected `npm ls --all --json` fixtures; no network, no
 // npm install, no verdaccio.
-import { describe, it, expect } from "vitest";
-import { pathToFileURL } from "node:url";
+import { afterEach, beforeEach, describe, it, expect } from "vitest";
+import { execFileSync } from "node:child_process";
+import { mkdtempSync, mkdirSync, rmSync, symlinkSync, writeFileSync, copyFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { fileURLToPath, pathToFileURL } from "node:url";
 import {
   EXPECTED_TREE_PROBLEMS,
+  OK_MARKER,
   classifyConsumerTree,
   collectInvalidNodes,
   formatConsumerTreeReport,
   isDirectInvocation,
 } from "./check-consumer-tree.mjs";
+
+const MODULE_PATH = fileURLToPath(new URL("./check-consumer-tree.mjs", import.meta.url));
 
 const HONO_INVALID = '"^1.19.9" from node_modules/@modelcontextprotocol/sdk';
 
@@ -138,45 +145,182 @@ describe("classifyConsumerTree", () => {
 });
 
 describe("isDirectInvocation", () => {
-  // Regression: the CLI guard used `import.meta.url === \`file://${argv[1]}\``,
-  // which silently reported "imported" whenever the script path contained a
-  // character a URL escapes. The gate then exited 0 having checked nothing,
-  // i.e. it failed OPEN, which is the exact failure this module exists to stop.
+  // Two fail-OPEN bugs have lived in this guard, both from comparing two
+  // spellings of the same file. It now canonicalizes through realpathSync, so
+  // these use REAL files on disk: a string-only fixture cannot exercise it and
+  // would assert nothing meaningful.
+  let dir;
+  beforeEach(() => {
+    dir = mkdtempSync(join(tmpdir(), "cct-guard-"));
+  });
+  afterEach(() => {
+    rmSync(dir, { recursive: true, force: true });
+  });
+
+  /** Create a real file at `name` under the temp dir and return its path. */
+  function realFile(name) {
+    const p = join(dir, name);
+    writeFileSync(p, "// fixture\n");
+    return p;
+  }
+
   it("recognises a direct run from a plain path", () => {
-    const p = "/srv/repos/gw/scripts/check-consumer-tree.mjs";
+    const p = realFile("entry.mjs");
     expect(isDirectInvocation(pathToFileURL(p).href, p)).toBe(true);
   });
 
   it("recognises a direct run from a path containing spaces", () => {
-    const p = "/srv/dir with space/check-consumer-tree.mjs";
+    // Bug 1: `file://${argv1}` left the space unencoded while import.meta.url
+    // percent-encoded it, so the guard skipped the body entirely.
+    const p = realFile("entry with space.mjs");
     expect(isDirectInvocation(pathToFileURL(p).href, p)).toBe(true);
-    // The naive form this replaced would compare against an unencoded string
-    // and miss, so assert the encoding really is the thing that differs.
     expect(pathToFileURL(p).href).not.toBe(`file://${p}`);
   });
 
   it("recognises a direct run from other URL-escaped characters", () => {
-    for (const p of [
-      "/srv/re#po/check-consumer-tree.mjs",
-      "/srv/re?po/check-consumer-tree.mjs",
-      "/srv/ünïcode/check-consumer-tree.mjs",
-    ]) {
+    for (const name of ["re#po.mjs", "re?po.mjs", "ünïcode.mjs", "a%20b.mjs"]) {
+      const p = realFile(name);
       expect(isDirectInvocation(pathToFileURL(p).href, p)).toBe(true);
     }
   });
 
+  it("recognises a direct run reached through a SYMLINK", () => {
+    // Bug 2: node canonicalizes import.meta.url but pathToFileURL(argv1) does
+    // not, so a symlinked path (or /proc/self/cwd, or a repo under a symlinked
+    // checkout) skipped the body and exited 0 having verified nothing.
+    const realDir = join(dir, "real");
+    mkdirSync(realDir);
+    const target = join(realDir, "entry.mjs");
+    writeFileSync(target, "// fixture\n");
+    const linkDir = join(dir, "link");
+    symlinkSync(realDir, linkDir);
+    const viaLink = join(linkDir, "entry.mjs");
+
+    // node would report the canonical URL for import.meta.url.
+    expect(isDirectInvocation(pathToFileURL(target).href, viaLink)).toBe(true);
+  });
+
   it("reports false when the module is merely imported", () => {
-    expect(
-      isDirectInvocation(
-        pathToFileURL("/srv/gw/scripts/check-consumer-tree.mjs").href,
-        "/srv/gw/scripts/some-other-entry.mjs"
-      )
-    ).toBe(false);
+    const a = realFile("module.mjs");
+    const b = realFile("other-entry.mjs");
+    expect(isDirectInvocation(pathToFileURL(a).href, b)).toBe(false);
   });
 
   it("reports false when there is no argv[1] at all", () => {
-    expect(isDirectInvocation("file:///srv/gw/x.mjs", undefined)).toBe(false);
-    expect(isDirectInvocation("file:///srv/gw/x.mjs", "")).toBe(false);
+    const p = realFile("entry.mjs");
+    expect(isDirectInvocation(pathToFileURL(p).href, undefined)).toBe(false);
+    expect(isDirectInvocation(pathToFileURL(p).href, "")).toBe(false);
+  });
+});
+
+// End-to-end guard on the actual CLI process. These spawn node so they cover
+// the real entry-point detection, which unit-level assertions on
+// isDirectInvocation cannot: both fail-open bugs were about how the RUNNING
+// process spells its own path.
+describe("CLI process (fail-closed under path aliasing)", () => {
+  let dir;
+  const BAD_TREE = {
+    name: "consumer",
+    problems: [],
+    dependencies: {
+      "llm-cli-gateway": {
+        version: "3.0.0",
+        // Reviewed security pin absent: this MUST be rejected.
+        dependencies: { "@modelcontextprotocol/sdk": { version: "1.29.0", dependencies: {} } },
+      },
+    },
+  };
+
+  beforeEach(() => {
+    dir = mkdtempSync(join(tmpdir(), "cct-cli-"));
+  });
+  afterEach(() => {
+    rmSync(dir, { recursive: true, force: true });
+  });
+
+  /** Run the checker at `scriptPath`; return {status, out}. */
+  function runChecker(scriptPath, treeFile) {
+    try {
+      const out = execFileSync(process.execPath, [scriptPath, treeFile], {
+        encoding: "utf8",
+        stdio: ["ignore", "pipe", "pipe"],
+      });
+      return { status: 0, out };
+    } catch (err) {
+      return { status: err.status ?? 1, out: `${err.stdout ?? ""}${err.stderr ?? ""}` };
+    }
+  }
+
+  it("rejects a tree missing the reviewed pin when run through a SYMLINKED path", () => {
+    // Regression: pathToFileURL(argv[1]) preserves symlinks while node
+    // canonicalizes import.meta.url, so the guard skipped the whole body and
+    // exited 0 having verified nothing. bash's logical `pwd` in ROOT_DIR
+    // produces exactly this whenever the repo sits under a symlinked path.
+    const real = join(dir, "real");
+    mkdirSync(real);
+    const script = join(real, "check-consumer-tree.mjs");
+    copyFileSync(MODULE_PATH, script);
+    const link = join(dir, "link");
+    symlinkSync(real, link);
+
+    const treeFile = join(dir, "tree.json");
+    writeFileSync(treeFile, JSON.stringify(BAD_TREE));
+
+    const viaLink = runChecker(join(link, "check-consumer-tree.mjs"), treeFile);
+    expect(viaLink.status).not.toBe(0);
+    expect(viaLink.out).toContain("NO LONGER reaching consumers");
+    expect(viaLink.out).not.toContain(OK_MARKER);
+  });
+
+  it("rejects a tree missing the reviewed pin when run through a path with spaces", () => {
+    const spaced = join(dir, "dir with space");
+    mkdirSync(spaced);
+    const script = join(spaced, "check-consumer-tree.mjs");
+    copyFileSync(MODULE_PATH, script);
+
+    const treeFile = join(dir, "tree.json");
+    writeFileSync(treeFile, JSON.stringify(BAD_TREE));
+
+    const res = runChecker(script, treeFile);
+    expect(res.status).not.toBe(0);
+    expect(res.out).not.toContain(OK_MARKER);
+  });
+
+  it("prints the OK marker only when a tree really was classified and passed", () => {
+    const treeFile = join(dir, "good.json");
+    writeFileSync(
+      treeFile,
+      JSON.stringify({
+        name: "consumer",
+        problems: [],
+        dependencies: {
+          "llm-cli-gateway": {
+            version: "3.0.0",
+            dependencies: {
+              "@modelcontextprotocol/sdk": {
+                version: "1.29.0",
+                dependencies: {
+                  "@hono/node-server": { version: "2.0.11", invalid: HONO_INVALID },
+                },
+              },
+            },
+          },
+        },
+      })
+    );
+    const res = runChecker(MODULE_PATH, treeFile);
+    expect(res.status).toBe(0);
+    expect(res.out).toContain(OK_MARKER);
+  });
+
+  it("never prints the OK marker on a degenerate tree", () => {
+    for (const body of ["{}", "null", "[]", "", "not json"]) {
+      const treeFile = join(dir, "degenerate.json");
+      writeFileSync(treeFile, body);
+      const res = runChecker(MODULE_PATH, treeFile);
+      expect(res.status).not.toBe(0);
+      expect(res.out).not.toContain(OK_MARKER);
+    }
   });
 });
 

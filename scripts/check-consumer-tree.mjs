@@ -18,7 +18,7 @@
 //
 // Usage: node scripts/check-consumer-tree.mjs <npm-ls-json-file>
 import fs from "node:fs";
-import { pathToFileURL } from "node:url";
+import { fileURLToPath } from "node:url";
 
 /**
  * Reviewed, expected-and-required consumer-tree problems.
@@ -152,13 +152,31 @@ export function formatConsumerTreeReport(result) {
 }
 
 /**
+ * Emitted on stdout only after a tree has actually been classified and passed.
+ * scripts/verify-registry-install.sh requires this marker rather than trusting
+ * exit 0, so that ANY future way of skipping the body (see isDirectInvocation)
+ * still fails the release instead of reading as success.
+ */
+export const OK_MARKER = "CONSUMER_TREE_CHECK_OK";
+
+/**
  * True when this module is the process entry point rather than an import.
  *
- * Must go through pathToFileURL, NOT `file://${argv1}`. A path containing a
- * space (or any character a URL escapes) percent-encodes in `import.meta.url`
- * but not in a template literal, so the naive comparison silently reports
- * "imported" for a direct run. In a release gate that failure is invisible and
- * fail-OPEN: node exits 0 having checked nothing, and the caller reads success.
+ * Both sides are canonicalized with realpathSync before comparing. Two separate
+ * fail-OPEN bugs have already been found in this one guard, and both were a
+ * comparison of two spellings of the same file:
+ *
+ *   1. `file://${argv1}` vs `import.meta.url` differed on any URL-escaped
+ *      character, so a path containing a space skipped the body entirely.
+ *   2. `pathToFileURL(argv1)` preserves symlinks while Node canonicalizes
+ *      `import.meta.url`, so invoking through a symlink (or /proc/self/cwd, or
+ *      a repo checked out under a symlinked path, which bash's logical `pwd`
+ *      in ROOT_DIR happily produces) skipped the body entirely.
+ *
+ * Both exited 0 having verified nothing. realpathSync resolves every spelling
+ * to one physical path, which is why the comparison is made there and not on
+ * URLs. The OK_MARKER contract above is the backstop if this is ever wrong
+ * again.
  *
  * @param {string} metaUrl `import.meta.url` of the entry module.
  * @param {string|undefined} argv1 `process.argv[1]`.
@@ -167,7 +185,7 @@ export function formatConsumerTreeReport(result) {
 export function isDirectInvocation(metaUrl, argv1) {
   if (!argv1) return false;
   try {
-    return metaUrl === pathToFileURL(argv1).href;
+    return fs.realpathSync(fileURLToPath(metaUrl)) === fs.realpathSync(argv1);
   } catch {
     return false;
   }
@@ -185,5 +203,6 @@ if (isDirectInvocation(import.meta.url, process.argv[1])) {
   const { errors, info } = formatConsumerTreeReport(result);
   for (const line of errors) console.error(line);
   for (const line of info) console.log(line);
+  if (result.ok) console.log(OK_MARKER);
   process.exit(result.ok ? 0 : 1);
 }
