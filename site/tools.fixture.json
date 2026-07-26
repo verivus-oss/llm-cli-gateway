@@ -3131,17 +3131,6 @@
             "minLength": 1,
             "description": "Grok --agent <NAME>: agent name or definition file path."
           },
-          "bestOfN": {
-            "type": "integer",
-            "exclusiveMinimum": 0,
-            "minimum": -9007199254740991,
-            "maximum": 10000,
-            "description": "Grok --best-of-n <N>: run the task N ways in parallel and pick the best (headless only)."
-          },
-          "check": {
-            "type": "boolean",
-            "description": "Grok --check: append a self-verification loop to the prompt (headless only)."
-          },
           "disableWebSearch": {
             "type": "boolean",
             "description": "Grok --disable-web-search: disable web search and remote retrieval tools."
@@ -3618,14 +3607,6 @@
             "type": "string",
             "minLength": 1,
             "description": "Grok --agent <NAME>: agent name or definition file path."
-          },
-          "bestOfN": {
-            "$ref": "#/properties/maxTurns",
-            "description": "Grok --best-of-n <N>: run the task N ways in parallel and pick the best (headless only)."
-          },
-          "check": {
-            "type": "boolean",
-            "description": "Grok --check: append a self-verification loop to the prompt (headless only)."
           },
           "disableWebSearch": {
             "type": "boolean",

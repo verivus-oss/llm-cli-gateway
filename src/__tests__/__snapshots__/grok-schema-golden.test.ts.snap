@@ -5,8 +5,6 @@ exports[`grok schema fidelity (pre/post cutover) > covered-field describe text i
   "agent": "Grok --agent <NAME>: agent name or definition file path.",
   "allow": "Grok --allow <RULE>: permission allow rules. Each entry is emitted as its own --allow instance (per \`grok --help\`: "Repeat to add multiple rules").",
   "allowedTools": "Allowed built-in tools (passed as --tools comma list)",
-  "bestOfN": "Grok --best-of-n <N>: run the task N ways in parallel and pick the best (headless only).",
-  "check": "Grok --check: append a self-verification loop to the prompt (headless only).",
   "compactionDetail": "Grok --compaction-detail: verbatim segment detail (none|minimal|balanced|verbose, default verbose). Only affects \`--compaction-mode segments\`. Sets GROK_COMPACTION_DETAIL.",
   "compactionMode": "Grok --compaction-mode: summary (default; no pointer) | transcript (points at the raw transcript) | segments (persists per-segment markdown to grep). Sets GROK_COMPACTION_MODE.",
   "deny": "Grok --deny <RULE>: permission deny rules. Each entry is emitted as its own --deny instance (per \`grok --help\`: "Repeat to add multiple rules").",

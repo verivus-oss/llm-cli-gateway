@@ -229,12 +229,10 @@ describe("Grok 0.2.x: --compaction-mode / --compaction-detail wiring", () => {
 });
 
 describe("Grok 0.2.x: headless control flags", () => {
-  it("emits --agent, --best-of-n, --check, --disable-web-search, --todo-gate, --verbatim", () => {
+  it("emits --agent, --disable-web-search, --todo-gate, --verbatim", () => {
     const prep = prepareGrokRequest(
       baseParams({
         agent: "reviewer",
-        bestOfN: 3,
-        check: true,
         disableWebSearch: true,
         todoGate: true,
         verbatim: true,
@@ -243,12 +241,20 @@ describe("Grok 0.2.x: headless control flags", () => {
     if (!("args" in prep)) throw new Error("expected args");
     expect(prep.args).toContain("--agent");
     expect(prep.args).toContain("reviewer");
-    expect(prep.args).toContain("--best-of-n");
-    expect(prep.args).toContain("3");
-    expect(prep.args).toContain("--check");
     expect(prep.args).toContain("--disable-web-search");
     expect(prep.args).toContain("--todo-gate");
     expect(prep.args).toContain("--verbatim");
+  });
+
+  it("never emits --best-of-n or --check, removed upstream in grok 0.2.112", () => {
+    // Passing them is not a type error on the legacy interfaces, but the
+    // generation table no longer covers them, so nothing reaches argv.
+    const prep = prepareGrokRequest(
+      baseParams({ agent: "reviewer" } as Parameters<typeof baseParams>[0])
+    );
+    if (!("args" in prep)) throw new Error("expected args");
+    expect(prep.args).not.toContain("--best-of-n");
+    expect(prep.args).not.toContain("--check");
   });
 
   it("does not emit headless flags when omitted", () => {

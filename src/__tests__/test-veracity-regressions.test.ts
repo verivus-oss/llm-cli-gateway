@@ -227,8 +227,6 @@ describe("REGRESSIONS C — Phase 4 contracts must expose slice α/γ/δ params"
     const params = UPSTREAM_CLI_CONTRACTS.grok.mcpParameters;
     for (const name of [
       "agent",
-      "bestOfN",
-      "check",
       "disableWebSearch",
       "todoGate",
       "verbatim",
@@ -341,8 +339,6 @@ describe("REGRESSIONS E — both sync and async tools expose slice fields", () =
     const fields = Object.keys(shape);
     for (const param of [
       "agent",
-      "bestOfN",
-      "check",
       "disableWebSearch",
       "todoGate",
       "verbatim",

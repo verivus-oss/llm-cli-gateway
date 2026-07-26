@@ -22,7 +22,14 @@ import { CLI_TYPES, type CliType } from "../provider-types.js";
 
 // The full seven-provider command catalog intentionally remains compact; added
 // upstream coverage exceeds 12 KiB without including raw help text.
-const COMPACT_PROVIDER_CATALOG_MAX_BYTES = 16 * 1024;
+//
+// The real bloat guard is the companion `not.toMatch(/Usage:|Options:/)`
+// assertion: raw help is what would balloon this resource. This ceiling only
+// bounds legitimate growth, and provider command surfaces do grow upstream
+// (grok gained `doctor`, devin gained `migrate` and `models` at the versions
+// stamped in PROVIDER_TARGET_VERSIONS), which pushed the catalog just past
+// 16 KiB. Raised rather than absorbed by trimming accurate descriptions.
+const COMPACT_PROVIDER_CATALOG_MAX_BYTES = 20 * 1024;
 
 describe("upstream CLI contracts", () => {
   it("accepts a valid Claude argv emitted by the gateway", () => {
@@ -797,14 +804,15 @@ Options:
       expect((ACP_ENTRYPOINT_CONTRACTS.claude.adapterCandidates ?? []).length).toBeGreaterThan(0);
     });
 
-    it("keeps agy on the watchlist with no ACP surface at agy 1.1.3", () => {
+    it("keeps agy on the watchlist with no ACP surface at agy 1.1.7", () => {
       const agy = ACP_ENTRYPOINT_CONTRACTS.gemini;
       expect(agy.status).toBe("absent_watchlist");
       expect(agy.executable).toBe("agy");
       // Deliberately a literal, not derived from PROVIDER_TARGET_VERSIONS: bumping
       // the target must fail here so the ACP claim is re-probed rather than
-      // restamped. Re-probed at agy 1.1.3: absent_watchlist, no native entrypoint.
-      expect(agy.targetVersion).toContain("1.1.3");
+      // restamped. Re-probed at agy 1.1.7: absent_watchlist, no native entrypoint
+      // (`agy acp --help` prints general usage; `agy --help` does not list acp).
+      expect(agy.targetVersion).toContain("1.1.7");
       expect(agy.entrypointArgs).toEqual([]);
       expect(agy.probeArgs).toEqual([]);
     });
