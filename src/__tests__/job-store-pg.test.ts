@@ -65,6 +65,40 @@ describe("PostgresJobStore", () => {
     rmSync(tempDir, { recursive: true, force: true });
   });
 
+  it("reports whether the completion guard admitted the terminal write", () => {
+    // Postgres is the backend where this actually matters: it is the shared
+    // store, so a wrong `true` here would let one gateway instance overwrite
+    // another instance's terminal output through the unfenced recordOutput.
+    const t = new Date().toISOString();
+    store.recordStart({
+      id: "pg-guard-job",
+      correlationId: "pg-guard-corr",
+      requestKey: computeRequestKey("claude", ["-p", "guard"]),
+      cli: "claude",
+      args: ["-p", "guard"],
+      startedAt: t,
+      pid: 4242,
+    });
+
+    const terminal = {
+      id: "pg-guard-job",
+      status: "canceled" as const,
+      exitCode: null,
+      stdout: "PARTIAL",
+      stderr: "",
+      outputTruncated: false,
+      error: "canceled by caller",
+      finishedAt: t,
+    };
+
+    expect(store.recordComplete(terminal)).toBe(true);
+    expect(store.recordComplete({ ...terminal, stdout: "LATER" })).toBe(false);
+    expect(store.getById("pg-guard-job")?.stdout).toBe("PARTIAL");
+
+    // A row that does not exist is also "not admitted".
+    expect(store.recordComplete({ ...terminal, id: "pg-no-such-row" })).toBe(false);
+  });
+
   it("round-trips a completed process job", () => {
     const startedAt = new Date().toISOString();
     const finishedAt = new Date().toISOString();

@@ -166,9 +166,15 @@ fix only removes the timing-dependence rather than recovering bytes.
 
 Both are pinned by tests that fail before and pass after, verified by reverting
 each fix hunk independently. Scope of that claim: it covers the two fix hunks,
-the guard-rejection branch, and the cursor scoping ratchet. It does **not**
-cover MemoryJobStore/PostgresJobStore parity for the new boolean return, which
-is asserted only for `SqliteJobStore` and matches by inspection elsewhere.
+the guard-rejection branch, and the cursor scoping ratchet.
+
+At the time of the first merge it did **not** cover MemoryJobStore or
+PostgresJobStore parity for the new boolean return, which was asserted only for
+`SqliteJobStore`. That gap was closed in the follow-up: `job-store.test.ts` now
+runs the guard-reporting parity across sqlite and memory, and
+`job-store-pg.test.ts` covers Postgres, which is the backend where a wrong
+`true` actually costs something because the store is shared. Each was verified
+to fail when the corresponding backend is made to report the wrong answer.
 
 ### End-to-end validation against a real provider
 
@@ -317,21 +323,50 @@ the behaviour it describes lives in a child process that no unit test can drive.
 
   That case is now pinned by a test rather than by an argument.
 
-## 5. Residual limitations, deliberately not fixed
+## 5. Residual limitations
 
-1. **mistral, cursor and devin cannot be cancelled with any output retained.**
-   The bytes never leave the child. Fixing this needs a provider-side change or
-   a different invocation mode, not a gateway change. Now declared as
-   `terminal-burst` / `flushesOnSigterm: false` so callers can see it.
-2. **cursor ships a `stream-json` mode the gateway does not use by default.**
-   Correction after review: `cursor_request` *does* forward
+Items 2 and 7 were picked up as follow-ups after the first merge and are
+annotated in place. The rest remain deliberately unfixed, with the reason.
+
+1. **Under the DEFAULT argv, mistral, cursor and devin cannot be cancelled with
+   any output retained.** The bytes never leave the child. Fixing this needs a
+   provider-side change or a different invocation mode, not a gateway change.
+   Declared as `terminal-burst` / `flushesOnSigterm: false` so callers can see
+   it. Scope matters here: residual 2 below shows cursor DOES retain output when
+   a caller opts into `outputFormat: "stream-json"`, so this statement is about
+   the default invocation, not about the cursor CLI.
+2. **cursor buffers only under the DEFAULT argv; its streaming modes work.**
+   Follow-up measurement, 2026-07-26. `cursor_request` forwards
    `--output-format stream-json` when a caller sets `outputFormat`
-   (`src/index.ts:13550`), so it is reachable, not merely dormant. The
-   classification is therefore explicitly scoped to the default text argv, and
-   the streaming-mode behaviour is **unmeasured**. This is the one residual
-   plausibly recoverable by changing the default invocation, which would change
-   cursor's output parsing end to end and belongs in its own slice. Caught by
-   the codex reviewer.
+   (`src/index.ts:13552`), and cursor also accepts `--stream-partial-output`.
+   Probed on the same prompt and a 25 s cancel:
+
+   | cursor mode | first byte | chunks | bytes before cancel | reachable via gateway? |
+   |---|---|---|---|---|
+   | `text` (gateway default) | never | 0 | **0** | yes, the default |
+   | `--output-format stream-json` | 4.1 s | 10 | 1,922 | **yes**, via `outputFormat` |
+   | `stream-json --stream-partial-output` | 4.0 s | 1,923 | 351,663 | **no** |
+
+   So cursor's `terminal-burst` classification is a fact about the *default*
+   invocation, not the CLI. None of the three flushes on SIGTERM, so a cancel
+   still loses the tail, but under the streaming mode a caller keeps everything
+   already streamed.
+
+   **The last row is a direct-CLI experiment only.** `cursor_request` exposes
+   `outputFormat` and the argv builder emits nothing but `--output-format`
+   (`src/index.ts:13552`); `--stream-partial-output` appears only in the
+   upstream-contract help probe, never in a spawn. So the gateway-accessible
+   improvement is 1,922 bytes over 10 chunks, not 351 KB. Including that row
+   without this caveat overstated what a caller can actually get, which the
+   codex reviewer caught.
+
+   **Still not changed here**: the gateway's default remains `text`, because
+   switching it rewrites cursor's output parsing end to end (the reply would
+   arrive as a JSON event stream rather than plain text) and that belongs in its
+   own slice with its own review. What has changed is that the registry now
+   records the measurement instead of calling it unmeasured, so the upgrade path
+   is documented rather than guessed at.
+
 3. **codex streams per event, not per token.** A single long non-agentic message
    still emits nothing until it completes, so `stdoutBytes` can sit at 0 on a
    healthy codex job too. Classified `incremental` because that is what it is
@@ -350,14 +385,43 @@ the behaviour it describes lives in a child process that no unit test can drive.
    because `status = 'canceled'` already carries the meaning, and a killed
    child's exit code is not independently informative. Raised by the grok
    reviewer.
-7. **The dead-process (ESRCH) detector finalizes the flight row early.** That
-   path sets `exited = true` and completes the flight-recorder row before the
-   child's `close` callback runs, so the durable job output is still refreshed
-   at close but the flight-recorder `response` is not. Narrow: the process is
-   already confirmed gone at that point, so little should still be in flight.
-   Not fixed here because gating the flight finalization on a distinct
-   "close actually fired" flag is a broader lifecycle change than this fix
-   warrants. Raised by the codex reviewer.
+7. **The dead-process (ESRCH) detector finalized the flight row early. FIXED.**
+   That path set `exited = true` the moment `kill(pid, 0)` reported ESRCH and
+   finalized the flight-recorder row, so the job store still picked up late
+   bytes at close but `llm_request_result` did not. The root confusion was using
+   `exited` as a proxy for "all output delivered": a vanished pid is not a
+   drained pipe, because node still delivers buffered stdout before emitting
+   `close`.
+
+   There is now a separate `closeObserved` flag meaning "no further output can
+   arrive", set by the real close handler and by every path where no process
+   output is possible (never spawned, spawn failure, http settled) but
+   deliberately NOT by the speculative ESRCH sweep. The flight finalization
+   gates on that instead. The ESRCH sweep still writes the row exactly as
+   before, and it stays eligible for one refresh if `close` arrives.
+
+   Precision, after review: "nothing regresses if `close` never arrives" would
+   overstate it. In that case the row keeps its ESRCH-time content, which is the
+   old behaviour, but `flightRecorderComplete` stays false so
+   `flightRecorderEntry` / `extractUsage` are not cleared early. That retention
+   is **bounded**, not permanent: the record is terminal with a `finishedAt`, so
+   the sweep drops it after `completedJobMemoryTtlMs` (1 h by default). Raised
+   by the codex reviewer.
+
+   Note also what this rules out. Setting `closeObserved` in the ESRCH branch,
+   which the mistral reviewer proposed as a blocker, would reinstate exactly the
+   bug being fixed: the row would finalize on the speculative signal and could
+   never pick up the buffered bytes. Its premise, that no `close` can follow
+   ESRCH, does not hold. The sweep observes a vanished pid on a timer, while
+   node delivers `exit` and then `close` once the stdio pipes drain, which is
+   the ordinary ordering. The only case where `close` genuinely may not arrive
+   is a descendant holding the pipes open, and that is the bounded-retention
+   case above.
+
+   Pinned by a test that points the manager's process handle at a pid that
+   cannot exist, drives the real sweep, and then lets the live child flush.
+   With the old `!exited` guard it times out waiting for the refresh.
+
 8. **The late-output write is still unfenced, but is now only used on rows this
    instance owns.** `recordOutput` has never carried an owner or version
    predicate, for any caller. An earlier revision of this fix wrote late output

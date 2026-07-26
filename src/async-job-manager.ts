@@ -841,6 +841,17 @@ interface AsyncJobRecord {
   outputDirty: boolean; // true if stdout/stderr changed since last DB flush
   lastOutputFlushAt: number;
   /**
+   * True once no further output can arrive for this job: `close` fired, or the
+   * job never spawned a process at all, or an http request settled.
+   *
+   * Deliberately NOT the same as `exited`. The dead-process sweep sets `exited`
+   * the moment `kill(pid, 0)` reports ESRCH, but a vanished pid does not mean a
+   * drained pipe: Node still delivers buffered stdout before emitting `close`.
+   * Using `exited` to decide that a persisted response is final would strand
+   * exactly those bytes.
+   */
+  closeObserved: boolean;
+  /**
    * True once a terminal `recordComplete` has been attempted without throwing,
    * whether or not the store's guard admitted it. Gates REPLAY: the terminal
    * state is settled, so the call is never repeated.
@@ -2521,6 +2532,7 @@ export class AsyncJobManager {
       terminalHookCompletion: terminalHookCompletion.promise,
       resolveTerminalHookCompletion: terminalHookCompletion.resolve,
       outputDirty: false,
+      closeObserved: false,
       terminalPersisted: false,
       terminalRowOwned: false,
       lastOutputFlushAt: Date.now(),
@@ -2706,6 +2718,7 @@ export class AsyncJobManager {
     }
     job.finishedAt = new Date().toISOString();
     job.exited = true;
+    job.closeObserved = true;
     job.abort = null; // request settled — no live handle to cancel
     this.emitMetrics(job);
     this.persistComplete(job);
@@ -2932,7 +2945,7 @@ export class AsyncJobManager {
       // the second pass. In practice that is one write at the terminal
       // decision plus one at close. Scoped to the spawn path: an http job has
       // no close event to wait for.
-      if (job.transport === "process" && !job.exited) return;
+      if (job.transport === "process" && !job.closeObserved) return;
       // Only mark complete on successful write so a thrown logComplete
       // can be retried by the next terminal callback.
       job.flightRecorderComplete = true;
@@ -3354,6 +3367,7 @@ export class AsyncJobManager {
       lastProgressFlushAt: Date.now(),
       hydratedFromStore: true,
       outputDirty: false,
+      closeObserved: false,
       terminalPersisted: false,
       terminalRowOwned: false,
       lastOutputFlushAt: Date.now(),
@@ -3694,6 +3708,7 @@ export class AsyncJobManager {
       terminalHookCompletion: terminalHookCompletion.promise,
       resolveTerminalHookCompletion: terminalHookCompletion.resolve,
       outputDirty: false,
+      closeObserved: false,
       terminalPersisted: false,
       terminalRowOwned: false,
       lastOutputFlushAt: Date.now(),
@@ -3740,6 +3755,7 @@ export class AsyncJobManager {
         job.stderr = launchError.message;
         job.finishedAt = new Date().toISOString();
         job.exited = true;
+        job.closeObserved = true;
         this.logger.error(`Job ${id} failed to spawn: ${launchError.message}`, { correlationId });
         this.emitMetrics(job);
         this.persistComplete(job);
@@ -3976,6 +3992,7 @@ export class AsyncJobManager {
         return;
       }
       job.exited = true;
+      job.closeObserved = true;
       stdinDelivery?.cleanup();
       job.clearIdleTimer?.();
       terminationFence.cleanupAfterLeaderExit();
@@ -4006,6 +4023,7 @@ export class AsyncJobManager {
 
     child.on("close", (code: number | null, signal: NodeJS.Signals | null) => {
       job.exited = true;
+      job.closeObserved = true;
       const stdinDeliveryIncomplete = isChildStdinDeliveryIncomplete(stdinDelivery);
       stdinDelivery?.cleanup();
       job.clearIdleTimer?.();
@@ -4149,6 +4167,7 @@ export class AsyncJobManager {
     job.error = exitCode === 75 ? `Gateway is at capacity for ${job.cli}: ${reason}` : reason;
     job.finishedAt = new Date().toISOString();
     job.exited = true;
+    job.closeObserved = true;
     this.logger.info(`Job ${job.id} failed while queued: ${reason}`, {
       correlationId: job.correlationId,
     });
@@ -4353,6 +4372,7 @@ export class AsyncJobManager {
       job.status = "canceled";
       job.finishedAt = new Date().toISOString();
       job.exited = true;
+      job.closeObserved = true;
       this.logger.info(`Job ${jobId} canceled while queued`, {
         correlationId: job.correlationId,
       });
