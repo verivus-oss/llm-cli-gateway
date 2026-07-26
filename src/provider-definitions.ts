@@ -1361,7 +1361,7 @@ const PROVIDER_DEFINITIONS = {
       streaming: "terminal-burst",
       flushesOnSigterm: false,
       evidence:
-        "Probed 2026-07-26 under the DEFAULT gateway argv (--print, text): a single 8199-byte stdout chunk arrived at 28.5s, immediately before clean exit; SIGTERM at 15s produced zero bytes. The opt-in streaming modes are NOT covered by this classification, and were measured separately on the same date: --output-format stream-json yielded 10 chunks over 4.1s to 10.3s, and adding --stream-partial-output yielded 1923 chunks and 351663 bytes over 4.0s to 25.0s. Neither flushes on SIGTERM, but a caller who sets outputFormat gets incremental output and keeps whatever streamed before a cancel.",
+        "Probed 2026-07-26 under the DEFAULT gateway argv (--print, text): a single 8199-byte stdout chunk arrived at 28.5s, immediately before clean exit; SIGTERM at 15s produced zero bytes. The opt-in streaming mode is NOT covered by this classification: setting outputFormat emits --output-format stream-json, measured the same date at 10 chunks over 4.1s to 10.3s, which does not flush on SIGTERM but does leave a caller holding whatever streamed before a cancel. Cursor also ships --stream-partial-output (1923 chunks, 351663 bytes in the same window), but the gateway never emits that flag, so it is a property of the CLI rather than a reachable gateway behaviour.",
     },
     resourcePolicy: { exposesModelsResource: true, exposesSessionsResource: true },
     upstreamContract: {

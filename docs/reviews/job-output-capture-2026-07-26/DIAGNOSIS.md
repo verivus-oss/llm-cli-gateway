@@ -322,26 +322,37 @@ the behaviour it describes lives in a child process that no unit test can drive.
 Items 2 and 7 were picked up as follow-ups after the first merge and are
 annotated in place. The rest remain deliberately unfixed, with the reason.
 
-1. **mistral, cursor and devin cannot be cancelled with any output retained.**
-   The bytes never leave the child. Fixing this needs a provider-side change or
-   a different invocation mode, not a gateway change. Now declared as
-   `terminal-burst` / `flushesOnSigterm: false` so callers can see it.
+1. **Under the DEFAULT argv, mistral, cursor and devin cannot be cancelled with
+   any output retained.** The bytes never leave the child. Fixing this needs a
+   provider-side change or a different invocation mode, not a gateway change.
+   Declared as `terminal-burst` / `flushesOnSigterm: false` so callers can see
+   it. Scope matters here: residual 2 below shows cursor DOES retain output when
+   a caller opts into `outputFormat: "stream-json"`, so this statement is about
+   the default invocation, not about the cursor CLI.
 2. **cursor buffers only under the DEFAULT argv; its streaming modes work.**
    Follow-up measurement, 2026-07-26. `cursor_request` forwards
    `--output-format stream-json` when a caller sets `outputFormat`
    (`src/index.ts:13550`), and cursor also accepts `--stream-partial-output`.
    Probed on the same prompt and a 25 s cancel:
 
-   | cursor mode | first byte | chunks | bytes before cancel |
-   |---|---|---|---|
-   | `text` (gateway default) | never | 0 | **0** |
-   | `--output-format stream-json` | 4.1 s | 10 | 1,922 |
-   | `stream-json --stream-partial-output` | 4.0 s | **1,923** | **351,663** |
+   | cursor mode | first byte | chunks | bytes before cancel | reachable via gateway? |
+   |---|---|---|---|---|
+   | `text` (gateway default) | never | 0 | **0** | yes, the default |
+   | `--output-format stream-json` | 4.1 s | 10 | 1,922 | **yes**, via `outputFormat` |
+   | `stream-json --stream-partial-output` | 4.0 s | 1,923 | 351,663 | **no** |
 
    So cursor's `terminal-burst` classification is a fact about the *default*
    invocation, not the CLI. None of the three flushes on SIGTERM, so a cancel
-   still loses the tail, but under a streaming mode the caller keeps everything
-   already streamed, which is the difference between nothing and 351 KB.
+   still loses the tail, but under the streaming mode a caller keeps everything
+   already streamed.
+
+   **The last row is a direct-CLI experiment only.** `cursor_request` exposes
+   `outputFormat` and the argv builder emits nothing but `--output-format`
+   (`src/index.ts:13550`); `--stream-partial-output` appears only in the
+   upstream-contract help probe, never in a spawn. So the gateway-accessible
+   improvement is 1,922 bytes over 10 chunks, not 351 KB. Including that row
+   without this caveat overstated what a caller can actually get, which the
+   codex reviewer caught.
 
    **Still not changed here**: the gateway's default remains `text`, because
    switching it rewrites cursor's output parsing end to end (the reply would
@@ -381,8 +392,25 @@ annotated in place. The rest remain deliberately unfixed, with the reason.
    output is possible (never spawned, spawn failure, http settled) but
    deliberately NOT by the speculative ESRCH sweep. The flight finalization
    gates on that instead. The ESRCH sweep still writes the row exactly as
-   before, so nothing regresses if `close` never arrives; it simply stays
-   eligible for one refresh if it does.
+   before, and it stays eligible for one refresh if `close` arrives.
+
+   Precision, after review: "nothing regresses if `close` never arrives" would
+   overstate it. In that case the row keeps its ESRCH-time content, which is the
+   old behaviour, but `flightRecorderComplete` stays false so
+   `flightRecorderEntry` / `extractUsage` are not cleared early. That retention
+   is **bounded**, not permanent: the record is terminal with a `finishedAt`, so
+   the sweep drops it after `completedJobMemoryTtlMs` (1 h by default). Raised
+   by the codex reviewer.
+
+   Note also what this rules out. Setting `closeObserved` in the ESRCH branch,
+   which the mistral reviewer proposed as a blocker, would reinstate exactly the
+   bug being fixed: the row would finalize on the speculative signal and could
+   never pick up the buffered bytes. Its premise, that no `close` can follow
+   ESRCH, does not hold. The sweep observes a vanished pid on a timer, while
+   node delivers `exit` and then `close` once the stdio pipes drain, which is
+   the ordinary ordering. The only case where `close` genuinely may not arrive
+   is a descendant holding the pipes open, and that is the bounded-retention
+   case above.
 
    Pinned by a test that points the manager's process handle at a pid that
    cannot exist, drives the real sweep, and then lets the live child flush.
