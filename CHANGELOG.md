@@ -67,6 +67,29 @@ All notable changes to the llm-cli-gateway project.
   vanished pid is not a drained pipe: Node still delivers buffered stdout before
   emitting `close`. Finalization now waits for the close event rather than the
   sweep's speculative signal.
+- **Installing the package no longer leaves a consumer's dependency tree
+  reporting `content-type` as out of range.** The `content-type` pin in
+  `package.json#overrides` existed only so `body-parser@2.3.0` could reach the
+  `^2.0.0` it requires, which npm already satisfies on its own. As a global
+  override it also substituted a major into `@modelcontextprotocol/sdk` and
+  `express`, which both declare `^1.0.5`. That substitution was not
+  behaviour-neutral: `content-type` 2.x parses leniently where 1.x threw, and it
+  inverted duplicate-parameter precedence, which changes the charset the SDK
+  hands to its request-body reader. Each package now resolves to the major it
+  declares, and `body-parser`/`type-is` keep the 2.0.0 they genuinely require.
+
+### Security
+
+- The registry-fidelity gate now verifies the consumer dependency tree against a
+  reviewed exception list instead of a bare `npm ls` exit code. `overrides` is a
+  root-only field, so a security pin that lifts a transitive past the range its
+  parent declares always reads as `invalid` to consumers; treating that as a
+  blanket failure gave no way to distinguish it from real tree corruption. The
+  check is bidirectional: an unreviewed out-of-range package fails the release,
+  and so does the *disappearance* of a reviewed pin, which is what silently
+  shipping an unpatched transitive would look like. The one current entry is the
+  `@hono/node-server` pin for GHSA-frvp-7c67-39w9, whose exit condition is
+  recorded with it.
 
 ## [3.0.0] - 2026-07-18
 
