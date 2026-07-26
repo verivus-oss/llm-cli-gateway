@@ -260,19 +260,20 @@ npm ls --all --json > .npm-ls.json 2>/dev/null || true
 # passed, so any future path that skips its CLI body (two such fail-open bugs
 # have already been found and fixed in its entry-point guard) cannot be read as
 # success here. Exit status is still honoured for the ordinary failure path.
-# `env -u NODE_OPTIONS` because a preload (`--import=...`) runs before the entry
-# module, in the same process, and can both print the marker and clear argv[1],
-# so an inherited NODE_OPTIONS could make this report success having classified
-# nothing. Anyone able to set it on the release process could subvert the gate
-# other ways too, so this is defence in depth rather than a trust boundary, but
-# a verification step should not inherit ambient node preloads in any case.
-CONSUMER_TREE_OUT="$(env -u NODE_OPTIONS node "${ROOT_DIR}/scripts/check-consumer-tree.mjs" .npm-ls.json 2>&1)" \
+# `env -u NODE_OPTIONS -u NODE_PATH` because a preload (`--require=` /
+# `--import=`) runs in the same process BEFORE the entry module, so it can print
+# the marker and exit 0 without any classification happening, defeating both the
+# exit status and the marker at once. Anyone able to set those on the release
+# process could subvert the gate more directly, so this is defence in depth
+# rather than a trust boundary, but a verification step should not inherit
+# ambient node preloads in any case.
+CONSUMER_TREE_OUT="$(env -u NODE_OPTIONS -u NODE_PATH node "${ROOT_DIR}/scripts/check-consumer-tree.mjs" .npm-ls.json 2>&1)" \
   || { echo "${CONSUMER_TREE_OUT}" >&2; fail "consumer dependency tree did not match the reviewed set (see above)"; }
 echo "${CONSUMER_TREE_OUT}"
-case "${CONSUMER_TREE_OUT}" in
-  *CONSUMER_TREE_CHECK_OK*) ;;
-  *) fail "consumer-tree checker exited 0 without confirming it classified a tree (no CONSUMER_TREE_CHECK_OK marker); treat as an unverified tree, never as a pass" ;;
-esac
+# Exact whole-line match, not a substring glob: `*CONSUMER_TREE_CHECK_OK*` would
+# also accept CONSUMER_TREE_CHECK_OKAY or the token embedded in unrelated text.
+printf '%s\n' "${CONSUMER_TREE_OUT}" | grep -qxF "CONSUMER_TREE_CHECK_OK" \
+  || fail "consumer-tree checker exited 0 without confirming it classified a tree (no CONSUMER_TREE_CHECK_OK marker line); treat as an unverified tree, never as a pass"
 rm -f .npm-ls.json
 
 # node:sqlite is what the installed package now uses for persistence. Cheap
