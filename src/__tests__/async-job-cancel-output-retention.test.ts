@@ -189,6 +189,62 @@ describe("late child output survives a terminal-status-before-close transition",
     }
   }, 60_000);
 
+  it("keeps the flight-recorder row refreshable after the dead-process sweep fires", async () => {
+    // The dead-process sweep marks a job failed the moment `kill(pid, 0)`
+    // reports ESRCH. A vanished pid is NOT a drained pipe: node still delivers
+    // buffered stdout before it emits `close`. If the flight row were finalized
+    // on that speculative signal, those bytes would never reach the persisted
+    // response, even though the job store still picks them up at close.
+    const rec = new FlightRecorder(join(tempDir, "logs.db"));
+    const frManager = new AsyncJobManager(undefined, undefined, store, rec);
+    try {
+      const outcome = frManager.startJobWithDedup(
+        "node" as LlmCli,
+        FLUSH_ON_SIGTERM,
+        "corr-esrch",
+        {
+          writeFlightStart: true,
+          flightRecorderEntry: {
+            model: "test-model",
+            prompt: "assembled prompt",
+            sessionId: "sess-esrch",
+            stablePrefixHash: "deadbeef",
+            stablePrefixTokens: 1,
+          },
+          forceRefresh: true,
+        }
+      );
+      const jobId = outcome.snapshot.id;
+      await waitFor(() => (frManager.getJobSnapshot(jobId)?.stdoutBytes ?? 0) >= 11, 25_000);
+
+      const internals = frManager as unknown as {
+        jobs: Map<string, { process: { pid: number } | null }>;
+        evictCompletedJobs: () => void;
+      };
+      const record = internals.jobs.get(jobId)!;
+      const realPid = record.process!.pid;
+      // Point the manager's handle at a pid that cannot exist, so the sweep
+      // takes the ESRCH branch while the real child keeps running and its
+      // close handler stays wired up.
+      record.process = { pid: 0x7ffffff0 };
+      internals.evictCompletedJobs();
+
+      // The sweep wrote the row from the bytes known at that instant.
+      expect(readPersistedRequest(rec, "corr-esrch")?.response).toContain("EARLY_BYTES");
+      expect(readPersistedRequest(rec, "corr-esrch")?.response ?? "").not.toContain("LATE");
+
+      // Now let the real child flush and close.
+      process.kill(realPid, "SIGTERM");
+      await waitFor(
+        () => (readPersistedRequest(rec, "corr-esrch")?.response ?? "").includes("LATE"),
+        25_000
+      );
+      expect(readPersistedRequest(rec, "corr-esrch")?.response).toContain("LATE_FLUSH_MARKER");
+    } finally {
+      rec.close();
+    }
+  }, 60_000);
+
   it("persists bytes the child emits after the output cap trips and before close", async () => {
     // The overflow branch rejects ONLY the chunk that would cross the cap, so a
     // later smaller chunk still fits and IS appended. Those bytes need the same

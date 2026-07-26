@@ -1361,7 +1361,7 @@ const PROVIDER_DEFINITIONS = {
       streaming: "terminal-burst",
       flushesOnSigterm: false,
       evidence:
-        "Probed 2026-07-26 under the DEFAULT gateway argv (--print, text): a single 8199-byte stdout chunk arrived at 28.5s, immediately before clean exit; SIGTERM at 15s produced zero bytes. A caller CAN pass outputFormat to emit --output-format stream-json, which is expected to stream and is NOT covered by this classification (unmeasured).",
+        "Probed 2026-07-26 under the DEFAULT gateway argv (--print, text): a single 8199-byte stdout chunk arrived at 28.5s, immediately before clean exit; SIGTERM at 15s produced zero bytes. The opt-in streaming modes are NOT covered by this classification, and were measured separately on the same date: --output-format stream-json yielded 10 chunks over 4.1s to 10.3s, and adding --stream-partial-output yielded 1923 chunks and 351663 bytes over 4.0s to 25.0s. Neither flushes on SIGTERM, but a caller who sets outputFormat gets incremental output and keeps whatever streamed before a cancel.",
     },
     resourcePolicy: { exposesModelsResource: true, exposesSessionsResource: true },
     upstreamContract: {

@@ -666,4 +666,106 @@ describe("JobStore", () => {
       expect(dedup?.id).toBe(id);
     });
   });
+  describe("recordComplete guard reporting (cross-backend parity)", () => {
+    // The manager uses this boolean to tell "I committed this row" from
+    // "someone else already did", and only the former licenses the unfenced
+    // recordOutput. A backend that reported the wrong answer would silently
+    // re-open the clobber the ownership rule exists to prevent, so every
+    // backend has to agree.
+    const backends = (): Array<[string, JobStore]> => [
+      ["sqlite", new SqliteJobStore(join(tempDir, `parity-${Math.random()}`.replace(".", "")))],
+      ["memory", new MemoryJobStore()],
+    ];
+
+    it("returns true on an open row and false once the row is terminal", () => {
+      for (const [name, backend] of backends()) {
+        const t = new Date().toISOString();
+        backend.recordStart({
+          id: "parity-job",
+          correlationId: "parity-corr",
+          requestKey: "parity-key",
+          cli: "claude",
+          args: ["-p", "hi"],
+          startedAt: t,
+          pid: 4242,
+        });
+        const terminal = {
+          id: "parity-job",
+          status: "canceled" as const,
+          exitCode: null,
+          stdout: "PARTIAL",
+          stderr: "",
+          outputTruncated: false,
+          error: "canceled by caller",
+          finishedAt: t,
+        };
+        expect(backend.recordComplete(terminal), name).toBe(true);
+        expect(backend.recordComplete({ ...terminal, stdout: "LATER" }), name).toBe(false);
+        expect(backend.getById("parity-job")?.stdout, name).toBe("PARTIAL");
+        backend.close();
+      }
+    });
+
+    it("returns false for an id that does not exist", () => {
+      for (const [name, backend] of backends()) {
+        expect(
+          backend.recordComplete({
+            id: "no-such-row",
+            status: "completed",
+            exitCode: 0,
+            stdout: "",
+            stderr: "",
+            outputTruncated: false,
+            error: null,
+            finishedAt: new Date().toISOString(),
+          }),
+          name
+        ).toBe(false);
+        backend.close();
+      }
+    });
+
+    it("admits a terminal write onto an orphaned row, so recovery still works", () => {
+      // The guard admits 'orphaned' on purpose: a job whose owner died must
+      // still be completable by whoever adopts it. If that returned false the
+      // adopting instance would treat a row it legitimately owns as foreign
+      // and refuse to persist its output. Sqlite only: the lease transition is
+      // driven through the real sweep, which needs a file-backed row.
+      const orphanPath = join(tempDir, "orphan-parity.db");
+      const backend = new SqliteJobStore(orphanPath);
+      try {
+        const t = new Date().toISOString();
+        backend.recordStart({
+          id: "orphan-parity",
+          correlationId: "orphan-corr",
+          requestKey: "orphan-key",
+          cli: "codex",
+          args: ["exec", "hi"],
+          startedAt: t,
+          pid: 7,
+          ownerInstance: "dead-instance",
+        });
+        expireLease(orphanPath, "orphan-parity");
+        backend.recoverStaleJobs(1, 300_000);
+        // Guard against a vacuous assertion: the row must really be orphaned.
+        expect(backend.getById("orphan-parity")?.status).toBe("orphaned");
+
+        expect(
+          backend.recordComplete({
+            id: "orphan-parity",
+            status: "completed",
+            exitCode: 0,
+            stdout: "recovered",
+            stderr: "",
+            outputTruncated: false,
+            error: null,
+            finishedAt: t,
+          })
+        ).toBe(true);
+        expect(backend.getById("orphan-parity")?.stdout).toBe("recovered");
+      } finally {
+        backend.close();
+      }
+    });
+  });
 });
