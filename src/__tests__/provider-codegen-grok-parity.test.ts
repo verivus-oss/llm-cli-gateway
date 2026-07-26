@@ -102,7 +102,7 @@ const CASES: Array<{ name: string; params: Record<string, unknown> }> = [
   },
   {
     name: "number flags (incl. boundary)",
-    params: { maxTurns: 7, bestOfN: 3 },
+    params: { maxTurns: 7 },
   },
   {
     name: "csv list flags",
@@ -208,8 +208,6 @@ describe("provider-codegen: grok schema derivation from the contract", () => {
       reasoningEffort: "low",
       allowedTools: ["Read"],
       maxTurns: 5,
-      bestOfN: 2,
-      check: true,
       sandbox: "workspace-write",
       compactionMode: "segments",
       compactionDetail: "minimal",

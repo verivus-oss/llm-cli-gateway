@@ -134,7 +134,7 @@ must_cover = [
   "allow/deny/permissionMode/alwaysApprove",
   "local ~/.grok/skills and ~/.grok/bundled/skills discovery",
   "provider-native skill tools including Imagine image_gen/image_edit/image_to_video/reference_to_video",
-  "agent/agents/bestOfN/check/todoGate/noSubagents",
+  "agent/agents/todoGate/noSubagents",
   "disableWebSearch",
   "experimentalMemory/noMemory/noPlan/noAltScreen",
   "promptFile/promptJson/single/verbatim/systemPromptOverride/rules",

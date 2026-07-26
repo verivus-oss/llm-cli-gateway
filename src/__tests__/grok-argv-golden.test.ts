@@ -50,8 +50,6 @@ describe("grok argv golden (pre/post cutover parity)", () => {
         compactionMode: "segments",
         compactionDetail: "verbose",
         agent: "reviewer",
-        bestOfN: 3,
-        check: true,
         disableWebSearch: true,
         todoGate: true,
         verbatim: true,
