@@ -28,12 +28,13 @@ All notable changes to the llm-cli-gateway project.
 
 - **`outputDiscipline` on every provider in the registry**, surfaced through the
   provider capability rows. It declares whether a provider's stdout advances
-  while a job runs and whether the CLI flushes on SIGTERM, so a caller can tell
-  a healthy job from a hung one. This matters because gemini, mistral, cursor
-  and devin emit nothing until they exit under the default invocation, which
-  means `stdoutBytes` and `lastActivityAt` both stay frozen on a perfectly
-  healthy job and a cancel retains nothing. The fact is scoped to the default
-  argv: cursor does stream when a caller sets `outputFormat`.
+  while a job runs and whether the CLI flushes on SIGTERM, so a caller knows
+  when an absence of output carries no information. Under the default
+  invocation gemini, mistral, cursor and devin emit nothing until they exit,
+  which means `stdoutBytes` and `lastActivityAt` both stay frozen on a perfectly
+  healthy job, and cancelling one yields no usable answer output. The fact is
+  scoped to the default argv: cursor does stream under
+  `outputFormat: "stream-json"`.
 
 ### Changed
 
@@ -56,12 +57,12 @@ All notable changes to the llm-cli-gateway project.
   8.3 KB after SIGTERM, and all of it was being dropped. Late output now lands
   through the unfenced output write, and the flight-recorder response is
   refreshed once the process is genuinely gone.
-- **A job row is never overwritten by an instance that does not own it.**
-  `recordComplete` now reports whether the completion guard admitted the write,
-  so the gateway can tell "I committed this row" from "another instance already
-  did". Only the former licenses the unfenced output write, on every path that
-  reaches it. On a shared PostgreSQL store this prevents one instance's output
-  from clobbering another's committed result.
+- **Late output cannot overwrite a terminal result whose completion write this
+  gateway did not win.** `recordComplete` now reports whether the completion
+  guard admitted the write, and only an admitted write licenses the unfenced
+  output write, on every path that reaches it. On a shared PostgreSQL store this
+  prevents one instance's output from clobbering a result another instance had
+  already committed.
 - **The dead-process sweep no longer finalizes a flight-recorder row early.** A
   vanished pid is not a drained pipe: Node still delivers buffered stdout before
   emitting `close`. Finalization now waits for the close event rather than the
