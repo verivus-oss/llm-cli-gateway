@@ -128,7 +128,8 @@ export function rewriteTargetVersion(source, cli, nextVersion) {
   } catch (err) {
     throw new Error(
       `Refusing to write ${cli}=${JSON.stringify(nextVersion)}: result no longer parses ` +
-        `(${err instanceof Error ? err.message : String(err)})`
+        `(${err instanceof Error ? err.message : String(err)})`,
+      { cause: err }
     );
   }
   if (verified[cli] !== nextVersion) {
