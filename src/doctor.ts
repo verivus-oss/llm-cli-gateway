@@ -52,6 +52,7 @@ import {
   buildUpstreamContractReport,
   type InstalledCliContractProbe,
 } from "./upstream-contracts.js";
+import { compareInstalledToTargets, summarizeVersionGuard } from "./provider-version-guard.js";
 import {
   getProviderToolCapabilities,
   knownProviderCapabilityIds,
@@ -604,6 +605,19 @@ export interface DoctorReport {
     probed: boolean;
     /** Cheap installed versions (always present when CLIs are detected). */
     installed_versions: Partial<Record<CliType, string | null>>;
+    /**
+     * Installed-versus-contracted comparison. Both halves were already in this
+     * report and were never compared, so a provider could move underneath its
+     * contract and only `pre-release.sh` would ever notice. Offline: it reuses
+     * `installed_versions` above and spawns nothing.
+     */
+    version_guard: {
+      ok: boolean;
+      drifted: CliType[];
+      not_installed: CliType[];
+      unknown: CliType[];
+      providers: ReturnType<typeof import("./provider-version-guard.js").compareInstalledToTargets>;
+    };
     /** Lightweight declared contracts (always present, no spawning). */
     contracts: ReturnType<typeof import("./upstream-contracts.js").buildUpstreamContractReport>;
     /** Full probed report only when --probe-upstream was used. */
@@ -1435,13 +1449,27 @@ export function createDoctorReport(
     ? buildUpstreamContractReport({ probeInstalled: true })
     : undefined;
 
+  // Compare the two halves this report already had. Offline and free: it reads
+  // installedVersions above rather than spawning anything, so it runs on every
+  // doctor invocation instead of waiting for --probe-upstream.
+  const versionVerdicts = compareInstalledToTargets(installedVersions);
+  const versionSummary = summarizeVersionGuard(versionVerdicts);
+
   const upstream: DoctorReport["upstream"] = {
     note: "The gateway declares strict contracts for what flags, output modes, permission modes, and session/resume behaviour each provider CLI is expected to support.",
-    recommendation:
-      "After upgrading any provider CLI (especially fast-moving vendor binaries like grok), run the installed binary probe to detect drift between what the gateway expects and what your installed CLI actually advertises.",
+    recommendation: versionSummary.ok
+      ? "Installed provider CLI versions match their contracted targets. Run the installed binary probe after any provider upgrade to also compare advertised flags and subcommands."
+      : `Installed provider CLI versions have drifted from their contracted targets (${versionSummary.drifted.join(", ")}). The declared flags and subcommands for those providers may no longer match what the installed binary advertises; run the installed binary probe to confirm before releasing.`,
     how_to_check: "llm-cli-gateway contracts --json --probe-installed   (or with --cli=grok etc.)",
     probed: !!opts.probeUpstream,
     installed_versions: installedVersions,
+    version_guard: {
+      ok: versionSummary.ok,
+      drifted: versionSummary.drifted,
+      not_installed: versionSummary.notInstalled,
+      unknown: versionSummary.unknown,
+      providers: versionVerdicts,
+    },
     contracts: lightweightContracts,
   };
   if (probeReport) {
