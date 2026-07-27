@@ -112,9 +112,18 @@ report_applied_changes() {
   else
     log "auto-applied ${WROTE_COUNT} version rebaseline(s) to src/provider-definitions.ts"
     # Best-effort diffstat for the operator; absence of git is not an error.
+    #
+    # The `|| true` is load-bearing. Under `set -euo pipefail`, and called bare
+    # as this function is, a failing pipeline aborts the function AND the
+    # script with exit 1: the rebuild below would be skipped after source had
+    # already been rewritten, and exit 1 is not in the unit's
+    # SuccessExitStatus, so systemd would report a hard failure for what is
+    # only a cosmetic diffstat.
     if command -v git >/dev/null 2>&1 && git rev-parse --git-dir >/dev/null 2>&1; then
-      git --no-pager diff HEAD --stat -- src/provider-definitions.ts 2>/dev/null |
-        while IFS= read -r line; do log "  $line"; done
+      {
+        git --no-pager diff HEAD --stat -- src/provider-definitions.ts 2>/dev/null |
+          while IFS= read -r line; do log "  $line"; done
+      } || true
     fi
   fi
 
