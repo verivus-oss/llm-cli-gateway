@@ -1,6 +1,6 @@
 [Unit]
 Description=Daily llm-cli-gateway provider CLI contract drift check
-Documentation=file:///srv/repos/internal/verivusai-labs/rvwr/llm-cli-gateway/scripts/provider-drift-check.sh
+Documentation=https://github.com/verivus-oss/llm-cli-gateway/blob/main/scripts/provider-drift-check.sh
 
 [Timer]
 # Genuinely offset from gateway-autoupgrade.timer, which upgrades the GATEWAY

@@ -1,12 +1,17 @@
 [Unit]
 Description=llm-cli-gateway provider CLI contract drift check
-Documentation=file:///srv/repos/internal/verivusai-labs/rvwr/llm-cli-gateway/scripts/provider-drift-check.sh
+Documentation=https://github.com/verivus-oss/llm-cli-gateway/blob/main/scripts/provider-drift-check.sh
 After=network-online.target
 Wants=network-online.target
 
 [Service]
 Type=oneshot
-ExecStart=/srv/repos/internal/verivusai-labs/rvwr/llm-cli-gateway/scripts/provider-drift-check.sh
+# Reference unit: replace /path/to/llm-cli-gateway with your checkout before
+# installing. systemd does not expand environment variables in the executable
+# token, so this one path has to be edited rather than configured. The script
+# itself derives the repository from its own location, so nothing else needs
+# changing; set GATEWAY_DRIFT_REPO below only to point at a different checkout.
+ExecStart=/path/to/llm-cli-gateway/scripts/provider-drift-check.sh
 # report = detect and log only. Set to "apply" to additionally rebaseline the
 # version targets in place. Flag REMOVALS are never auto-applied in either
 # mode: `flags` is the argv emit allowlist, so a removal needs a coordinated
