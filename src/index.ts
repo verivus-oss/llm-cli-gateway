@@ -589,7 +589,7 @@ export function buildServerInstructions(
   ).join(", ");
   return `llm-cli-gateway: Multi-LLM orchestration via MCP.
 
-Tools: ${syncRequestToolList}${apiToolsNote} (sync)${asyncToolsNote} | codex_fork_session (fork a Codex session into a new branch)
+Tools: ${syncRequestToolList}${apiToolsNote} (sync)${asyncToolsNote} | codex_fork_session (UNAVAILABLE: codex fork needs a terminal; use codex_request with a session UUID or resumeLatest instead)
 ${validationLine}${jobsLine}Sessions: session_create, session_list, session_set_active, session_get, session_delete, session_clear_all
 Other: list_models, provider_tool_capabilities, cli_versions, upstream_contracts, provider_subcommands_* (read-only subcommand contract/drift introspection), cli_upgrade, approval_list, llm_process_health, llm_request_result (read back any persisted request, sync or async, by correlationId)
 Workspaces: workspace_create, workspace_list, workspace_get, workspace_register_existing_repo (remote HTTP/OAuth workspace registry only; do not use workspace_* to fix stdio/local provider path access)
@@ -602,7 +602,7 @@ ${deferralLine}
 - An unscoped local CLI child uses a fresh private neutral cwd, not the gateway repository. Cwd-scoped resumeLatest requires workingDir, workspace, or a configured default workspace.
 - Codex new and resume prompts use stdin. codex_fork_session remains argv-bound and rejects oversized UTF-8 prompts as non-retryable input_too_large. Prompts are never truncated.
 - Upstream drift detection: After upgrading any provider CLI (especially grok), use upstream_contracts with probeInstalled:true and provider_subcommand_drift for declared subcommand help surfaces. Probes are safe, read-only --help checks.
-- Idle timeout kills stuck processes (default 10min, configurable via idleTimeoutMs).
+- Idle timeout kills stuck processes (default 10min for providers that stream; providers that emit nothing until they exit (gemini, mistral, devin, cursor) instead get a 1h total-runtime bound, since an idle timer never advances for them). Configurable via idleTimeoutMs.
 
 Skills (full docs via MCP resources):
 ${loadedSkills.map(s => `- skills://${s.name} — ${s.description}`).join("\n")}`;
@@ -1291,13 +1291,20 @@ function emitsOnlyOnExit(cli: string): boolean {
  * upstream, this becomes the single place to flip.
  */
 export function codexForkCanRunHeadless(): boolean {
-  // Off in every normal deployment. The escape hatch exists so the retained
-  // spawn path keeps its coverage (argv composition, argv admission, and the
-  // durable error classifications it propagates from job admission), and so a
-  // host that genuinely supplies a terminal, or a future headless `codex fork`,
-  // can re-enable it without a code change. Setting it does not make fork work
-  // where a TTY is absent; it only stops this guard short-circuiting first.
-  return process.env.LLM_GATEWAY_ALLOW_CODEX_FORK === "1";
+  // Deliberately a constant with no runtime override.
+  //
+  // An earlier version read an environment variable so the retained spawn path
+  // could keep its test coverage. A reviewer correctly called that a footgun: it
+  // is an undocumented deployment switch that re-enables a known-doomed,
+  // remote-triggerable child spawn and contradicts the tool's own advertised
+  // "fails fast" contract, in exchange for exercising code that cannot run in
+  // production anyway. Losing that coverage is the better trade, and the shared
+  // job-admission classifications it exercised are covered through the other
+  // providers that actually reach job admission.
+  //
+  // If a headless `codex fork` lands upstream, this becomes `true` and the
+  // retained argv path below is already built and type-checked for it.
+  return false;
 }
 
 export function resolveIdleTimeout(cli: string, override?: number): number | undefined {
@@ -4715,11 +4722,18 @@ export function registerBaseResources(server: McpServer, runtime: GatewayServerR
   // registered here, so they were unreachable in every configuration: absent
   // from resources/list and -32602 on read, even with [least_cost] enabled.
   //
-  // The gate is deliberately the SAME expression ResourceProvider.readResource
-  // uses (`leastCost.enabled`), because the original defect was exactly a
-  // declaration that disagreed with what the server exposed. Registering on a
-  // different condition would recreate it in mirror image.
-  if (runtime.leastCost?.enabled) {
+  // The gate matches the route-tool gate (`leastCost.enabled &&
+  // !personalConfigEnabled`), not merely `leastCost.enabled`. An earlier version
+  // used the latter to mirror ResourceProvider.readResource, on the reasoning
+  // that the original defect was a declaration disagreeing with exposure. A
+  // reviewer correctly pointed out that this violates the Kit boundary rule
+  // stated at the route-tool gate: an enabled [least_cost] block must not
+  // advertise a route surface that cannot preserve that boundary. With the Kit
+  // enabled the route tools are suppressed, so there is no routing for these to
+  // observe, and exposing them anyway would advertise exactly the surface that
+  // gate exists to withhold. readResource stays permissive underneath; it is
+  // simply never reached for an unregistered URI.
+  if (runtime.leastCost?.enabled && !runtime.personalConfig.settings.enabled) {
     for (const [name, uri, title, description] of [
       [
         "routing-decisions",
@@ -18156,8 +18170,12 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
       // U23: emit `-o json` to extract token usage via parseGeminiJson. Default
       // remains text so existing callers see no behavior change. Phase 4 slice
       // ε adds `stream-json` (NDJSON event stream parsed by
-      // parseGeminiStreamJson — `init`/`message`/`result` lines, idle-timeout
-      // semantics covered by Gemini's existing real-time stdout streaming).
+      // parseGeminiStreamJson: `init`/`message`/`result` lines). NOTE: gemini's
+      // registry outputDiscipline is "terminal-burst", so under the default argv it
+      // emits nothing until exit. An idle timer therefore never advances for it, and
+      // resolveIdleTimeout gives it a total-runtime bound instead. An earlier version
+      // of this comment claimed "real-time stdout streaming", which the probed
+      // evidence contradicts.
       outputFormat: z
         .enum(["text", "json", "stream-json"])
         .default("text")
@@ -18369,7 +18387,7 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
         .max(3_600_000)
         .optional()
         .describe(
-          "Idle timeout in ms (min 30s, max 1h). Vibe emits nothing until it exits, so this is a total-runtime bound rather than an idle bound; omit = gateway default of 3600000ms (1 h)."
+          "Idle timeout in ms (min 30s, max 1h). Omit = gateway default of 600000ms (10 min) with no output before the process is killed."
         ),
       forceRefresh: z
         .boolean()
@@ -20214,8 +20232,10 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
         // U23: emit `-o json` to extract token usage via parseGeminiJson. Default
         // remains text so existing callers see no behavior change. Phase 4 slice
         // ε adds `stream-json` (NDJSON event stream parsed by
-        // parseGeminiStreamJson — `init`/`message`/`result` lines, idle-timeout
-        // semantics covered by Gemini's existing real-time stdout streaming).
+        // parseGeminiStreamJson: `init`/`message`/`result` lines). NOTE: gemini's
+        // registry outputDiscipline is "terminal-burst", so under the default argv it
+        // emits nothing until exit; resolveIdleTimeout gives it a total-runtime bound
+        // rather than an idle bound.
         outputFormat: z
           .enum(["text", "json", "stream-json"])
           .default("text")
@@ -20421,7 +20441,7 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
           .max(3_600_000)
           .optional()
           .describe(
-            "Idle timeout in ms (min 30s, max 1h). Vibe emits nothing until it exits, so this is a total-runtime bound rather than an idle bound; omit = gateway default of 3600000ms (1 h)."
+            "Idle timeout in ms (min 30s, max 1h). Omit = gateway default of 600000ms (10 min) with no output before the process is killed."
           ),
         forceRefresh: z
           .boolean()

@@ -3260,7 +3260,7 @@
             "type": "integer",
             "minimum": 30000,
             "maximum": 3600000,
-            "description": "Idle timeout in ms (min 30s, max 1h). Vibe emits nothing until it exits, so this is a total-runtime bound rather than an idle bound; omit = gateway default of 3600000ms (1 h)."
+            "description": "Idle timeout in ms (min 30s, max 1h). Omit = gateway default of 600000ms (10 min) with no output before the process is killed."
           },
           "forceRefresh": {
             "type": "boolean",
@@ -3536,7 +3536,7 @@
             "type": "integer",
             "minimum": 30000,
             "maximum": 3600000,
-            "description": "Idle timeout in ms (min 30s, max 1h). Vibe emits nothing until it exits, so this is a total-runtime bound rather than an idle bound; omit = gateway default of 3600000ms (1 h)."
+            "description": "Idle timeout in ms (min 30s, max 1h). Omit = gateway default of 600000ms (10 min) with no output before the process is killed."
           },
           "forceRefresh": {
             "type": "boolean",
