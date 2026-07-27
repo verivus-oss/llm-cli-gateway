@@ -1,7 +1,7 @@
 import { existsSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
-import { spawnSync } from "node:child_process";
+import { spawn, spawnSync } from "node:child_process";
 import { CLI_TYPES, type CliType } from "./provider-types.js";
 import { getProviderLoginGuidance, type ProviderLoginGuidance } from "./provider-login-guidance.js";
 import { apiProviderKeyPresent, isApiProviderEnabled, type ApiProviderConfig } from "./config.js";
@@ -103,14 +103,29 @@ export function listProviderRuntimeStatuses(): Record<CliType, ProviderRuntimeSt
   ) as Record<CliType, ProviderRuntimeStatus>;
 }
 
-export function getProviderRuntimeStatus(provider: CliType): ProviderRuntimeStatus {
+/** Result of one probe command, the only impure input to status building. */
+interface ProbeResult {
+  exitCode: number | null;
+  output: string;
+}
+
+/**
+ * Build the installed/version half of a status from the version probe.
+ *
+ * Pure. Shared by the sync and async orchestrations so the two can never drift
+ * on what "installed" means.
+ *
+ * @param provider Provider key.
+ * @param version Result of the version probe.
+ * @returns Status with install and version fields resolved, login not yet checked.
+ */
+function buildBaseStatus(provider: CliType, version: ProbeResult): ProviderRuntimeStatus {
   const guidance = getProviderLoginGuidance(provider);
   const command = PROVIDER_COMMANDS[provider];
-  const version = runCommand(command, VERSION_ARGS[provider], 5_000);
   const installed = version.exitCode === 0 || Boolean(version.output);
   const versionText = installed ? firstLine(version.output) : null;
 
-  const base: ProviderRuntimeStatus = {
+  return {
     provider,
     displayName: guidance.displayName,
     command,
@@ -128,34 +143,54 @@ export function getProviderRuntimeStatus(provider: CliType): ProviderRuntimeStat
     },
     guidance,
   };
+}
 
-  if (!installed) return base;
+/**
+ * Antigravity has no safe CLI login check, so its auth state comes from
+ * credential stores rather than a probe. Pure with respect to subprocesses.
+ *
+ * @param base Base status from the version probe.
+ * @returns Status with Antigravity login state resolved.
+ */
+function withGeminiLoginStatus(base: ProviderRuntimeStatus): ProviderRuntimeStatus {
+  const auth = geminiAuthStatus();
+  const store = auth.status;
+  const matchedMethods = Object.entries(auth.methods)
+    .filter(([, v]) => v)
+    .map(([k]) => k);
+  return {
+    ...base,
+    loginStatus: store === "present" ? "authenticated" : "unknown",
+    loginCheck: {
+      method: "credential_store",
+      command: null,
+      credentialStore: store,
+      detail:
+        store === "present"
+          ? `Antigravity auth detected via Gemini-compatible stores: ${matchedMethods.join(", ")}; contents were not inspected.`
+          : "Antigravity CLI is installed, but no Gemini-compatible credential store or auth env vars were found (oauth_creds.json, GEMINI_API_KEY, GOOGLE_API_KEY, or GOOGLE_CLOUD_PROJECT+GOOGLE_GENAI_USE_VERTEXAI).",
+    },
+  };
+}
 
-  if (provider === "gemini") {
-    const auth = geminiAuthStatus();
-    const store = auth.status;
-    const matchedMethods = Object.entries(auth.methods)
-      .filter(([, v]) => v)
-      .map(([k]) => k);
-    return {
-      ...base,
-      loginStatus: store === "present" ? "authenticated" : "unknown",
-      loginCheck: {
-        method: "credential_store",
-        command: null,
-        credentialStore: store,
-        detail:
-          store === "present"
-            ? `Antigravity auth detected via Gemini-compatible stores: ${matchedMethods.join(", ")}; contents were not inspected.`
-            : "Antigravity CLI is installed, but no Gemini-compatible credential store or auth env vars were found (oauth_creds.json, GEMINI_API_KEY, GOOGLE_API_KEY, or GOOGLE_CLOUD_PROJECT+GOOGLE_GENAI_USE_VERTEXAI).",
-      },
-    };
-  }
-
-  const args = LOGIN_CHECKS[provider];
-  if (!args) return base;
-
-  const login = runCommand(command, args, 5_000);
+/**
+ * Fold a login-check probe into a status.
+ *
+ * Pure, and deliberately the ONLY place login status is inferred, so the sync
+ * and async paths cannot disagree about whether a provider is authenticated.
+ *
+ * @param provider Provider key.
+ * @param base Base status from the version probe.
+ * @param args The login-check argv that was run.
+ * @param login Result of the login probe.
+ * @returns Status with login state resolved.
+ */
+function withLoginProbe(
+  provider: CliType,
+  base: ProviderRuntimeStatus,
+  args: string[],
+  login: ProbeResult
+): ProviderRuntimeStatus {
   const status = inferLoginStatus(provider, login.exitCode, login.output);
   const credentialStore =
     provider === "grok"
@@ -168,11 +203,137 @@ export function getProviderRuntimeStatus(provider: CliType): ProviderRuntimeStat
     loginStatus: status,
     loginCheck: {
       method: "cli",
-      command: [command, ...args],
+      command: [base.command, ...args],
       credentialStore,
       detail: loginCheckDetail(provider, status, login.exitCode),
     },
   };
+}
+
+export function getProviderRuntimeStatus(provider: CliType): ProviderRuntimeStatus {
+  const command = PROVIDER_COMMANDS[provider];
+  const base = buildBaseStatus(provider, runCommand(command, VERSION_ARGS[provider], 5_000));
+  if (!base.installed) return base;
+  if (provider === "gemini") return withGeminiLoginStatus(base);
+
+  const args = LOGIN_CHECKS[provider];
+  if (!args) return base;
+  return withLoginProbe(provider, base, args, runCommand(command, args, 5_000));
+}
+
+/**
+ * Async twin of `getProviderRuntimeStatus`.
+ *
+ * Same decisions, same shared interpretation helpers, but the probes are
+ * spawned asynchronously so the caller does not stall the event loop.
+ * `getProviderRuntimeStatus` performs up to TWO `spawnSync` calls per provider
+ * with 5s timeouts each, so collecting all seven blocked for ~5.3 s measured on
+ * a dev host. That is tolerable in `doctor`, a one-shot CLI, and not tolerable
+ * in an MCP tool handler, where it freezes the gateway for every other
+ * in-flight request.
+ *
+ * @param provider Provider key.
+ * @returns Runtime status, identical in shape and meaning to the sync variant.
+ */
+export async function getProviderRuntimeStatusAsync(
+  provider: CliType
+): Promise<ProviderRuntimeStatus> {
+  const command = PROVIDER_COMMANDS[provider];
+  const base = buildBaseStatus(
+    provider,
+    await runCommandAsync(command, VERSION_ARGS[provider], 5_000)
+  );
+  if (!base.installed) return base;
+  if (provider === "gemini") return withGeminiLoginStatus(base);
+
+  const args = LOGIN_CHECKS[provider];
+  if (!args) return base;
+  return withLoginProbe(provider, base, args, await runCommandAsync(command, args, 5_000));
+}
+
+/**
+ * List every provider's runtime status without blocking the event loop.
+ *
+ * @returns Status per provider, probed concurrently.
+ */
+export async function listProviderRuntimeStatusesAsync(): Promise<
+  Record<CliType, ProviderRuntimeStatus>
+> {
+  const entries = await Promise.all(
+    CLI_TYPES.map(async provider => [provider, await getProviderRuntimeStatusAsync(provider)])
+  );
+  return Object.fromEntries(entries) as Record<CliType, ProviderRuntimeStatus>;
+}
+
+/**
+ * Async twin of `runCommand`.
+ *
+ * Mirrors it exactly: same resolved command, same extended PATH env, empty
+ * stdin, same timeout, same output sanitisation, and the same
+ * exitCode/output shape. The only difference is that it does not block the
+ * event loop while the child runs.
+ *
+ * Never rejects. A spawn failure or timeout yields a null exit code and
+ * whatever output was captured, which `buildBaseStatus` reads as "not
+ * installed", matching the sync path's behaviour on the same failure.
+ *
+ * @param command Provider command name.
+ * @param args Argv.
+ * @param timeoutMs Kill the child after this long.
+ * @returns Exit code and combined sanitized output.
+ */
+function runCommandAsync(
+  command: string,
+  args: string[],
+  timeoutMs: number
+): Promise<{ exitCode: number | null; output: string }> {
+  const extendedPath = getExtendedPath();
+  const env = envWithExtendedPath(process.env, extendedPath);
+  const resolved = resolveCommandForSpawn(command, args, { envPath: extendedPath });
+
+  return new Promise(resolve => {
+    let settled = false;
+    let stdout = "";
+    let stderr = "";
+    const finish = (exitCode: number | null): void => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      resolve({ exitCode, output: sanitizeOutput(`${stdout}\n${stderr}`) });
+    };
+
+    let child: ReturnType<typeof spawn>;
+    try {
+      child = spawn(resolved.command, resolved.args, {
+        env,
+        windowsHide: true,
+        windowsVerbatimArguments: resolved.windowsVerbatimArguments,
+      });
+    } catch {
+      // Mirrors spawnSync's error case: no exit code, no output.
+      return resolve({ exitCode: null, output: sanitizeOutput("\n") });
+    }
+
+    const timer = setTimeout(() => {
+      child.kill("SIGKILL");
+      finish(null);
+    }, timeoutMs);
+
+    child.stdout?.setEncoding("utf8");
+    child.stderr?.setEncoding("utf8");
+    // Cap retained output: a runaway provider must not grow this unbounded.
+    child.stdout?.on("data", d => {
+      if (stdout.length < 1_000_000) stdout += d;
+    });
+    child.stderr?.on("data", d => {
+      if (stderr.length < 1_000_000) stderr += d;
+    });
+    child.on("error", () => finish(null));
+    child.on("close", code => finish(typeof code === "number" ? code : null));
+    // Match spawnSync's `input: ""`: close stdin so a prompting CLI sees EOF
+    // rather than hanging until the timeout.
+    child.stdin?.end();
+  });
 }
 
 function runCommand(
