@@ -1,6 +1,6 @@
 [Unit]
 Description=llm-cli-gateway host auto-upgrade (stage + apply latest npm release)
-Documentation=file:///srv/repos/internal/verivusai-labs/rvwr/llm-cli-gateway/scripts/host-upgrade.sh
+Documentation=https://github.com/verivus-oss/llm-cli-gateway/blob/main/scripts/host-upgrade.sh
 After=network-online.target
 Wants=network-online.target
 
