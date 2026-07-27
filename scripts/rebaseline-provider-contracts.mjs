@@ -56,22 +56,64 @@ export function parseTargetVersions(source) {
   return { versions, open, close, body };
 }
 
+/** Escape a string for literal use inside a RegExp. */
+function escapeRegExp(text) {
+  return text.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
+/**
+ * Characters that cannot appear in a version written into a double-quoted
+ * TypeScript string literal without escaping.
+ *
+ * This value comes from a vendor CLI's own `--version` banner, which is not
+ * under our control, and it is written into SOURCE. Rather than escape and
+ * hope, refuse: a version containing a quote, backslash or newline is far more
+ * likely to be a parse failure than a real version, and corrupting
+ * provider-definitions.ts is a much worse outcome than declining to rebaseline.
+ */
+const UNSAFE_IN_LITERAL = /["\\\r\n]/;
+
 /**
  * Rewrite one provider's version string in the PROVIDER_TARGET_VERSIONS block.
  *
  * Replaces only within the located block so an identical string elsewhere in
  * the file cannot be clobbered.
  *
+ * Three ways this went wrong before, all found by probing it rather than
+ * reading it, and all of them silently corrupted the file:
+ *   - a version containing `"` closed the string literal early and produced
+ *     invalid TypeScript;
+ *   - a version containing `$1` or `$&` was interpreted by String.replace as a
+ *     replacement pattern, so the written value was not the value passed in;
+ *   - `cli` was interpolated into the RegExp unescaped, so a key containing a
+ *     metacharacter could match a different provider's line.
+ *
  * @param source File contents.
  * @param cli Provider key.
  * @param nextVersion Replacement version string.
  * @returns Updated file contents.
+ * @throws When the entry is absent, or the version cannot be safely embedded.
  */
 export function rewriteTargetVersion(source, cli, nextVersion) {
+  if (typeof nextVersion !== "string" || nextVersion.length === 0) {
+    throw new Error(`Refusing to write an empty version for ${cli}`);
+  }
+  if (UNSAFE_IN_LITERAL.test(nextVersion)) {
+    throw new Error(
+      `Refusing to write version for ${cli}: contains a quote, backslash or newline ` +
+        `(${JSON.stringify(nextVersion)}). This would corrupt provider-definitions.ts.`
+    );
+  }
+
   const { open, close, body } = parseTargetVersions(source);
-  const pattern = new RegExp(`(^\\s*${cli}\\s*:\\s*")([^"]*)("\\s*,?\\s*$)`, "m");
+  const pattern = new RegExp(`(^\\s*${escapeRegExp(cli)}\\s*:\\s*")([^"]*)("\\s*,?\\s*$)`, "m");
   if (!pattern.test(body)) throw new Error(`No target-version entry for ${cli}`);
-  const nextBody = body.replace(pattern, `$1${nextVersion}$3`);
+  // Replacement FUNCTION, not a string: a string replacement would treat `$1`
+  // and `$&` inside nextVersion as capture-group references.
+  const nextBody = body.replace(
+    pattern,
+    (_match, prefix, _old, suffix) => prefix + nextVersion + suffix
+  );
   return source.slice(0, open + 1) + nextBody + source.slice(close);
 }
 

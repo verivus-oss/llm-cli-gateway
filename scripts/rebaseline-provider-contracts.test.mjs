@@ -72,6 +72,50 @@ describe("rewriteTargetVersion", () => {
   it("round-trips: rewriting to the same value is a no-op", () => {
     expect(rewriteTargetVersion(SAMPLE, "claude", "claude 2.1.220")).toBe(SAMPLE);
   });
+
+  it("handles CRLF line endings", () => {
+    const crlf = SAMPLE.replace(/\n/g, "\r\n");
+    const next = rewriteTargetVersion(crlf, "grok", "grok 0.2.113");
+    expect(parseTargetVersions(next).versions.grok).toBe("grok 0.2.113");
+  });
+
+  // The version written here comes from a vendor CLI's own --version banner,
+  // which is outside our control, and it lands in SOURCE. Each of the
+  // following silently corrupted provider-definitions.ts before, and was found
+  // by probing the function rather than reading it.
+  describe("refuses input it cannot embed safely", () => {
+    it("rejects a version containing a double quote", () => {
+      // Previously closed the string literal early: `grok: "grok 0.2."113"`.
+      expect(() => rewriteTargetVersion(SAMPLE, "grok", 'grok 0.2."113')).toThrow(/Refusing/);
+    });
+
+    it("rejects a version containing a backslash", () => {
+      expect(() => rewriteTargetVersion(SAMPLE, "grok", "grok 0.2\\113")).toThrow(/Refusing/);
+    });
+
+    it("rejects a version containing a newline", () => {
+      expect(() => rewriteTargetVersion(SAMPLE, "grok", 'grok 1.0\nclaude: "evil"')).toThrow(
+        /Refusing/
+      );
+    });
+
+    it("rejects an empty version rather than blanking the entry", () => {
+      expect(() => rewriteTargetVersion(SAMPLE, "grok", "")).toThrow(/empty version/);
+    });
+
+    it("writes $1 and $& literally instead of expanding them", () => {
+      // String.replace treats these as capture-group references, so a string
+      // replacement wrote something other than the value passed in.
+      const next = rewriteTargetVersion(SAMPLE, "grok", "grok $1$&x");
+      expect(parseTargetVersions(next).versions.grok).toBe("grok $1$&x");
+    });
+
+    it("does not let a regex metacharacter in the key match another provider", () => {
+      // `cli` used to be interpolated into the RegExp unescaped, so "gr.k"
+      // matched the grok line.
+      expect(() => rewriteTargetVersion(SAMPLE, "gr.k", "x")).toThrow(/No target-version/);
+    });
+  });
 });
 
 describe("classifyRebaseline", () => {
