@@ -3,10 +3,17 @@ Description=Daily llm-cli-gateway provider CLI contract drift check
 Documentation=file:///srv/repos/internal/verivusai-labs/rvwr/llm-cli-gateway/scripts/provider-drift-check.sh
 
 [Timer]
-# Daily, offset from gateway-autoupgrade.timer (which upgrades the GATEWAY
-# package) so the two do not contend for the machine. This watches the other
-# direction: the seven provider CLIs the gateway drives.
-OnCalendar=daily
+# Genuinely offset from gateway-autoupgrade.timer, which upgrades the GATEWAY
+# package. This watches the other direction: the seven provider CLIs the
+# gateway drives.
+#
+# The offset has to come from OnCalendar, not from RandomizedDelaySec. Both
+# units previously used `OnCalendar=daily` (midnight) and differed only in
+# their randomized delay, 30m there and 45m here. Those are INDEPENDENT random
+# windows over 00:00-00:30 and 00:00-00:45, so they overlap often rather than
+# never, and both run `npm` work. A fixed 04:00 base cannot collide with the
+# midnight one whatever either delay rolls.
+OnCalendar=*-*-* 04:00:00
 RandomizedDelaySec=45m
 Persistent=true
 
