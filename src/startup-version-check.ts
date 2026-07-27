@@ -20,9 +20,49 @@
  *     (`provider_version_guard` with `checkUpgrades`), not on every boot.
  */
 import type { Logger } from "./logger.js";
-import type { CliType } from "./provider-types.js";
-import { getCliVersions } from "./cli-updater.js";
+import { CLI_TYPES, type CliType } from "./provider-types.js";
+import { executeCli, providerCommandName } from "./executor.js";
 import { compareInstalledToTargets, summarizeVersionGuard } from "./provider-version-guard.js";
+
+/** Map of provider to reported version, or null when the CLI is absent. */
+export type InstalledVersionMap = Partial<Record<CliType, string | null>>;
+
+/**
+ * Collect installed provider versions WITHOUT blocking the event loop.
+ *
+ * Deliberately does not use `getCliVersions`. That path reaches `spawnSync`
+ * (via getProviderRuntimeStatus) before its first await, so marking the caller
+ * `void` buys nothing: control does not return until every probe has finished.
+ * Measured on this host, `void runStartupVersionCheck()` blocked for 5277 ms,
+ * which is 5 seconds during which a gateway that has just announced itself
+ * ready cannot serve anything.
+ *
+ * `executeCli` spawns asynchronously, so the probes interleave with real work
+ * instead of stalling it.
+ *
+ * @param timeoutMs Per-provider timeout.
+ * @returns Reported version per provider; null where the CLI is missing.
+ */
+export async function collectInstalledVersionsAsync(
+  timeoutMs = 5_000
+): Promise<InstalledVersionMap> {
+  const entries = await Promise.all(
+    CLI_TYPES.map(async cli => {
+      try {
+        const result = await executeCli(providerCommandName(cli), ["--version"], {
+          timeout: timeoutMs,
+        });
+        const text = `${result.stdout ?? ""}`.trim() || `${result.stderr ?? ""}`.trim();
+        return [cli, text ? text.split("\n")[0].trim() : null] as const;
+      } catch {
+        // Absent CLI, non-zero exit, or timeout: reported as not installed,
+        // which the comparison treats as a deployment fact rather than drift.
+        return [cli, null] as const;
+      }
+    })
+  );
+  return Object.fromEntries(entries) as InstalledVersionMap;
+}
 
 /** Env var that disables the check entirely. */
 export const STARTUP_VERSION_CHECK_DISABLE_ENV = "LLM_GATEWAY_DISABLE_STARTUP_VERSION_CHECK";
@@ -56,20 +96,20 @@ export function startupVersionCheckEnabled(env: NodeJS.ProcessEnv = process.env)
 export async function runStartupVersionCheck(
   logger: Logger,
   deps: {
-    getVersions?: typeof getCliVersions;
+    collectVersions?: () => Promise<InstalledVersionMap>;
     env?: NodeJS.ProcessEnv;
   } = {}
 ): Promise<CliType[]> {
   const env = deps.env ?? process.env;
   if (!startupVersionCheckEnabled(env)) return [];
 
-  try {
-    const versions = await (deps.getVersions ?? getCliVersions)();
-    const installed: Partial<Record<CliType, string | null>> = {};
-    for (const info of versions) {
-      installed[info.cli] = info.installed ? (info.version ?? null) : null;
-    }
+  // Yield once before doing anything, so even the setup cost lands after the
+  // caller has returned. `void`-ing an async function does not on its own get
+  // you off the hot path; only an actual suspension point does.
+  await new Promise(resolve => setImmediate(resolve));
 
+  try {
+    const installed = await (deps.collectVersions ?? collectInstalledVersionsAsync)();
     const summary = summarizeVersionGuard(compareInstalledToTargets(installed));
     if (summary.ok) return [];
 
