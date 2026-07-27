@@ -187,7 +187,16 @@ async function main() {
     }
   }
 
-  process.exit(plan.removals.length > 0 ? 2 : 0);
+  // Exit codes are the scheduled job's whole signal, so they distinguish the
+  // three outcomes that need different responses:
+  //   0  clean
+  //   2  drift found that this tool can rebaseline on its own
+  //   3  drift found that needs a human (a flag removal)
+  // Treating version drift as clean, which an earlier version did, makes a
+  // timer silently report success while the contract is stale.
+  if (plan.removals.length > 0) process.exit(3);
+  const rebaselinable = plan.versionUpdates.length > 0 || plan.additive.length > 0;
+  process.exit(rebaselinable ? 2 : 0);
 }
 
 /**

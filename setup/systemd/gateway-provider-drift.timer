@@ -1,0 +1,14 @@
+[Unit]
+Description=Daily llm-cli-gateway provider CLI contract drift check
+Documentation=file:///srv/repos/internal/verivusai-labs/rvwr/llm-cli-gateway/scripts/provider-drift-check.sh
+
+[Timer]
+# Daily, offset from gateway-autoupgrade.timer (which upgrades the GATEWAY
+# package) so the two do not contend for the machine. This watches the other
+# direction: the seven provider CLIs the gateway drives.
+OnCalendar=daily
+RandomizedDelaySec=45m
+Persistent=true
+
+[Install]
+WantedBy=timers.target
