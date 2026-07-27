@@ -69,20 +69,33 @@ render() {
     process.stdin.on("data", d => (s += d)).on("end", () => {
       let j;
       try { j = JSON.parse(s); } catch { console.log("COUNT unknown"); return; }
-      for (const u of j.versionUpdates ?? []) {
+      // The parse guard alone is not enough: `null` and `[]` are valid JSON
+      // that parse fine and then throw on property access or iteration. That
+      // throw escapes an async callback, so node exits non-zero, `render`
+      // fails, and `set -e` aborts the whole script BEFORE the rebuild, with
+      // source possibly already written. Validate the shape and degrade to
+      // `unknown`, which rebuilds defensively, rather than dying.
+      const arr = v => (Array.isArray(v) ? v : null);
+      if (!j || typeof j !== "object" || Array.isArray(j)) { console.log("COUNT unknown"); return; }
+      const versionUpdates = arr(j.versionUpdates ?? []);
+      const additive = arr(j.additiveFlagDrift ?? []);
+      const removed = arr(j.removedFlagDrift ?? []);
+      const written = arr(j.changesWritten ?? []);
+      if (!versionUpdates || !additive || !removed || !written) { console.log("COUNT unknown"); return; }
+      for (const u of versionUpdates) {
         console.log(`LINE ${j.applied ? "rebaselined" : "would rebaseline"} ${u.cli}: ${u.from} -> ${u.to}`);
       }
-      for (const a of j.additiveFlagDrift ?? []) {
+      for (const a of additive) {
         console.log(`LINE ${a.cli}: installed binary advertises flag(s) the contract does not know: ${a.flags.join(" ")}`);
       }
-      for (const r of j.removedFlagDrift ?? []) {
+      for (const r of removed) {
         console.log(`LINE ${r.cli}: contract declares flag(s) the installed binary NO LONGER advertises: ${r.flags.join(" ")}`);
         console.log("LINE   NOT auto-applied: a removal needs a lock-step edit across upstream-contracts.ts, provider-codegen.ts and index.ts.");
       }
-      if (!(j.versionUpdates ?? []).length && !(j.additiveFlagDrift ?? []).length && !(j.removedFlagDrift ?? []).length) {
+      if (!versionUpdates.length && !additive.length && !removed.length) {
         console.log("LINE no drift: installed CLIs match their contracts");
       }
-      console.log(`COUNT ${(j.changesWritten ?? []).length}`);
+      console.log(`COUNT ${written.length}`);
     });
   '
 }
