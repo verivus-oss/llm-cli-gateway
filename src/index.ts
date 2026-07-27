@@ -17792,7 +17792,7 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
 
   server.tool(
     "codex_fork_session",
-    "UNAVAILABLE from the gateway: `codex fork` is an interactive subcommand requiring a controlling terminal, which an MCP server cannot provide, so every call fails fast with an explanation. To continue an existing Codex conversation use codex_request with a real Codex session UUID or resumeLatest: true, which run `codex exec resume` and work headlessly. Retained because Codex exposes no non-interactive fork today; the argv builder stays ready if one appears.",
+    "UNAVAILABLE from the gateway: `codex fork` is an interactive subcommand requiring a controlling terminal, which an MCP server cannot provide, so every call fails fast with an explanation instead of spawning a child that cannot succeed. To continue an existing Codex conversation use codex_request with a real Codex session UUID or resumeLatest: true, which run `codex exec resume` and work headlessly. Retained because Codex exposes no non-interactive fork today; this prompt remains argv-bound and still rejects oversized UTF-8 input as non-retryable input_too_large before the unavailability check, so the argv builder stays ready if a headless fork appears.",
     {
       prompt: z
         .string()
@@ -17909,7 +17909,6 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
         return createErrorResponse("codex_fork_session", 1, "", corrId, err as Error);
       }
 
-
       const cliInfo = getCliInfo();
       const resolvedModel = resolveModelAlias("codex", model, cliInfo);
       const approvalDecision: ApprovalRecord | null = null;
@@ -17955,28 +17954,6 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
         return createErrorResponse("codex_fork_session", 1, "", corrId, err as Error);
       }
 
-      // Placed after every specific validation above (argument shape, argv
-      // admission, session lookup) so a caller's own mistake still produces its
-      // own precise, durably classified error rather than being masked by this
-      // blanket one. Everything below would spawn `codex fork`, which cannot
-      // succeed from an MCP server: see CODEX_FORK_UNAVAILABLE. Returning here
-      // avoids a doomed child and replaces an opaque "stdin is not a terminal",
-      // which reads like a broken environment, with the reason and the route
-      // that works.
-      //
-      // A predicate rather than an unconditional return, so the spawn path below
-      // stays reachable to the compiler and keeps type-checking instead of
-      // rotting while we wait for a headless fork upstream.
-      if (!codexForkCanRunHeadless()) {
-        return createErrorResponse(
-          "codex_fork_session",
-          1,
-          "",
-          corrId,
-          new Error(CODEX_FORK_UNAVAILABLE)
-        );
-      }
-
       logger.info(
         `[${corrId}] codex_fork_session invoked (forkLast=${Boolean(forkLast)}, sessionId=${sessionId ? "set" : "unset"})`
       );
@@ -17988,6 +17965,32 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
           sessionId,
           runtime,
         });
+
+        // Deliberately the LAST check, after argument shape, argv admission,
+        // session lookup and workspace/worktree resolution. Each of those
+        // produces a more specific and more important error than this one: a
+        // remote caller without a registered workspace must be told about the
+        // workspace requirement, not about fork being unavailable, or a
+        // containment failure would be masked by an unrelated message.
+        //
+        // Everything below spawns `codex fork`, which cannot succeed from an MCP
+        // server: see CODEX_FORK_UNAVAILABLE. Returning here avoids a doomed
+        // child and replaces an opaque "stdin is not a terminal", which reads
+        // like a broken environment, with the reason and the working route.
+        //
+        // A predicate rather than an unconditional return, so the spawn path
+        // below stays reachable to the compiler and keeps type-checking instead
+        // of rotting while we wait for a headless fork upstream.
+        if (!codexForkCanRunHeadless()) {
+          return createErrorResponse(
+            "codex_fork_session",
+            1,
+            "",
+            corrId,
+            new Error(CODEX_FORK_UNAVAILABLE)
+          );
+        }
+
         const result = await awaitJobOrDefer(
           "codex",
           finalArgs,
