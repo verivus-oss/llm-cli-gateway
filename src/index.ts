@@ -22086,15 +22086,30 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
       // Attach the concrete command for anything actually upgradable, so the
       // caller does not have to know each provider's install mechanism.
       const upgradable = upgradableProviders(upgrades);
+      // buildCliUpgradePlan THROWS for a provider whose install mechanism it
+      // cannot determine: mistral does exactly this when neither uv, pip nor
+      // brew is detected. This is a read-only diagnostic, so one unplannable
+      // provider must not fault the whole call and take the drift report with
+      // it. Report the provider as upgradable with no command instead.
       const offers = upgradable.map(target => {
-        const plan = buildCliUpgradePlan(target, "latest");
-        return {
-          cli: target,
-          command: `${plan.command} ${plan.args.join(" ")}`.trim(),
-          strategy: plan.strategy,
-          note: plan.note,
-          apply: `cli_upgrade with cli:"${target}", dryRun:false`,
-        };
+        try {
+          const plan = buildCliUpgradePlan(target, "latest");
+          return {
+            cli: target,
+            command: `${plan.command} ${plan.args.join(" ")}`.trim(),
+            strategy: plan.strategy,
+            note: plan.note,
+            apply: `cli_upgrade with cli:"${target}", dryRun:false`,
+          };
+        } catch (err) {
+          return {
+            cli: target,
+            command: null,
+            strategy: null,
+            note: `Upgrade command could not be determined: ${err instanceof Error ? err.message : String(err)}`,
+            apply: null,
+          };
+        }
       });
 
       return {
