@@ -24,109 +24,45 @@
     "next_actions"
   ],
   "properties": {
-    "schema_version": {
-      "const": "1.0"
-    },
-    "ok": {
-      "type": "boolean"
-    },
-    "generated_at": {
-      "type": "string",
-      "format": "date-time"
-    },
+    "schema_version": { "const": "1.0" },
+    "ok": { "type": "boolean" },
+    "generated_at": { "type": "string", "format": "date-time" },
     "system": {
       "type": "object",
-      "required": [
-        "os",
-        "arch",
-        "release",
-        "node_version"
-      ],
+      "required": ["os", "arch", "release", "node_version"],
       "properties": {
-        "os": {
-          "type": "string"
-        },
-        "arch": {
-          "type": "string"
-        },
-        "release": {
-          "type": "string"
-        },
-        "node_version": {
-          "type": "string"
-        }
+        "os": { "type": "string" },
+        "arch": { "type": "string" },
+        "release": { "type": "string" },
+        "node_version": { "type": "string" }
       },
       "additionalProperties": false
     },
     "gateway": {
       "type": "object",
-      "required": [
-        "name",
-        "version"
-      ],
+      "required": ["name", "version"],
       "properties": {
-        "name": {
-          "const": "llm-cli-gateway"
-        },
-        "version": {
-          "type": "string"
-        }
+        "name": { "const": "llm-cli-gateway" },
+        "version": { "type": "string" }
       },
       "additionalProperties": false
     },
     "transport": {
       "type": "object",
-      "required": [
-        "default",
-        "http"
-      ],
+      "required": ["default", "http"],
       "properties": {
-        "default": {
-          "enum": [
-            "stdio",
-            "http"
-          ]
-        },
+        "default": { "enum": ["stdio", "http"] },
         "http": {
           "type": "object",
-          "required": [
-            "enabled",
-            "host",
-            "port",
-            "path",
-            "public_url_configured",
-            "public_url"
-          ],
+          "required": ["enabled", "host", "port", "path", "public_url_configured", "public_url"],
           "properties": {
-            "enabled": {
-              "type": "boolean"
-            },
-            "host": {
-              "type": "string"
-            },
-            "port": {
-              "type": "integer",
-              "minimum": 1,
-              "maximum": 65535
-            },
-            "path": {
-              "type": "string"
-            },
-            "public_url_configured": {
-              "type": "boolean"
-            },
-            "public_url": {
-              "type": [
-                "string",
-                "null"
-              ]
-            },
-            "chatgpt_connector_url": {
-              "type": [
-                "string",
-                "null"
-              ]
-            }
+            "enabled": { "type": "boolean" },
+            "host": { "type": "string" },
+            "port": { "type": "integer", "minimum": 1, "maximum": 65535 },
+            "path": { "type": "string" },
+            "public_url_configured": { "type": "boolean" },
+            "public_url": { "type": ["string", "null"] },
+            "chatgpt_connector_url": { "type": ["string", "null"] }
           },
           "additionalProperties": false
         }
@@ -135,25 +71,11 @@
     },
     "auth": {
       "type": "object",
-      "required": [
-        "required",
-        "token_configured",
-        "source"
-      ],
+      "required": ["required", "token_configured", "source"],
       "properties": {
-        "required": {
-          "type": "boolean"
-        },
-        "token_configured": {
-          "type": "boolean"
-        },
-        "source": {
-          "enum": [
-            "env",
-            "disabled",
-            "installer-auth-token-file"
-          ]
-        },
+        "required": { "type": "boolean" },
+        "token_configured": { "type": "boolean" },
+        "source": { "enum": ["env", "disabled", "installer-auth-token-file"] },
         "oauth": {
           "type": "object",
           "required": [
@@ -165,32 +87,14 @@
             "issuer"
           ],
           "properties": {
-            "enabled": {
-              "type": "boolean"
-            },
+            "enabled": { "type": "boolean" },
             "registration_policy": {
-              "enum": [
-                "static_clients",
-                "shared_secret",
-                "open_dev"
-              ]
+              "enum": ["static_clients", "shared_secret", "open_dev"]
             },
-            "clients_configured": {
-              "type": "integer",
-              "minimum": 0
-            },
-            "shared_secret_enabled": {
-              "type": "boolean"
-            },
-            "pkce_required": {
-              "type": "boolean"
-            },
-            "issuer": {
-              "type": [
-                "string",
-                "null"
-              ]
-            }
+            "clients_configured": { "type": "integer", "minimum": 0 },
+            "shared_secret_enabled": { "type": "boolean" },
+            "pkce_required": { "type": "boolean" },
+            "issuer": { "type": ["string", "null"] }
           },
           "additionalProperties": false
         }
@@ -207,26 +111,11 @@
         "gateway_app_dir_is_workspace"
       ],
       "properties": {
-        "enabled": {
-          "type": "boolean"
-        },
-        "default": {
-          "type": [
-            "string",
-            "null"
-          ]
-        },
-        "repo_count": {
-          "type": "integer",
-          "minimum": 0
-        },
-        "allowed_root_count": {
-          "type": "integer",
-          "minimum": 0
-        },
-        "gateway_app_dir_is_workspace": {
-          "type": "boolean"
-        }
+        "enabled": { "type": "boolean" },
+        "default": { "type": ["string", "null"] },
+        "repo_count": { "type": "integer", "minimum": 0 },
+        "allowed_root_count": { "type": "integer", "minimum": 0 },
+        "gateway_app_dir_is_workspace": { "type": "boolean" }
       },
       "additionalProperties": false
     },
@@ -245,109 +134,52 @@
           "login_guidance"
         ],
         "properties": {
-          "cli_available": {
-            "type": "boolean"
-          },
-          "version": {
-            "type": [
-              "string",
-              "null"
-            ]
-          },
+          "cli_available": { "type": "boolean" },
+          "version": { "type": ["string", "null"] },
           "login_status": {
-            "enum": [
-              "authenticated",
-              "not_authenticated",
-              "unknown",
-              "not_checked"
-            ]
+            "enum": ["authenticated", "not_authenticated", "unknown", "not_checked"]
           },
           "version_command": {
             "type": "array",
-            "items": {
-              "type": "string"
-            }
+            "items": { "type": "string" }
           },
           "login_check": {
             "type": "object",
-            "required": [
-              "method",
-              "command",
-              "credential_store",
-              "detail"
-            ],
+            "required": ["method", "command", "credential_store", "detail"],
             "properties": {
-              "method": {
-                "enum": [
-                  "cli",
-                  "credential_store",
-                  "not_checked"
-                ]
-              },
+              "method": { "enum": ["cli", "credential_store", "not_checked"] },
               "command": {
-                "type": [
-                  "array",
-                  "null"
-                ],
-                "items": {
-                  "type": "string"
-                }
+                "type": ["array", "null"],
+                "items": { "type": "string" }
               },
-              "credential_store": {
-                "enum": [
-                  "present",
-                  "not_found",
-                  "not_checked"
-                ]
-              },
-              "detail": {
-                "type": "string"
-              }
+              "credential_store": { "enum": ["present", "not_found", "not_checked"] },
+              "detail": { "type": "string" }
             },
             "additionalProperties": false
           },
           "install_guidance": {
             "type": "object",
-            "required": [
-              "summary",
-              "commands"
-            ],
+            "required": ["summary", "commands"],
             "properties": {
-              "summary": {
-                "type": "string"
-              },
+              "summary": { "type": "string" },
               "commands": {
                 "type": "array",
-                "items": {
-                  "type": "string"
-                }
+                "items": { "type": "string" }
               },
-              "documentation_url": {
-                "type": "string"
-              }
+              "documentation_url": { "type": "string" }
             },
             "additionalProperties": false
           },
           "login_guidance": {
             "type": "object",
-            "required": [
-              "summary",
-              "commands",
-              "credential_handling"
-            ],
+            "required": ["summary", "commands", "credential_handling"],
             "properties": {
-              "summary": {
-                "type": "string"
-              },
+              "summary": { "type": "string" },
               "commands": {
                 "type": "array",
-                "items": {
-                  "type": "string"
-                }
+                "items": { "type": "string" }
               },
-              "credential_handling": {
-                "type": "string"
-              }
+              "credential_handling": { "type": "string" }
             },
             "additionalProperties": false
           }
@@ -372,89 +204,30 @@
       ],
       "properties": {
         "mode": {
-          "enum": [
-            "local_only",
-            "lan",
-            "tunnel",
-            "byo_reverse_proxy",
-            "misconfigured"
-          ]
+          "enum": ["local_only", "lan", "tunnel", "byo_reverse_proxy", "misconfigured"]
         },
-        "local_url": {
-          "type": "string"
-        },
-        "public_url_configured": {
-          "type": "boolean"
-        },
-        "public_url": {
-          "type": [
-            "string",
-            "null"
-          ]
-        },
-        "https_required_for_web": {
-          "type": "boolean"
-        },
-        "https_configured": {
-          "type": "boolean"
-        },
-        "web_clients_supported": {
-          "type": "boolean"
-        },
-        "tunnel_provider": {
-          "type": [
-            "string",
-            "null"
-          ]
-        },
-        "reachable_from_web": {
-          "enum": [
-            "not_checked",
-            "reachable",
-            "unreachable"
-          ]
-        },
+        "local_url": { "type": "string" },
+        "public_url_configured": { "type": "boolean" },
+        "public_url": { "type": ["string", "null"] },
+        "https_required_for_web": { "type": "boolean" },
+        "https_configured": { "type": "boolean" },
+        "web_clients_supported": { "type": "boolean" },
+        "tunnel_provider": { "type": ["string", "null"] },
+        "reachable_from_web": { "enum": ["not_checked", "reachable", "unreachable"] },
         "verification": {
           "type": "object",
-          "required": [
-            "method",
-            "checked_url",
-            "status_code",
-            "error"
-          ],
+          "required": ["method", "checked_url", "status_code", "error"],
           "properties": {
-            "method": {
-              "enum": [
-                "not_checked",
-                "http_head"
-              ]
-            },
-            "checked_url": {
-              "type": [
-                "string",
-                "null"
-              ]
-            },
-            "status_code": {
-              "type": [
-                "integer",
-                "null"
-              ]
-            },
-            "error": {
-              "type": [
-                "string",
-                "null"
-              ]
-            }
+            "method": { "enum": ["not_checked", "http_head"] },
+            "checked_url": { "type": ["string", "null"] },
+            "status_code": { "type": ["integer", "null"] },
+            "error": { "type": ["string", "null"] }
           },
           "additionalProperties": false
         },
         "next_actions": {
           "type": "array",
-          "items": {
-            "type": "string"
-          }
+          "items": { "type": "string" }
         }
       },
       "additionalProperties": false
@@ -473,9 +246,7 @@
         "next_actions"
       ],
       "properties": {
-        "ready": {
-          "type": "boolean"
-        },
+        "ready": { "type": "boolean" },
         "stage": {
           "enum": [
             "not_started",
@@ -488,25 +259,9 @@
             "ready"
           ]
         },
-        "public_url": {
-          "type": [
-            "string",
-            "null"
-          ]
-        },
-        "mcp_url": {
-          "type": [
-            "string",
-            "null"
-          ]
-        },
-        "auth_mode": {
-          "enum": [
-            "oauth",
-            "bearer_token",
-            "none"
-          ]
-        },
+        "public_url": { "type": ["string", "null"] },
+        "mcp_url": { "type": ["string", "null"] },
+        "auth_mode": { "enum": ["oauth", "bearer_token", "none"] },
         "oauth": {
           "type": "object",
           "required": [
@@ -519,75 +274,34 @@
             "consent_required"
           ],
           "properties": {
-            "enabled": {
-              "type": "boolean"
-            },
-            "issuer": {
-              "type": [
-                "string",
-                "null"
-              ]
-            },
-            "authorization_url": {
-              "type": [
-                "string",
-                "null"
-              ]
-            },
-            "token_url": {
-              "type": [
-                "string",
-                "null"
-              ]
-            },
+            "enabled": { "type": "boolean" },
+            "issuer": { "type": ["string", "null"] },
+            "authorization_url": { "type": ["string", "null"] },
+            "token_url": { "type": ["string", "null"] },
             "registration_policy": {
-              "enum": [
-                "static_clients",
-                "shared_secret",
-                "open_dev"
-              ]
+              "enum": ["static_clients", "shared_secret", "open_dev"]
             },
-            "clients_configured": {
-              "type": "integer",
-              "minimum": 0
-            },
-            "consent_required": {
-              "type": "boolean"
-            }
+            "clients_configured": { "type": "integer", "minimum": 0 },
+            "consent_required": { "type": "boolean" }
           },
           "additionalProperties": false
         },
         "workspace": {
           "type": "object",
-          "required": [
-            "ready",
-            "default",
-            "aliases"
-          ],
+          "required": ["ready", "default", "aliases"],
           "properties": {
-            "ready": {
-              "type": "boolean"
-            },
-            "default": {
-              "type": [
-                "string",
-                "null"
-              ]
-            },
+            "ready": { "type": "boolean" },
+            "default": { "type": ["string", "null"] },
             "aliases": {
               "type": "array",
-              "items": {
-                "type": "string"
-              }
+              "items": { "type": "string" }
             }
           },
           "additionalProperties": false
         },
         "next_actions": {
           "type": "array",
-          "items": {
-            "type": "string"
-          }
+          "items": { "type": "string" }
         }
       },
       "additionalProperties": false
@@ -602,15 +316,9 @@
         "vibe_session_logging"
       ],
       "properties": {
-        "claude_desktop_config_present": {
-          "type": "boolean"
-        },
-        "codex_config_present": {
-          "type": "boolean"
-        },
-        "gemini_settings_present": {
-          "type": "boolean"
-        },
+        "claude_desktop_config_present": { "type": "boolean" },
+        "codex_config_present": { "type": "boolean" },
+        "gemini_settings_present": { "type": "boolean" },
         "gemini_config": {
           "type": "object",
           "required": [
@@ -625,57 +333,34 @@
             "next_actions"
           ],
           "properties": {
-            "project_gemini_md_present": {
-              "type": "boolean"
-            },
-            "project_gemini_md_path": {
-              "type": "string"
-            },
-            "user_gemini_md_present": {
-              "type": "boolean"
-            },
-            "user_gemini_md_path": {
-              "type": "string"
-            },
-            "settings_json_present": {
-              "type": "boolean"
-            },
-            "settings_json_path": {
-              "type": "string"
-            },
+            "project_gemini_md_present": { "type": "boolean" },
+            "project_gemini_md_path": { "type": "string" },
+            "user_gemini_md_present": { "type": "boolean" },
+            "user_gemini_md_path": { "type": "string" },
+            "settings_json_present": { "type": "boolean" },
+            "settings_json_path": { "type": "string" },
             "mcp_servers_registered": {
               "type": "array",
-              "items": {
-                "type": "string"
-              }
+              "items": { "type": "string" }
             },
             "mcp_reconciliation": {
               "type": "object",
-              "required": [
-                "whitelisted",
-                "missing_from_settings"
-              ],
+              "required": ["whitelisted", "missing_from_settings"],
               "properties": {
                 "whitelisted": {
                   "type": "array",
-                  "items": {
-                    "type": "string"
-                  }
+                  "items": { "type": "string" }
                 },
                 "missing_from_settings": {
                   "type": "array",
-                  "items": {
-                    "type": "string"
-                  }
+                  "items": { "type": "string" }
                 }
               },
               "additionalProperties": false
             },
             "next_actions": {
               "type": "array",
-              "items": {
-                "type": "string"
-              }
+              "items": { "type": "string" }
             }
           },
           "additionalProperties": false
@@ -690,18 +375,10 @@
             "kit_note"
           ],
           "properties": {
-            "config_path": {
-              "type": "string"
-            },
-            "config_present": {
-              "type": "boolean"
-            },
-            "session_logging_enabled": {
-              "type": "boolean"
-            },
-            "note": {
-              "type": "string"
-            },
+            "config_path": { "type": "string" },
+            "config_present": { "type": "boolean" },
+            "session_logging_enabled": { "type": "boolean" },
+            "note": { "type": "string" },
             "kit_note": {
               "type": "string",
               "description": "How this ambient setting relates to a Personal Agent Config Kit mistral turn, which runs under a redirected VIBE_HOME and never reads this file."
@@ -714,43 +391,23 @@
     },
     "cache_awareness": {
       "type": "object",
-      "required": [
-        "enabled_features",
-        "last_24h",
-        "per_cli"
-      ],
+      "required": ["enabled_features", "last_24h", "per_cli"],
       "properties": {
         "enabled_features": {
           "type": "array",
           "items": {
             "type": "string",
-            "enum": [
-              "anthropic_cache_control",
-              "ttl_warnings"
-            ]
+            "enum": ["anthropic_cache_control", "ttl_warnings"]
           }
         },
         "last_24h": {
           "type": "object",
-          "required": [
-            "hit_rate",
-            "total_hits",
-            "total_requests",
-            "estimated_savings_usd"
-          ],
+          "required": ["hit_rate", "total_hits", "total_requests", "estimated_savings_usd"],
           "properties": {
-            "hit_rate": {
-              "type": "number"
-            },
-            "total_hits": {
-              "type": "integer"
-            },
-            "total_requests": {
-              "type": "integer"
-            },
-            "estimated_savings_usd": {
-              "type": "number"
-            }
+            "hit_rate": { "type": "number" },
+            "total_hits": { "type": "integer" },
+            "total_requests": { "type": "integer" },
+            "estimated_savings_usd": { "type": "number" }
           },
           "additionalProperties": false
         },
@@ -758,21 +415,11 @@
           "type": "object",
           "additionalProperties": {
             "type": "object",
-            "required": [
-              "hit_rate",
-              "total_hits",
-              "total_cache_read_tokens"
-            ],
+            "required": ["hit_rate", "total_hits", "total_cache_read_tokens"],
             "properties": {
-              "hit_rate": {
-                "type": "number"
-              },
-              "total_hits": {
-                "type": "integer"
-              },
-              "total_cache_read_tokens": {
-                "type": "integer"
-              }
+              "hit_rate": { "type": "number" },
+              "total_hits": { "type": "integer" },
+              "total_cache_read_tokens": { "type": "integer" }
             },
             "additionalProperties": false
           }
@@ -782,44 +429,24 @@
     },
     "provider_capabilities": {
       "type": "object",
-      "required": [
-        "schema_version",
-        "tool",
-        "resources",
-        "cache_ttl_ms",
-        "providers"
-      ],
+      "required": ["schema_version", "tool", "resources", "cache_ttl_ms", "providers"],
       "properties": {
-        "schema_version": {
-          "const": "provider-tool-capabilities.v2"
-        },
-        "tool": {
-          "const": "provider_tool_capabilities"
-        },
+        "schema_version": { "const": "provider-tool-capabilities.v2" },
+        "tool": { "const": "provider_tool_capabilities" },
         "resources": {
           "type": "object",
-          "required": [
-            "catalog",
-            "providers"
-          ],
+          "required": ["catalog", "providers"],
           "properties": {
-            "catalog": {
-              "const": "provider-tools://catalog"
-            },
+            "catalog": { "const": "provider-tools://catalog" },
             "providers": {
               "type": "object",
               "minProperties": 1,
-              "additionalProperties": {
-                "type": "string"
-              }
+              "additionalProperties": { "type": "string" }
             }
           },
           "additionalProperties": false
         },
-        "cache_ttl_ms": {
-          "type": "integer",
-          "minimum": 0
-        },
+        "cache_ttl_ms": { "type": "integer", "minimum": 0 },
         "providers": {
           "type": "object",
           "minProperties": 1,
@@ -837,50 +464,26 @@
               "warnings"
             ],
             "properties": {
-              "provider_kind": {
-                "enum": [
-                  "cli",
-                  "api"
-                ]
-              },
-              "cli_available": {
-                "type": "boolean"
-              },
+              "provider_kind": { "enum": ["cli", "api"] },
+              "cli_available": { "type": "boolean" },
               "gateway_request_tools": {
                 "type": "array",
-                "items": {
-                  "type": "string"
-                }
+                "items": { "type": "string" }
               },
               "supported_features": {
                 "type": "array",
-                "items": {
-                  "type": "string"
-                }
+                "items": { "type": "string" }
               },
               "unsupported_inputs": {
                 "type": "array",
-                "items": {
-                  "type": "string"
-                }
+                "items": { "type": "string" }
               },
-              "config_surface_count": {
-                "type": "integer",
-                "minimum": 0
-              },
-              "discovered_skill_count": {
-                "type": "integer",
-                "minimum": 0
-              },
-              "discovered_provider_tool_count": {
-                "type": "integer",
-                "minimum": 0
-              },
+              "config_surface_count": { "type": "integer", "minimum": 0 },
+              "discovered_skill_count": { "type": "integer", "minimum": 0 },
+              "discovered_provider_tool_count": { "type": "integer", "minimum": 0 },
               "warnings": {
                 "type": "array",
-                "items": {
-                  "type": "string"
-                }
+                "items": { "type": "string" }
               }
             },
             "additionalProperties": false
@@ -892,35 +495,16 @@
     "least_cost": {
       "type": "object",
       "description": "LCR phase_3: least-cost-routing eligibility summary. Economics-only and secret-free (model names, pricing families, price provenance, tiers, telemetry tiers, price-table staleness, anonymized calibration buckets). ALWAYS present; compact (empty arrays) when routing is disabled.",
-      "required": [
-        "enabled",
-        "pricing",
-        "providers",
-        "untieredModels",
-        "calibrationQuality"
-      ],
+      "required": ["enabled", "pricing", "providers", "untieredModels", "calibrationQuality"],
       "properties": {
-        "enabled": {
-          "type": "boolean"
-        },
+        "enabled": { "type": "boolean" },
         "pricing": {
           "type": "object",
-          "required": [
-            "tableAsOf",
-            "apiCatalogAsOf",
-            "staleDays"
-          ],
+          "required": ["tableAsOf", "apiCatalogAsOf", "staleDays"],
           "properties": {
-            "tableAsOf": {
-              "type": "string"
-            },
-            "apiCatalogAsOf": {
-              "type": "string"
-            },
-            "staleDays": {
-              "type": "integer",
-              "minimum": 0
-            }
+            "tableAsOf": { "type": "string" },
+            "apiCatalogAsOf": { "type": "string" },
+            "staleDays": { "type": "integer", "minimum": 0 }
           },
           "additionalProperties": false
         },
@@ -928,62 +512,23 @@
           "type": "array",
           "items": {
             "type": "object",
-            "required": [
-              "provider",
-              "telemetryTier",
-              "candidates"
-            ],
+            "required": ["provider", "telemetryTier", "candidates"],
             "properties": {
-              "provider": {
-                "type": "string"
-              },
-              "telemetryTier": {
-                "enum": [
-                  "T1",
-                  "T2",
-                  "T3",
-                  "T4"
-                ]
-              },
+              "provider": { "type": "string" },
+              "telemetryTier": { "enum": ["T1", "T2", "T3", "T4"] },
               "candidates": {
                 "type": "array",
                 "items": {
                   "type": "object",
-                  "required": [
-                    "model",
-                    "family",
-                    "priced",
-                    "priceSource",
-                    "tier"
-                  ],
+                  "required": ["model", "family", "priced", "priceSource", "tier"],
                   "properties": {
-                    "model": {
-                      "type": "string"
-                    },
-                    "family": {
-                      "type": "string"
-                    },
-                    "priced": {
-                      "type": "boolean"
-                    },
-                    "priceSource": {
-                      "enum": [
-                        "table",
-                        "api-catalog",
-                        "unknown"
-                      ]
-                    },
+                    "model": { "type": "string" },
+                    "family": { "type": "string" },
+                    "priced": { "type": "boolean" },
+                    "priceSource": { "enum": ["table", "api-catalog", "unknown"] },
                     "tier": {
-                      "type": [
-                        "string",
-                        "null"
-                      ],
-                      "enum": [
-                        "economy",
-                        "standard",
-                        "frontier",
-                        null
-                      ]
+                      "type": ["string", "null"],
+                      "enum": ["economy", "standard", "frontier", null]
                     }
                   },
                   "additionalProperties": false
@@ -995,38 +540,18 @@
         },
         "untieredModels": {
           "type": "array",
-          "items": {
-            "type": "string"
-          }
+          "items": { "type": "string" }
         },
         "calibrationQuality": {
           "type": "array",
           "items": {
             "type": "object",
-            "required": [
-              "bucket",
-              "k",
-              "samples",
-              "confidence"
-            ],
+            "required": ["bucket", "k", "samples", "confidence"],
             "properties": {
-              "bucket": {
-                "type": "string"
-              },
-              "k": {
-                "type": "number"
-              },
-              "samples": {
-                "type": "integer",
-                "minimum": 0
-              },
-              "confidence": {
-                "enum": [
-                  "high",
-                  "medium",
-                  "low"
-                ]
-              }
+              "bucket": { "type": "string" },
+              "k": { "type": "number" },
+              "samples": { "type": "integer", "minimum": 0 },
+              "confidence": { "enum": ["high", "medium", "low"] }
             },
             "additionalProperties": false
           }
@@ -1051,46 +576,16 @@
         "provider_eligibility"
       ],
       "properties": {
-        "enabled": {
-          "type": "boolean"
-        },
-        "configuration_valid": {
-          "type": "boolean"
-        },
-        "ready": {
-          "type": "boolean"
-        },
-        "claude_bare_auth_configured": {
-          "type": "boolean"
-        },
-        "baseline_present": {
-          "type": "boolean"
-        },
-        "current_release_id": {
-          "type": [
-            "string",
-            "null"
-          ]
-        },
-        "last_success_at": {
-          "type": [
-            "string",
-            "null"
-          ],
-          "format": "date-time"
-        },
-        "stale": {
-          "type": "boolean"
-        },
-        "last_sync_error": {
-          "type": [
-            "string",
-            "null"
-          ]
-        },
-        "durable_async_configured": {
-          "type": "boolean"
-        },
+        "enabled": { "type": "boolean" },
+        "configuration_valid": { "type": "boolean" },
+        "ready": { "type": "boolean" },
+        "claude_bare_auth_configured": { "type": "boolean" },
+        "baseline_present": { "type": "boolean" },
+        "current_release_id": { "type": ["string", "null"] },
+        "last_success_at": { "type": ["string", "null"], "format": "date-time" },
+        "stale": { "type": "boolean" },
+        "last_sync_error": { "type": ["string", "null"] },
+        "durable_async_configured": { "type": "boolean" },
         "provider_eligibility": {
           "type": "object",
           "description": "Kit eligibility for every CLI provider, keyed by provider id. kit_supported is a static registry fact; eligible additionally requires the Kit to be enabled and every precondition met. blockers names unmet preconditions and never carries a credential value or a local path.",
@@ -1105,39 +600,15 @@
               "blockers"
             ],
             "properties": {
-              "kit_supported": {
-                "type": "boolean"
-              },
-              "eligible": {
-                "type": "boolean"
-              },
+              "kit_supported": { "type": "boolean" },
+              "eligible": { "type": "boolean" },
               "isolation_model": {
-                "type": [
-                  "string",
-                  "null"
-                ],
-                "enum": [
-                  "bare-flag",
-                  "strip-ambient",
-                  "controlled-environment",
-                  null
-                ]
+                "type": ["string", "null"],
+                "enum": ["bare-flag", "strip-ambient", "controlled-environment", null]
               },
-              "required_credential_env": {
-                "type": [
-                  "string",
-                  "null"
-                ]
-              },
-              "required_credential_configured": {
-                "type": "boolean"
-              },
-              "blockers": {
-                "type": "array",
-                "items": {
-                  "type": "string"
-                }
-              }
+              "required_credential_env": { "type": ["string", "null"] },
+              "required_credential_configured": { "type": "boolean" },
+              "blockers": { "type": "array", "items": { "type": "string" } }
             },
             "additionalProperties": false
           }
@@ -1148,15 +619,9 @@
     "api_providers": {
       "type": "object",
       "description": "Slice 6: health of enabled [providers.<name>] (kind:api) providers. OMITTED entirely when none are enabled (dormant byte-identical).",
-      "required": [
-        "enabled_count",
-        "providers"
-      ],
+      "required": ["enabled_count", "providers"],
       "properties": {
-        "enabled_count": {
-          "type": "integer",
-          "minimum": 1
-        },
+        "enabled_count": { "type": "integer", "minimum": 1 },
         "providers": {
           "type": "object",
           "additionalProperties": {
@@ -1173,49 +638,18 @@
               "login_guidance"
             ],
             "properties": {
-              "name": {
-                "type": "string"
-              },
-              "kind": {
-                "enum": [
-                  "openai-compatible",
-                  "anthropic",
-                  "xai-responses"
-                ]
-              },
-              "base_url": {
-                "type": "string"
-              },
-              "default_model": {
-                "type": "string"
-              },
+              "name": { "type": "string" },
+              "kind": { "enum": ["openai-compatible", "anthropic", "xai-responses"] },
+              "base_url": { "type": "string" },
+              "default_model": { "type": "string" },
               "models": {
-                "type": [
-                  "array",
-                  "null"
-                ],
-                "items": {
-                  "type": "string"
-                }
+                "type": ["array", "null"],
+                "items": { "type": "string" }
               },
-              "api_key_env": {
-                "type": [
-                  "string",
-                  "null"
-                ]
-              },
-              "api_key_present": {
-                "type": "boolean"
-              },
-              "reachable": {
-                "type": [
-                  "boolean",
-                  "null"
-                ]
-              },
-              "reachability_error": {
-                "type": "string"
-              },
+              "api_key_env": { "type": ["string", "null"] },
+              "api_key_present": { "type": "boolean" },
+              "reachable": { "type": ["boolean", "null"] },
+              "reachability_error": { "type": "string" },
               "login_guidance": {
                 "type": "object",
                 "required": [
@@ -1229,40 +663,14 @@
                   "credentialHandling"
                 ],
                 "properties": {
-                  "provider": {
-                    "type": "string"
-                  },
-                  "displayName": {
-                    "type": "string"
-                  },
-                  "kind": {
-                    "enum": [
-                      "openai-compatible",
-                      "anthropic",
-                      "xai-responses"
-                    ]
-                  },
-                  "baseUrl": {
-                    "type": "string"
-                  },
-                  "apiKeyEnv": {
-                    "type": [
-                      "string",
-                      "null"
-                    ]
-                  },
-                  "summary": {
-                    "type": "string"
-                  },
-                  "steps": {
-                    "type": "array",
-                    "items": {
-                      "type": "string"
-                    }
-                  },
-                  "credentialHandling": {
-                    "type": "string"
-                  }
+                  "provider": { "type": "string" },
+                  "displayName": { "type": "string" },
+                  "kind": { "enum": ["openai-compatible", "anthropic", "xai-responses"] },
+                  "baseUrl": { "type": "string" },
+                  "apiKeyEnv": { "type": ["string", "null"] },
+                  "summary": { "type": "string" },
+                  "steps": { "type": "array", "items": { "type": "string" } },
+                  "credentialHandling": { "type": "string" }
                 },
                 "additionalProperties": false
               }
@@ -1285,93 +693,27 @@
         "contracts"
       ],
       "properties": {
-        "note": {
-          "type": "string"
-        },
-        "recommendation": {
-          "type": "string"
-        },
-        "how_to_check": {
-          "type": "string"
-        },
-        "probed": {
-          "type": "boolean"
-        },
+        "note": { "type": "string" },
+        "recommendation": { "type": "string" },
+        "how_to_check": { "type": "string" },
+        "probed": { "type": "boolean" },
         "installed_versions": {
           "type": "object",
-          "additionalProperties": {
-            "type": [
-              "string",
-              "null"
-            ]
-          }
+          "additionalProperties": { "type": ["string", "null"] }
         },
         "version_guard": {
           "type": "object",
           "description": "Installed-versus-contracted provider version comparison. Offline: derived from installed_versions and PROVIDER_TARGET_VERSIONS, spawning nothing.",
-          "additionalProperties": false,
-          "required": [
-            "ok",
-            "drifted",
-            "not_installed",
-            "unknown",
-            "providers"
-          ],
+          "required": ["ok", "drifted", "not_installed", "unknown", "providers"],
           "properties": {
-            "ok": {
-              "type": "boolean",
-              "description": "False only when a provider's installed version drifted from its contract."
-            },
-            "drifted": {
-              "type": "array",
-              "items": {
-                "type": "string",
-                "enum": [
-                  "claude",
-                  "codex",
-                  "gemini",
-                  "grok",
-                  "mistral",
-                  "devin",
-                  "cursor"
-                ]
-              }
-            },
-            "not_installed": {
-              "type": "array",
-              "items": {
-                "type": "string",
-                "enum": [
-                  "claude",
-                  "codex",
-                  "gemini",
-                  "grok",
-                  "mistral",
-                  "devin",
-                  "cursor"
-                ]
-              }
-            },
-            "unknown": {
-              "type": "array",
-              "items": {
-                "type": "string",
-                "enum": [
-                  "claude",
-                  "codex",
-                  "gemini",
-                  "grok",
-                  "mistral",
-                  "devin",
-                  "cursor"
-                ]
-              }
-            },
+            "ok": { "type": "boolean" },
+            "drifted": { "type": "array", "items": { "type": "string" } },
+            "not_installed": { "type": "array", "items": { "type": "string" } },
+            "unknown": { "type": "array", "items": { "type": "string" } },
             "providers": {
               "type": "array",
               "items": {
                 "type": "object",
-                "additionalProperties": false,
                 "required": [
                   "cli",
                   "state",
@@ -1382,59 +724,29 @@
                   "detail"
                 ],
                 "properties": {
-                  "cli": {
-                    "type": "string",
-                    "enum": [
-                      "claude",
-                      "codex",
-                      "gemini",
-                      "grok",
-                      "mistral",
-                      "devin",
-                      "cursor"
-                    ]
-                  },
+                  "cli": { "type": "string" },
                   "state": {
                     "type": "string",
-                    "enum": [
-                      "match",
-                      "drift",
-                      "not-installed",
-                      "unknown"
-                    ]
+                    "enum": ["match", "drift", "not-installed", "unknown"]
                   },
-                  "installed": {
-                    "type": [
-                      "string",
-                      "null"
-                    ]
-                  },
-                  "target": {
-                    "type": "string"
-                  },
-                  "installedNormalized": {
-                    "type": "string"
-                  },
-                  "targetNormalized": {
-                    "type": "string"
-                  },
-                  "detail": {
-                    "type": "string"
-                  }
-                }
+                  "installed": { "type": ["string", "null"] },
+                  "target": { "type": "string" },
+                  "installedNormalized": { "type": "string" },
+                  "targetNormalized": { "type": "string" },
+                  "detail": { "type": "string" }
+                },
+                "additionalProperties": false
               }
             }
-          }
+          },
+          "additionalProperties": false
         },
         "contracts": {
           "type": "object",
           "additionalProperties": true
         },
         "probe_report": {
-          "type": [
-            "object",
-            "null"
-          ],
+          "type": ["object", "null"],
           "additionalProperties": true
         }
       },
@@ -1442,9 +754,7 @@
     },
     "next_actions": {
       "type": "array",
-      "items": {
-        "type": "string"
-      }
+      "items": { "type": "string" }
     }
   },
   "additionalProperties": false
