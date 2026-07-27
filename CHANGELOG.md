@@ -4,6 +4,14 @@ All notable changes to the llm-cli-gateway project.
 
 ## [Unreleased]
 
+## [3.1.0-rc.1] - 2026-07-27: provider version guard, durable job output, Mistral Kit
+
+Release candidate. The gateway now notices when a provider CLI has moved
+underneath it, instead of carrying a recorded contract that only a human running
+a manual probe would ever discover was stale. Alongside that, provider output
+written during shutdown is retained rather than dropped, and Mistral joins the
+Personal Agent Config Kit.
+
 ### Added
 
 - **Mistral in the Personal Agent Config Kit.** `mistral_request` and
@@ -36,6 +44,31 @@ All notable changes to the llm-cli-gateway project.
   scoped to the default argv: cursor does stream under
   `outputFormat: "stream-json"`.
 
+- **Provider version drift is detected rather than merely reported.** `doctor`
+  already emitted both the installed provider versions and the recorded contract
+  targets, in one document, and never compared them; it printed `probed: false`
+  and a string telling a human to go run the probe. `upstream.version_guard` now
+  performs that comparison on every run, offline, and the same comparison is
+  exposed as a new read-only `provider_version_guard` tool and runs once at
+  gateway start (silent unless something has drifted, disabled with
+  `LLM_GATEWAY_DISABLE_STARTUP_VERSION_CHECK`). Version strings are normalised
+  before comparison, because the seven CLIs disagree about whether to print
+  their own name: a naive string compare reports drift on three of seven
+  correct installs.
+- **Upgrade availability for provider CLIs.** The guard reports whether a newer
+  version has been published, from npm for Claude and Codex, PyPI for Mistral,
+  and Grok's own structured update check. Gemini, Devin and Cursor report
+  `unknown` with a stated reason rather than a guess, because none exposes a
+  check that is guaranteed not to install as a side effect. A probe that fails
+  reports `unknown`; it never reports `current`.
+- **`npm run providers:rebaseline` (and `:apply`)** rewrites the recorded target
+  versions and additive contract drift in place, so a routine provider CLI
+  upgrade no longer has to be reconciled by hand. Flag removals are deliberately
+  not automated: `flags` is the argv emit allowlist, so deleting an entry from
+  the contract alone leaves the generator and the request path dangling. Those
+  exit with a distinct status naming the three files a human must edit.
+  `setup/systemd/gateway-provider-drift.{service,timer}` runs the check daily.
+
 ### Changed
 
 - `client_config.vibe_session_logging` in the doctor report gained a `kit_note`
@@ -46,6 +79,16 @@ All notable changes to the llm-cli-gateway project.
   is no longer told to supply a `workingDir` its own gate rejects.
 
 ### Fixed
+
+- **Probing provider CLI versions no longer freezes the gateway.** Collecting
+  the seven providers' versions runs up to two `spawnSync` calls each, so the
+  work completed before the enclosing async function reached its first `await`
+  and blocked the event loop for roughly 5.3 seconds, stalling every other
+  in-flight request. This affected all three callers: the startup check, the
+  `provider_version_guard` handler, and the `cli_versions` tool. All three now
+  probe asynchronously and concurrently. `cli_versions` keeps reporting login
+  status and install guidance, verified identical between the two paths for
+  every provider.
 
 - **Provider output flushed during shutdown is no longer lost.** Cancellation,
   idle timeout and the output cap all commit a job's terminal row at the moment
