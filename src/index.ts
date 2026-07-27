@@ -1210,7 +1210,8 @@ export function resolveGatewayServerRuntime(
             deps.providers ?? getProvidersConfig(runtimeLogger),
             undefined,
             deps.acpConfig ?? getAcpConfig(runtimeLogger),
-            deps.leastCost ?? getLeastCostConfig(runtimeLogger)
+            deps.leastCost ?? getLeastCostConfig(runtimeLogger),
+            () => runtimePersonalConfig.settings.enabled
           )
         : resourceProvider),
     db: "db" in deps ? (deps.db ?? null) : db,
@@ -23026,7 +23027,10 @@ async function initializeSessionManager(): Promise<void> {
     getProvidersConfig(logger),
     undefined,
     getAcpConfig(logger),
-    getLeastCostConfig(logger)
+    getLeastCostConfig(logger),
+    // Read lazily: this provider is built during session-manager init, and the
+    // Kit setting is resolved from config each time rather than captured here.
+    () => loadPersonalConfigSettings(undefined, logger).settings.enabled
   );
 }
 

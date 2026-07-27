@@ -113,12 +113,29 @@ export class ResourceProvider {
     // disabled they are neither listed nor readable (readResource returns null),
     // mirroring the [least_cost] all-off default. index.ts must thread the
     // resolved LeastCostConfig here to actually surface them.
-    private leastCost: LeastCostConfig | undefined = undefined
+    private leastCost: LeastCostConfig | undefined = undefined,
+    /**
+     * Whether the Personal Agent Config Kit is enabled, read lazily because the
+     * provider outlives any single request and the Kit can be resolved after
+     * construction. Defaults to "not enabled" so existing callers and tests are
+     * unaffected.
+     */
+    private kitEnabled: () => boolean = () => false
   ) {}
 
-  /** LCR phase_2: true only when routing resources should be exposed. */
+  /**
+   * LCR phase_2: true only when routing resources should be exposed.
+   *
+   * Mirrors the route-tool gate (`leastCost.enabled && !personalConfigEnabled`).
+   * The Kit term matters even though index.ts already refuses to register these
+   * URIs under the Kit: leaving the reader permissive would reproduce, in mirror
+   * image, the exact defect this work fixed. There, listResources() declared two
+   * URIs the server never registered; here, readResource() would serve a URI the
+   * server never registers. Both are a declaration disagreeing with exposure, so
+   * both sides now carry the same condition.
+   */
   private routingResourcesEnabled(): boolean {
-    return this.leastCost?.enabled === true;
+    return this.leastCost?.enabled === true && !this.kitEnabled();
   }
 
   /** Read-only flight-recorder accessor for cache-state resource readers. */
