@@ -68,6 +68,7 @@
     "provider_subcommand_drift",
     "provider_subcommands_list",
     "provider_tool_capabilities",
+    "provider_version_guard",
     "red_team_review",
     "review_changes",
     "second_opinion",

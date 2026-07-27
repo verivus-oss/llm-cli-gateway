@@ -9,7 +9,7 @@ npm run site:generate
 ```
 
 - Public site version: `3.0.0`
-- Tool count: 63
+- Tool count: 64
 - Source: runtime MCP tools/list from dist/index.js over in-memory MCP transport
 - Capture command: `node scripts/generate-site-discovery.mjs`
 - Generated at: deterministic build output
@@ -80,6 +80,7 @@ npm run site:generate
 - `provider_subcommand_drift` - Probe declared provider subcommand --help surfaces and return compact drift rows without raw help output.
 - `provider_subcommands_list` - Return a compact, filterable read-only catalog of declared provider CLI subcommands without flags or raw help.
 - `provider_tool_capabilities` - Report provider tool/feature capabilities and discovered local skill/tool integrations for claude|codex|gemini|grok|mistral|devin|cursor|grok_api, or an enabled API provider name.
+- `provider_version_guard` - Compare installed provider CLI versions against their contracted targets, and optionally check whether a newer version is published. Reports which providers drifted and which can be upgraded, plus the exact upgrade command for each.
 
 ## Operations
 

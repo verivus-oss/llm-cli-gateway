@@ -5,7 +5,7 @@
   "siteVersion": "3.0.0",
   "captureCommand": "node scripts/generate-site-discovery.mjs",
   "source": "runtime MCP tools/list from dist/index.js over in-memory MCP transport",
-  "toolCount": 63,
+  "toolCount": 64,
   "tools": [
     {
       "name": "approval_list",
@@ -4746,6 +4746,42 @@
             "type": "boolean",
             "default": false,
             "description": "Bypass the short-lived capability cache"
+          }
+        },
+        "additionalProperties": false,
+        "$schema": "http://json-schema.org/draft-07/schema#"
+      }
+    },
+    {
+      "name": "provider_version_guard",
+      "description": "Compare installed provider CLI versions against their contracted targets, and optionally check whether a newer version is published. Reports which providers drifted and which can be upgraded, plus the exact upgrade command for each.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "cli": {
+            "type": "string",
+            "enum": [
+              "claude",
+              "codex",
+              "gemini",
+              "grok",
+              "mistral",
+              "devin",
+              "cursor"
+            ],
+            "description": "CLI filter (claude|codex|gemini|grok|mistral|devin|cursor)"
+          },
+          "checkUpgrades": {
+            "type": "boolean",
+            "default": false,
+            "description": "When true, query each provider's release source for a newer version. Costs network and one subprocess for grok; four of seven providers can be checked, the rest report unknown with a reason."
+          },
+          "timeoutMs": {
+            "type": "integer",
+            "minimum": 1000,
+            "maximum": 120000,
+            "default": 10000,
+            "description": "Per-provider timeout for the upgrade check"
           }
         },
         "additionalProperties": false,

@@ -291,7 +291,10 @@ import {
   readPersistedRequest,
   PERSISTED_REQUEST_DEFAULT_MAX_CHARS,
 } from "./cache-stats.js";
-import { getCliVersions, runCliUpgrade } from "./cli-updater.js";
+import { getCliVersions, buildCliUpgradePlan, runCliUpgrade } from "./cli-updater.js";
+import { compareInstalledToTargets, summarizeVersionGuard } from "./provider-version-guard.js";
+import { runStartupVersionCheck } from "./startup-version-check.js";
+import { checkUpgradeAvailability, upgradableProviders } from "./provider-upgrade-availability.js";
 import { startHttpGateway, type HttpGatewayHandle } from "./http-transport.js";
 import {
   getRequestContext,
@@ -22029,6 +22032,95 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
   );
 
   server.tool(
+    "provider_version_guard",
+    "Compare installed provider CLI versions against their contracted targets, and optionally check whether a newer version is published. Reports which providers drifted and which can be upgraded, plus the exact upgrade command for each.",
+    {
+      cli: z
+        .preprocess(
+          value => (value === "" || value === null ? undefined : value),
+          CLI_TYPE_ENUM.optional()
+        )
+        .describe("CLI filter (claude|codex|gemini|grok|mistral|devin|cursor)"),
+      checkUpgrades: z
+        .boolean()
+        .default(false)
+        .describe(
+          "When true, query each provider's release source for a newer version. Costs network and one subprocess for grok; four of seven providers can be checked, the rest report unknown with a reason."
+        ),
+      timeoutMs: z
+        .number()
+        .int()
+        .min(1_000)
+        .max(120_000)
+        .default(10_000)
+        .describe("Per-provider timeout for the upgrade check"),
+    },
+    {
+      title: "Provider version guard",
+      readOnlyHint: true,
+      destructiveHint: false,
+      idempotentHint: true,
+      // Reaches vendor registries when checkUpgrades is true.
+      openWorldHint: true,
+    },
+    async ({ cli, checkUpgrades, timeoutMs }) => {
+      const versions = await getCliVersions(cli);
+      const installed: Partial<Record<CliType, string | null>> = {};
+      for (const info of versions) {
+        installed[info.cli] = info.installed ? (info.version ?? null) : null;
+      }
+
+      const verdicts = compareInstalledToTargets(installed);
+      const filteredVerdicts = cli ? verdicts.filter(v => v.cli === cli) : verdicts;
+      const summary = summarizeVersionGuard(filteredVerdicts);
+
+      const upgrades = await checkUpgradeAvailability({
+        installed,
+        enabled: checkUpgrades,
+        timeoutMs,
+        only: cli,
+      });
+
+      // Attach the concrete command for anything actually upgradable, so the
+      // caller does not have to know each provider's install mechanism.
+      const upgradable = upgradableProviders(upgrades);
+      const offers = upgradable.map(target => {
+        const plan = buildCliUpgradePlan(target, "latest");
+        return {
+          cli: target,
+          command: `${plan.command} ${plan.args.join(" ")}`.trim(),
+          strategy: plan.strategy,
+          note: plan.note,
+          apply: `cli_upgrade with cli:"${target}", dryRun:false`,
+        };
+      });
+
+      return {
+        content: [
+          {
+            type: "text",
+            text: JSON.stringify(
+              {
+                ok: summary.ok,
+                drifted: summary.drifted,
+                notInstalled: summary.notInstalled,
+                unknown: summary.unknown,
+                providers: filteredVerdicts,
+                upgradesChecked: checkUpgrades,
+                upgradeAvailable: upgradable,
+                upgrades,
+                upgradeOffers: offers,
+              },
+              null,
+              2
+            ),
+          },
+        ],
+      };
+    }
+  );
+
+  server.tool(
     "upstream_contracts",
     "Return the gateway's declared provider CLI contracts; with probeInstalled true, diff against installed --help surfaces to detect flag drift.",
     {
@@ -23472,6 +23564,7 @@ async function main() {
       logger,
     });
     logger.info(`llm-cli-gateway HTTP MCP server connected and ready at ${activeHttpGateway.url}`);
+    void runStartupVersionCheck(logger);
     return;
   }
 
@@ -23500,6 +23593,11 @@ async function main() {
   const transport = new StdioServerTransport();
   await activeServer.connect(transport);
   logger.info("llm-cli-gateway MCP server connected and ready");
+
+  // Fired AFTER readiness and deliberately not awaited: this spawns one
+  // --version per provider, which must never sit in front of a client's first
+  // request. Silent unless a provider has drifted from its contract.
+  void runStartupVersionCheck(logger);
 }
 
 // Guard: only auto-start when run directly (not imported for testing)
