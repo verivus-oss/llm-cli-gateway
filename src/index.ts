@@ -293,7 +293,7 @@ import {
 } from "./cache-stats.js";
 import { getCliVersions, buildCliUpgradePlan, runCliUpgrade } from "./cli-updater.js";
 import { compareInstalledToTargets, summarizeVersionGuard } from "./provider-version-guard.js";
-import { runStartupVersionCheck } from "./startup-version-check.js";
+import { collectInstalledVersionsAsync, runStartupVersionCheck } from "./startup-version-check.js";
 import { checkUpgradeAvailability, upgradableProviders } from "./provider-upgrade-availability.js";
 import { startHttpGateway, type HttpGatewayHandle } from "./http-transport.js";
 import {
@@ -22064,11 +22064,13 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
       openWorldHint: true,
     },
     async ({ cli, checkUpgrades, timeoutMs }) => {
-      const versions = await getCliVersions(cli);
-      const installed: Partial<Record<CliType, string | null>> = {};
-      for (const info of versions) {
-        installed[info.cli] = info.installed ? (info.version ?? null) : null;
-      }
+      // Deliberately NOT getCliVersions: that path reaches spawnSync before its
+      // first await and blocks the event loop for the whole probe. Measured at
+      // 5107 ms with zero timer ticks, which in a tool handler means the
+      // gateway serves nothing else for five seconds, on every call. This is
+      // the same defect that was fixed in the startup check; it was missed here
+      // because the tool looked like the low-risk part of the change.
+      const installed = await collectInstalledVersionsAsync(timeoutMs);
 
       const verdicts = compareInstalledToTargets(installed);
       const filteredVerdicts = cli ? verdicts.filter(v => v.cli === cli) : verdicts;
@@ -22084,15 +22086,30 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
       // Attach the concrete command for anything actually upgradable, so the
       // caller does not have to know each provider's install mechanism.
       const upgradable = upgradableProviders(upgrades);
+      // buildCliUpgradePlan THROWS for a provider whose install mechanism it
+      // cannot determine: mistral does exactly this when neither uv, pip nor
+      // brew is detected. This is a read-only diagnostic, so one unplannable
+      // provider must not fault the whole call and take the drift report with
+      // it. Report the provider as upgradable with no command instead.
       const offers = upgradable.map(target => {
-        const plan = buildCliUpgradePlan(target, "latest");
-        return {
-          cli: target,
-          command: `${plan.command} ${plan.args.join(" ")}`.trim(),
-          strategy: plan.strategy,
-          note: plan.note,
-          apply: `cli_upgrade with cli:"${target}", dryRun:false`,
-        };
+        try {
+          const plan = buildCliUpgradePlan(target, "latest");
+          return {
+            cli: target,
+            command: `${plan.command} ${plan.args.join(" ")}`.trim(),
+            strategy: plan.strategy,
+            note: plan.note,
+            apply: `cli_upgrade with cli:"${target}", dryRun:false`,
+          };
+        } catch (err) {
+          return {
+            cli: target,
+            command: null,
+            strategy: null,
+            note: `Upgrade command could not be determined: ${err instanceof Error ? err.message : String(err)}`,
+            apply: null,
+          };
+        }
       });
 
       return {
