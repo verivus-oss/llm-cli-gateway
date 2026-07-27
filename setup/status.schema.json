@@ -689,6 +689,7 @@
         "how_to_check",
         "probed",
         "installed_versions",
+        "version_guard",
         "contracts"
       ],
       "properties": {
@@ -699,6 +700,46 @@
         "installed_versions": {
           "type": "object",
           "additionalProperties": { "type": ["string", "null"] }
+        },
+        "version_guard": {
+          "type": "object",
+          "description": "Installed-versus-contracted provider version comparison. Offline: derived from installed_versions and PROVIDER_TARGET_VERSIONS, spawning nothing.",
+          "required": ["ok", "drifted", "not_installed", "unknown", "providers"],
+          "properties": {
+            "ok": { "type": "boolean" },
+            "drifted": { "type": "array", "items": { "type": "string" } },
+            "not_installed": { "type": "array", "items": { "type": "string" } },
+            "unknown": { "type": "array", "items": { "type": "string" } },
+            "providers": {
+              "type": "array",
+              "items": {
+                "type": "object",
+                "required": [
+                  "cli",
+                  "state",
+                  "installed",
+                  "target",
+                  "installedNormalized",
+                  "targetNormalized",
+                  "detail"
+                ],
+                "properties": {
+                  "cli": { "type": "string" },
+                  "state": {
+                    "type": "string",
+                    "enum": ["match", "drift", "not-installed", "unknown"]
+                  },
+                  "installed": { "type": ["string", "null"] },
+                  "target": { "type": "string" },
+                  "installedNormalized": { "type": "string" },
+                  "targetNormalized": { "type": "string" },
+                  "detail": { "type": "string" }
+                },
+                "additionalProperties": false
+              }
+            }
+          },
+          "additionalProperties": false
         },
         "contracts": {
           "type": "object",

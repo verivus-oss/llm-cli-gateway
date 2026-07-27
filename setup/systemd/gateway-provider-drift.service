@@ -1,0 +1,24 @@
+[Unit]
+Description=llm-cli-gateway provider CLI contract drift check
+Documentation=file:///srv/repos/internal/verivusai-labs/rvwr/llm-cli-gateway/scripts/provider-drift-check.sh
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+ExecStart=/srv/repos/internal/verivusai-labs/rvwr/llm-cli-gateway/scripts/provider-drift-check.sh
+# report = detect and log only. Set to "apply" to additionally rebaseline the
+# version targets in place. Flag REMOVALS are never auto-applied in either
+# mode: `flags` is the argv emit allowlist, so a removal needs a coordinated
+# three-file edit and a flag upstream dropped while the gateway still emits it
+# is a live breakage that wants eyes on it.
+Environment=GATEWAY_DRIFT_MODE=report
+Nice=10
+# Probing seven CLIs plus a build; generous but bounded.
+TimeoutStartSec=900
+# 0 clean, 2 rebaselinable drift, 3 needs a human. Only 1 is a real failure,
+# so drift is reported without the unit going into a failed state on every run.
+SuccessExitStatus=0 2 3
+
+[Install]
+WantedBy=default.target
