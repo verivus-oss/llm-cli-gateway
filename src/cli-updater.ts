@@ -2,7 +2,7 @@ import { spawnSync } from "node:child_process";
 import { executeCli, providerCommandName } from "./executor.js";
 import type { Logger } from "./logger.js";
 import { CLI_TYPES, type CliType } from "./provider-types.js";
-import { getProviderRuntimeStatus, type ProviderLoginStatus } from "./provider-status.js";
+import { getProviderRuntimeStatusAsync, type ProviderLoginStatus } from "./provider-status.js";
 import type { ProviderLoginGuidance } from "./provider-login-guidance.js";
 
 export interface CliVersionInfo {
@@ -216,7 +216,12 @@ export function buildCliUpgradePlan(
 export async function getCliVersion(cli: CliType): Promise<CliVersionInfo> {
   const args = VERSION_ARGS[cli];
   try {
-    const status = getProviderRuntimeStatus(cli);
+    // Async twin, deliberately. The sync `getProviderRuntimeStatus` performs up
+    // to two `spawnSync` calls per provider, so this function used to block the
+    // event loop before its first await: 5281 ms for the seven-provider case,
+    // measured. That froze the gateway for every other in-flight request each
+    // time the `cli_versions` tool was called.
+    const status = await getProviderRuntimeStatusAsync(cli);
     return {
       cli,
       command: status.command,

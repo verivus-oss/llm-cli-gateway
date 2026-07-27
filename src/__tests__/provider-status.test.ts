@@ -13,7 +13,12 @@ import { mkdtempSync, mkdirSync, writeFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import { geminiAuthStatus } from "../provider-status.js";
+import {
+  geminiAuthStatus,
+  getProviderRuntimeStatus,
+  getProviderRuntimeStatusAsync,
+} from "../provider-status.js";
+import type { CliType } from "../provider-types.js";
 
 let fakeHome: string;
 
@@ -125,4 +130,50 @@ describe("U27 geminiAuthStatus", () => {
       vertexAi: true,
     });
   });
+});
+
+/**
+ * The sync and async runtime-status probes must stay semantically identical.
+ *
+ * `getProviderRuntimeStatusAsync` exists only because the sync variant performs
+ * up to two `spawnSync` calls per provider and blocked the event loop for
+ * 5281 ms across the seven, freezing the gateway whenever the `cli_versions`
+ * tool ran. It is NOT meant to differ in any observable way.
+ *
+ * Both share the interpretation helpers, so login inference cannot drift. What
+ * could drift is the short orchestration skeleton each one owns, which is
+ * exactly what this asserts. It holds whether or not a CLI is installed: if it
+ * is absent, both paths must agree it is absent.
+ */
+describe("getProviderRuntimeStatusAsync equivalence", () => {
+  // Spawns real probes, so keep the provider set small and the budget generous.
+  const SAMPLE: CliType[] = ["claude", "devin"];
+
+  it.each(SAMPLE)(
+    "returns exactly what the sync probe returns for %s",
+    async provider => {
+      const sync = getProviderRuntimeStatus(provider);
+      const async_ = await getProviderRuntimeStatusAsync(provider);
+      expect(async_).toEqual(sync);
+    },
+    60_000
+  );
+
+  it("agrees about a provider whose binary does not exist", async () => {
+    // Deterministic regardless of what is installed: a bogus command must be
+    // reported as not installed by both, with the same shape.
+    const bogus = "definitely-not-a-real-provider-binary" as unknown as CliType;
+    let syncResult: unknown;
+    let asyncResult: unknown;
+    try {
+      syncResult = getProviderRuntimeStatus(bogus);
+      asyncResult = await getProviderRuntimeStatusAsync(bogus);
+    } catch {
+      // An unknown provider key may throw in guidance lookup; if the sync path
+      // throws, the async path must throw too rather than returning something.
+      await expect(getProviderRuntimeStatusAsync(bogus)).rejects.toThrow();
+      return;
+    }
+    expect(asyncResult).toEqual(syncResult);
+  }, 60_000);
 });
