@@ -1237,17 +1237,50 @@ export function shouldRegisterGrokApiTools(providers: ProvidersConfig): boolean 
 // Per-CLI idle timeouts: kill process if no stdout/stderr activity for this duration.
 // Claude idle timeout only applies in stream-json mode (with --include-partial-messages).
 // In text/json mode, Claude produces no output until done, so idle timeout would false-positive.
+//
+// Only providers whose registry `outputDiscipline.streaming` is "incremental"
+// belong here. For a "terminal-burst" provider the timer below is not an idle
+// timer at all, because no output ever arrives before exit. See
+// TERMINAL_BURST_RUNTIME_CAP_MS.
 const CLI_IDLE_TIMEOUTS: Record<string, number | undefined> = {
-  claude: 600_000, // 10 minutes — only used when outputFormat=stream-json
-  codex: 600_000, // 10 minutes — Codex streams stderr progress
-  gemini: 600_000, // 10 minutes — Gemini streams stdout in real-time
-  grok: 600_000, // 10 minutes — Grok streams stderr/stdout activity in headless mode
-  mistral: 600_000, // 10 minutes — Vibe streams stdout/stderr in headless mode
-  cursor: 600_000, // 10 minutes — Cursor Agent can stream stdout in print mode
+  claude: 600_000, // 10 minutes, only used when outputFormat=stream-json
+  codex: 600_000, // 10 minutes; Codex streams stderr progress
+  grok: 600_000, // 10 minutes; Grok streams stderr/stdout activity in headless mode
 };
 
-function resolveIdleTimeout(cli: string, override?: number): number | undefined {
+/**
+ * Total-runtime bound for providers that emit nothing until they exit.
+ *
+ * gemini, mistral, devin and cursor declare `outputDiscipline.streaming:
+ * "terminal-burst"`. Their stdout stays at zero bytes for the whole run, so an
+ * "idle" timer never resets and silently degrades into a wall-clock cap. At the
+ * previous 600_000ms that killed perfectly healthy work: a real cross-LLM review
+ * job was terminated at exactly 600000ms of "inactivity" having produced exactly
+ * the zero bytes its own registry entry predicts.
+ *
+ * Removing the bound entirely is not an option, because `checkStalledJobs` only
+ * warns and never kills, so this timer is the sole protection against a hung
+ * child. The bound is therefore kept and sized for real work rather than for a
+ * streaming provider's silence. An explicit caller `idleTimeoutMs` still wins.
+ */
+const TERMINAL_BURST_RUNTIME_CAP_MS = 3_600_000; // 1 hour, the schema maximum
+
+/** True when the provider's registry entry says it emits nothing before exit. */
+function emitsOnlyOnExit(cli: string): boolean {
+  try {
+    return getProviderDefinition(cli as CliType).outputDiscipline?.streaming === "terminal-burst";
+  } catch {
+    // Not a registry provider; validation pseudo-CLIs reach here too.
+    return false;
+  }
+}
+
+export function resolveIdleTimeout(cli: string, override?: number): number | undefined {
   if (override !== undefined) return override;
+  // Derived from the registry rather than a hand-maintained table: the previous
+  // table asserted in comments that gemini and mistral "stream in real-time",
+  // which their own probed `outputDiscipline` evidence contradicts.
+  if (emitsOnlyOnExit(cli)) return TERMINAL_BURST_RUNTIME_CAP_MS;
   return CLI_IDLE_TIMEOUTS[cli];
 }
 
@@ -4651,6 +4684,42 @@ export function registerBaseResources(server: McpServer, runtime: GatewayServerR
         };
       }
     );
+  }
+
+  // LCR phase_2 observability. These were declared in ResourceProvider but never
+  // registered here, so they were unreachable in every configuration: absent
+  // from resources/list and -32602 on read, even with [least_cost] enabled.
+  //
+  // The gate is deliberately the SAME expression ResourceProvider.readResource
+  // uses (`leastCost.enabled`), because the original defect was exactly a
+  // declaration that disagreed with what the server exposed. Registering on a
+  // different condition would recreate it in mirror image.
+  if (runtime.leastCost?.enabled) {
+    for (const [name, uri, title, description] of [
+      [
+        "routing-decisions",
+        "routing://decisions",
+        "Routing Decisions",
+        "Recent redacted least-cost routing decisions (provider/model/tier/est cost/confidence)",
+      ],
+      [
+        "routing-priors",
+        "routing://priors",
+        "Routing Priors",
+        "Learned output-token priors + input-token calibration (k, samples, quality) + price asOf",
+      ],
+    ] as const) {
+      server.registerResource(
+        name,
+        uri,
+        { title, description, mimeType: "application/json" },
+        async resourceUri => {
+          runtime.logger.debug(`Reading ${uri} resource`);
+          const contents = await runtime.resourceProvider.readResource(resourceUri.href);
+          return { contents: contents ? [contents] : [] };
+        }
+      );
+    }
   }
 }
 
@@ -18249,7 +18318,7 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
         .max(3_600_000)
         .optional()
         .describe(
-          "Idle timeout in ms (min 30s, max 1h). Omit = gateway default of 600000ms (10 min) with no output before the process is killed."
+          "Idle timeout in ms (min 30s, max 1h). Vibe emits nothing until it exits, so this is a total-runtime bound rather than an idle bound; omit = gateway default of 3600000ms (1 h)."
         ),
       forceRefresh: z
         .boolean()
@@ -20301,7 +20370,7 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
           .max(3_600_000)
           .optional()
           .describe(
-            "Idle timeout in ms (min 30s, max 1h). Omit = gateway default of 600000ms (10 min) with no output before the process is killed."
+            "Idle timeout in ms (min 30s, max 1h). Vibe emits nothing until it exits, so this is a total-runtime bound rather than an idle bound; omit = gateway default of 3600000ms (1 h)."
           ),
         forceRefresh: z
           .boolean()

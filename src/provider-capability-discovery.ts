@@ -21,8 +21,8 @@
  */
 
 import { spawnSync } from "node:child_process";
-import { readFileSync } from "node:fs";
-import { dirname, join } from "node:path";
+import { accessSync, constants as fsConstants, readFileSync, statSync } from "node:fs";
+import { dirname, isAbsolute, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { InitializeResponseSchema, type AgentCapabilities } from "./acp/types.js";
 import { envWithExtendedPath, getExtendedPath, resolveCommandForSpawn } from "./executor.js";
@@ -185,15 +185,42 @@ export function resolveExecutableAbsolutePath(exe: string): string {
   const extendedPath = getExtendedPath();
   const resolved = resolveCommandForSpawn(exe, [], { envPath: extendedPath });
   if (resolved.command !== exe) return resolved.command;
-  // Non-Windows: resolveCommandForSpawn returns the bare command. Probe PATH.
-  const result = spawnSync(process.platform === "win32" ? "where" : "command", ["-v", exe], {
-    encoding: "utf8",
-    timeout: 3000,
-    windowsHide: true,
-    shell: process.platform !== "win32", // `command -v` needs a shell; read-only lookup, fixed argv
-  });
-  const out = (result.stdout ?? "").split(/\r?\n/).find(line => line.trim().length > 0);
-  return out?.trim() || exe;
+  // Non-Windows: resolveCommandForSpawn returns the bare command. Scan PATH.
+  return findExecutableOnPath(exe, extendedPath) ?? exe;
+}
+
+/**
+ * Locate an executable by walking the supplied PATH, without spawning anything.
+ *
+ * This replaces a `spawnSync("command", ["-v", exe], { shell: true })`. That form
+ * passed an argument array with a shell, which Node deprecates (DEP0190, because
+ * arguments are concatenated rather than escaped) and which printed a
+ * DeprecationWarning to stderr on every gateway start. stderr is the MCP log
+ * channel, so the warning landed in the one place operators watch for real
+ * problems. Reading the directory entries answers the same question with no
+ * shell, no child process, and no concatenation to reason about.
+ */
+function findExecutableOnPath(exe: string, envPath: string): string | undefined {
+  // A value that already carries a separator is a path, not a PATH lookup.
+  if (exe.includes("/") || exe.includes("\\") || isAbsolute(exe)) return undefined;
+  const isWindows = process.platform === "win32";
+  const extensions = isWindows
+    ? (process.env.PATHEXT ?? ".EXE;.CMD;.BAT;.COM").split(";").filter(Boolean)
+    : [""];
+  for (const dir of envPath.split(isWindows ? ";" : ":")) {
+    if (!dir) continue;
+    for (const extension of extensions) {
+      const candidate = join(dir, `${exe}${extension}`);
+      try {
+        // X_OK is not meaningful on Windows; existence plus a PATHEXT match is.
+        accessSync(candidate, isWindows ? fsConstants.F_OK : fsConstants.X_OK);
+        if (statSync(candidate).isFile()) return candidate;
+      } catch {
+        // Not here, or not executable by us. Keep scanning.
+      }
+    }
+  }
+  return undefined;
 }
 
 /**
