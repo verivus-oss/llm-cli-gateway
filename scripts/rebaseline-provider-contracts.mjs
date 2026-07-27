@@ -114,7 +114,40 @@ export function rewriteTargetVersion(source, cli, nextVersion) {
     pattern,
     (_match, prefix, _old, suffix) => prefix + nextVersion + suffix
   );
-  return source.slice(0, open + 1) + nextBody + source.slice(close);
+  const next = source.slice(0, open + 1) + nextBody + source.slice(close);
+
+  // Round-trip guard. The character denylist above only covers failure modes
+  // somebody thought of; this covers the rest by construction. Re-parse the
+  // result and require that every provider reads back as intended: the one we
+  // changed holds exactly nextVersion, and no other entry moved. A value
+  // containing `};`, for instance, would truncate the block on the next parse
+  // and was not on any denylist, but it cannot survive this.
+  let verified;
+  try {
+    verified = parseTargetVersions(next).versions;
+  } catch (err) {
+    throw new Error(
+      `Refusing to write ${cli}=${JSON.stringify(nextVersion)}: result no longer parses ` +
+        `(${err instanceof Error ? err.message : String(err)})`
+    );
+  }
+  if (verified[cli] !== nextVersion) {
+    throw new Error(
+      `Refusing to write ${cli}=${JSON.stringify(nextVersion)}: it reads back as ` +
+        `${JSON.stringify(verified[cli])}`
+    );
+  }
+  const before = parseTargetVersions(source).versions;
+  for (const key of Object.keys(before)) {
+    if (key !== cli && before[key] !== verified[key]) {
+      throw new Error(
+        `Refusing to write ${cli}: the rewrite also changed ${key} ` +
+          `(${JSON.stringify(before[key])} -> ${JSON.stringify(verified[key])})`
+      );
+    }
+  }
+
+  return next;
 }
 
 /**

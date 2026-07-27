@@ -115,6 +115,29 @@ describe("rewriteTargetVersion", () => {
       // matched the grok line.
       expect(() => rewriteTargetVersion(SAMPLE, "gr.k", "x")).toThrow(/No target-version/);
     });
+
+    it("refuses a version containing the block terminator", () => {
+      // Raised in review: parseTargetVersions locates the end of the block with
+      // indexOf("};"), so a value carrying `};` truncates the block on the next
+      // parse. It was on no denylist; the round-trip check catches it anyway.
+      expect(() => rewriteTargetVersion(SAMPLE, "grok", "grok 1.0};")).toThrow(/reads back as/);
+    });
+
+    it("still allows a harmless brace, rather than over-blocking", () => {
+      const next = rewriteTargetVersion(SAMPLE, "grok", "grok 1.0}");
+      expect(parseTargetVersions(next).versions.grok).toBe("grok 1.0}");
+    });
+
+    it("refuses if the rewrite would disturb another provider", () => {
+      // The denylist only covers failure modes somebody thought of. This
+      // asserts the general property: nothing but the named provider moves.
+      const next = rewriteTargetVersion(SAMPLE, "grok", "grok 9.9.9");
+      const before = parseTargetVersions(SAMPLE).versions;
+      const after = parseTargetVersions(next).versions;
+      for (const key of Object.keys(before)) {
+        if (key !== "grok") expect(after[key]).toBe(before[key]);
+      }
+    });
   });
 });
 
