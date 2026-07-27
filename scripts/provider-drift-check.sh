@@ -67,14 +67,19 @@ render() {
   printf '%s' "$JSON" | node -e '
     let s = "";
     process.stdin.on("data", d => (s += d)).on("end", () => {
+      // ONE try around the whole body, not a growing list of shape checks.
+      //
+      // Any throw in here escapes an async callback, so node exits non-zero,
+      // `render` fails, and `set -e` aborts the script BEFORE the rebuild with
+      // source possibly already written. Successive rounds of review each found
+      // another payload that slipped past the previous check: `null`, then a
+      // non-array field, then an array containing null. Enumerating shapes is
+      // a losing game, so treat ANY failure to render as `unknown`, which takes
+      // the defensive-rebuild branch. Whatever the payload, this cannot exit
+      // non-zero.
+      try {
       let j;
       try { j = JSON.parse(s); } catch { console.log("COUNT unknown"); return; }
-      // The parse guard alone is not enough: `null` and `[]` are valid JSON
-      // that parse fine and then throw on property access or iteration. That
-      // throw escapes an async callback, so node exits non-zero, `render`
-      // fails, and `set -e` aborts the whole script BEFORE the rebuild, with
-      // source possibly already written. Validate the shape and degrade to
-      // `unknown`, which rebuilds defensively, rather than dying.
       const arr = v => (Array.isArray(v) ? v : null);
       if (!j || typeof j !== "object" || Array.isArray(j)) { console.log("COUNT unknown"); return; }
       const versionUpdates = arr(j.versionUpdates ?? []);
@@ -96,6 +101,9 @@ render() {
         console.log("LINE no drift: installed CLIs match their contracts");
       }
       console.log(`COUNT ${written.length}`);
+      } catch {
+        console.log("COUNT unknown");
+      }
     });
   '
 }
