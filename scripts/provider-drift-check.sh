@@ -57,32 +57,41 @@ set -e
 
 printf '%s\n' "$OUTPUT" | while IFS= read -r line; do log "  $line"; done
 
+# Report what was ACTUALLY written, not what the exit code implies. Only
+# version targets are auto-applied, so additive-only drift also exits 2 while
+# writing nothing; saying "rebaselined" there would make the timer log lie.
+# Evidence is the working tree, not the status.
+report_applied_changes() {
+  [ "$MODE" = "apply" ] || return 0
+  if git diff --quiet -- src/provider-definitions.ts 2>/dev/null; then
+    log "nothing was auto-applied (only version targets are; see the lines above for the rest)"
+    return 0
+  fi
+  log "auto-applied version rebaseline left uncommitted changes in src/provider-definitions.ts"
+  git --no-pager diff --stat -- src/provider-definitions.ts 2>/dev/null |
+    while IFS= read -r line; do log "  $line"; done
+  # Rebuild so dist/ reflects the freshly written baseline; otherwise the next
+  # run compares against the pre-apply contracts and reports the same drift
+  # again. This has to run for BOTH drift exits, not just the needs-a-human
+  # one: a pure version apply is the common case.
+  npm run build >/dev/null 2>&1 || log "WARNING: rebuild after apply failed; dist/ is now stale"
+}
+
 case "$STATUS" in
   0)
     log "no provider contract drift"
     ;;
   2)
     if [ "$MODE" = "apply" ]; then
-      log "provider contract drift found and rebaselined"
+      log "provider contract drift found; applying what can be applied"
+      report_applied_changes
     else
       log "provider contract drift found; re-run with GATEWAY_DRIFT_MODE=apply to rebaseline"
     fi
     ;;
   3)
     log "provider contract drift found that needs a human: see the lines above"
-    if [ "$MODE" = "apply" ]; then
-      # Surface any auto-applied edits, so an unexplained dirty tree never
-      # appears without a trail pointing here.
-      if ! git diff --quiet -- src/provider-definitions.ts 2>/dev/null; then
-        log "auto-applied version rebaseline left uncommitted changes in src/provider-definitions.ts"
-        git --no-pager diff --stat -- src/provider-definitions.ts 2>/dev/null |
-          while IFS= read -r line; do log "  $line"; done
-        # Rebuild so dist/ reflects the freshly written baseline; otherwise the
-        # next run compares against the pre-apply contracts and reports the
-        # same drift again.
-        npm run build >/dev/null 2>&1 || log "WARNING: rebuild after apply failed; dist/ is now stale"
-      fi
-    fi
+    report_applied_changes
     ;;
   *)
     die 1 "drift check failed with status $STATUS"

@@ -2,6 +2,7 @@ import { describe, it, expect } from "vitest";
 import {
   UPGRADE_PROBES,
   checkUpgradeAvailability,
+  parseCliCheckJson,
   parseCliCheckVersion,
   upgradableProviders,
 } from "../provider-upgrade-availability.js";
@@ -113,5 +114,35 @@ describe("checkUpgradeAvailability", () => {
         { cli: "devin", state: "unknown" } as never,
       ])
     ).toEqual(["grok"]);
+  });
+});
+
+describe("parseCliCheckJson", () => {
+  it("parses the real `grok update --check --json` document", () => {
+    // Captured verbatim from grok 0.2.112 on 2026-07-27. Preferred over the
+    // banner parser because this is a contract, not vendor copy.
+    const real =
+      '{"currentVersion":"0.2.112","latestVersion":"0.2.112","updateAvailable":false,' +
+      '"installer":"internal","channel":"stable","autoUpdate":false,"error":null}';
+    expect(parseCliCheckJson(real)).toBe("0.2.112");
+  });
+
+  it("reads a newer latestVersion", () => {
+    expect(parseCliCheckJson('{"currentVersion":"0.2.112","latestVersion":"0.2.120"}')).toBe(
+      "0.2.120"
+    );
+  });
+
+  it("returns null for non-JSON, so the banner parser can take over", () => {
+    expect(parseCliCheckJson("Grok Build - v0.2.112 (latest: 0.2.112)")).toBeNull();
+    expect(parseCliCheckJson("")).toBeNull();
+    expect(parseCliCheckJson("{not json")).toBeNull();
+  });
+
+  it("returns null when latestVersion is absent or not a string", () => {
+    expect(parseCliCheckJson('{"currentVersion":"1.0.0"}')).toBeNull();
+    expect(parseCliCheckJson('{"latestVersion":null}')).toBeNull();
+    expect(parseCliCheckJson('{"latestVersion":123}')).toBeNull();
+    expect(parseCliCheckJson('{"latestVersion":""}')).toBeNull();
   });
 });

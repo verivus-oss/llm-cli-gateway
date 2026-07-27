@@ -190,6 +190,26 @@ export function parseCliCheckVersion(text: string): string | null {
   return null;
 }
 
+/**
+ * Read the latest version out of a CLI's structured update-check output.
+ *
+ * Preferred over `parseCliCheckVersion`, which scrapes a human-readable
+ * banner and is therefore hostage to vendor copy changes.
+ *
+ * @param stdout Raw stdout from `<cli> update --check --json`.
+ * @returns Latest version string, or null when absent or unparseable.
+ */
+export function parseCliCheckJson(stdout: string): string | null {
+  const trimmed = (stdout ?? "").trim();
+  if (!trimmed.startsWith("{")) return null;
+  try {
+    const doc = JSON.parse(trimmed) as { latestVersion?: unknown };
+    return typeof doc.latestVersion === "string" && doc.latestVersion ? doc.latestVersion : null;
+  } catch {
+    return null;
+  }
+}
+
 /** Phrases that mean "you are already on the newest release". */
 const UP_TO_DATE = /\b(up[\s-]?to[\s-]?date|already (?:the )?latest|no updates? available)\b/i;
 
@@ -264,12 +284,28 @@ export async function checkUpgradeAvailability(params: {
         latest = await latestFromPyPi(probe.pkg, timeoutMs);
       } else if (probe.source === "cli-check") {
         try {
-          const result = await executeCli(providerCommandName(cli), ["update", "--check"], {
-            timeout: timeoutMs,
-          });
-          const text = `${result.stdout ?? ""}\n${result.stderr ?? ""}`;
-          sawUpToDate = UP_TO_DATE.test(text);
-          latest = parseCliCheckVersion(text);
+          // Prefer the structured form. grok 0.2.112 answers
+          // `update --check --json` with
+          //   {"currentVersion":"…","latestVersion":"…","updateAvailable":false,…}
+          // which is a contract rather than prose, so it cannot be broken by a
+          // reworded banner the way the text parser can.
+          const jsonResult = await executeCli(
+            providerCommandName(cli),
+            ["update", "--check", "--json"],
+            { timeout: timeoutMs }
+          );
+          latest = parseCliCheckJson(`${jsonResult.stdout ?? ""}`);
+
+          if (!latest) {
+            // Fall back to the human-readable banner for CLIs or versions that
+            // do not support --json.
+            const result = await executeCli(providerCommandName(cli), ["update", "--check"], {
+              timeout: timeoutMs,
+            });
+            const text = `${result.stdout ?? ""}\n${result.stderr ?? ""}`;
+            sawUpToDate = UP_TO_DATE.test(text);
+            latest = parseCliCheckVersion(text);
+          }
         } catch {
           latest = null;
         }
