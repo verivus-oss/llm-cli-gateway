@@ -46,30 +46,78 @@ npm run build >/dev/null 2>&1 || die 1 "build failed"
 
 log "checking provider CLI versions and contract surfaces (mode=$MODE)"
 
+# ONE invocation, in --json mode, and capture its status immediately.
+#
+# Two things went wrong reaching this shape. Running the rebaseliner a second
+# time to ask what it wrote re-probed all seven CLIs AND ran after the apply,
+# so it saw an already-clean tree and always reported zero. And putting that
+# second call before `STATUS=$?` meant STATUS captured the wrong command, so
+# every run reported "no drift" while actively applying one.
 set +e
 if [ "$MODE" = "apply" ]; then
-  OUTPUT="$(node scripts/rebaseline-provider-contracts.mjs --apply 2>&1)"
+  JSON="$(node scripts/rebaseline-provider-contracts.mjs --json --apply 2>/dev/null)"
 else
-  OUTPUT="$(node scripts/rebaseline-provider-contracts.mjs 2>&1)"
+  JSON="$(node scripts/rebaseline-provider-contracts.mjs --json 2>/dev/null)"
 fi
 STATUS=$?
 set -e
+
+# Render the human log and the written-count from that single JSON document.
+render() {
+  printf '%s' "$JSON" | node -e '
+    let s = "";
+    process.stdin.on("data", d => (s += d)).on("end", () => {
+      let j;
+      try { j = JSON.parse(s); } catch { console.log("COUNT unknown"); return; }
+      for (const u of j.versionUpdates ?? []) {
+        console.log(`LINE ${j.applied ? "rebaselined" : "would rebaseline"} ${u.cli}: ${u.from} -> ${u.to}`);
+      }
+      for (const a of j.additiveFlagDrift ?? []) {
+        console.log(`LINE ${a.cli}: installed binary advertises flag(s) the contract does not know: ${a.flags.join(" ")}`);
+      }
+      for (const r of j.removedFlagDrift ?? []) {
+        console.log(`LINE ${r.cli}: contract declares flag(s) the installed binary NO LONGER advertises: ${r.flags.join(" ")}`);
+        console.log("LINE   NOT auto-applied: a removal needs a lock-step edit across upstream-contracts.ts, provider-codegen.ts and index.ts.");
+      }
+      if (!(j.versionUpdates ?? []).length && !(j.additiveFlagDrift ?? []).length && !(j.removedFlagDrift ?? []).length) {
+        console.log("LINE no drift: installed CLIs match their contracts");
+      }
+      console.log(`COUNT ${(j.changesWritten ?? []).length}`);
+    });
+  '
+}
+
+RENDERED="$(render)"
+WROTE_COUNT="$(printf '%s\n' "$RENDERED" | sed -n 's/^COUNT //p')"
+[ -n "$WROTE_COUNT" ] || WROTE_COUNT=unknown
+OUTPUT="$(printf '%s\n' "$RENDERED" | sed -n 's/^LINE //p')"
 
 printf '%s\n' "$OUTPUT" | while IFS= read -r line; do log "  $line"; done
 
 # Report what was ACTUALLY written, not what the exit code implies. Only
 # version targets are auto-applied, so additive-only drift also exits 2 while
 # writing nothing; saying "rebaselined" there would make the timer log lie.
-# Evidence is the working tree, not the status.
+# The authority is the rebaseliner's own changesWritten, not the git state.
 report_applied_changes() {
   [ "$MODE" = "apply" ] || return 0
-  if git diff --quiet -- src/provider-definitions.ts 2>/dev/null; then
+
+  if [ "$WROTE_COUNT" = "unknown" ]; then
+    # Could not establish what was written. Rebuild anyway: a stale dist/ makes
+    # the NEXT run compare against pre-apply contracts and silently re-report,
+    # which is the failure this whole job exists to avoid.
+    log "could not determine what was auto-applied; rebuilding defensively"
+  elif [ "$WROTE_COUNT" = "0" ]; then
     log "nothing was auto-applied (only version targets are; see the lines above for the rest)"
     return 0
+  else
+    log "auto-applied ${WROTE_COUNT} version rebaseline(s) to src/provider-definitions.ts"
+    # Best-effort diffstat for the operator; absence of git is not an error.
+    if command -v git >/dev/null 2>&1 && git rev-parse --git-dir >/dev/null 2>&1; then
+      git --no-pager diff HEAD --stat -- src/provider-definitions.ts 2>/dev/null |
+        while IFS= read -r line; do log "  $line"; done
+    fi
   fi
-  log "auto-applied version rebaseline left uncommitted changes in src/provider-definitions.ts"
-  git --no-pager diff --stat -- src/provider-definitions.ts 2>/dev/null |
-    while IFS= read -r line; do log "  $line"; done
+
   # Rebuild so dist/ reflects the freshly written baseline; otherwise the next
   # run compares against the pre-apply contracts and reports the same drift
   # again. This has to run for BOTH drift exits, not just the needs-a-human
