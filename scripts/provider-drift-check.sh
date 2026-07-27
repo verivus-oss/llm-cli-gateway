@@ -20,7 +20,13 @@
 # Exit codes: 0 clean, 2 rebaselinable drift, 3 drift needing a human, 1 error.
 set -euo pipefail
 
-REPO="${GATEWAY_DRIFT_REPO:-/srv/repos/internal/verivusai-labs/rvwr/llm-cli-gateway}"
+# Default to the checkout this script lives in, so the same file works on any
+# host without editing. readlink -f resolves a symlinked invocation, and pwd -P
+# resolves symlinked parent directories: bash's logical cwd would otherwise hand
+# back a path that does not match what the tools below compare against.
+SCRIPT_PATH="$(readlink -f "${BASH_SOURCE[0]}")"
+DEFAULT_REPO="$(cd "$(dirname "$SCRIPT_PATH")/.." && pwd -P)"
+REPO="${GATEWAY_DRIFT_REPO:-$DEFAULT_REPO}"
 MODE="${GATEWAY_DRIFT_MODE:-report}"
 LOCK_FILE="${GATEWAY_DRIFT_LOCK:-${TMPDIR:-/tmp}/gateway-provider-drift.lock}"
 
