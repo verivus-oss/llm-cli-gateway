@@ -1482,6 +1482,36 @@ export interface CodexForkRequestInput {
   forkLast?: boolean;
 }
 
+/**
+ * Why this request can never succeed from the gateway.
+ *
+ * `codex fork` is an interactive subcommand: its own help calls it "Fork a
+ * previous interactive session (picker by default; use --last to fork the most
+ * recent)". It requires a controlling terminal. The gateway spawns every
+ * provider child with pipes, and an MCP server has no TTY to give it, so the
+ * child exits 1 with "Error: stdin is not a terminal" on both the `--last` and
+ * the explicit-session paths. Verified against a real Codex session UUID, and
+ * identically on the previous release, so this is a standing property rather
+ * than a regression.
+ *
+ * There is no non-interactive equivalent to switch to: `codex exec` exposes only
+ * `resume`, `review` and `help`. Allocating a PTY would mean a native
+ * dependency this package deliberately does not carry.
+ *
+ * Failing here rather than at spawn keeps the caller from waiting on a doomed
+ * child and, more importantly, replaces an opaque terminal error, which reads
+ * like a broken environment, with the actual situation and the route that does
+ * work.
+ */
+export const CODEX_FORK_UNAVAILABLE =
+  "codex_fork_session is not usable from the gateway: `codex fork` is an interactive " +
+  "subcommand that requires a controlling terminal, and provider children are spawned " +
+  "with pipes, so it exits with 'stdin is not a terminal'. Codex exposes no " +
+  "non-interactive fork (`codex exec` has only resume/review/help). To continue an " +
+  "existing Codex conversation, call codex_request with a real Codex session UUID from " +
+  "~/.codex/sessions/, or with resumeLatest: true, both of which use `codex exec resume` " +
+  "and do work headlessly.";
+
 export function prepareCodexForkRequest(input: CodexForkRequestInput): {
   args: string[];
 } {

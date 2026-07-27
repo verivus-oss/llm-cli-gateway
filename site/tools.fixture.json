@@ -894,7 +894,7 @@
     },
     {
       "name": "codex_fork_session",
-      "description": "Fork an existing Codex session into a new branch (codex fork <ID|--last>) without mutating the original. This prompt remains argv-bound and rejects oversized UTF-8 input as non-retryable input_too_large.",
+      "description": "UNAVAILABLE from the gateway: `codex fork` is an interactive subcommand requiring a controlling terminal, which an MCP server cannot provide, so every call fails fast with an explanation. To continue an existing Codex conversation use codex_request with a real Codex session UUID or resumeLatest: true, which run `codex exec resume` and work headlessly. Retained because Codex exposes no non-interactive fork today; the argv builder stays ready if one appears.",
       "inputSchema": {
         "type": "object",
         "properties": {
@@ -3260,7 +3260,7 @@
             "type": "integer",
             "minimum": 30000,
             "maximum": 3600000,
-            "description": "Idle timeout in ms (min 30s, max 1h). Omit = gateway default of 600000ms (10 min) with no output before the process is killed."
+            "description": "Idle timeout in ms (min 30s, max 1h). Vibe emits nothing until it exits, so this is a total-runtime bound rather than an idle bound; omit = gateway default of 3600000ms (1 h)."
           },
           "forceRefresh": {
             "type": "boolean",
@@ -3536,7 +3536,7 @@
             "type": "integer",
             "minimum": 30000,
             "maximum": 3600000,
-            "description": "Idle timeout in ms (min 30s, max 1h). Omit = gateway default of 600000ms (10 min) with no output before the process is killed."
+            "description": "Idle timeout in ms (min 30s, max 1h). Vibe emits nothing until it exits, so this is a total-runtime bound rather than an idle bound; omit = gateway default of 3600000ms (1 h)."
           },
           "forceRefresh": {
             "type": "boolean",

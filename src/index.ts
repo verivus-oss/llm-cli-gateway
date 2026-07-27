@@ -259,6 +259,7 @@ import {
   validateClaudeAgentsMap,
   prepareCodexHighImpactFlags,
   prepareCodexForkRequest,
+  CODEX_FORK_UNAVAILABLE,
   CODEX_CONFIG_OVERRIDES_SCHEMA,
   resolveGeminiSessionPlan,
   GEMINI_HIGH_IMPACT_PARAMS_SCHEMA,
@@ -1273,6 +1274,30 @@ function emitsOnlyOnExit(cli: string): boolean {
     // Not a registry provider; validation pseudo-CLIs reach here too.
     return false;
   }
+}
+
+/**
+ * Whether `codex fork` can run in this process.
+ *
+ * Always false today. Codex's fork is an interactive subcommand that needs a
+ * controlling terminal, and provider children are spawned with pipes, so the
+ * child exits 1 with "stdin is not a terminal" on both the `--last` and the
+ * explicit-session paths. Codex offers no non-interactive equivalent (`codex
+ * exec` has only resume/review/help), and allocating a PTY would require a
+ * native dependency this package does not carry.
+ *
+ * Kept as a predicate, rather than deleting the spawn path, so the argv builder
+ * and its tests continue to compile and run. If a headless fork appears
+ * upstream, this becomes the single place to flip.
+ */
+export function codexForkCanRunHeadless(): boolean {
+  // Off in every normal deployment. The escape hatch exists so the retained
+  // spawn path keeps its coverage (argv composition, argv admission, and the
+  // durable error classifications it propagates from job admission), and so a
+  // host that genuinely supplies a terminal, or a future headless `codex fork`,
+  // can re-enable it without a code change. Setting it does not make fork work
+  // where a TTY is absent; it only stops this guard short-circuiting first.
+  return process.env.LLM_GATEWAY_ALLOW_CODEX_FORK === "1";
 }
 
 export function resolveIdleTimeout(cli: string, override?: number): number | undefined {
@@ -17767,7 +17792,7 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
 
   server.tool(
     "codex_fork_session",
-    "Fork an existing Codex session into a new branch (codex fork <ID|--last>) without mutating the original. This prompt remains argv-bound and rejects oversized UTF-8 input as non-retryable input_too_large.",
+    "UNAVAILABLE from the gateway: `codex fork` is an interactive subcommand requiring a controlling terminal, which an MCP server cannot provide, so every call fails fast with an explanation. To continue an existing Codex conversation use codex_request with a real Codex session UUID or resumeLatest: true, which run `codex exec resume` and work headlessly. Retained because Codex exposes no non-interactive fork today; the argv builder stays ready if one appears.",
     {
       prompt: z
         .string()
@@ -17884,6 +17909,7 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
         return createErrorResponse("codex_fork_session", 1, "", corrId, err as Error);
       }
 
+
       const cliInfo = getCliInfo();
       const resolvedModel = resolveModelAlias("codex", model, cliInfo);
       const approvalDecision: ApprovalRecord | null = null;
@@ -17927,6 +17953,28 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
         });
       } catch (err) {
         return createErrorResponse("codex_fork_session", 1, "", corrId, err as Error);
+      }
+
+      // Placed after every specific validation above (argument shape, argv
+      // admission, session lookup) so a caller's own mistake still produces its
+      // own precise, durably classified error rather than being masked by this
+      // blanket one. Everything below would spawn `codex fork`, which cannot
+      // succeed from an MCP server: see CODEX_FORK_UNAVAILABLE. Returning here
+      // avoids a doomed child and replaces an opaque "stdin is not a terminal",
+      // which reads like a broken environment, with the reason and the route
+      // that works.
+      //
+      // A predicate rather than an unconditional return, so the spawn path below
+      // stays reachable to the compiler and keeps type-checking instead of
+      // rotting while we wait for a headless fork upstream.
+      if (!codexForkCanRunHeadless()) {
+        return createErrorResponse(
+          "codex_fork_session",
+          1,
+          "",
+          corrId,
+          new Error(CODEX_FORK_UNAVAILABLE)
+        );
       }
 
       logger.info(

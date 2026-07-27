@@ -242,6 +242,12 @@ describe("codex_fork_session MCP-managed boundary", () => {
   it.each([CLI_INPUT_TOO_LARGE_CATEGORY, CLI_INVALID_INPUT_CATEGORY] as const)(
     "preserves a durable %s classification on codex_fork_session",
     async errorCategory => {
+      // `codex fork` needs a controlling terminal, so the handler normally stops
+      // before job admission and returns CODEX_FORK_UNAVAILABLE (see
+      // codex-fork-unavailable.test.ts). This case is about the classification
+      // plumbing behind that guard, which still has to be right if a headless
+      // fork ever lands upstream, so it opts past the guard explicitly.
+      process.env.LLM_GATEWAY_ALLOW_CODEX_FORK = "1";
       const jobs = new ClassifiedForkFailureJobManager(errorCategory);
       const { server } = createManagedServer(jobs);
       try {
@@ -262,6 +268,7 @@ describe("codex_fork_session MCP-managed boundary", () => {
           },
         });
       } finally {
+        delete process.env.LLM_GATEWAY_ALLOW_CODEX_FORK;
         await server.close();
         await jobs.dispose();
       }
