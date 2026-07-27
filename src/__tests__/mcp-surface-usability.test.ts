@@ -312,7 +312,7 @@ describe("MCP tool-surface usability (post-usability-review regressions)", () =>
     // EXACT set pinning (post-2.3.0-gate Codex finding): derive the actual
     // sets from the registry and compare them exactly — positive membership
     // alone would let a future mis-classified or unlisted tool slip through.
-    expect(names.length).toBe(61);
+    expect(names.length).toBe(62);
     const setOf = (pred: (a: NonNullable<(typeof registry)[string]["annotations"]>) => boolean) =>
       names.filter(n => pred(registry[n].annotations!)).sort();
     expect(setOf(a => a.readOnlyHint === true)).toEqual(
@@ -335,6 +335,7 @@ describe("MCP tool-surface usability (post-usability-review regressions)", () =>
         "provider_subcommand_contract",
         "provider_subcommand_drift",
         "provider_subcommands_list",
+        "provider_version_guard",
         "provider_admin_list",
         "provider_admin_run",
         "session_get",
@@ -368,6 +369,9 @@ describe("MCP tool-surface usability (post-usability-review regressions)", () =>
         "ask_model",
         "synthesize_validation",
         "cli_upgrade",
+        // Only openWorld entry that is NOT destructive: it reaches vendor
+        // registries to ask whether a newer CLI exists and changes nothing.
+        "provider_version_guard",
       ].sort()
     );
     expect(setOf(a => a.destructiveHint === true)).toEqual(
