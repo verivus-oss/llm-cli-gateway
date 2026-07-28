@@ -104,11 +104,20 @@ jobs:
         run: |
           set -euo pipefail
           python3 scripts/ci/validate_security_requirements.py requirements/ci/requirements-security.txt
-          python3 -m pip install --user --require-hashes -r requirements/ci/requirements-security.txt
+          # Install into a venv rather than `pip install --user`. The system
+          # python on the self-hosted runner ships without the pip module
+          # ("No module named pip"), and venv bootstraps its own pip through
+          # ensurepip. This works identically on a GitHub-hosted runner, so it
+          # stays one code path rather than a conditional. The --require-hashes
+          # supply-chain pin is unchanged, which is the whole point of
+          # installing zizmor from a hash-pinned requirements file rather than
+          # as a standalone binary.
+          python3 -m venv /tmp/zizmor-venv
+          /tmp/zizmor-venv/bin/pip install --quiet --require-hashes -r requirements/ci/requirements-security.txt
           # Default min-severity (low+); informational findings (job
           # names, concurrency limits, superfluous actions) are tracked
-          # but not enforced — those don't move the security needle.
-          "$HOME/.local/bin/zizmor" .github/workflows/
+          # but not enforced, those don't move the security needle.
+          /tmp/zizmor-venv/bin/zizmor .github/workflows/
 
       # ---------------------------------------------------------------
       # Content correctness — cheap, broad coverage.
