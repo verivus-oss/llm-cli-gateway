@@ -158,13 +158,35 @@ jobs:
           fi
 
       - name: Shell-script lint (shellcheck)
-        # ubuntu-latest pre-installs shellcheck. Our shell scripts run
-        # under release / install / pg-test flows; correctness bugs here
-        # would silently break gates.
+        # Our shell scripts run under release / install / pg-test flows;
+        # correctness bugs here would silently break gates.
+        #
+        # Install a pinned binary rather than relying on the runner image.
+        # ubuntu-latest pre-installs shellcheck, but the self-hosted runner does
+        # not (the step failed with "shellcheck: command not found"), and an
+        # image-provided version also drifts silently underneath us, which can
+        # turn a green gate red with no repo change. Pinning makes the two
+        # runner types behave identically and makes a lint-behaviour change an
+        # explicit commit. Same approach as osv-scanner and gitleaks below.
         run: |
           set -euo pipefail
-          shellcheck --version
-          shellcheck \
+          VERSION="0.11.0"
+          TARBALL="shellcheck-v${VERSION}.linux.x86_64.tar.xz"
+          # SHA256 fetched from the release artifact directly on 2026-07-28.
+          # Update this pin when bumping VERSION above.
+          EXPECTED_SHA="8c3be12b05d5c177a04c29e3c78ce89ac86f1595681cab149b65b97c4e227198"
+          curl -fsSL "https://github.com/koalaman/shellcheck/releases/download/v${VERSION}/${TARBALL}" -o "$RUNNER_TEMP/${TARBALL}"
+          actual=$(sha256sum "$RUNNER_TEMP/${TARBALL}" | awk '{print $1}')
+          if [ "${actual}" != "${EXPECTED_SHA}" ]; then
+            echo "FAIL: shellcheck tarball SHA256 mismatch."
+            echo "  expected: ${EXPECTED_SHA}"
+            echo "  actual:   ${actual}"
+            exit 1
+          fi
+          tar -xJf "$RUNNER_TEMP/${TARBALL}" -C "$RUNNER_TEMP" --strip-components=1 \
+            "shellcheck-v${VERSION}/shellcheck"
+          "$RUNNER_TEMP/shellcheck" --version
+          "$RUNNER_TEMP/shellcheck" \
             scripts/release-security-audit.sh \
             scripts/test-pg.sh \
             installer/build-release.sh
