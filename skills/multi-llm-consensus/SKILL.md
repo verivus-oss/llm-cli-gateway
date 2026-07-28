@@ -203,8 +203,7 @@ agent mode to accept-edits. Current Vibe defaults session logging to enabled.
 Before relying on Mistral resume, run doctor and correct an explicit
 [session_logging] enabled = false setting.
 
-Codex native continuation requires a real Codex UUID and inherits its original
-target directory. The sandbox posture is not guaranteed to carry over: a resume
+Codex native continuation requires a real Codex UUID. Do not rely on the resumed target directory: the gateway filters `-C`/`--cd` from resume argv, but the child is still spawned with the gateway-resolved cwd. The sandbox posture is not guaranteed to carry over: a resume
 `sandboxMode` cannot select one on resume, `configOverrides` still can, and
 Codex re-resolves
 configuration. Each other provider has provider-native continuity;

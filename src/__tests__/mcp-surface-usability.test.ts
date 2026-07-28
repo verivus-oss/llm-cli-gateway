@@ -166,7 +166,11 @@ describe("MCP tool-surface usability (post-usability-review regressions)", () =>
       // Whether the code or the documented contract is wrong is #258. Until
       // that is decided, pin the interim contract instead: the description must
       // warn rather than promise, so neither outcome of #258 is foreclosed.
-      expect(description, `${toolName}.resumeLatest must flag the open question`).toMatch(/#258/);
+      // Deliberately not keyed on the internal ticket number: these
+      // descriptions ship to npm consumers who cannot see that tracker.
+      expect(description, `${toolName}.resumeLatest must flag the open question`).toMatch(
+        /under review/i
+      );
       expect(description, `${toolName}.resumeLatest must not promise a target`).toMatch(
         /do not rely on/i
       );

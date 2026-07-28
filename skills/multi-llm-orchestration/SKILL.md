@@ -143,9 +143,8 @@ implement-review-fix for the detailed repair loop.
 ## Sessions, Jobs, and Persistence
 
 All seven providers have provider-native continuity behavior. Codex requires a
-real native Codex UUID and resume inherits its original working directory. The
-sandbox posture is not guaranteed to carry over: `sandboxMode` cannot select
-one on resume,
+real native Codex UUID. Do not rely on the resumed target directory: the gateway filters `-C`/`--cd` from resume argv, but the child is still spawned with the gateway-resolved cwd. The sandbox posture is not
+guaranteed to carry over either: `sandboxMode` cannot select one on resume,
 `configOverrides` still passes through, and Codex re-resolves configuration. Do not pass a gateway-generated gw-* identifier as a native
 Codex sessionId.
 

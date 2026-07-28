@@ -86,11 +86,13 @@ metadata is authoritative; the TOML is scanner input only.
    child is still spawned with the gateway-resolved cwd. Do not rely on which
    session it selects or on the resumed working directory.
    The provider-native `workingDir` and `addDir` flags scope new sessions only;
-   the gateway accepts but omits those fields on resume. A verified `workspace`
+   the gateway accepts but omits those fields on resume. Omitting them does not
+   pin the resumed directory: the child is still spawned with the
+   gateway-resolved cwd. A verified `workspace`
    or gateway `worktree` can still select the child process launch cwd and bind
-   gateway tracking, but it does not retarget the resumed Codex session. Every
-   resume form, including a direct UUID resume, inherits the original native
-   session cwd.
+   gateway tracking. Do not rely on a resumed session's directory in any resume
+   form, including a direct UUID resume: the child is spawned with the
+   gateway-resolved cwd even though the flags are filtered.
 8. Codex new and resume requests send the exact prompt through stdin with the
    native `-` marker. They do not consume the platform's single-argv prompt
    allowance and are never truncated. `codex_fork_session` uses the distinct

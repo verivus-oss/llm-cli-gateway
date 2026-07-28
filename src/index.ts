@@ -6047,7 +6047,9 @@ function prepareCodexRequestInternal(
     ignoreUserConfig?: boolean;
     ignoreRules?: boolean;
     // Phase 4 slice ζ — Codex working-dir + add-dir parity. Both flags are in
-    // CODEX_RESUME_FILTERED_FLAGS (resume inherits the original session's cwd
+    // CODEX_RESUME_FILTERED_FLAGS (filtered from resume argv; this does NOT pin
+    // the resumed session's cwd, since the child is still spawned with the
+    // gateway-resolved cwd
     // and writable dirs), so we emit them on NEW sessions only.
     workingDir?: string;
     addDir?: string[];
@@ -6295,7 +6297,9 @@ function prepareCodexRequestInternal(
   let highImpactInput: Parameters<typeof prepareCodexHighImpactFlags>[0];
   if (sessionPlan.mode === "new") {
     // Phase 4 slice ζ: emit working-dir and add-dir on new sessions only.
-    // Both flags are listed in CODEX_RESUME_FILTERED_FLAGS — resume inherits
+    // Both flags are listed in CODEX_RESUME_FILTERED_FLAGS. Filtering them does
+    // NOT pin the resumed directory; the child is still spawned with the
+    // gateway-resolved cwd. Formerly documented as: resume inherits
     // the original session's cwd and writable-dir policy, so emitting them
     // on resume would be silently stripped (wasteful + misleading on argv
     // logs). Gating here mirrors `--search` / `--sandbox`.
@@ -17652,7 +17656,7 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
         .boolean()
         .default(false)
         .describe(
-          "Resume a previous Codex session via `codex exec resume --last`. UNDER REVIEW (#258): do not rely on which session this selects or on the resumed working directory. `--last` is filtered by cwd upstream unless `--all` is passed, which the gateway does not emit, and the child is still spawned with the gateway-resolved cwd even though `-C`/`--add-dir` are dropped from the resume argv. Verify the target, or start a fresh session when it must be certain. Ignored if sessionId is set; an explicit real Codex UUID targets that session. A brand-new session returns no resumable sessionId; continue with resumeLatest:true or a real Codex UUID."
+          "Resume a previous Codex session via `codex exec resume --last`. UNDER REVIEW: do not rely on which session this selects or on the resumed working directory. `--last` is filtered by cwd upstream unless `--all` is passed, which the gateway does not emit, and the child is still spawned with the gateway-resolved cwd even though `-C`/`--add-dir` are dropped from the resume argv. Verify the target, or start a fresh session when it must be certain. Ignored if sessionId is set; an explicit real Codex UUID targets that session. A brand-new session returns no resumable sessionId; continue with resumeLatest:true or a real Codex UUID."
         ),
       createNewSession: z.boolean().default(false).describe("Force a fresh session (no resume)"),
       correlationId: z.string().optional().describe("Request trace ID (auto if omitted)"),
@@ -17739,14 +17743,14 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
         .min(1)
         .optional()
         .describe(
-          "Codex -C/--cd <DIR>: working root for this session. Emitted on new sessions only; resume inherits the original session's cwd via CODEX_RESUME_FILTERED_FLAGS. Personal Agent Config Kit mode requires an absolute path." +
+          "Codex -C/--cd <DIR>: working root for this session. Emitted on new sessions only: the flag is filtered from resume argv. That does NOT pin a resumed session's directory, because the child is still spawned with the gateway-resolved cwd; do not rely on a resumed session's working directory. Personal Agent Config Kit mode requires an absolute path." +
             LOCAL_WORKING_DIR_FIELD_SUFFIX
         ),
       addDir: z
         .array(z.string())
         .optional()
         .describe(
-          "Codex --add-dir <DIR>: additional writable workspace directories. Emitted once per entry on new sessions only; resume inherits the original session's writable-dir policy." +
+          "Codex --add-dir <DIR>: additional writable workspace directories. Emitted once per entry on new sessions only: the flag is filtered from resume argv. That does NOT pin a resumed session's writable-dir policy; do not rely on it." +
             LOCAL_ADD_DIR_FIELD_SUFFIX
         ),
       ...CODEX_PART_A_FIELDS,
@@ -20061,7 +20065,7 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
           .boolean()
           .default(false)
           .describe(
-            "Resume a previous Codex session via `codex exec resume --last`. UNDER REVIEW (#258): do not rely on which session this selects or on the resumed working directory. `--last` is filtered by cwd upstream unless `--all` is passed, which the gateway does not emit, and the child is still spawned with the gateway-resolved cwd even though `-C`/`--add-dir` are dropped from the resume argv. Verify the target, or start a fresh session when it must be certain. Ignored if sessionId is set; an explicit real Codex UUID targets that session. A brand-new session returns no resumable sessionId; continue with resumeLatest:true or a real Codex UUID."
+            "Resume a previous Codex session via `codex exec resume --last`. UNDER REVIEW: do not rely on which session this selects or on the resumed working directory. `--last` is filtered by cwd upstream unless `--all` is passed, which the gateway does not emit, and the child is still spawned with the gateway-resolved cwd even though `-C`/`--add-dir` are dropped from the resume argv. Verify the target, or start a fresh session when it must be certain. Ignored if sessionId is set; an explicit real Codex UUID targets that session. A brand-new session returns no resumable sessionId; continue with resumeLatest:true or a real Codex UUID."
           ),
         createNewSession: z.boolean().default(false).describe("Force a fresh session (no resume)"),
         correlationId: z.string().optional().describe("Request trace ID (auto if omitted)"),
@@ -20118,7 +20122,7 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
           .min(1)
           .optional()
           .describe(
-            "Codex -C/--cd <DIR>: working root for this session. New sessions only; resume inherits the original session's cwd. Personal Agent Config Kit mode requires an absolute path." +
+            "Codex -C/--cd <DIR>: working root for this session. New sessions only: the flag is filtered from resume argv. That does NOT pin a resumed session's directory, because the child is still spawned with the gateway-resolved cwd; do not rely on it. Personal Agent Config Kit mode requires an absolute path." +
               LOCAL_WORKING_DIR_FIELD_SUFFIX
           ),
         addDir: z

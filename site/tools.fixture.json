@@ -1103,7 +1103,7 @@
           "resumeLatest": {
             "type": "boolean",
             "default": false,
-            "description": "Resume a previous Codex session via `codex exec resume --last`. UNDER REVIEW (#258): do not rely on which session this selects or on the resumed working directory. `--last` is filtered by cwd upstream unless `--all` is passed, which the gateway does not emit, and the child is still spawned with the gateway-resolved cwd even though `-C`/`--add-dir` are dropped from the resume argv. Verify the target, or start a fresh session when it must be certain. Ignored if sessionId is set; an explicit real Codex UUID targets that session. A brand-new session returns no resumable sessionId; continue with resumeLatest:true or a real Codex UUID."
+            "description": "Resume a previous Codex session via `codex exec resume --last`. UNDER REVIEW: do not rely on which session this selects or on the resumed working directory. `--last` is filtered by cwd upstream unless `--all` is passed, which the gateway does not emit, and the child is still spawned with the gateway-resolved cwd even though `-C`/`--add-dir` are dropped from the resume argv. Verify the target, or start a fresh session when it must be certain. Ignored if sessionId is set; an explicit real Codex UUID targets that session. A brand-new session returns no resumable sessionId; continue with resumeLatest:true or a real Codex UUID."
           },
           "createNewSession": {
             "type": "boolean",
@@ -1199,14 +1199,14 @@
           "workingDir": {
             "type": "string",
             "minLength": 1,
-            "description": "Codex -C/--cd <DIR>: working root for this session. Emitted on new sessions only; resume inherits the original session's cwd via CODEX_RESUME_FILTERED_FLAGS. Personal Agent Config Kit mode requires an absolute path. Stdio/local callers may pass local paths directly. Remote HTTP/OAuth callers must use relative paths inside a selected registered workspace. Do not call workspace_* tools to fix stdio/local provider path access."
+            "description": "Codex -C/--cd <DIR>: working root for this session. Emitted on new sessions only: the flag is filtered from resume argv. That does NOT pin a resumed session's directory, because the child is still spawned with the gateway-resolved cwd; do not rely on a resumed session's working directory. Personal Agent Config Kit mode requires an absolute path. Stdio/local callers may pass local paths directly. Remote HTTP/OAuth callers must use relative paths inside a selected registered workspace. Do not call workspace_* tools to fix stdio/local provider path access."
           },
           "addDir": {
             "type": "array",
             "items": {
               "type": "string"
             },
-            "description": "Codex --add-dir <DIR>: additional writable workspace directories. Emitted once per entry on new sessions only; resume inherits the original session's writable-dir policy. Stdio/local callers may pass local paths directly. Remote HTTP/OAuth callers must use relative paths inside a selected registered workspace. Do not call workspace_* tools to fix stdio/local provider path access."
+            "description": "Codex --add-dir <DIR>: additional writable workspace directories. Emitted once per entry on new sessions only: the flag is filtered from resume argv. That does NOT pin a resumed session's writable-dir policy; do not rely on it. Stdio/local callers may pass local paths directly. Remote HTTP/OAuth callers must use relative paths inside a selected registered workspace. Do not call workspace_* tools to fix stdio/local provider path access."
           },
           "enable": {
             "type": "array",
@@ -1417,7 +1417,7 @@
           "resumeLatest": {
             "type": "boolean",
             "default": false,
-            "description": "Resume a previous Codex session via `codex exec resume --last`. UNDER REVIEW (#258): do not rely on which session this selects or on the resumed working directory. `--last` is filtered by cwd upstream unless `--all` is passed, which the gateway does not emit, and the child is still spawned with the gateway-resolved cwd even though `-C`/`--add-dir` are dropped from the resume argv. Verify the target, or start a fresh session when it must be certain. Ignored if sessionId is set; an explicit real Codex UUID targets that session. A brand-new session returns no resumable sessionId; continue with resumeLatest:true or a real Codex UUID."
+            "description": "Resume a previous Codex session via `codex exec resume --last`. UNDER REVIEW: do not rely on which session this selects or on the resumed working directory. `--last` is filtered by cwd upstream unless `--all` is passed, which the gateway does not emit, and the child is still spawned with the gateway-resolved cwd even though `-C`/`--add-dir` are dropped from the resume argv. Verify the target, or start a fresh session when it must be certain. Ignored if sessionId is set; an explicit real Codex UUID targets that session. A brand-new session returns no resumable sessionId; continue with resumeLatest:true or a real Codex UUID."
           },
           "createNewSession": {
             "type": "boolean",
@@ -1503,7 +1503,7 @@
           "workingDir": {
             "type": "string",
             "minLength": 1,
-            "description": "Codex -C/--cd <DIR>: working root for this session. New sessions only; resume inherits the original session's cwd. Personal Agent Config Kit mode requires an absolute path. Stdio/local callers may pass local paths directly. Remote HTTP/OAuth callers must use relative paths inside a selected registered workspace. Do not call workspace_* tools to fix stdio/local provider path access."
+            "description": "Codex -C/--cd <DIR>: working root for this session. New sessions only: the flag is filtered from resume argv. That does NOT pin a resumed session's directory, because the child is still spawned with the gateway-resolved cwd; do not rely on it. Personal Agent Config Kit mode requires an absolute path. Stdio/local callers may pass local paths directly. Remote HTTP/OAuth callers must use relative paths inside a selected registered workspace. Do not call workspace_* tools to fix stdio/local provider path access."
           },
           "addDir": {
             "type": "array",
