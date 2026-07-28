@@ -180,7 +180,7 @@ be reported as `BLOCKED_EXTERNAL` without shrinking the roster.
 All seven CLI providers have native continuity support, but each has its own
 native handle rules. Codex requires a real Codex UUID and inherits its original
 target on resume; the sandbox posture is not guaranteed to carry over, since a
-resume cannot select one and Codex re-resolves configuration. Gateway-generated gw-* identifiers must not be
+`sandboxMode` cannot select one on resume and Codex re-resolves configuration. Gateway-generated gw-* identifiers must not be
 used as Codex native session IDs. Current Mistral Vibe defaults session logging
 to enabled; run doctor and correct an explicit [session_logging] enabled =
 false before relying on Vibe resume.

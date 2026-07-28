@@ -144,7 +144,8 @@ implement-review-fix for the detailed repair loop.
 
 All seven providers have provider-native continuity behavior. Codex requires a
 real native Codex UUID and resume inherits its original working directory. The
-sandbox posture is not guaranteed to carry over: a resume cannot select one,
+sandbox posture is not guaranteed to carry over: `sandboxMode` cannot select
+one on resume,
 `configOverrides` still passes through, and Codex re-resolves configuration. Do not pass a gateway-generated gw-* identifier as a native
 Codex sessionId.
 

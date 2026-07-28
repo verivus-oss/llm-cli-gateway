@@ -268,8 +268,9 @@ content.
 Mistral Vibe defaults to accept-edits for programmatic callers and uses legacy
 approval. Current Vibe session logging defaults to enabled; run doctor and
 correct an explicit [session_logging] enabled = false setting before relying on
-resume. Codex native resume requires a real Codex UUID and inherits its
-original target and sandbox posture.
+resume. Codex native resume requires a real Codex UUID. Neither the target nor
+the sandbox posture is guaranteed to carry over: `sandboxMode`, `-C`/`--cd` and
+`--add-dir` are filtered from the resume argv, and Codex resolves both itself.
 
 SQLite and Postgres persistence make async jobs durable. Memory persistence is
 process-lifetime only and needs explicit acknowledgement. With

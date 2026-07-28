@@ -77,9 +77,11 @@ metadata is authoritative; the TOML is scanner input only.
    gateway approval boundary.
 7. Codex continuity is real through `codex exec resume`: pass a real Codex UUID
    from `~/.codex/sessions/`, or `resumeLatest:true`. Gateway `gw-*` IDs are not
-   Codex sessions. Resumed Codex sessions retain their provider-native posture;
-   `sandboxMode` and its deprecated `fullAuto:true` shorthand are dropped on
-   resume. `resumeLatest` selects Codex's globally latest session, inherits that
+   Codex sessions. `sandboxMode` and its deprecated `fullAuto:true` shorthand are
+   dropped on resume, so those fields cannot select a posture there. That is not
+   a guarantee that the original posture is retained: `configOverrides` is not
+   filtered and can set `sandbox_mode`, and Codex re-resolves configuration on a
+   cold resume. `resumeLatest` selects Codex's globally latest session, inherits that
    session's original cwd, and is not scoped by `workingDir`.
    The provider-native `workingDir` and `addDir` flags scope new sessions only;
    the gateway accepts but omits those fields on resume. A verified `workspace`

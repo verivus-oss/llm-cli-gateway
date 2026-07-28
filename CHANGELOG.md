@@ -55,7 +55,7 @@ All notable changes to the llm-cli-gateway project.
   on a cold resume, and `--sandbox` is in fact accepted before the `resume`
   subcommand (only the gateway's after-subcommand placement is rejected). So
   the schemas, the plugin command, the tutorial, and six skill sites now say
-  the narrow true thing: a resumed request cannot select a posture, and the
+  the narrow true thing: `sandboxMode` cannot select a posture on resume, and the
   resulting posture is not guaranteed either way, so establish it on the first
   request and verify it when it matters. Inspection should pass
   `sandboxMode: "read-only"` explicitly rather than relying on omission.

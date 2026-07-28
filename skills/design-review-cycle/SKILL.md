@@ -219,7 +219,8 @@ Mistral Vibe defaults session logging to enabled. Before relying on
 resumeLatest or sessionId continuity, run doctor and correct an explicit
 [session_logging] enabled = false configuration. Codex native resume requires a
 real Codex UUID and inherits its original target. The sandbox posture is not
-guaranteed to carry over: a resume cannot select one and Codex re-resolves
+guaranteed to carry over: `sandboxMode` cannot select one on resume and Codex
+re-resolves
 configuration.
 
 ## Acceptance Record

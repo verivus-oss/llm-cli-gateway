@@ -181,7 +181,7 @@ asks for that work.
    capability and availability. Reapply the full-access control on every new
    provider job. Do not assume a previous job, a resumed session, or a provider
    configuration reload retained the grant. The gateway drops `sandboxMode` on
-   a Codex resume, so a resumed request cannot select a posture, and the
+   a Codex resume, so that field cannot select a posture there, and the
    resumed posture is not guaranteed to match the original either
    (`configOverrides` still passes through and Codex re-resolves configuration).
    Start a new Codex session when the access posture must be known.
