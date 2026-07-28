@@ -4,6 +4,56 @@ All notable changes to the llm-cli-gateway project.
 
 ## [Unreleased]
 
+## [3.1.0-rc.2] - 2026-07-28: defects found by cross-LLM review of rc.1
+
+Release candidate. Same feature set as rc.1; this cut exists because an
+adversarial cross-LLM review of rc.1 found six defects, all of which predated
+that candidate. Anyone testing rc.1 should move to rc.2.
+
+### Fixed
+
+- **`routing://decisions` and `routing://priors` were unreachable in every
+  configuration.** `index.ts` builds the live resource surface from explicit
+  `registerResource` calls and never registered them, so they were absent from
+  `resources/list` and answered `-32602` on read even with least-cost routing
+  enabled. `ResourceProvider.listResources()`, which did declare them behind the
+  correct gate, has no production caller at all. They are now registered, and
+  both the registration and the reader gate on the same condition as the
+  `route_request` tools, so the Personal Agent Config Kit withholds the
+  observability surface exactly as it withholds the routing tools.
+- **The idle timeout was a hard wall-clock cap for providers that never
+  stream.** gemini, mistral, devin and cursor declare
+  `outputDiscipline.streaming: "terminal-burst"`, meaning zero bytes until exit,
+  yet a hand-maintained table gave three of them a 600000ms *idle* timeout with
+  comments asserting they "stream in real-time". The timer never reset, so
+  healthy work was killed at ten minutes: a real cross-LLM review job died at
+  exactly 600000ms of "inactivity" having produced precisely the zero bytes its
+  own registry entry predicts. The default is now derived from the registry, and
+  terminal-burst providers get a one-hour total-runtime bound. The bound is kept
+  rather than removed because the stall checker only warns and never kills.
+- **`codex_fork_session` leaked an opaque terminal error.** `codex fork` is an
+  interactive subcommand requiring a controlling terminal, and provider children
+  are spawned with pipes, so every call failed with `exit code 1: Error: stdin is
+  not a terminal`, which reads like a broken environment. Codex exposes no
+  non-interactive equivalent. The tool now returns the reason and the route that
+  works (`codex_request` with a session UUID or `resumeLatest`), without spawning
+  a child that cannot succeed, and without writing session workspace scope for a
+  request that can never run.
+- **A `DEP0190` deprecation warning on every startup.** Executable lookup spawned
+  `command -v` with an argument array and the shell option enabled, which Node
+  deprecates because arguments are concatenated rather than escaped, and which
+  printed into stderr, the MCP log channel, on every start. The lookup now walks
+  the extended PATH directly with no child process.
+- **An unactionable ERROR on every startup.** A legacy orphaned-artifact row with
+  no captured scope can never acquire one, so the message recurred forever with
+  no action available. Retaining the artifact is unchanged; the report is now a
+  single WARN per process that says so.
+- **Only nine of the sixteen agent skills shipped.** `package.json#files` omitted
+  the seven per-provider skills, so a development tree served sixteen `skills://`
+  resources and an npm install served nine. All sixteen tracked skills now ship.
+  (`gateway-restart-surfaces` is gitignored host-local operational guidance and
+  is deliberately neither committed nor shipped.)
+
 ## [3.1.0-rc.1] - 2026-07-27: provider version guard, durable job output, Mistral Kit
 
 Release candidate. The gateway now notices when a provider CLI has moved
