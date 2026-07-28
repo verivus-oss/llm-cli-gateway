@@ -11,6 +11,8 @@ Use the llm-gateway's `codex_request` MCP tool to execute this prompt. Pass the 
 
 Do not pass `fullAuto`. It is deprecated compatibility shorthand that expands to `--sandbox workspace-write`, so defaulting to it silently grants write access.
 
-Pass `sandboxMode` explicitly. For inspection use `sandboxMode: "read-only"`; do not rely on omitting the field, because the gateway then emits no `--sandbox` flag and Codex resolves the policy from its own configuration. Pass `workspace-write` only when the task must edit files.
+Pass `sandboxMode` explicitly on a new session. For inspection use `sandboxMode: "read-only"`; do not rely on omitting the field, because the gateway then emits no `--sandbox` flag and Codex resolves the policy from configuration, project trust, and its own fallback, so a trusted project can resolve to `workspace-write`. Pass `workspace-write` only when the task must edit files.
+
+`codex exec resume` rejects sandbox policy flags, so a resumed request inherits the original session's posture and `sandboxMode` has no effect. Establish it on the first request.
 
 Do not pass `model` unless the caller named one; the gateway resolves the configured Codex default.

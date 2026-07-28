@@ -122,12 +122,13 @@ Before writing any ledger change, get independent validation via the `gtwy` MCP
 from at least codex, grok, and mistral, each as an independent reviewer:
 
 - `createNewSession: true`, no resume or commits; prompt every reviewer to make
-  no mutations. Codex retains its default read-only sandbox unless a task
+  no mutations. Codex requires an explicit `sandboxMode: "read-only"` unless a task
   explicitly requires more access;
 - hand each the `report.json` + the filled contracts, and ask them to verify the
   classification and the safe-to-upgrade calls **against npm / the advisory DBs /
   the changelog directly**, not against your summary;
-- Codex via `codex_request` (default read-only sandbox), Mistral with
+- Codex via `codex_request` with an explicit `sandboxMode: "read-only"`
+  (omitting it does NOT guarantee read-only), Mistral with
   `permissionMode:"accept-edits"` (the gateway's non-interactive default; it
   accepts workspace edits, so retain the no-mutation instruction), and Grok at
   high effort. All three use `approvalStrategy:"legacy"` and omit

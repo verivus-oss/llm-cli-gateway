@@ -149,7 +149,7 @@ Use `*_request_async` when:
 ### Start
 
 ```
-claude_request_async({prompt:"Analyze src/ for type safety...",approvalStrategy:"mcp_managed",optimizePrompt:true})
+claude_request_async({prompt:"Analyze src/ for type safety...",workingDir:"<repo>",approvalStrategy:"mcp_managed",optimizePrompt:true})
 ```
 
 Response:
@@ -463,6 +463,7 @@ codex_request_async({
     task:    "Implement X per the above."
   },
   sandboxMode: "workspace-write",
+  workingDir: "<repo>",
   approvalStrategy: "legacy",
   correlationId: "impl-r1"
 })

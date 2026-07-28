@@ -10,10 +10,19 @@ const entrypoint = join(process.cwd(), "dist", "index.js");
 
 describe.skipIf(!existsSync(entrypoint))("CLI metadata entrypoint", () => {
   function run(args: string[]) {
+    // Several assertions below require stderr to be exactly empty. Node writes
+    // "NO_COLOR is ignored because FORCE_COLOR is set" to stderr when both are
+    // present, so inheriting them makes those assertions depend on the ambient
+    // environment rather than on the entrypoint. A reviewer's shell had both
+    // set and saw two failures here that do not reproduce with them unset.
+    // Neither variable affects anything these tests assert, so drop both.
+    const env = { ...process.env };
+    delete env.FORCE_COLOR;
+    delete env.NO_COLOR;
     return spawnSync(process.execPath, [entrypoint, ...args], {
       encoding: "utf8",
       env: {
-        ...process.env,
+        ...env,
         LLM_GATEWAY_LOGS_DB: "none",
         LLM_GATEWAY_JOBS_DB: "none",
       },
