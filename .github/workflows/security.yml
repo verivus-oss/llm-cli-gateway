@@ -47,7 +47,7 @@ permissions:
 jobs:
   security:
     name: security (workflow + content + deps + secrets)
-    runs-on: ubuntu-latest
+    runs-on: ${{ github.repository == 'verivus-oss/llm-cli-gateway' && 'ubuntu-latest' || fromJSON('["self-hosted","Linux","X64","x86_64","workhorse3","gateway"]') }}
     permissions:
       contents: read
     steps:
