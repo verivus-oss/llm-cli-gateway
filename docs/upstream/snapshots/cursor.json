@@ -1,7 +1,7 @@
 {
   "schemaVersion": "upstream-scan-snapshot.v2",
   "cli": "cursor",
-  "fetchedAt": "2026-07-26T07:37:24.253Z",
+  "fetchedAt": "2026-07-28T01:53:09.558Z",
   "sources": [
     {
       "url": "https://cursor.com/cli",
@@ -29,7 +29,7 @@
     }
   ],
   "helpSurface": {
-    "probedAt": "2026-07-26T07:37:23.905Z",
+    "probedAt": "2026-07-28T01:53:09.224Z",
     "available": true,
     "version": "2026.07.23-e383d2b",
     "targetVersion": "cursor-agent 2026.07.23-e383d2b",
@@ -93,7 +93,7 @@
       "commandPath": [
         "about"
       ],
-      "probedAt": "2026-07-26T07:37:18.746Z",
+      "probedAt": "2026-07-28T01:53:04.197Z",
       "available": true,
       "existence": "present",
       "discoveredFlags": [
@@ -113,7 +113,7 @@
       "commandPath": [
         "agent"
       ],
-      "probedAt": "2026-07-26T07:37:19.095Z",
+      "probedAt": "2026-07-28T01:53:04.527Z",
       "available": true,
       "existence": "present",
       "discoveredFlags": [],
@@ -131,7 +131,7 @@
       "commandPath": [
         "create-chat"
       ],
-      "probedAt": "2026-07-26T07:37:19.437Z",
+      "probedAt": "2026-07-28T01:53:04.869Z",
       "available": true,
       "existence": "present",
       "discoveredFlags": [],
@@ -149,7 +149,7 @@
       "commandPath": [
         "generate-rule"
       ],
-      "probedAt": "2026-07-26T07:37:19.783Z",
+      "probedAt": "2026-07-28T01:53:05.207Z",
       "available": true,
       "existence": "present",
       "discoveredFlags": [],
@@ -167,7 +167,7 @@
       "commandPath": [
         "install-shell-integration"
       ],
-      "probedAt": "2026-07-26T07:37:20.124Z",
+      "probedAt": "2026-07-28T01:53:05.540Z",
       "available": true,
       "existence": "present",
       "discoveredFlags": [],
@@ -185,7 +185,7 @@
       "commandPath": [
         "login"
       ],
-      "probedAt": "2026-07-26T07:37:20.473Z",
+      "probedAt": "2026-07-28T01:53:05.880Z",
       "available": true,
       "existence": "present",
       "discoveredFlags": [],
@@ -203,7 +203,7 @@
       "commandPath": [
         "logout"
       ],
-      "probedAt": "2026-07-26T07:37:20.822Z",
+      "probedAt": "2026-07-28T01:53:06.212Z",
       "available": true,
       "existence": "present",
       "discoveredFlags": [],
@@ -221,7 +221,7 @@
       "commandPath": [
         "ls"
       ],
-      "probedAt": "2026-07-26T07:37:21.160Z",
+      "probedAt": "2026-07-28T01:53:06.546Z",
       "available": true,
       "existence": "present",
       "discoveredFlags": [],
@@ -239,7 +239,7 @@
       "commandPath": [
         "mcp"
       ],
-      "probedAt": "2026-07-26T07:37:21.504Z",
+      "probedAt": "2026-07-28T01:53:06.881Z",
       "available": true,
       "existence": "present",
       "discoveredFlags": [],
@@ -257,7 +257,7 @@
       "commandPath": [
         "models"
       ],
-      "probedAt": "2026-07-26T07:37:21.846Z",
+      "probedAt": "2026-07-28T01:53:07.211Z",
       "available": true,
       "existence": "present",
       "discoveredFlags": [],
@@ -275,7 +275,7 @@
       "commandPath": [
         "plugin"
       ],
-      "probedAt": "2026-07-26T07:37:22.182Z",
+      "probedAt": "2026-07-28T01:53:07.546Z",
       "available": true,
       "existence": "present",
       "discoveredFlags": [],
@@ -293,7 +293,7 @@
       "commandPath": [
         "resume"
       ],
-      "probedAt": "2026-07-26T07:37:22.523Z",
+      "probedAt": "2026-07-28T01:53:07.873Z",
       "available": true,
       "existence": "present",
       "discoveredFlags": [],
@@ -311,7 +311,7 @@
       "commandPath": [
         "status"
       ],
-      "probedAt": "2026-07-26T07:37:22.874Z",
+      "probedAt": "2026-07-28T01:53:08.218Z",
       "available": true,
       "existence": "present",
       "discoveredFlags": [
@@ -331,7 +331,7 @@
       "commandPath": [
         "uninstall-shell-integration"
       ],
-      "probedAt": "2026-07-26T07:37:23.217Z",
+      "probedAt": "2026-07-28T01:53:08.553Z",
       "available": true,
       "existence": "present",
       "discoveredFlags": [],
@@ -349,7 +349,7 @@
       "commandPath": [
         "update"
       ],
-      "probedAt": "2026-07-26T07:37:23.559Z",
+      "probedAt": "2026-07-28T01:53:08.891Z",
       "available": true,
       "existence": "present",
       "discoveredFlags": [],
@@ -367,7 +367,7 @@
       "commandPath": [
         "worker"
       ],
-      "probedAt": "2026-07-26T07:37:23.905Z",
+      "probedAt": "2026-07-28T01:53:09.224Z",
       "available": true,
       "existence": "present",
       "discoveredFlags": [

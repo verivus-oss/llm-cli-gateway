@@ -1,7 +1,7 @@
 {
   "schemaVersion": "upstream-scan-snapshot.v2",
   "cli": "gemini",
-  "fetchedAt": "2026-07-26T07:37:01.682Z",
+  "fetchedAt": "2026-07-28T01:52:47.559Z",
   "sources": [
     {
       "url": "https://antigravity.google/docs/cli-overview",
@@ -33,10 +33,10 @@
     }
   ],
   "helpSurface": {
-    "probedAt": "2026-07-26T07:37:01.681Z",
+    "probedAt": "2026-07-28T01:52:47.559Z",
     "available": true,
-    "version": "1.1.7",
-    "targetVersion": "agy 1.1.7",
+    "version": "1.1.8",
+    "targetVersion": "1.1.8",
     "versionMatchesTarget": true,
     "discoveredFlags": [
       "--add-dir",
@@ -45,10 +45,12 @@
       "--conversation",
       "--dangerously-skip-permissions",
       "--effort",
+      "--json-schema",
       "--log-file",
       "--mode",
       "--model",
       "--new-project",
+      "--output-format",
       "--print",
       "--print-timeout",
       "--project",
@@ -56,7 +58,7 @@
       "--prompt-interactive",
       "--sandbox"
     ],
-    "helpHash": "7a4dabc595bc3012ae2caf24da7c30d4ab3632c3d1142a56e36379568887427f",
+    "helpHash": "7cb346f42706cb6b6dcc3f678bf81bb71c1ed9878c960a6f9707701250bcdf9a",
     "extraVsContract": [],
     "missingFromBinary": [],
     "arityMismatches": [],
@@ -78,7 +80,7 @@
       "commandPath": [
         "agent"
       ],
-      "probedAt": "2026-07-26T07:37:01.297Z",
+      "probedAt": "2026-07-28T01:52:47.187Z",
       "available": true,
       "existence": "present",
       "discoveredFlags": [],
@@ -96,7 +98,7 @@
       "commandPath": [
         "changelog"
       ],
-      "probedAt": "2026-07-26T07:37:01.363Z",
+      "probedAt": "2026-07-28T01:52:47.250Z",
       "available": true,
       "existence": "present",
       "discoveredFlags": [],
@@ -114,7 +116,7 @@
       "commandPath": [
         "install"
       ],
-      "probedAt": "2026-07-26T07:37:01.427Z",
+      "probedAt": "2026-07-28T01:52:47.313Z",
       "available": true,
       "existence": "present",
       "discoveredFlags": [
@@ -136,7 +138,7 @@
       "commandPath": [
         "models"
       ],
-      "probedAt": "2026-07-26T07:37:01.490Z",
+      "probedAt": "2026-07-28T01:52:47.374Z",
       "available": true,
       "existence": "present",
       "discoveredFlags": [],
@@ -154,7 +156,7 @@
       "commandPath": [
         "plugin"
       ],
-      "probedAt": "2026-07-26T07:37:01.553Z",
+      "probedAt": "2026-07-28T01:52:47.435Z",
       "available": true,
       "existence": "present",
       "discoveredFlags": [],
@@ -172,7 +174,7 @@
       "commandPath": [
         "plugins"
       ],
-      "probedAt": "2026-07-26T07:37:01.616Z",
+      "probedAt": "2026-07-28T01:52:47.496Z",
       "available": true,
       "existence": "present",
       "discoveredFlags": [],
@@ -190,7 +192,7 @@
       "commandPath": [
         "update"
       ],
-      "probedAt": "2026-07-26T07:37:01.681Z",
+      "probedAt": "2026-07-28T01:52:47.559Z",
       "available": true,
       "existence": "present",
       "discoveredFlags": [],

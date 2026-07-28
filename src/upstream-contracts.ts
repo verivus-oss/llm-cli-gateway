@@ -1862,7 +1862,20 @@ export const UPSTREAM_CLI_CONTRACTS: Record<CliType, CliContract> = {
     // the bounded gateway approval profiles above.
     // `--effort` (agy 1.1.7 reasoning effort) is advertised by `agy --help` but
     // the gateway emits no gemini effort flag, so it stays acknowledge-only.
-    acknowledgedUpstreamFlags: ["--agent", "--effort", "--log-file", "--prompt-interactive"],
+    // `--json-schema` and `--output-format` arrived in agy 1.1.8. They are
+    // acknowledge-only for the same reason: the gemini adapter's outputFormat is
+    // text-only (the Antigravity headless path emits text, and json/stream-json
+    // are rejected at request time), so the gateway emits neither. Recording
+    // them here keeps a genuinely new upstream flag standing out as drift rather
+    // than being lost in a permanently failing probe.
+    acknowledgedUpstreamFlags: [
+      "--agent",
+      "--effort",
+      "--json-schema",
+      "--log-file",
+      "--output-format",
+      "--prompt-interactive",
+    ],
     env: {},
     conformanceFixtures: [
       {

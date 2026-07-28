@@ -112,11 +112,14 @@ Personal Agent Config Kit.
   check that is guaranteed not to install as a side effect. A probe that fails
   reports `unknown`; it never reports `current`.
 - **`npm run providers:rebaseline` (and `:apply`)** rewrites the recorded target
-  versions and additive contract drift in place, so a routine provider CLI
-  upgrade no longer has to be reconciled by hand. Flag removals are deliberately
-  not automated: `flags` is the argv emit allowlist, so deleting an entry from
-  the contract alone leaves the generator and the request path dangling. Those
-  exit with a distinct status naming the three files a human must edit.
+  version in place, so a routine provider CLI version bump no longer has to be
+  reconciled by hand. Additive flag drift and flag removals are both **reported,
+  not applied**: an added flag has to be classified as an argv emit (`flags`) or
+  a probe acknowledgement (`acknowledgedUpstreamFlags`), and that is a judgement
+  about whether the gateway should start emitting it, not a mechanical edit. A
+  removal is worse, because `flags` is the argv emit allowlist, so deleting an
+  entry from the contract alone leaves the generator and the request path
+  dangling. Both exit with a distinct status naming what a human must edit.
   `setup/systemd/gateway-provider-drift.{service,timer}` runs the check daily.
 
 ### Changed
