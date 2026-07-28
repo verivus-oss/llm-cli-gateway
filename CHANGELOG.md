@@ -133,8 +133,9 @@ that candidate. Anyone testing rc.1 should move to rc.2.
   rather than removed because the stall checker only warns and never kills.
 - **`codex_fork_session` leaked an opaque terminal error.** `codex fork` is an
   interactive subcommand requiring a controlling terminal, and provider children
-  are spawned with pipes, so every call failed with `exit code 1: Error: stdin is
-not a terminal`, which reads like a broken environment. Codex exposes no
+  are spawned with pipes, so every call failed with
+  `exit code 1: Error: stdin is not a terminal`, which reads like a broken
+  environment. Codex exposes no
   non-interactive equivalent. The tool now returns the reason and the route that
   works (`codex_request` with a session UUID or `resumeLatest`), without spawning
   a child that cannot succeed, and without writing session workspace scope for a
