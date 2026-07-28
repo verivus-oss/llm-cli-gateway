@@ -147,7 +147,7 @@ gemini_request_async({
   prompt: "Review [design path] for security, data flow, operational failure
     modes, and missing requirements. Return terminal JSON verdict APPROVED_UNCONDITIONALLY, CHANGES_REQUIRED, or BLOCKED_EXTERNAL with inspected evidence.",
   approvalStrategy: "legacy",
-  workspace: "[verified Gemini workspace]",
+  workingDir: "[repo]",
   correlationId: "design-review-gemini"
 })
 
@@ -171,9 +171,9 @@ devin_request_async({
   prompt: "Independently review [design path] for implementation risk, security,
     and missing verification. Return terminal JSON verdict APPROVED_UNCONDITIONALLY, CHANGES_REQUIRED, or BLOCKED_EXTERNAL with inspected evidence.",
   approvalStrategy: "legacy",
+  workingDir: "[repo]",
   correlationId: "design-review-devin"
 })
-// Dispatch Devin only from a gateway process whose confirmed cwd is [repo].
 
 cursor_request_async({
   prompt: "Independently review [design path] for usability, implementation

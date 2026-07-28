@@ -106,7 +106,7 @@ gemini_request_async({
   prompt: "Review [target] for security, data flow, edge cases, and operational
     risks. Return terminal JSON verdict APPROVED_UNCONDITIONALLY, CHANGES_REQUIRED, or BLOCKED_EXTERNAL with inspected evidence.",
   approvalStrategy: "legacy",
-  workspace: "[verified Gemini workspace]",
+  workingDir: "[repo]",
   correlationId: "consensus-gemini"
 })
 
@@ -130,9 +130,9 @@ devin_request_async({
   prompt: "Independently review [target] for security, correctness, and
     verification gaps. Return terminal JSON verdict APPROVED_UNCONDITIONALLY, CHANGES_REQUIRED, or BLOCKED_EXTERNAL with inspected evidence.",
   approvalStrategy: "legacy",
+  workingDir: "[repo]",
   correlationId: "consensus-devin"
 })
-// Dispatch Devin only from a gateway process whose confirmed cwd is [repo].
 
 cursor_request_async({
   prompt: "Independently review [target] for repository-specific defects,

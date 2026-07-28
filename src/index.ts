@@ -17610,7 +17610,7 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
         .enum(CODEX_SANDBOX_MODES)
         .optional()
         .describe(
-          "Codex --sandbox. Omit = Codex exec built-in default (read-only; cannot write files). Pass workspace-write to let Codex edit files in the working dir, or danger-full-access for unrestricted access."
+          "Codex --sandbox. Omitting it does NOT guarantee read-only: the gateway then emits no --sandbox flag and Codex resolves the policy from its own configuration, and neither `codex exec --help` nor the published config reference documents the value used when it is unset. Pass read-only explicitly for inspection. Pass workspace-write to let Codex edit files in the working dir, or danger-full-access for unrestricted access."
         ),
       askForApproval: z
         .enum(CODEX_ASK_FOR_APPROVAL_MODES)
@@ -17875,7 +17875,7 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
         .enum(CODEX_SANDBOX_MODES)
         .optional()
         .describe(
-          "Codex --sandbox. Omit = Codex exec built-in default (read-only; cannot write files). Pass workspace-write to let Codex edit files in the working dir, or danger-full-access for unrestricted access."
+          "Codex --sandbox. Omitting it does NOT guarantee read-only: the gateway then emits no --sandbox flag and Codex resolves the policy from its own configuration, and neither `codex exec --help` nor the published config reference documents the value used when it is unset. Pass read-only explicitly for inspection. Pass workspace-write to let Codex edit files in the working dir, or danger-full-access for unrestricted access."
         ),
       askForApproval: z
         .enum(CODEX_ASK_FOR_APPROVAL_MODES)
@@ -20019,7 +20019,7 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
           .enum(CODEX_SANDBOX_MODES)
           .optional()
           .describe(
-            "Codex --sandbox. Omit = Codex exec built-in default (read-only; cannot write files). Pass workspace-write to let Codex edit files in the working dir, or danger-full-access for unrestricted access."
+            "Codex --sandbox. Omitting it does NOT guarantee read-only: the gateway then emits no --sandbox flag and Codex resolves the policy from its own configuration, and neither `codex exec --help` nor the published config reference documents the value used when it is unset. Pass read-only explicitly for inspection. Pass workspace-write to let Codex edit files in the working dir, or danger-full-access for unrestricted access."
           ),
         askForApproval: z
           .enum(CODEX_ASK_FOR_APPROVAL_MODES)

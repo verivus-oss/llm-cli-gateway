@@ -172,7 +172,7 @@ gemini_request_async({
     unresolved finding or verification gap, CHANGES_REQUIRED with
     evidence-backed findings, or BLOCKED_EXTERNAL with a concrete external error.",
   approvalStrategy: "legacy",
-  workspace: "[verified Gemini workspace]",
+  workingDir: "[repo]",
   correlationId: "red-team-gemini"
 })
 
@@ -205,9 +205,9 @@ devin_request_async({
     gap, CHANGES_REQUIRED with evidence-backed findings, or BLOCKED_EXTERNAL
     with a concrete external error.",
   approvalStrategy: "legacy",
+  workingDir: "[repo]",
   correlationId: "red-team-devin"
 })
-// Dispatch Devin only from a gateway process whose confirmed cwd is [repo].
 
 cursor_request_async({
   prompt: "Independently red-team [target] for repository-specific vulnerabilities,

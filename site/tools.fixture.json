@@ -924,7 +924,7 @@
               "workspace-write",
               "danger-full-access"
             ],
-            "description": "Codex --sandbox. Omit = Codex exec built-in default (read-only; cannot write files). Pass workspace-write to let Codex edit files in the working dir, or danger-full-access for unrestricted access."
+            "description": "Codex --sandbox. Omitting it does NOT guarantee read-only: the gateway then emits no --sandbox flag and Codex resolves the policy from its own configuration, and neither `codex exec --help` nor the published config reference documents the value used when it is unset. Pass read-only explicitly for inspection. Pass workspace-write to let Codex edit files in the working dir, or danger-full-access for unrestricted access."
           },
           "askForApproval": {
             "type": "string",
@@ -1048,7 +1048,7 @@
               "workspace-write",
               "danger-full-access"
             ],
-            "description": "Codex --sandbox. Omit = Codex exec built-in default (read-only; cannot write files). Pass workspace-write to let Codex edit files in the working dir, or danger-full-access for unrestricted access."
+            "description": "Codex --sandbox. Omitting it does NOT guarantee read-only: the gateway then emits no --sandbox flag and Codex resolves the policy from its own configuration, and neither `codex exec --help` nor the published config reference documents the value used when it is unset. Pass read-only explicitly for inspection. Pass workspace-write to let Codex edit files in the working dir, or danger-full-access for unrestricted access."
           },
           "askForApproval": {
             "type": "string",
@@ -1362,7 +1362,7 @@
               "workspace-write",
               "danger-full-access"
             ],
-            "description": "Codex --sandbox. Omit = Codex exec built-in default (read-only; cannot write files). Pass workspace-write to let Codex edit files in the working dir, or danger-full-access for unrestricted access."
+            "description": "Codex --sandbox. Omitting it does NOT guarantee read-only: the gateway then emits no --sandbox flag and Codex resolves the policy from its own configuration, and neither `codex exec --help` nor the published config reference documents the value used when it is unset. Pass read-only explicitly for inspection. Pass workspace-write to let Codex edit files in the working dir, or danger-full-access for unrestricted access."
           },
           "askForApproval": {
             "type": "string",
