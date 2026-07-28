@@ -48,11 +48,18 @@ that candidate. Anyone testing rc.1 should move to rc.2.
   no captured scope can never acquire one, so the message recurred forever with
   no action available. Retaining the artifact is unchanged; the report is now a
   single WARN per process that says so.
-- **Only nine of the sixteen agent skills shipped.** `package.json#files` omitted
-  the seven per-provider skills, so a development tree served sixteen `skills://`
-  resources and an npm install served nine. All sixteen tracked skills now ship.
-  (`gateway-restart-surfaces` is gitignored host-local operational guidance and
-  is deliberately neither committed nor shipped.)
+- **Documented which agent skills ship, and why the rest do not.** A review
+  finding claimed the eight unshipped skills were an oversight. They are not.
+  The seven `provider-*` skills are maintainer documentation for this
+  repository: their descriptions say "Track and maintain the upstream `<X>` CLI
+  contract", their bodies instruct the reader to edit `src/upstream-contracts.ts`,
+  and shipping them trips the release audit's leak scan because they cite
+  internal identifiers. `gateway-restart-surfaces` is gitignored host-local
+  operational guidance. The nine workflow skills ship, as before; no packaging
+  changed. What changed is that `src/__tests__/skill-packaging.test.ts` now
+  enforces the boundary in both directions, so a workflow skill cannot be
+  silently dropped and a maintainer skill cannot be silently packaged, and
+  CLAUDE.md no longer implies the provider skills are consumer-facing.
 
 ## [3.1.0-rc.1] - 2026-07-27: provider version guard, durable job output, Mistral Kit
 

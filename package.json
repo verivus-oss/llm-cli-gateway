@@ -64,14 +64,7 @@
     ".agents/skills/retrospective-walk/SKILL.md",
     ".agents/skills/public-demo-session/SKILL.md",
     ".agents/skills/least-cost-routing/SKILL.md",
-    ".agents/skills/personal-agent-config-kit/SKILL.md",
-    ".agents/skills/provider-claude/SKILL.md",
-    ".agents/skills/provider-codex/SKILL.md",
-    ".agents/skills/provider-cursor/SKILL.md",
-    ".agents/skills/provider-devin/SKILL.md",
-    ".agents/skills/provider-gemini/SKILL.md",
-    ".agents/skills/provider-grok/SKILL.md",
-    ".agents/skills/provider-mistral/SKILL.md"
+    ".agents/skills/personal-agent-config-kit/SKILL.md"
   ],
   "scripts": {
     "clean:dist": "node scripts/clean-dist.mjs",
