@@ -114,8 +114,17 @@ All notable changes to the llm-cli-gateway project.
   `src/__tests__/mcp-surface-usability.test.ts` previously **required** the
   false claims, so it would have failed any honest correction. It is inverted
   rather than deleted: it now requires the interim warning to name both
-  uncertainties and rejects reassertion of the inheritance and global-selector
-  forms.
+  uncertainties, and bans the one specific prior phrase `globally latest`.
+
+  Its coverage stops there, deliberately. An attempt to also forbid affirmative
+  inheritance by pattern was removed after it proved wrong in both directions:
+  it missed `keeps its original cwd and workingDir cannot retarget it`, which
+  never says "inherits", while rejecting the legitimate denials
+  `Do not assume a resumed session inherits its original cwd` and
+  `Whether it inherits its original cwd is unresolved`. Blacklisting
+  natural-language assertions is not workable, so a description that satisfies
+  the positive requirements and then contradicts itself will pass this test and
+  has to be caught in review.
 
 - **Three agent skills still pointed at `codex_fork_session`**, which
   `3.1.0-rc.2` made explicitly unavailable, so the shipped guidance told callers
