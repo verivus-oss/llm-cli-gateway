@@ -4,6 +4,49 @@ All notable changes to the llm-cli-gateway project.
 
 ## [Unreleased]
 
+### Fixed
+
+- **`cursor_request` and `gemini_request` exposed no `workingDir`, so the
+  scoping advice in the server instructions could not be followed for two of the
+  seven providers.** The instructions tell stdio/local callers to pass
+  `workingDir`/`addDir`/`includeDirs` directly and not to reach for workspace
+  aliases, but neither tool had the property at all. Neither provider emits a
+  cwd flag of its own, so the child cwd is the entire scoping contract for them:
+  an unscoped call ran in the neutral private cwd rather than the caller's
+  repository, with no local input capable of changing that. Both tools, sync and
+  async, now accept `workingDir` and thread it through the same shared resolver
+  every other provider uses, so remote containment
+  (`validatePathInsideWorkspace`) and local canonicalization behave identically.
+  All 14 request tools now expose the field.
+
+  Cursor needed one extra decision. Its `workspace` input is overloaded: besides
+  a registered alias it accepts a Cursor saved-workspace name or a local
+  absolute path, so it can already name a process cwd. When that path and an
+  explicit `workingDir` disagree, the request is now rejected rather than
+  silently ranked, because either precedence rule would run the child somewhere
+  the caller never named. Identical values are admitted, so passing the same
+  directory both ways is not an error.
+
+- **Three agent skills still pointed at `codex_fork_session`**, which
+  `3.1.0-rc.2` made explicitly unavailable, so the shipped guidance told callers
+  to use a tool that now refuses by design. `async-job-orchestration` and
+  `secure-orchestration` (both shipped) and `provider-codex` (maintainer) now
+  route Codex continuation through `codex_request` with a real session UUID or
+  `resumeLatest`. Their statements that `codex_fork_session` still applies the
+  argv size rejection are retained and clarified rather than removed: the
+  availability guard is deliberately evaluated *after* argv admission, so
+  `input_too_large` really does surface there first.
+
+### Added
+
+- **Skill coverage for `llm_request_result` and `provider_version_guard`**,
+  neither of which any skill mentioned. `async-job-orchestration` now documents
+  reading a persisted request back by `correlationId` instead of re-running it,
+  including why it is preferable to `llm_job_result` for Codex, whose
+  `codexDisplayText` can be a truncated interim line. `secure-orchestration`
+  documents verifying that installed provider CLIs still match their recorded
+  contract before relying on capability claims.
+
 ## [3.1.0-rc.2] - 2026-07-28: defects found by cross-LLM review of rc.1
 
 Release candidate. Same feature set as rc.1; this cut exists because an

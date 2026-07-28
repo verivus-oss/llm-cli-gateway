@@ -1840,6 +1840,52 @@ describe("issue #190 workspace wiring", () => {
         optimizePrompt: false,
       },
     },
+    // #243: gemini and cursor exposed no workingDir at all, so the scoping
+    // advice in the server instructions could not be followed for two of the
+    // seven providers. They go through the same shared resolver, so remote
+    // containment must hold for them exactly as it does above.
+    {
+      provider: "gemini" as const,
+      toolName: "gemini_request",
+      params: {
+        prompt: "inspect",
+        resumeLatest: false,
+        createNewSession: true,
+        approvalStrategy: "legacy",
+        optimizePrompt: false,
+      },
+    },
+    {
+      provider: "gemini" as const,
+      toolName: "gemini_request_async",
+      params: {
+        prompt: "inspect",
+        resumeLatest: false,
+        createNewSession: true,
+        approvalStrategy: "legacy",
+        optimizePrompt: false,
+      },
+    },
+    {
+      provider: "cursor" as const,
+      toolName: "cursor_request",
+      params: {
+        prompt: "inspect",
+        outputFormat: "text",
+        approvalStrategy: "legacy",
+        optimizePrompt: false,
+      },
+    },
+    {
+      provider: "cursor" as const,
+      toolName: "cursor_request_async",
+      params: {
+        prompt: "inspect",
+        outputFormat: "text",
+        approvalStrategy: "legacy",
+        optimizePrompt: false,
+      },
+    },
   ])(
     "uses the contained remote workingDir as the child cwd for $toolName",
     async ({ provider, toolName, params }) => {
@@ -1993,6 +2039,110 @@ describe("issue #190 workspace wiring", () => {
         expect(manager.starts[0]!.args[flagIndex + 1]).not.toBe("src");
       } finally {
         process.chdir(originalCwd);
+        await gateway.close();
+      }
+    }
+  );
+
+  // #243. gemini and cursor emit no cwd flag of their own, so the child cwd is
+  // the whole of the scoping contract for them: if workingDir does not reach
+  // the spawn, an unscoped call silently runs in the neutral private cwd
+  // instead of the caller's repository.
+  it.each([
+    { provider: "gemini", toolName: "gemini_request" },
+    { provider: "gemini", toolName: "gemini_request_async" },
+    { provider: "cursor", toolName: "cursor_request" },
+    { provider: "cursor", toolName: "cursor_request_async" },
+  ] as const)("uses a local workingDir as the child cwd for $toolName", async ({ toolName }) => {
+    const originalCwd = process.cwd();
+    process.chdir(repository);
+    const manager = toolName.endsWith("_async")
+      ? new CapturingJobManager(noopLogger, undefined, new MemoryJobStore())
+      : new CompletingJobManager(noopLogger, undefined, new MemoryJobStore());
+    const gateway = server(disabledWorkspaces(), manager);
+    const expectedCwd = realpathSync(join(repository, "src"));
+
+    try {
+      const response = await registeredTools(gateway)[toolName].handler(
+        {
+          prompt: "inspect",
+          workingDir: "src",
+          outputFormat: "text",
+          resumeLatest: false,
+          createNewSession: true,
+          approvalStrategy: "legacy",
+          optimizePrompt: false,
+        },
+        {}
+      );
+
+      expect(response.isError).not.toBe(true);
+      expect(manager.starts).toHaveLength(1);
+      // Canonicalized, and not the neutral private cwd a scopeless call gets.
+      expect(manager.starts[0]?.cwd).toBe(expectedCwd);
+      expect(manager.starts[0]?.cwd).not.toBe("src");
+    } finally {
+      process.chdir(originalCwd);
+      await gateway.close();
+    }
+  });
+
+  // Cursor alone accepts a local absolute path through `workspace`, so it is the
+  // only provider where two inputs can name different process cwds. Ranking them
+  // silently would run the child somewhere the caller never named.
+  it.each(["cursor_request", "cursor_request_async"] as const)(
+    "rejects a cursor workspace path that disagrees with workingDir for %s",
+    async toolName => {
+      const manager = new CapturingJobManager(noopLogger, undefined, new MemoryJobStore());
+      const gateway = server(disabledWorkspaces(), manager);
+
+      try {
+        const response = await registeredTools(gateway)[toolName].handler(
+          {
+            prompt: "inspect",
+            workspace: repository,
+            workingDir: join(repository, "src"),
+            outputFormat: "text",
+            approvalStrategy: "legacy",
+            optimizePrompt: false,
+          },
+          {}
+        );
+
+        expect(response.isError).toBe(true);
+        expect(response.content[0]?.text).toContain("two different working directories");
+        expect(manager.starts).toHaveLength(0);
+      } finally {
+        await gateway.close();
+      }
+    }
+  );
+
+  it.each(["cursor_request", "cursor_request_async"] as const)(
+    "admits a cursor workspace path that agrees with workingDir for %s",
+    async toolName => {
+      const manager = toolName.endsWith("_async")
+        ? new CapturingJobManager(noopLogger, undefined, new MemoryJobStore())
+        : new CompletingJobManager(noopLogger, undefined, new MemoryJobStore());
+      const gateway = server(disabledWorkspaces(), manager);
+
+      try {
+        const response = await registeredTools(gateway)[toolName].handler(
+          {
+            prompt: "inspect",
+            workspace: repository,
+            workingDir: repository,
+            outputFormat: "text",
+            approvalStrategy: "legacy",
+            optimizePrompt: false,
+          },
+          {}
+        );
+
+        expect(response.isError).not.toBe(true);
+        expect(manager.starts).toHaveLength(1);
+        expect(manager.starts[0]?.cwd).toBe(repository);
+      } finally {
         await gateway.close();
       }
     }

@@ -1916,6 +1916,11 @@
             },
             "description": "Additional workspace root directories (--add-dir, repeatable)."
           },
+          "workingDir": {
+            "type": "string",
+            "minLength": 1,
+            "description": "Local Cursor Agent process working directory. Distinct from --workspace, which selects a Cursor workspace or saved workspace name; this sets the process cwd. Passing both an absolute workspace path and a different workingDir is rejected rather than silently ranked. Stdio/local callers may pass local paths directly. Remote HTTP/OAuth callers must use relative paths inside a selected registered workspace. Do not call workspace_* tools to fix stdio/local provider path access."
+          },
           "sessionId": {
             "type": "string",
             "description": "On transport=cli, Cursor chat/session ID to resume (emits --resume <id>); gateway gw-* tracking ids are not CLI session ids. On transport=acp, gateway-owned ACP session ID returned by an earlier ACP call; Cursor-native and CLI session ids are rejected."
@@ -2052,6 +2057,11 @@
               "type": "string"
             },
             "description": "Additional workspace root directories (--add-dir, repeatable)."
+          },
+          "workingDir": {
+            "type": "string",
+            "minLength": 1,
+            "description": "Local Cursor Agent process working directory. Distinct from --workspace, which selects a Cursor workspace or saved workspace name; this sets the process cwd. Passing both an absolute workspace path and a different workingDir is rejected rather than silently ranked. Stdio/local callers may pass local paths directly. Remote HTTP/OAuth callers must use relative paths inside a selected registered workspace. Do not call workspace_* tools to fix stdio/local provider path access."
           },
           "sessionId": {
             "type": "string",
@@ -2684,6 +2694,11 @@
             "minLength": 1,
             "description": "Antigravity --print-timeout <DURATION>: print-mode wait timeout as a Go duration string (e.g. '5m0s', '30s')."
           },
+          "workingDir": {
+            "type": "string",
+            "minLength": 1,
+            "description": "Local Antigravity process working directory. Stdio/local callers may pass local paths directly. Remote HTTP/OAuth callers must use relative paths inside a selected registered workspace. Do not call workspace_* tools to fix stdio/local provider path access."
+          },
           "workspace": {
             "type": "string",
             "minLength": 1,
@@ -2924,6 +2939,11 @@
             "type": "string",
             "minLength": 1,
             "description": "Antigravity --print-timeout <DURATION>: print-mode wait timeout as a Go duration string (e.g. '5m0s', '30s')."
+          },
+          "workingDir": {
+            "type": "string",
+            "minLength": 1,
+            "description": "Local Antigravity process working directory. Stdio/local callers may pass local paths directly. Remote HTTP/OAuth callers must use relative paths inside a selected registered workspace. Do not call workspace_* tools to fix stdio/local provider path access."
           },
           "workspace": {
             "type": "string",

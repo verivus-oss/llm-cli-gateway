@@ -10122,6 +10122,7 @@ export interface GeminiRequestParams {
   mcpServers?: ClaudeMcpServerName[];
   allowedTools?: string[];
   includeDirs?: string[];
+  workingDir?: string;
   correlationId?: string;
   optimizePrompt: boolean;
   optimizeResponse?: boolean;
@@ -11705,6 +11706,7 @@ export async function handleGeminiRequest(
           worktree: params.worktree,
           sessionId: effectiveSessionIdHint,
           runtime,
+          workingDir: params.workingDir,
           addDir: params.includeDirs,
           requireStableCwd: sessionPlan.args.includes("--continue"),
           deferWorktree: true,
@@ -11759,6 +11761,7 @@ export async function handleGeminiRequest(
           worktree: params.worktree,
           sessionId: effectiveSessionIdHint,
           runtime,
+          workingDir: params.workingDir,
           addDir: params.includeDirs,
           requireStableCwd: sessionPlan.args.includes("--continue"),
           expectedSession: ledger.sessionAdmission?.admitted,
@@ -11973,6 +11976,7 @@ export async function handleGeminiRequestAsync(
           worktree: params.worktree,
           sessionId: effectiveSessionId,
           runtime,
+          workingDir: params.workingDir,
           addDir: params.includeDirs,
           requireStableCwd: sessionPlan.args.includes("--continue"),
           deferWorktree: true,
@@ -12031,6 +12035,7 @@ export async function handleGeminiRequestAsync(
           worktree: params.worktree,
           sessionId: effectiveSessionId,
           runtime,
+          workingDir: params.workingDir,
           addDir: params.includeDirs,
           requireStableCwd: sessionPlan.args.includes("--continue"),
           expectedSession: ledger.sessionAdmission?.admitted,
@@ -13574,6 +13579,8 @@ export interface CursorRequestParams {
   trust?: boolean;
   workspace?: string;
   addDir?: string[];
+  /** Process cwd. Distinct from `workspace`, which is Cursor's own selector. */
+  workingDir?: string;
   sessionId?: string;
   resumeLatest?: boolean;
   createNewSession?: boolean;
@@ -13779,6 +13786,41 @@ function resolveCursorWorkspaceSelection(
   return { registryAlias: workspace.alias, cliWorkspace: workspace.cwd };
 }
 
+/**
+ * Cursor is the one provider whose `workspace` input can itself carry a local
+ * absolute path, so it can name a process cwd without `workingDir`. That makes
+ * the two inputs genuinely ambiguous when both are present and disagree.
+ *
+ * Reject rather than rank them. A silent precedence rule would run the child
+ * somewhere the caller did not name, and the resulting scope is exactly what
+ * `workingDir` exists to make explicit. Agreement is admitted so a caller that
+ * passes the same directory both ways is not punished for redundancy.
+ *
+ * Only local selection can conflict: the remote branch above returns a registry
+ * alias and no cwd, and a remote `workingDir` is contained by
+ * `validatePathInsideWorkspace` inside the shared resolver.
+ */
+function resolveCursorWorkingDir(
+  requestedWorkingDir: string | undefined,
+  selection: CursorWorkspaceSelection
+): string | undefined {
+  if (!requestedWorkingDir) return selection.cwd;
+  if (!selection.cwd) return requestedWorkingDir;
+  const canonical = (value: string): string => {
+    try {
+      return realpathSync(resolve(value));
+    } catch {
+      return resolve(value);
+    }
+  };
+  if (canonical(requestedWorkingDir) === canonical(selection.cwd)) return requestedWorkingDir;
+  throw new Error(
+    `cursor_request received two different working directories: workspace resolved to "${selection.cwd}" ` +
+      `and workingDir is "${requestedWorkingDir}". Pass only one, or pass the same path for both. ` +
+      `Use workingDir for the process cwd and workspace for a Cursor workspace or saved workspace name.`
+  );
+}
+
 export async function handleCursorRequest(
   deps: HandlerDeps,
   params: CursorRequestParams
@@ -13923,7 +13965,7 @@ export async function handleCursorRequest(
           workspace: cursorWorkspace.registryAlias,
           sessionId: sessionResult.effectiveSessionId,
           runtime,
-          workingDir: cursorWorkspace.cwd,
+          workingDir: resolveCursorWorkingDir(params.workingDir, cursorWorkspace),
           addDir: params.addDir,
           suppressImplicitWorkspace: cursorWorkspace.localWorkspaceInput !== undefined,
           requireStableCwd: sessionResult.resumeArgs.includes("--continue"),
@@ -14155,7 +14197,7 @@ export async function handleCursorRequestAsync(
           workspace: cursorWorkspace.registryAlias,
           sessionId: effectiveSessionId,
           runtime,
-          workingDir: cursorWorkspace.cwd,
+          workingDir: resolveCursorWorkingDir(params.workingDir, cursorWorkspace),
           addDir: params.addDir,
           suppressImplicitWorkspace: cursorWorkspace.localWorkspaceInput !== undefined,
           requireStableCwd: sessionResult.resumeArgs.includes("--continue"),
@@ -18241,6 +18283,11 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
         .describe(
           "Antigravity --print-timeout <DURATION>: print-mode wait timeout as a Go duration string (e.g. '5m0s', '30s')."
         ),
+      workingDir: z
+        .string()
+        .min(1)
+        .optional()
+        .describe("Local Antigravity process working directory." + LOCAL_WORKING_DIR_FIELD_SUFFIX),
       workspace: providerWorkspaceAliasSchema(),
       worktree: WORKTREE_SCHEMA.optional(),
     },
@@ -18280,6 +18327,7 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
       project,
       newProject,
       printTimeout,
+      workingDir,
       workspace,
       worktree,
     }) => {
@@ -18314,6 +18362,7 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
           project,
           newProject,
           printTimeout,
+          workingDir,
           workspace,
           worktree,
         }
@@ -18818,6 +18867,14 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
         .array(z.string())
         .optional()
         .describe("Additional workspace root directories (--add-dir, repeatable)."),
+      workingDir: z
+        .string()
+        .min(1)
+        .optional()
+        .describe(
+          "Local Cursor Agent process working directory. Distinct from --workspace, which selects a Cursor workspace or saved workspace name; this sets the process cwd. Passing both an absolute workspace path and a different workingDir is rejected rather than silently ranked." +
+            LOCAL_WORKING_DIR_FIELD_SUFFIX
+        ),
       sessionId: z
         .string()
         .optional()
@@ -18886,6 +18943,7 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
       autoReview,
       sandbox,
       trust,
+      workingDir,
       workspace,
       addDir,
       sessionId,
@@ -18912,6 +18970,7 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
           autoReview,
           sandbox,
           trust,
+          workingDir,
           workspace,
           addDir,
           sessionId,
@@ -20301,6 +20360,13 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
           .describe(
             "Antigravity --print-timeout <DURATION>: print-mode wait timeout as a Go duration string (e.g. '5m0s', '30s')."
           ),
+        workingDir: z
+          .string()
+          .min(1)
+          .optional()
+          .describe(
+            "Local Antigravity process working directory." + LOCAL_WORKING_DIR_FIELD_SUFFIX
+          ),
         workspace: providerWorkspaceAliasSchema(),
         worktree: WORKTREE_SCHEMA.optional(),
       },
@@ -20339,6 +20405,7 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
         project,
         newProject,
         printTimeout,
+        workingDir,
         workspace,
         worktree,
       }) => {
@@ -20372,6 +20439,7 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
             project,
             newProject,
             printTimeout,
+            workingDir,
             workspace,
             worktree,
           }
@@ -20948,6 +21016,14 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
           .array(z.string())
           .optional()
           .describe("Additional workspace root directories (--add-dir, repeatable)."),
+        workingDir: z
+          .string()
+          .min(1)
+          .optional()
+          .describe(
+            "Local Cursor Agent process working directory. Distinct from --workspace, which selects a Cursor workspace or saved workspace name; this sets the process cwd. Passing both an absolute workspace path and a different workingDir is rejected rather than silently ranked." +
+              LOCAL_WORKING_DIR_FIELD_SUFFIX
+          ),
         sessionId: z
           .string()
           .optional()
@@ -21007,6 +21083,7 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
         autoReview,
         sandbox,
         trust,
+        workingDir,
         workspace,
         addDir,
         sessionId,
@@ -21031,6 +21108,7 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
             autoReview,
             sandbox,
             trust,
+            workingDir,
             workspace,
             addDir,
             sessionId,
