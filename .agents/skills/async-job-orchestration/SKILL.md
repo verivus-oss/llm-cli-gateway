@@ -35,7 +35,7 @@ Apply these on every dispatch unless the caller has explicitly overridden a rule
    Devin, and Cursor. They reject `mcp_managed` before launch because their
    ambient MCP configuration cannot be isolated. `approvalPolicy` is valid only
    for Claude managed requests and has no effect with legacy.
-3. **No wallclock timeout; poll every 60 s by default:** see [Polling Strategy](#polling-strategy) below. When the user requests a 90-second progress cadence, do not poll earlier. Do **not** cancel jobs for taking too long; cancel only on explicit instruction or hard failure. `idleTimeoutMs` (no-output safeguard) is separate.
+3. **No caller-imposed wallclock timeout; poll every 60 s by default:** see [Polling Strategy](#polling-strategy) below. When the user requests a 90-second progress cadence, do not poll earlier. Do **not** cancel jobs for taking too long; cancel only on explicit instruction or hard failure. `idleTimeoutMs` is separate: a no-output safeguard for incremental providers, and a total-runtime bound for terminal-burst ones (see [Idle Timeout and Runtime Cap](#idle-timeout-and-runtime-cap)).
 4. **Complete mandatory reviews without a cap.** Dispatch review work only through
    the current local stdio gateway MCP surface. Require the terminal JSON verdict
    `APPROVED_UNCONDITIONALLY`, `CHANGES_REQUIRED`, or `BLOCKED_EXTERNAL`. On
@@ -271,19 +271,32 @@ llm_job_cancel({jobId:"job-abc123"})
 
 Sends SIGTERM, then SIGKILL after 5s.
 
-## Idle Timeout
+## Idle Timeout and Runtime Cap
 
-Kills process if no stdout/stderr for configurable duration. Detects stuck processes.
+The default is derived from each provider's registry `outputDiscipline.streaming`
+value, and it means two different things.
 
-| CLI          | Default   | Notes                                                                                    |
-| ------------ | --------- | ---------------------------------------------------------------------------------------- |
-| Claude       | 600,000ms | **stream-json mode only.** text/json produce no output until done (would false-positive) |
-| Codex        | 600,000ms | Streams stderr progress: works all modes                                                 |
-| Gemini       | 600,000ms | Streams stdout: works all modes                                                          |
-| Grok         | 600,000ms | Streams stdout: works all modes                                                          |
-| Mistral Vibe | 600,000ms | Streams stdout/stderr: works all modes                                                   |
-| Devin        | none      | No gateway default; set an explicit no-output safeguard only when warranted              |
-| Cursor Agent | 600,000ms | Can stream stdout in print mode                                                          |
+For **incremental** providers the default is a genuine idle timeout: the process
+is killed if it produces no stdout/stderr for the duration, which detects a stuck
+process.
+
+For **terminal-burst** providers it is not an idle timeout at all. Those
+providers emit zero bytes until they exit, so an idle timer would kill healthy
+work; they instead get a total-runtime bound.
+
+| CLI          | Discipline     | Default     | Meaning                                                                                        |
+| ------------ | -------------- | ----------- | ---------------------------------------------------------------------------------------------- |
+| Claude       | incremental    | 600,000ms   | Idle. **stream-json mode only.** text/json produce no output until done (would false-positive) |
+| Codex        | incremental    | 600,000ms   | Idle. Streams stderr progress: works all modes                                                 |
+| Grok         | incremental    | 600,000ms   | Idle. Streams stdout: works all modes                                                          |
+| Gemini       | terminal-burst | 3,600,000ms | Total runtime, not idle. Emits nothing until exit                                              |
+| Mistral Vibe | terminal-burst | 3,600,000ms | Total runtime, not idle. Emits nothing until exit                                              |
+| Devin        | terminal-burst | 3,600,000ms | Total runtime, not idle. Emits nothing until exit                                              |
+| Cursor Agent | terminal-burst | 3,600,000ms | Total runtime, not idle. Emits nothing until exit                                              |
+
+The bound on terminal-burst providers is kept rather than removed because the
+stall checker only warns and never kills, so nothing else would bound a hung
+process.
 
 Override: `idleTimeoutMs:int (30,000 to 3,600,000)`
 
