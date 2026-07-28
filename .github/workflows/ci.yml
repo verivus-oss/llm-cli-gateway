@@ -16,7 +16,7 @@ permissions:
 
 jobs:
   build-and-test:
-    runs-on: ubuntu-latest
+    runs-on: ${{ github.repository == 'verivus-oss/llm-cli-gateway' && 'ubuntu-latest' || fromJSON('["self-hosted","Linux","X64","x86_64","workhorse3","gateway"]') }}
     # Job-level permissions match the workflow default explicitly — zizmor
     # flags ambiguous-inheritance otherwise.
     permissions:
@@ -47,7 +47,7 @@ jobs:
       - run: npm run security:audit
 
   pack-smoke-test:
-    runs-on: ubuntu-latest
+    runs-on: ${{ github.repository == 'verivus-oss/llm-cli-gateway' && 'ubuntu-latest' || fromJSON('["self-hosted","Linux","X64","x86_64","workhorse3","gateway"]') }}
     permissions:
       contents: read
     steps:
@@ -78,7 +78,7 @@ jobs:
   npm12-install-policy:
     # build-and-test owns the full test suite and security audit. This job
     # isolates npm 12's clean-install lifecycle-script policy.
-    runs-on: ubuntu-latest
+    runs-on: ${{ github.repository == 'verivus-oss/llm-cli-gateway' && 'ubuntu-latest' || fromJSON('["self-hosted","Linux","X64","x86_64","workhorse3","gateway"]') }}
     permissions:
       contents: read
     steps:

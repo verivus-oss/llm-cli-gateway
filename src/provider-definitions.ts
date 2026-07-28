@@ -450,7 +450,7 @@ const KIT_UNSUPPORTED: ProviderPersonalConfigKit = {
 export const PROVIDER_TARGET_VERSIONS: Record<CliType, string> = {
   claude: "claude 2.1.220",
   codex: "codex-cli 0.145.0",
-  gemini: "agy 1.1.7",
+  gemini: "1.1.8",
   grok: "grok 0.2.112 (9bbd559437)",
   mistral: "vibe 2.22.0",
   devin: "devin 3000.2.17 (2c489dfc)",

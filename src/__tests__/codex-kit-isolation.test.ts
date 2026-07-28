@@ -412,7 +412,7 @@ describe("Codex Personal Agent Config isolation", () => {
         "setInterval(() => {}, 1000);",
       ].join("");
       const stubSource = [
-        "#!/usr/bin/env node",
+        `#!${process.execPath}`,
         'const { spawn } = require("node:child_process");',
         'const { writeFileSync } = require("node:fs");',
         `const descendant = spawn(process.execPath, ["-e", ${JSON.stringify(
@@ -427,6 +427,14 @@ describe("Codex Personal Agent Config isolation", () => {
       ].join("\n");
       writeFileSync(codexStub, stubSource, { mode: 0o700 });
       chmodSync(codexStub, 0o700);
+      // Pin the stub's module type. Node infers it for an extensionless file by
+      // walking up for the nearest package.json, which escapes the temp dir and
+      // lands on whatever sits above tmpdir(). A stray `"type": "module"` there
+      // loads this CommonJS stub as ESM, `require` is undefined, the stub dies
+      // before writing its pid file, and the test fails with an unrelated
+      // ENOENT. That is exactly what happened on the self-hosted runner, whose
+      // TMPDIR is /tmp, while a developer TMPDIR elsewhere passed by luck.
+      writeFileSync(join(testDir, "package.json"), JSON.stringify({ type: "commonjs" }));
 
       let parentPid: number | undefined;
       let descendantPid: number | undefined;

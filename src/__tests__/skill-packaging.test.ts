@@ -1,15 +1,16 @@
-// Every skill registered as an MCP resource must actually ship.
+// Which agent skills ship, and which deliberately do not.
 //
-// package.json#files listed 9 of the 17 skills, so a development tree served 17
-// skills:// resources while an npm install served 9. The eight missing ones were
-// the per-provider guides plus gateway-restart-surfaces, which is exactly the
-// material an operator driving seven unfamiliar CLIs needs. Nothing failed
-// loudly: the published build simply never registered them, and CLAUDE.md
-// described them as shipped.
+// The original version of this ratchet asserted that every git-tracked skill
+// must be listed in package.json#files. That premise was wrong, and shipping on
+// it tripped the release audit's shipped-skill leak scan: all seven
+// `provider-*` skills are MAINTAINER documentation for this repository. Their
+// own descriptions say "Track and maintain the upstream <X> CLI contract", and
+// their bodies instruct the reader to edit `src/upstream-contracts.ts`. They
+// reference internal source paths and identifiers that must not reach a
+// consumer, and the audit is right to reject them.
 //
-// This ratchet fails the build when a skill is added to the tree without being
-// added to the package, rather than waiting for someone to diff a live server
-// against a published one.
+// So the invariant is not "everything ships". It is: the workflow skills ship,
+// and two categories are excluded on purpose.
 
 import { describe, it, expect } from "vitest";
 import { readdirSync, readFileSync, existsSync } from "node:fs";
@@ -20,22 +21,26 @@ const REPO_ROOT = new URL("../..", import.meta.url).pathname;
 const SKILLS_DIR = join(REPO_ROOT, ".agents", "skills");
 
 /**
- * Skills that can actually ship, meaning the ones git tracks.
+ * Skills excluded from the package on purpose.
  *
- * Deliberately NOT a directory listing. A first version of this read the
- * filesystem and passed locally while failing in CI, because
- * .agents/skills/gateway-restart-surfaces/ is gitignored: it exists in the
- * author's working tree but not in a checkout. `npm pack` reads the working
- * tree too, so packing locally also reported it as shipping. Only git
- * distinguishes "present on this machine" from "present for everyone", and the
- * question this ratchet asks is what a consumer receives.
+ * `provider-*`: maintainer docs for updating this repo's upstream CLI
+ * contracts. They cite `src/upstream-contracts.ts`, `UPSTREAM_CLI_CONTRACTS`
+ * and `validateUpstreamCliArgs`, which the release audit's leak scan rejects in
+ * a shipped artifact, correctly.
+ *
+ * `gateway-restart-surfaces`: gitignored host-local operational guidance. It is
+ * not committed, so it cannot ship regardless.
  */
-function shippableSkills(): string[] {
-  const tracked = execFileSync("git", ["ls-files", ".agents/skills/*/SKILL.md"], {
+function isDeliberatelyUnshipped(skill: string): boolean {
+  return skill.startsWith("provider-") || skill === "gateway-restart-surfaces";
+}
+
+/** Skills git tracks. `npm pack` and a directory listing both also see untracked files. */
+function trackedSkills(): string[] {
+  return execFileSync("git", ["ls-files", ".agents/skills/*/SKILL.md"], {
     cwd: REPO_ROOT,
     encoding: "utf8",
-  });
-  return tracked
+  })
     .split("\n")
     .map(line => line.trim())
     .filter(Boolean)
@@ -43,7 +48,6 @@ function shippableSkills(): string[] {
     .sort();
 }
 
-/** Every skill directory present locally, tracked or not. */
 function skillsOnDisk(): string[] {
   return readdirSync(SKILLS_DIR, { withFileTypes: true })
     .filter(entry => entry.isDirectory() && existsSync(join(SKILLS_DIR, entry.name, "SKILL.md")))
@@ -51,7 +55,7 @@ function skillsOnDisk(): string[] {
     .sort();
 }
 
-function skillsDeclaredInPackage(): string[] {
+function declaredInPackage(): string[] {
   const pkg = JSON.parse(readFileSync(join(REPO_ROOT, "package.json"), "utf8")) as {
     files: string[];
   };
@@ -62,43 +66,41 @@ function skillsDeclaredInPackage(): string[] {
 }
 
 describe("skill packaging", () => {
-  it("ships every skill that git tracks", () => {
-    const onDisk = shippableSkills();
-    const declared = skillsDeclaredInPackage();
-    const missing = onDisk.filter(skill => !declared.includes(skill));
+  it("ships every tracked skill that is not deliberately excluded", () => {
+    const shouldShip = trackedSkills().filter(s => !isDeliberatelyUnshipped(s));
+    const declared = declaredInPackage();
+    const missing = shouldShip.filter(s => !declared.includes(s));
     expect(
       missing,
-      `these skills exist but package.json#files does not ship them, so npm consumers ` +
-        `will not see their skills:// resources: ${missing.join(", ")}`
+      `these skills are tracked and not excluded, but package.json#files omits them, ` +
+        `so npm consumers never see their skills:// resources: ${missing.join(", ")}`
     ).toEqual([]);
   });
 
-  it("does not declare a skill that no longer exists", () => {
-    const onDisk = shippableSkills();
-    const declared = skillsDeclaredInPackage();
-    const stale = declared.filter(skill => !onDisk.includes(skill));
+  it("never ships a maintainer or host-local skill", () => {
+    // Shipping one of these is what tripped the release audit's leak scan, since
+    // they cite internal source paths and identifiers.
+    const leaked = declaredInPackage().filter(isDeliberatelyUnshipped);
     expect(
-      stale,
-      `package.json#files references skills that are gone: ${stale.join(", ")}`
+      leaked,
+      `these are maintainer or host-local skills and must not be packaged: ${leaked.join(", ")}`
     ).toEqual([]);
   });
 
-  it("covers all seven providers with a per-provider skill", () => {
-    const onDisk = shippableSkills();
-    for (const provider of ["claude", "codex", "gemini", "grok", "mistral", "devin", "cursor"]) {
-      expect(onDisk, `no provider-${provider} skill`).toContain(`provider-${provider}`);
-    }
+  it("does not declare a skill that is not tracked", () => {
+    const tracked = trackedSkills();
+    const stale = declaredInPackage().filter(s => !tracked.includes(s));
+    expect(stale, `package.json#files references untracked skills: ${stale.join(", ")}`).toEqual(
+      []
+    );
   });
-  it("tolerates a locally present but gitignored skill", () => {
-    // gateway-restart-surfaces is host-local operational guidance and is
-    // gitignored on purpose. It must never be required to ship, and its presence
-    // in a working tree must not make this suite disagree with CI.
-    const untracked = skillsOnDisk().filter(skill => !shippableSkills().includes(skill));
-    const declared = skillsDeclaredInPackage();
-    for (const skill of untracked) {
-      expect(declared, `gitignored skill ${skill} must not be declared in files`).not.toContain(
-        skill
-      );
+
+  it("keeps a per-provider maintainer skill for all seven providers", () => {
+    // These do not ship, but they must exist: they are how a contract gets
+    // updated when a vendor releases.
+    const onDisk = skillsOnDisk();
+    for (const provider of ["claude", "codex", "gemini", "grok", "mistral", "devin", "cursor"]) {
+      expect(onDisk, `no provider-${provider} maintainer skill`).toContain(`provider-${provider}`);
     }
   });
 });

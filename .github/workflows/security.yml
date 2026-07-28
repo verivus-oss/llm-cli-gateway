@@ -47,7 +47,7 @@ permissions:
 jobs:
   security:
     name: security (workflow + content + deps + secrets)
-    runs-on: ubuntu-latest
+    runs-on: ${{ github.repository == 'verivus-oss/llm-cli-gateway' && 'ubuntu-latest' || fromJSON('["self-hosted","Linux","X64","x86_64","workhorse3","gateway"]') }}
     permissions:
       contents: read
     steps:
@@ -58,6 +58,15 @@ jobs:
           persist-credentials: false
 
       - name: Set up Python (for zizmor)
+        # GitHub-hosted only. setup-python resolves against a tool cache that a
+        # self-hosted runner does not have, and there is no published build for
+        # this host's distribution, so it fails with "version 3.12 with
+        # architecture x64 was not found". The self-hosted runner uses its
+        # system python3 instead; the requirements file is hash-pinned with a
+        # wheel list that satisfies it (verified: a --require-hashes install of
+        # requirements-security.txt succeeds under python 3.13 and yields the
+        # pinned zizmor 1.26.1).
+        if: github.repository == 'verivus-oss/llm-cli-gateway'
         uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
         with:
           python-version: "3.12"
@@ -66,6 +75,9 @@ jobs:
         # actionlint is distributed as a Go binary. Pinning to "stable"
         # keeps us on the same line as the language's release cadence
         # rather than freezing a minor version that drifts.
+        # Deliberately NOT made conditional like the Python step above: Go
+        # resolves fine on the self-hosted runner (its tool cache already holds
+        # a go toolchain), and disabling a step that works would be guessing.
         uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6
         with:
           go-version: "stable"
@@ -92,11 +104,29 @@ jobs:
         run: |
           set -euo pipefail
           python3 scripts/ci/validate_security_requirements.py requirements/ci/requirements-security.txt
-          python3 -m pip install --user --require-hashes -r requirements/ci/requirements-security.txt
+          # Install into a venv rather than `pip install --user`. The system
+          # python on the self-hosted runner ships without the pip module
+          # ("No module named pip"), and venv bootstraps its own pip through
+          # ensurepip. This works identically on a GitHub-hosted runner, so it
+          # stays one code path rather than a conditional. The --require-hashes
+          # supply-chain pin is unchanged, which is the whole point of
+          # installing zizmor from a hash-pinned requirements file rather than
+          # as a standalone binary.
+          #
+          # Scratch paths use $RUNNER_TEMP, never a fixed /tmp path. A
+          # GitHub-hosted runner gets a fresh /tmp per job, so a hardcoded name
+          # is harmless there; a self-hosted runner does not. /tmp persists
+          # across jobs and is shared with every other user on the box, so a
+          # leftover directory owned by someone else makes the step fail with
+          # EACCES (observed: a stale werner-owned /tmp/zizmor-venv broke this
+          # step for the `runners` user). $RUNNER_TEMP is per-job, owned by the
+          # runner account, and cleaned between runs.
+          python3 -m venv "$RUNNER_TEMP/zizmor-venv"
+          "$RUNNER_TEMP/zizmor-venv/bin/pip" install --quiet --require-hashes -r requirements/ci/requirements-security.txt
           # Default min-severity (low+); informational findings (job
           # names, concurrency limits, superfluous actions) are tracked
-          # but not enforced — those don't move the security needle.
-          "$HOME/.local/bin/zizmor" .github/workflows/
+          # but not enforced, those don't move the security needle.
+          "$RUNNER_TEMP/zizmor-venv/bin/zizmor" .github/workflows/
 
       # ---------------------------------------------------------------
       # Content correctness — cheap, broad coverage.
@@ -118,23 +148,45 @@ jobs:
             range="${HEAD_SHA}"
           fi
 
-          git log --format='%H%n%an <%ae>%n%cn <%ce>%n%B%n---END---' "${range}" > /tmp/commit-attribution.txt
+          git log --format='%H%n%an <%ae>%n%cn <%ce>%n%B%n---END---' "${range}" > "$RUNNER_TEMP/commit-attribution.txt"
           if grep -Ein \
             'Co-authored-by:[[:space:]]*Claude|<[^>]*@anthropic\.com>|noreply@anthropic\.com' \
-            /tmp/commit-attribution.txt; then
+            "$RUNNER_TEMP/commit-attribution.txt"; then
             echo "FAIL: commit attribution must not credit Claude/Anthropic accounts." >&2
             echo "Use human or project-owned author identity only; remove Claude/Anthropic co-author trailers before merging." >&2
             exit 1
           fi
 
       - name: Shell-script lint (shellcheck)
-        # ubuntu-latest pre-installs shellcheck. Our shell scripts run
-        # under release / install / pg-test flows; correctness bugs here
-        # would silently break gates.
+        # Our shell scripts run under release / install / pg-test flows;
+        # correctness bugs here would silently break gates.
+        #
+        # Install a pinned binary rather than relying on the runner image.
+        # ubuntu-latest pre-installs shellcheck, but the self-hosted runner does
+        # not (the step failed with "shellcheck: command not found"), and an
+        # image-provided version also drifts silently underneath us, which can
+        # turn a green gate red with no repo change. Pinning makes the two
+        # runner types behave identically and makes a lint-behaviour change an
+        # explicit commit. Same approach as osv-scanner and gitleaks below.
         run: |
           set -euo pipefail
-          shellcheck --version
-          shellcheck \
+          VERSION="0.11.0"
+          TARBALL="shellcheck-v${VERSION}.linux.x86_64.tar.xz"
+          # SHA256 fetched from the release artifact directly on 2026-07-28.
+          # Update this pin when bumping VERSION above.
+          EXPECTED_SHA="8c3be12b05d5c177a04c29e3c78ce89ac86f1595681cab149b65b97c4e227198"
+          curl -fsSL "https://github.com/koalaman/shellcheck/releases/download/v${VERSION}/${TARBALL}" -o "$RUNNER_TEMP/${TARBALL}"
+          actual=$(sha256sum "$RUNNER_TEMP/${TARBALL}" | awk '{print $1}')
+          if [ "${actual}" != "${EXPECTED_SHA}" ]; then
+            echo "FAIL: shellcheck tarball SHA256 mismatch."
+            echo "  expected: ${EXPECTED_SHA}"
+            echo "  actual:   ${actual}"
+            exit 1
+          fi
+          tar -xJf "$RUNNER_TEMP/${TARBALL}" -C "$RUNNER_TEMP" --strip-components=1 \
+            "shellcheck-v${VERSION}/shellcheck"
+          "$RUNNER_TEMP/shellcheck" --version
+          "$RUNNER_TEMP/shellcheck" \
             scripts/release-security-audit.sh \
             scripts/test-pg.sh \
             installer/build-release.sh
@@ -147,14 +199,36 @@ jobs:
       # ---------------------------------------------------------------
 
       - name: Lock-file CVE scan (osv-scanner)
-        uses: google/osv-scanner-action/osv-scanner-action@9a498708959aeaef5ef730655706c5a1df1edbc2 # v2.3.8
-        with:
+        # Install the official osv-scanner binary at a pinned version rather
+        # than using osv-scanner-action. That action is a CONTAINER action, so
+        # it requires a docker daemon; this repository's self-hosted runner has
+        # podman and no docker, and a container action cannot use it. The
+        # scanner itself is a single static Go executable with no such
+        # requirement, which makes this job behave identically on a
+        # GitHub-hosted and a self-hosted runner. Same reasoning as the gitleaks
+        # step below.
+        run: |
+          set -euo pipefail
+          VERSION="2.3.8"
+          BINARY="osv-scanner_linux_amd64"
+          # SHA256 of the published release artifact, fetched and verified on
+          # 2026-07-28. Update this pin when bumping VERSION above.
+          EXPECTED_SHA="bc98e15319ed0d515e3f9235287ba53cdc5535d576d24fd573978ecfe9ab92dc"
+          curl -fsSL "https://github.com/google/osv-scanner/releases/download/v${VERSION}/${BINARY}" -o "$RUNNER_TEMP/osv-scanner"
+          actual=$(sha256sum "$RUNNER_TEMP/osv-scanner" | awk '{print $1}')
+          if [ "${actual}" != "${EXPECTED_SHA}" ]; then
+            echo "FAIL: osv-scanner binary SHA256 mismatch."
+            echo "  expected: ${EXPECTED_SHA}"
+            echo "  actual:   ${actual}"
+            exit 1
+          fi
+          chmod +x "$RUNNER_TEMP/osv-scanner"
           # --no-resolve disables network-required transitive dependency
           # resolution. package-lock.json has full transitive info baked in,
           # and requirements/ci uses hash-pinned direct tool dependencies.
-          scan-args: |-
-            --recursive
-            --no-resolve
+          "$RUNNER_TEMP/osv-scanner" scan \
+            --recursive \
+            --no-resolve \
             ./
 
       - name: Secret scan (gitleaks)
@@ -170,17 +244,17 @@ jobs:
           # SHA256 fetched from the release artifact directly on
           # 2026-05-26. Update this pin when bumping the VERSION above.
           EXPECTED_SHA="551f6fc83ea457d62a0d98237cbad105af8d557003051f41f3e7ca7b3f2470eb"
-          curl -fsSL "https://github.com/gitleaks/gitleaks/releases/download/v${VERSION}/${TARBALL}" -o "/tmp/${TARBALL}"
-          actual=$(sha256sum "/tmp/${TARBALL}" | awk '{print $1}')
+          curl -fsSL "https://github.com/gitleaks/gitleaks/releases/download/v${VERSION}/${TARBALL}" -o "$RUNNER_TEMP/${TARBALL}"
+          actual=$(sha256sum "$RUNNER_TEMP/${TARBALL}" | awk '{print $1}')
           if [ "${actual}" != "${EXPECTED_SHA}" ]; then
             echo "FAIL: gitleaks tarball SHA256 mismatch."
             echo "  expected: ${EXPECTED_SHA}"
             echo "  actual:   ${actual}"
             exit 1
           fi
-          mkdir -p /tmp/gitleaks-bin
-          tar -xzf "/tmp/${TARBALL}" -C /tmp/gitleaks-bin gitleaks
-          /tmp/gitleaks-bin/gitleaks detect \
+          mkdir -p "$RUNNER_TEMP/gitleaks-bin"
+          tar -xzf "$RUNNER_TEMP/${TARBALL}" -C "$RUNNER_TEMP/gitleaks-bin" gitleaks
+          "$RUNNER_TEMP/gitleaks-bin/gitleaks" detect \
             --source . \
             --config .gitleaks.toml \
             --no-banner \

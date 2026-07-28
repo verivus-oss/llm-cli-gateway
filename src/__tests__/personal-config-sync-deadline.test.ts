@@ -316,8 +316,18 @@ describe("Personal Agent Config Kit sync deadline", () => {
       )
     );
     expect(response.isError).toBe(true);
-    expect(start).toHaveBeenCalledOnce();
-    expect(response.structuredContent?.errorCategory).toBe("saturated");
+    // Carry the rejection text into the failure message. Every assertion below
+    // presumes the request reached the job manager and was refused for
+    // saturation; if it was instead refused earlier (kit_busy on a lease claim,
+    // a workspace or admission gate), a bare "startJob was called 0 times"
+    // names the symptom and hides the cause, which costs a full CI round-trip
+    // to recover.
+    const rejection = `errorCategory=${response.structuredContent?.errorCategory} text=${response.content[0]?.text}`;
+    expect(
+      start,
+      `request was rejected before reaching the job manager: ${rejection}`
+    ).toHaveBeenCalledOnce();
+    expect(response.structuredContent?.errorCategory, rejection).toBe("saturated");
     expect(response.structuredContent?.retryable).toBe(true);
     expect(response.content[0]?.text).not.toContain(resolved.text);
     expect(release).toHaveBeenCalled();

@@ -4,6 +4,63 @@ All notable changes to the llm-cli-gateway project.
 
 ## [Unreleased]
 
+## [3.1.0-rc.2] - 2026-07-28: defects found by cross-LLM review of rc.1
+
+Release candidate. Same feature set as rc.1; this cut exists because an
+adversarial cross-LLM review of rc.1 found six defects, all of which predated
+that candidate. Anyone testing rc.1 should move to rc.2.
+
+### Fixed
+
+- **`routing://decisions` and `routing://priors` were unreachable in every
+  configuration.** `index.ts` builds the live resource surface from explicit
+  `registerResource` calls and never registered them, so they were absent from
+  `resources/list` and answered `-32602` on read even with least-cost routing
+  enabled. `ResourceProvider.listResources()`, which did declare them behind the
+  correct gate, has no production caller at all. They are now registered, and
+  both the registration and the reader gate on the same condition as the
+  `route_request` tools, so the Personal Agent Config Kit withholds the
+  observability surface exactly as it withholds the routing tools.
+- **The idle timeout was a hard wall-clock cap for providers that never
+  stream.** gemini, mistral, devin and cursor declare
+  `outputDiscipline.streaming: "terminal-burst"`, meaning zero bytes until exit,
+  yet a hand-maintained table gave three of them a 600000ms *idle* timeout with
+  comments asserting they "stream in real-time". The timer never reset, so
+  healthy work was killed at ten minutes: a real cross-LLM review job died at
+  exactly 600000ms of "inactivity" having produced precisely the zero bytes its
+  own registry entry predicts. The default is now derived from the registry, and
+  terminal-burst providers get a one-hour total-runtime bound. The bound is kept
+  rather than removed because the stall checker only warns and never kills.
+- **`codex_fork_session` leaked an opaque terminal error.** `codex fork` is an
+  interactive subcommand requiring a controlling terminal, and provider children
+  are spawned with pipes, so every call failed with `exit code 1: Error: stdin is
+  not a terminal`, which reads like a broken environment. Codex exposes no
+  non-interactive equivalent. The tool now returns the reason and the route that
+  works (`codex_request` with a session UUID or `resumeLatest`), without spawning
+  a child that cannot succeed, and without writing session workspace scope for a
+  request that can never run.
+- **A `DEP0190` deprecation warning on every startup.** Executable lookup spawned
+  `command -v` with an argument array and the shell option enabled, which Node
+  deprecates because arguments are concatenated rather than escaped, and which
+  printed into stderr, the MCP log channel, on every start. The lookup now walks
+  the extended PATH directly with no child process.
+- **An unactionable ERROR on every startup.** A legacy orphaned-artifact row with
+  no captured scope can never acquire one, so the message recurred forever with
+  no action available. Retaining the artifact is unchanged; the report is now a
+  single WARN per process that says so.
+- **Documented which agent skills ship, and why the rest do not.** A review
+  finding claimed the eight unshipped skills were an oversight. They are not.
+  The seven `provider-*` skills are maintainer documentation for this
+  repository: their descriptions say "Track and maintain the upstream `<X>` CLI
+  contract", their bodies instruct the reader to edit `src/upstream-contracts.ts`,
+  and shipping them trips the release audit's leak scan because they cite
+  internal identifiers. `gateway-restart-surfaces` is gitignored host-local
+  operational guidance. The nine workflow skills ship, as before; no packaging
+  changed. What changed is that `src/__tests__/skill-packaging.test.ts` now
+  enforces the boundary in both directions, so a workflow skill cannot be
+  silently dropped and a maintainer skill cannot be silently packaged, and
+  CLAUDE.md no longer implies the provider skills are consumer-facing.
+
 ## [3.1.0-rc.1] - 2026-07-27: provider version guard, durable job output, Mistral Kit
 
 Release candidate. The gateway now notices when a provider CLI has moved
@@ -62,11 +119,14 @@ Personal Agent Config Kit.
   check that is guaranteed not to install as a side effect. A probe that fails
   reports `unknown`; it never reports `current`.
 - **`npm run providers:rebaseline` (and `:apply`)** rewrites the recorded target
-  versions and additive contract drift in place, so a routine provider CLI
-  upgrade no longer has to be reconciled by hand. Flag removals are deliberately
-  not automated: `flags` is the argv emit allowlist, so deleting an entry from
-  the contract alone leaves the generator and the request path dangling. Those
-  exit with a distinct status naming the three files a human must edit.
+  version in place, so a routine provider CLI version bump no longer has to be
+  reconciled by hand. Additive flag drift and flag removals are both **reported,
+  not applied**: an added flag has to be classified as an argv emit (`flags`) or
+  a probe acknowledgement (`acknowledgedUpstreamFlags`), and that is a judgement
+  about whether the gateway should start emitting it, not a mechanical edit. A
+  removal is worse, because `flags` is the argv emit allowlist, so deleting an
+  entry from the contract alone leaves the generator and the request path
+  dangling. Both exit with a distinct status naming what a human must edit.
   `setup/systemd/gateway-provider-drift.{service,timer}` runs the check daily.
 
 ### Changed

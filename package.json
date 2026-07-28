@@ -1,6 +1,6 @@
 {
   "name": "llm-cli-gateway",
-  "version": "3.1.0-rc.1",
+  "version": "3.1.0-rc.2",
   "publicSiteVersion": "3.0.0",
   "mcpName": "io.github.verivus-oss/llm-cli-gateway",
   "description": "Secure local control plane for AI coding agents across supported MCP clients, with workspace-scoped remote access, approval gates, durable jobs, sessions, and audit receipts.",
@@ -64,14 +64,7 @@
     ".agents/skills/retrospective-walk/SKILL.md",
     ".agents/skills/public-demo-session/SKILL.md",
     ".agents/skills/least-cost-routing/SKILL.md",
-    ".agents/skills/personal-agent-config-kit/SKILL.md",
-    ".agents/skills/provider-claude/SKILL.md",
-    ".agents/skills/provider-codex/SKILL.md",
-    ".agents/skills/provider-cursor/SKILL.md",
-    ".agents/skills/provider-devin/SKILL.md",
-    ".agents/skills/provider-gemini/SKILL.md",
-    ".agents/skills/provider-grok/SKILL.md",
-    ".agents/skills/provider-mistral/SKILL.md"
+    ".agents/skills/personal-agent-config-kit/SKILL.md"
   ],
   "scripts": {
     "clean:dist": "node scripts/clean-dist.mjs",
