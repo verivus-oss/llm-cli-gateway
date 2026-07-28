@@ -147,14 +147,36 @@ jobs:
       # ---------------------------------------------------------------
 
       - name: Lock-file CVE scan (osv-scanner)
-        uses: google/osv-scanner-action/osv-scanner-action@9a498708959aeaef5ef730655706c5a1df1edbc2 # v2.3.8
-        with:
+        # Install the official osv-scanner binary at a pinned version rather
+        # than using osv-scanner-action. That action is a CONTAINER action, so
+        # it requires a docker daemon; this repository's self-hosted runner has
+        # podman and no docker, and a container action cannot use it. The
+        # scanner itself is a single static Go executable with no such
+        # requirement, which makes this job behave identically on a
+        # GitHub-hosted and a self-hosted runner. Same reasoning as the gitleaks
+        # step below.
+        run: |
+          set -euo pipefail
+          VERSION="2.3.8"
+          BINARY="osv-scanner_linux_amd64"
+          # SHA256 of the published release artifact, fetched and verified on
+          # 2026-07-28. Update this pin when bumping VERSION above.
+          EXPECTED_SHA="bc98e15319ed0d515e3f9235287ba53cdc5535d576d24fd573978ecfe9ab92dc"
+          curl -fsSL "https://github.com/google/osv-scanner/releases/download/v${VERSION}/${BINARY}" -o /tmp/osv-scanner
+          actual=$(sha256sum /tmp/osv-scanner | awk '{print $1}')
+          if [ "${actual}" != "${EXPECTED_SHA}" ]; then
+            echo "FAIL: osv-scanner binary SHA256 mismatch."
+            echo "  expected: ${EXPECTED_SHA}"
+            echo "  actual:   ${actual}"
+            exit 1
+          fi
+          chmod +x /tmp/osv-scanner
           # --no-resolve disables network-required transitive dependency
           # resolution. package-lock.json has full transitive info baked in,
           # and requirements/ci uses hash-pinned direct tool dependencies.
-          scan-args: |-
-            --recursive
-            --no-resolve
+          /tmp/osv-scanner scan \
+            --recursive \
+            --no-resolve \
             ./
 
       - name: Secret scan (gitleaks)
