@@ -192,7 +192,8 @@ export function resolveExecutableAbsolutePath(exe: string): string {
 /**
  * Locate an executable by walking the supplied PATH, without spawning anything.
  *
- * This replaces a `spawnSync("command", ["-v", exe], { shell: true })`. That form
+ * This replaces a former spawnSync of `command -v` that enabled the shell
+ * option with a separate argument array. That form
  * passed an argument array with a shell, which Node deprecates (DEP0190, because
  * arguments are concatenated rather than escaped) and which printed a
  * DeprecationWarning to stderr on every gateway start. stderr is the MCP log
