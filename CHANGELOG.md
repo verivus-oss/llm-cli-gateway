@@ -35,15 +35,33 @@ All notable changes to the llm-cli-gateway project.
   independent reviewers; the `provider_tool_capabilities` discovery text for
   Gemini and Cursor was corrected to match.
 
-- **Shipped agent skills contradicted the fix above.** Adding `workingDir`
-  falsified guidance in skills that ship to npm consumers: `session-workflow`
-  asserted "Gemini has no `workingDir`", and the `multi-llm-review` local target
-  matrix still routed Gemini and Cursor through a registered `workspace`. An
-  agent following those skills would have avoided the field the fix adds.
-  Corrected across six skills (`session-workflow`, `multi-llm-review`,
-  `async-job-orchestration`, `implement-review-fix`, and the unshipped
-  maintainer `provider-gemini` and `provider-cursor`), including the worked
-  examples, not only the prose.
+- **Agent-facing guidance across every surface contradicted the fix above.**
+  Adding `workingDir` falsified claims wherever the old capability was written
+  down, and those claims were scattered across four distinct surfaces that no
+  single search covered:
+
+  - **npm-packaged skills**: `session-workflow` asserted "Gemini has no
+    `workingDir`", and the `multi-llm-review` local target matrix routed Gemini
+    and Cursor through a registered `workspace`. Also `async-job-orchestration`
+    and `implement-review-fix`, plus the maintainer `provider-gemini` and
+    `provider-cursor`, including the worked examples rather than only the prose.
+  - **`README.md`**, the primary user-facing reference: `gemini_request`
+    documented `workspace` as the cwd selector with no `workingDir` at all, and
+    `cursor_request` had no entry for it.
+  - **`provider_tool_capabilities`**, which agents are explicitly told to
+    trust: Gemini advertised `includeDirs/workspace/worktree` and Cursor
+    `workspace/addDir`, and Cursor's ACP rejection list omitted the field.
+  - **The Claude plugin skills** under `skills/`, declared by
+    `.claude-plugin/plugin.json`. This is a second distribution channel,
+    separate from `package.json#files`: `design-review-cycle`, `model-routing`,
+    `multi-llm-consensus`, `multi-llm-orchestration`, and
+    `red-team-assessment` all told readers Gemini has no `workingDir`.
+    `docs/guides/BEST_PRACTICES.md` enumerated only five providers as accepting
+    it.
+
+  All corrected. The enumeration form is worth noting: a positive list of five
+  providers is invisible to any search for a negative claim, which is how it
+  survived several sweeps.
 
 - **Three agent skills still pointed at `codex_fork_session`**, which
   `3.1.0-rc.2` made explicitly unavailable, so the shipped guidance told callers
@@ -52,7 +70,7 @@ All notable changes to the llm-cli-gateway project.
   route Codex continuation through `codex_request` with a real session UUID or
   `resumeLatest`. Their statements that `codex_fork_session` still applies the
   argv size rejection are retained and clarified rather than removed: the
-  availability guard is deliberately evaluated *after* argv admission, so
+  availability guard is deliberately evaluated _after_ argv admission, so
   `input_too_large` really does surface there first.
 
 ### Added
@@ -85,7 +103,7 @@ that candidate. Anyone testing rc.1 should move to rc.2.
 - **The idle timeout was a hard wall-clock cap for providers that never
   stream.** gemini, mistral, devin and cursor declare
   `outputDiscipline.streaming: "terminal-burst"`, meaning zero bytes until exit,
-  yet a hand-maintained table gave three of them a 600000ms *idle* timeout with
+  yet a hand-maintained table gave three of them a 600000ms _idle_ timeout with
   comments asserting they "stream in real-time". The timer never reset, so
   healthy work was killed at ten minutes: a real cross-LLM review job died at
   exactly 600000ms of "inactivity" having produced precisely the zero bytes its
@@ -95,7 +113,7 @@ that candidate. Anyone testing rc.1 should move to rc.2.
 - **`codex_fork_session` leaked an opaque terminal error.** `codex fork` is an
   interactive subcommand requiring a controlling terminal, and provider children
   are spawned with pipes, so every call failed with `exit code 1: Error: stdin is
-  not a terminal`, which reads like a broken environment. Codex exposes no
+not a terminal`, which reads like a broken environment. Codex exposes no
   non-interactive equivalent. The tool now returns the reason and the route that
   works (`codex_request` with a session UUID or `resumeLatest`), without spawning
   a child that cannot succeed, and without writing session workspace scope for a
@@ -250,7 +268,7 @@ Personal Agent Config Kit.
   parent declares always reads as `invalid` to consumers; treating that as a
   blanket failure gave no way to distinguish it from real tree corruption. The
   check is bidirectional: an unreviewed out-of-range package fails the release,
-  and so does the *disappearance* of a reviewed pin, which is what silently
+  and so does the _disappearance_ of a reviewed pin, which is what silently
   shipping an unpatched transitive would look like. The one current entry is the
   `@hono/node-server` pin for GHSA-frvp-7c67-39w9, whose exit condition is
   recorded with it.
