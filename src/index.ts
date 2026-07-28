@@ -18235,7 +18235,9 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
         .min(30_000)
         .max(3_600_000)
         .optional()
-        .describe("Idle timeout in ms (min 30s, max 1h, omit=CLI default)"),
+        .describe(
+          "Total-runtime bound, not an idle timer: this provider emits no output until it exits, so the child is killed after this duration even while healthy. Min 30s, max 1h, omit=1h default."
+        ),
       forceRefresh: z
         .boolean()
         .default(false)
@@ -18752,7 +18754,9 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
         .min(30_000)
         .max(3_600_000)
         .optional()
-        .describe("Idle timeout in ms (min 30s, max 1h, omit=CLI default)"),
+        .describe(
+          "Total-runtime bound, not an idle timer: this provider emits no output until it exits, so the child is killed after this duration even while healthy. Min 30s, max 1h, omit=1h default."
+        ),
       forceRefresh: z
         .boolean()
         .default(false)
@@ -18932,7 +18936,9 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
         .min(30_000)
         .max(3_600_000)
         .optional()
-        .describe("Idle timeout in ms (min 30s, max 1h, omit=CLI default)"),
+        .describe(
+          "Total-runtime bound, not an idle timer: this provider emits no output until it exits, so the child is killed after this duration even while healthy. Min 30s, max 1h, omit=1h default."
+        ),
       forceRefresh: z
         .boolean()
         .default(false)
@@ -19096,7 +19102,9 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
         .min(30_000)
         .max(3_600_000)
         .optional()
-        .describe("Idle timeout in ms (min 30s, max 1h, omit=CLI default)"),
+        .describe(
+          "Total-runtime bound, not an idle timer: this provider emits no output until it exits, so the child is killed after this duration even while healthy. Min 30s, max 1h, omit=1h default."
+        ),
       forceRefresh: z
         .boolean()
         .default(false)
@@ -20314,7 +20322,9 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
           .min(30_000)
           .max(3_600_000)
           .optional()
-          .describe("Idle timeout in ms (min 30s, max 1h, omit=CLI default)"),
+          .describe(
+            "Total-runtime bound, not an idle timer: this provider emits no output until it exits, so the child is killed after this duration even while healthy. Min 30s, max 1h, omit=1h default."
+          ),
         forceRefresh: z
           .boolean()
           .default(false)
@@ -20911,7 +20921,9 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
           .min(30_000)
           .max(3_600_000)
           .optional()
-          .describe("Idle timeout in ms (min 30s, max 1h, omit=CLI default)"),
+          .describe(
+            "Total-runtime bound, not an idle timer: this provider emits no output until it exits, so the child is killed after this duration even while healthy. Min 30s, max 1h, omit=1h default."
+          ),
         forceRefresh: z
           .boolean()
           .default(false)
@@ -21073,7 +21085,9 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
           .min(30_000)
           .max(3_600_000)
           .optional()
-          .describe("Idle timeout in ms (min 30s, max 1h, omit=CLI default)"),
+          .describe(
+            "Total-runtime bound, not an idle timer: this provider emits no output until it exits, so the child is killed after this duration even while healthy. Min 30s, max 1h, omit=1h default."
+          ),
         forceRefresh: z
           .boolean()
           .default(false)
@@ -21222,7 +21236,9 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
           .min(30_000)
           .max(3_600_000)
           .optional()
-          .describe("Idle timeout in ms (min 30s, max 1h, omit=CLI default)"),
+          .describe(
+            "Total-runtime bound, not an idle timer: this provider emits no output until it exits, so the child is killed after this duration even while healthy. Min 30s, max 1h, omit=1h default."
+          ),
         forceRefresh: z
           .boolean()
           .default(false)

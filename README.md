@@ -734,7 +734,7 @@ Execute a Google Antigravity CLI (`agy`) request with session support.
 - `optimizePrompt` (boolean, optional): Optimize prompt for token efficiency, default: false
 - `optimizeResponse` (boolean, optional): Optimize response for token efficiency, default: false
 - `correlationId` (string, optional): Request trace ID (auto-generated if omitted)
-- `idleTimeoutMs` (integer, optional): Kill a stuck process after output inactivity; 30,000 to 3,600,000 ms
+- `idleTimeoutMs` (integer, optional): Total-runtime bound, not an idle timer: this provider emits no output until it exits, so the process is killed after this duration even while healthy. 30,000 to 3,600,000 ms, default 3,600,000 ms
 - `forceRefresh` (boolean, optional): Bypass dedup and force a fresh CLI run, default: false
 
 **Response extras:**
@@ -1158,7 +1158,7 @@ Run a Mistral Vibe agentic coding request. Like `grok_request` in shape, but wit
 - `promptParts` (object, optional): Cache-aware structured prompt `{ system?, tools?, context?, task }`; mutually exclusive with `prompt`
 - `optimizePrompt` / `optimizeResponse` (boolean, optional): Token-efficiency optimisation, default: false
 - `correlationId` (string, optional): Request trace ID (auto-generated if omitted)
-- `idleTimeoutMs` (integer, optional): Kill a stuck process after output inactivity; 30,000 to 3,600,000 ms
+- `idleTimeoutMs` (integer, optional): Total-runtime bound, not an idle timer: this provider emits no output until it exits, so the process is killed after this duration even while healthy. 30,000 to 3,600,000 ms, default 3,600,000 ms
 - `forceRefresh` (boolean, optional): Bypass dedup and force a fresh CLI run, default: false
 
 ##### `devin_request`
@@ -1196,7 +1196,7 @@ Run a Cognition Devin CLI request synchronously (headless print mode, `devin -p`
   in its repository representation instead of executing host commands.
 - `optimizePrompt` / `optimizeResponse` (boolean, optional): Token-efficiency optimisation, default: false
 - `correlationId` (string, optional): Request trace ID (auto-generated if omitted)
-- `idleTimeoutMs` (integer, optional): Kill a stuck process after output inactivity; 30,000 to 3,600,000 ms
+- `idleTimeoutMs` (integer, optional): Total-runtime bound, not an idle timer: this provider emits no output until it exits, so the process is killed after this duration even while healthy. 30,000 to 3,600,000 ms, default 3,600,000 ms
 - `forceRefresh` (boolean, optional): Bypass dedup and force a fresh CLI run, default: false
 
 ##### `cursor_request`
@@ -1224,7 +1224,7 @@ Run a Cursor Agent request synchronously. The default CLI transport uses headles
 - `approvalPolicy` (string, optional): Has no effect on CLI because `mcp_managed` is unavailable. ACP rejects it because ACP uses its own permission bridge.
 - `optimizePrompt` / `optimizeResponse` (boolean, optional): Token-efficiency optimisation, default: false
 - `correlationId` (string, optional): Request trace ID (auto-generated if omitted)
-- `idleTimeoutMs` (integer, optional): Kill a stuck process after output inactivity; 30,000 to 3,600,000 ms
+- `idleTimeoutMs` (integer, optional): Total-runtime bound, not an idle timer: this provider emits no output until it exits, so the process is killed after this duration even while healthy. 30,000 to 3,600,000 ms, default 3,600,000 ms
 - `forceRefresh` (boolean, optional): Bypass dedup and force a fresh CLI run, default: false
 
 ##### `claude_request_async` / `codex_request_async` / `gemini_request_async` / `grok_request_async` / `mistral_request_async` / `devin_request_async` / `cursor_request_async`

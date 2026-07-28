@@ -300,7 +300,7 @@ process.
 
 Override: `idleTimeoutMs:int (30,000 to 3,600,000)`
 
-When idle timeout fires: exit code **125** (non-transient, no retry).
+When the idle timeout fires, or the total-runtime bound on a terminal-burst provider: exit code **125** (non-transient, no retry).
 
 ## Parallel Jobs
 

@@ -1975,7 +1975,7 @@
             "type": "integer",
             "minimum": 30000,
             "maximum": 3600000,
-            "description": "Idle timeout in ms (min 30s, max 1h, omit=CLI default)"
+            "description": "Total-runtime bound, not an idle timer: this provider emits no output until it exits, so the child is killed after this duration even while healthy. Min 30s, max 1h, omit=1h default."
           },
           "forceRefresh": {
             "type": "boolean",
@@ -2112,7 +2112,7 @@
             "type": "integer",
             "minimum": 30000,
             "maximum": 3600000,
-            "description": "Idle timeout in ms (min 30s, max 1h, omit=CLI default)"
+            "description": "Total-runtime bound, not an idle timer: this provider emits no output until it exits, so the child is killed after this duration even while healthy. Min 30s, max 1h, omit=1h default."
           },
           "forceRefresh": {
             "type": "boolean",
@@ -2255,7 +2255,7 @@
             "type": "integer",
             "minimum": 30000,
             "maximum": 3600000,
-            "description": "Idle timeout in ms (min 30s, max 1h, omit=CLI default)"
+            "description": "Total-runtime bound, not an idle timer: this provider emits no output until it exits, so the child is killed after this duration even while healthy. Min 30s, max 1h, omit=1h default."
           },
           "forceRefresh": {
             "type": "boolean",
@@ -2409,7 +2409,7 @@
             "type": "integer",
             "minimum": 30000,
             "maximum": 3600000,
-            "description": "Idle timeout in ms (min 30s, max 1h, omit=CLI default)"
+            "description": "Total-runtime bound, not an idle timer: this provider emits no output until it exits, so the child is killed after this duration even while healthy. Min 30s, max 1h, omit=1h default."
           },
           "forceRefresh": {
             "type": "boolean",
@@ -2629,7 +2629,7 @@
             "type": "integer",
             "minimum": 30000,
             "maximum": 3600000,
-            "description": "Idle timeout in ms (min 30s, max 1h, omit=CLI default)"
+            "description": "Total-runtime bound, not an idle timer: this provider emits no output until it exits, so the child is killed after this duration even while healthy. Min 30s, max 1h, omit=1h default."
           },
           "forceRefresh": {
             "type": "boolean",
@@ -2875,7 +2875,7 @@
             "type": "integer",
             "minimum": 30000,
             "maximum": 3600000,
-            "description": "Idle timeout in ms (min 30s, max 1h, omit=CLI default)"
+            "description": "Total-runtime bound, not an idle timer: this provider emits no output until it exits, so the child is killed after this duration even while healthy. Min 30s, max 1h, omit=1h default."
           },
           "forceRefresh": {
             "type": "boolean",
@@ -4192,7 +4192,7 @@
             "type": "integer",
             "minimum": 30000,
             "maximum": 3600000,
-            "description": "Idle timeout in ms (min 30s, max 1h, omit=CLI default)"
+            "description": "Total-runtime bound, not an idle timer: this provider emits no output until it exits, so the child is killed after this duration even while healthy. Min 30s, max 1h, omit=1h default."
           },
           "forceRefresh": {
             "type": "boolean",
@@ -4417,7 +4417,7 @@
             "type": "integer",
             "minimum": 30000,
             "maximum": 3600000,
-            "description": "Idle timeout in ms (min 30s, max 1h, omit=CLI default)"
+            "description": "Total-runtime bound, not an idle timer: this provider emits no output until it exits, so the child is killed after this duration even while healthy. Min 30s, max 1h, omit=1h default."
           },
           "forceRefresh": {
             "type": "boolean",
