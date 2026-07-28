@@ -58,6 +58,15 @@ jobs:
           persist-credentials: false
 
       - name: Set up Python (for zizmor)
+        # GitHub-hosted only. setup-python resolves against a tool cache that a
+        # self-hosted runner does not have, and there is no published build for
+        # this host's distribution, so it fails with "version 3.12 with
+        # architecture x64 was not found". The self-hosted runner uses its
+        # system python3 instead; the requirements file is hash-pinned with a
+        # wheel list that satisfies it (verified: a --require-hashes install of
+        # requirements-security.txt succeeds under python 3.13 and yields the
+        # pinned zizmor 1.26.1).
+        if: github.repository == 'verivus-oss/llm-cli-gateway'
         uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
         with:
           python-version: "3.12"
@@ -66,6 +75,9 @@ jobs:
         # actionlint is distributed as a Go binary. Pinning to "stable"
         # keeps us on the same line as the language's release cadence
         # rather than freezing a minor version that drifts.
+        # Deliberately NOT made conditional like the Python step above: Go
+        # resolves fine on the self-hosted runner (its tool cache already holds
+        # a go toolchain), and disabling a step that works would be guessing.
         uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6
         with:
           go-version: "stable"
