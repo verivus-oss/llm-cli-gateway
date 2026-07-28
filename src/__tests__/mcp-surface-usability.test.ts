@@ -190,14 +190,21 @@ describe("MCP tool-surface usability (post-usability-review regressions)", () =>
         description,
         `${toolName}.resumeLatest must not reassert the global-selector claim`
       ).not.toMatch(/globally latest/i);
-      // A half-applied edit can leave an affirmative inheritance clause sitting
-      // next to the warning, which is how the same sentence ended up asserting
-      // both sides in a plugin skill. Forbid the affirmative form outright.
-      // Negative lookbehind so a legitimate DENIAL ("never inherits the original
-      // cwd") is not rejected alongside the affirmative form this targets.
-      expect(description, `${toolName}.resumeLatest must not reassert cwd inheritance`).not.toMatch(
-        /(?<!never |not |n't )inherits[^.]*original/i
-      );
+      // There is deliberately NO regex here forbidding affirmative inheritance
+      // phrasing. Two attempts failed in both directions, verified by probe:
+      // `/(?<!never |not |n't )inherits[^.]*original/i` let the affirmative
+      // "keeps its original cwd and workingDir cannot retarget it" through
+      // (it never says "inherits"), while wrongly rejecting the safe denials
+      // "Do not assume a resumed session inherits its original cwd" and
+      // "Whether it inherits its original cwd is unresolved".
+      //
+      // Blacklisting natural-language assertions is a losing game. The positive
+      // requirements above are the robust part: a description that names both
+      // uncertainties and says not to rely on them cannot also promise
+      // inheritance without contradicting itself, and a self-contradicting
+      // description is a review problem, not a regex problem. `globally latest`
+      // stays banned below because it is one specific stable phrase that was
+      // the actual prior claim, not an open-ended category.
       expect(description, `${toolName}.resumeLatest must explain explicit UUID targeting`).toMatch(
         /explicit real Codex UUID targets that session/i
       );

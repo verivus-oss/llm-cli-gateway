@@ -126,8 +126,10 @@ session, pass its verified real Codex UUID as `sessionId`.
 
 For Codex, start source inspection with `sandboxMode:"read-only"`; use
 `workspace-write` only if the work needs write-producing commands. Do not use
-new `fullAuto:true` examples. On a Codex resume, sandbox selection is not
-emitted, so start a fresh native session if you must alter it.
+new `fullAuto:true` examples. On a Codex resume, `sandboxMode` and `fullAuto`
+are not emitted, so neither can select a posture there; `configOverrides` can
+still set `sandbox_mode`. Start a fresh native session when the posture must be
+known.
 
 ## Target and concurrency discipline
 
@@ -136,8 +138,10 @@ before every resume, especially when multiple workstations or repositories run
 simultaneously:
 
 - Use explicit `workingDir` for Claude, Grok, Mistral, and Devin.
-- Use `workingDir` for a fresh Codex session. It does not scope Codex
-  `resumeLatest`; use a verified real Codex UUID to target a specific session.
+- Use `workingDir` for a fresh Codex session. Do not assume it leaves
+  `resumeLatest` unaffected: `--last` is cwd-filtered upstream and the child is
+  still spawned with the gateway-resolved cwd, so it can influence which session
+  is selected. Use a verified real Codex UUID to target a specific session.
 - Use `workingDir` for Gemini's target checkout. `includeDirs` remains an extra
   read path and still does not select cwd.
 - Use `workingDir` for Cursor's process cwd. Its `workspace` is a separate
