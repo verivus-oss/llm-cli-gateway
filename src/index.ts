@@ -17610,7 +17610,7 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
         .enum(CODEX_SANDBOX_MODES)
         .optional()
         .describe(
-          "Codex --sandbox. NEW SESSIONS ONLY: `codex exec resume` rejects sandbox policy flags, so a resumed request drops this field and inherits the original session's policy. Establish the posture on the first request. On a new session, omitting it does NOT guarantee read-only: the gateway emits no --sandbox flag and Codex resolves the policy from configuration, project trust, and its own fallback, so a trusted project can resolve to workspace-write. Pass read-only explicitly for inspection. Pass workspace-write to let Codex edit files in the working dir, or danger-full-access for unrestricted access."
+          "Codex --sandbox. NEW SESSIONS ONLY: the gateway filters --sandbox out of a resume argv, so this field has no effect on a resumed request. That is NOT a guarantee that the resumed session keeps its original posture: configOverrides still passes through and can set sandbox_mode, and Codex re-resolves configuration on a cold resume. Establish the posture on the first request and verify it when it matters. On a new session, omitting it does NOT guarantee read-only: the gateway emits no --sandbox flag and Codex resolves the policy from configuration, project trust, and its own fallback, so a trusted project can resolve to workspace-write. Pass read-only explicitly for inspection. Pass workspace-write to let Codex edit files in the working dir, or danger-full-access for unrestricted access."
         ),
       askForApproval: z
         .enum(CODEX_ASK_FOR_APPROVAL_MODES)
@@ -17875,7 +17875,7 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
         .enum(CODEX_SANDBOX_MODES)
         .optional()
         .describe(
-          "Codex --sandbox. NEW SESSIONS ONLY: `codex exec resume` rejects sandbox policy flags, so a resumed request drops this field and inherits the original session's policy. Establish the posture on the first request. On a new session, omitting it does NOT guarantee read-only: the gateway emits no --sandbox flag and Codex resolves the policy from configuration, project trust, and its own fallback, so a trusted project can resolve to workspace-write. Pass read-only explicitly for inspection. Pass workspace-write to let Codex edit files in the working dir, or danger-full-access for unrestricted access."
+          "Codex --sandbox. NEW SESSIONS ONLY: the gateway filters --sandbox out of a resume argv, so this field has no effect on a resumed request. That is NOT a guarantee that the resumed session keeps its original posture: configOverrides still passes through and can set sandbox_mode, and Codex re-resolves configuration on a cold resume. Establish the posture on the first request and verify it when it matters. On a new session, omitting it does NOT guarantee read-only: the gateway emits no --sandbox flag and Codex resolves the policy from configuration, project trust, and its own fallback, so a trusted project can resolve to workspace-write. Pass read-only explicitly for inspection. Pass workspace-write to let Codex edit files in the working dir, or danger-full-access for unrestricted access."
         ),
       askForApproval: z
         .enum(CODEX_ASK_FOR_APPROVAL_MODES)
@@ -20019,7 +20019,7 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
           .enum(CODEX_SANDBOX_MODES)
           .optional()
           .describe(
-            "Codex --sandbox. NEW SESSIONS ONLY: `codex exec resume` rejects sandbox policy flags, so a resumed request drops this field and inherits the original session's policy. Establish the posture on the first request. On a new session, omitting it does NOT guarantee read-only: the gateway emits no --sandbox flag and Codex resolves the policy from configuration, project trust, and its own fallback, so a trusted project can resolve to workspace-write. Pass read-only explicitly for inspection. Pass workspace-write to let Codex edit files in the working dir, or danger-full-access for unrestricted access."
+            "Codex --sandbox. NEW SESSIONS ONLY: the gateway filters --sandbox out of a resume argv, so this field has no effect on a resumed request. That is NOT a guarantee that the resumed session keeps its original posture: configOverrides still passes through and can set sandbox_mode, and Codex re-resolves configuration on a cold resume. Establish the posture on the first request and verify it when it matters. On a new session, omitting it does NOT guarantee read-only: the gateway emits no --sandbox flag and Codex resolves the policy from configuration, project trust, and its own fallback, so a trusted project can resolve to workspace-write. Pass read-only explicitly for inspection. Pass workspace-write to let Codex edit files in the working dir, or danger-full-access for unrestricted access."
           ),
         askForApproval: z
           .enum(CODEX_ASK_FOR_APPROVAL_MODES)

@@ -180,9 +180,11 @@ asks for that work.
 2. Before every iteration, use that fresh process to inspect live provider
    capability and availability. Reapply the full-access control on every new
    provider job. Do not assume a previous job, a resumed session, or a provider
-   configuration reload retained the grant. Codex resume inherits its original
-   sandbox and cannot accept a new sandbox selection, so start a new Codex
-   session when the access posture must be established again.
+   configuration reload retained the grant. The gateway drops `sandboxMode` on
+   a Codex resume, so a resumed request cannot select a posture, and the
+   resumed posture is not guaranteed to match the original either
+   (`configOverrides` still passes through and Codex re-resolves configuration).
+   Start a new Codex session when the access posture must be known.
 3. Preserve each provider's ambient native MCP configuration. Do not pass an
    `allowedTools`, `disallowedTools`, `tools`, `allow`, `deny`, `mcpServers`,
    or `strictMcpConfig` list as a purported full-access setting. The gateway

@@ -46,11 +46,18 @@ All notable changes to the llm-cli-gateway project.
   who omitted the field believing it was safe were not guaranteed a read-only
   child.
 
-  The correction also has a resume half. `codex exec resume` rejects sandbox
-  policy flags outright (`error: unexpected argument '--sandbox' found`), so a
-  resumed request inherits the original session's posture and `sandboxMode` has
-  no effect. Every surface now says new-session-only, and says to establish the
-  posture on the first request. Inspection should pass
+  The correction also has a resume half, and the obvious reading of that is
+  wrong too. The gateway filters `--sandbox` out of a resume argv
+  (`CODEX_RESUME_FILTERED_FLAGS`), so `sandboxMode` has no effect on a resumed
+  request. That is **not** the same as the resumed session inheriting its
+  original posture, which is what several skills asserted: `configOverrides`
+  is not filtered and can set `sandbox_mode`, Codex re-resolves configuration
+  on a cold resume, and `--sandbox` is in fact accepted before the `resume`
+  subcommand (only the gateway's after-subcommand placement is rejected). So
+  the schemas, the plugin command, the tutorial, and six skill sites now say
+  the narrow true thing: a resumed request cannot select a posture, and the
+  resulting posture is not guaranteed either way, so establish it on the first
+  request and verify it when it matters. Inspection should pass
   `sandboxMode: "read-only"` explicitly rather than relying on omission.
 
   The RUNBOOK instance mattered most: it is the supply-chain-guard skill's

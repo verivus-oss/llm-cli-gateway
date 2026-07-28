@@ -143,8 +143,9 @@ implement-review-fix for the detailed repair loop.
 ## Sessions, Jobs, and Persistence
 
 All seven providers have provider-native continuity behavior. Codex requires a
-real native Codex UUID and resume inherits its original working directory and
-sandbox posture. Do not pass a gateway-generated gw-* identifier as a native
+real native Codex UUID and resume inherits its original working directory. The
+sandbox posture is not guaranteed to carry over: a resume cannot select one,
+`configOverrides` still passes through, and Codex re-resolves configuration. Do not pass a gateway-generated gw-* identifier as a native
 Codex sessionId.
 
 Mistral Vibe defaults session logging to enabled. Run doctor before relying on

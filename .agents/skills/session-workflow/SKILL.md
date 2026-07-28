@@ -61,9 +61,11 @@ with `node dist/index.js --transport=stdio`; do not use a globally installed
 gateway whose revision is unknown. Reapply the provider-native full-access
 mapping on every new job and verify it through the live capability surface.
 
-Do not rely on continuity for the grant. In particular, Codex resume inherits
-its old sandbox and cannot take a new one, so a full-access Codex review needs
-a fresh native session. Keep ambient provider MCP configuration available, do
+Do not rely on continuity for the grant. In particular, the gateway drops
+`sandboxMode` on a Codex resume, so you cannot select a posture that way, and
+the resumed posture is not guaranteed to match the original either:
+`configOverrides` still passes through and Codex re-resolves configuration on a
+cold resume. A full-access Codex review therefore needs a fresh native session. Keep ambient provider MCP configuration available, do
 not turn request tool/MCP lists into an asserted allowlist, and record the
 exact base, diff or changed-file list, verification report, and durable job
 evidence with every review iteration. If the user requests 90-second progress

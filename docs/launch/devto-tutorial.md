@@ -87,7 +87,7 @@ codex_request({
 })
 ```
 
-Note: use `sandboxMode: "workspace-write"` when Codex needs to edit files, and `sandboxMode: "read-only"` for inspection. Do not rely on omitting the field: the gateway then emits no `--sandbox` flag and Codex resolves the policy from configuration, project trust, and its own fallback, so a trusted project can resolve to `workspace-write`. Set it on the first request of a session, because `codex exec resume` rejects sandbox flags and inherits the original posture. `fullAuto: true` remains a deprecated compatibility shorthand for `workspace-write`.
+Note: use `sandboxMode: "workspace-write"` when Codex needs to edit files, and `sandboxMode: "read-only"` for inspection. Do not rely on omitting the field: the gateway then emits no `--sandbox` flag and Codex resolves the policy from configuration, project trust, and its own fallback, so a trusted project can resolve to `workspace-write`. Set it on the first request of a session: the gateway filters `--sandbox` out of a resume argv, so it has no effect there, and the resumed posture is not guaranteed to match the original either. `fullAuto: true` remains a deprecated compatibility shorthand for `workspace-write`.
 
 ### Gemini: Security and Edge Cases
 

@@ -204,7 +204,9 @@ Before relying on Mistral resume, run doctor and correct an explicit
 [session_logging] enabled = false setting.
 
 Codex native continuation requires a real Codex UUID and inherits its original
-target and sandbox posture. Each other provider has provider-native continuity;
+target directory. The sandbox posture is not guaranteed to carry over: a resume
+cannot select one, `configOverrides` still passes through, and Codex re-resolves
+configuration. Each other provider has provider-native continuity;
 verify the live capability before relying on a stored handle.
 
 SQLite and Postgres persistence retain async jobs durably. Memory persistence is

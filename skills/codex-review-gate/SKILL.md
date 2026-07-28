@@ -57,7 +57,9 @@ and commands directly, not accept the report as proof. Require
 `APPROVED_UNCONDITIONALLY`, `CHANGES_REQUIRED` with file/command evidence, or
 `BLOCKED_EXTERNAL` with its exact error. Set no caller caps. If the user asks
 for 90-second progress checks, do not poll earlier, and reapply the full posture
-on every new job because Codex resume inherits its original sandbox.
+on every new job: the gateway drops `sandboxMode` on resume, so a resumed
+request cannot select one, and the resumed posture is not guaranteed to match
+the original either.
 
 ## Submit the Initial Review
 
@@ -129,10 +131,13 @@ have not changed.
 ## Continuity and Stable Prompts
 
 On a new Codex session, establish the target working directory and sandbox
-correctly. Native resume inherits those properties. resumeLatest:true or a real
+correctly, because a resume cannot change them: the gateway filters `-C`/`--cd`,
+`--add-dir` and `--sandbox` out of the resume argv. Do not read that as a
+guarantee that the resumed session keeps the original posture, though;
+`configOverrides` still passes through and Codex re-resolves configuration on a
+cold resume, so verify the posture when it matters. resumeLatest:true or a real
 Codex session UUID can continue a legacy Codex session; a gateway-generated
-gw-* identifier cannot be supplied as a native Codex sessionId. Resume also
-does not apply new sandbox, working-directory, or add-directory settings.
+gw-* identifier cannot be supplied as a native Codex sessionId.
 
 For repeated reviews of the same target, Codex supports promptParts:
 

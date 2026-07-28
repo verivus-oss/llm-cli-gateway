@@ -13,6 +13,6 @@ Do not pass `fullAuto`. It is deprecated compatibility shorthand that expands to
 
 Pass `sandboxMode` explicitly on a new session. For inspection use `sandboxMode: "read-only"`; do not rely on omitting the field, because the gateway then emits no `--sandbox` flag and Codex resolves the policy from configuration, project trust, and its own fallback, so a trusted project can resolve to `workspace-write`. Pass `workspace-write` only when the task must edit files.
 
-`codex exec resume` rejects sandbox policy flags, so a resumed request inherits the original session's posture and `sandboxMode` has no effect. Establish it on the first request.
+The gateway filters `--sandbox` out of a resume argv, so `sandboxMode` has no effect on a resumed request. That is not a guarantee that the resumed session keeps its original posture: `configOverrides` still passes through and can set `sandbox_mode`, and Codex re-resolves configuration on a cold resume. Establish the posture on the first request and verify it when it matters.
 
 Do not pass `model` unless the caller named one; the gateway resolves the configured Codex default.
