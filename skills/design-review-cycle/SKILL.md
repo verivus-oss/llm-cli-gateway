@@ -44,9 +44,9 @@ Use this local stdio targeting map:
 | Provider                     | Target the repository                                                                                                                                                |
 | ---------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | Claude, Codex, Grok, Mistral | Pass local workingDir on a new session when supported by the request, or select a registered workspace explicitly or by configured default.                          |
-| Gemini                       | It has no workingDir field. includeDirs adds auxiliary paths and does not select the process cwd. Select a registered workspace explicitly or by configured default. |
+| Gemini                       | Use workingDir to select the process cwd. includeDirs is auxiliary and does not select cwd. |
 | Devin                        | Pass local workingDir on a new CLI session, or select a registered workspace explicitly or by configured default.                                                    |
-| Cursor                       | Pass workspace as a local directory or registered alias. Cursor uses that selection for its native workspace and child cwd.                                          |
+| Cursor                       | Use workingDir for the process cwd. workspace is Cursor's own selector (saved-workspace name, .code-workspace file, or directory); an absolute workspace path disagreeing with workingDir is rejected, not ranked.                                          |
 
 Do not use workspace_* administration tools to repair a local stdio path
 problem. They are for remote HTTP/OAuth workspace clients.

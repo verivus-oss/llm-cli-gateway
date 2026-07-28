@@ -27,7 +27,7 @@ The gateway's CLI provider roster is:
 | -------- | ----------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------- |
 | Claude   | claude_request and claude_request_async   | The only provider that can use mcp_managed.                                                                                                        |
 | Codex    | codex_request and codex_request_async     | Use current sandboxMode values, not fullAuto.                                                                                                      |
-| Gemini   | gemini_request and gemini_request_async   | Antigravity owns its native tool configuration and does not accept workingDir.                                                                     |
+| Gemini   | gemini_request and gemini_request_async   | Antigravity owns its native tool configuration; use workingDir to select cwd.                                                                     |
 | Grok     | grok_request and grok_request_async       | CLI request surface plus native ACP capability.                                                                                                    |
 | Mistral  | mistral_request and mistral_request_async | CLI request surface plus native ACP capability; explicit model selection is injected through VIBE_ACTIVE_MODEL because Vibe has no CLI model flag. |
 | Devin    | devin_request and devin_request_async     | CLI request surface plus native ACP capability; it accepts flat prompt, not promptParts.                                                           |
@@ -93,7 +93,7 @@ the reviewer evidence:
 | Strict gateway-managed Claude tool isolation | Claude mcp_managed, only when its approval conditions are satisfied.                               |
 | Independent vendor-family review             | Add Grok, Mistral, Devin, or Cursor as a required reviewer when the review scope calls for it.     |
 | Native ACP integration                       | Grok, Mistral, Devin, or Cursor, after checking provider_tool_capabilities and ACP configuration.  |
-| Workspace-aware Cursor task                  | Cursor with workspace set to the intended local directory or registered alias.                     |
+| Workspace-aware Cursor task                  | Cursor with workingDir set to the intended local directory.                     |
 | Cost-constrained non-review task             | Use route_request only when the user explicitly asks for cost-constrained model-agnostic routing.  |
 
 Do not use route_request, select: "cheapest", maxCostUsd, maxPrice,
@@ -108,9 +108,9 @@ Never let providers review different default repositories.
 | Provider                     | Correct local target method                                                                                                                |
 | ---------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------ |
 | Claude, Codex, Grok, Mistral | Pass workingDir on a new session, or select a registered workspace explicitly or by configured default.                                    |
-| Gemini                       | No workingDir exists. includeDirs is auxiliary and does not select cwd. Select a registered workspace explicitly or by configured default. |
+| Gemini                       | Use workingDir to select the process cwd. includeDirs is auxiliary and does not select cwd. |
 | Devin                        | Pass workingDir on a new CLI session, or select a registered workspace explicitly or by configured default.                                |
-| Cursor                       | Set workspace to the local directory or registered alias.                                                                                  |
+| Cursor                       | Use workingDir for the process cwd. workspace is Cursor's own selector (saved-workspace name, .code-workspace file, or directory); an absolute workspace path disagreeing with workingDir is rejected, not ranked.                                                                                  |
 
 Do not use workspace_* administration tools merely to repair a local stdio
 path. They are remote HTTP/OAuth administration surfaces.

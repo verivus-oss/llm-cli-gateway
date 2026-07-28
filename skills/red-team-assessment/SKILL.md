@@ -81,9 +81,9 @@ does not authorize review mutation unless the user separately asks for it.
 | Provider                     | Local target rule                                                                                                                          |
 | ---------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------ |
 | Claude, Codex, Grok, Mistral | Use workingDir on a new session, or select a registered workspace explicitly or by configured default.                                     |
-| Gemini                       | No workingDir exists. includeDirs is auxiliary and does not choose cwd. Select a registered workspace explicitly or by configured default. |
+| Gemini                       | Use workingDir to select the process cwd. includeDirs is auxiliary and does not select cwd. |
 | Devin                        | Use workingDir on a new CLI session, or select a registered workspace explicitly or by configured default.                                 |
-| Cursor                       | Pass workspace as the intended local directory or registered alias.                                                                        |
+| Cursor                       | Use workingDir for the process cwd. workspace is Cursor's own selector (saved-workspace name, .code-workspace file, or directory); an absolute workspace path disagreeing with workingDir is rejected, not ranked.                                                                        |
 
 Do not use workspace_* administration tools to repair a local stdio path. Under
 managed Claude, custom workingDir, expanded workspace, custom tool selectors,

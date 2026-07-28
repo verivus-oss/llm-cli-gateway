@@ -71,9 +71,9 @@ commands, and native MCP facts. A response must be
 | Provider                     | Local target rule                                                                                                                          |
 | ---------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------ |
 | Claude, Codex, Grok, Mistral | Use workingDir on a new session, or select a registered workspace explicitly or by configured default.                                     |
-| Gemini                       | It has no workingDir. includeDirs is auxiliary and does not select cwd. Select a registered workspace explicitly or by configured default. |
+| Gemini                       | Use workingDir to select the process cwd. includeDirs is auxiliary and does not select cwd. |
 | Devin                        | Use workingDir on a new CLI session, or select a registered workspace explicitly or by configured default.                                 |
-| Cursor                       | Set workspace to the local directory or registered alias.                                                                                  |
+| Cursor                       | Use workingDir for the process cwd. workspace is Cursor's own selector (saved-workspace name, .code-workspace file, or directory); an absolute workspace path disagreeing with workingDir is rejected, not ranked.                                                                                  |
 
 Do not use workspace_* tools to fix a local stdio targeting failure. For managed
 Claude, a custom working directory or other posture-expanding input needs its
