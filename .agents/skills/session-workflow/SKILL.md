@@ -106,7 +106,7 @@ codex_request({
 gemini_request({
   prompt:"Continue the approved task.",
   sessionId:"<caller-owned-antigravity-conversation>",
-  workspace:"<registered-repo>",
+  workingDir:"<repo>",
   approvalStrategy:"legacy"
 })
 

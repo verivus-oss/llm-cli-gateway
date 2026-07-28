@@ -719,9 +719,12 @@ Execute a Google Antigravity CLI (`agy`) request with session support.
 - `project` (string, optional): Select the Antigravity project for this session (`--project <ID>`); mutually exclusive with `newProject`.
 - `newProject` (boolean, optional): Create a new Antigravity project for this session (`--new-project`); mutually exclusive with `project`.
 - `sandbox` (boolean, optional): Run Antigravity in sandbox mode (`--sandbox`)
+- `workingDir` (string, optional): Local Antigravity process working directory.
+  Stdio/local callers may pass local paths directly; remote HTTP/OAuth callers
+  must use relative paths inside a selected registered workspace. `includeDirs`
+  adds read paths but does not select cwd.
 - `workspace` (string, optional): Registered gateway workspace alias that selects
-  the Antigravity process cwd. `includeDirs` adds read paths but does not select
-  cwd.
+  the Antigravity process cwd for remote HTTP/OAuth callers.
 - `outputFormat` (string, optional): `text` only. Antigravity print mode emits text; `json` and `stream-json` are rejected.
 - `mcpServers` (string[], optional): Metadata only. Antigravity manages its own MCP configuration; this field does not create an allowlist.
 - `allowedTools`, `policyFiles`, `adminPolicyFiles`, `attachments` (string[], optional) and `skipTrust` (boolean, optional): **Unsupported by Antigravity CLI**. Non-empty values, or `skipTrust: true`, are rejected with an explanatory error.
@@ -1206,12 +1209,13 @@ Run a Cursor Agent request synchronously. The default CLI transport uses headles
 - `model` (string, optional): Model name or alias (for example `gpt-5`, `sonnet-4-thinking`, or `latest`)
 - `mode` (string, optional): Cursor mode, `"plan"` or `"ask"` (`--mode`)
 - `outputFormat` (string, optional): `"text"` (default), `"json"`, or `"stream-json"`
-- `transport` (string, optional): `"cli"` (default) or `"acp"`; ACP fails closed unless its global and Cursor provider gates are enabled. ACP accepts only `prompt`, `model`, `sessionId`, and a registered `workspace`; non-default Cursor CLI controls (`mode`, non-text `outputFormat`, non-empty `addDir`, `force`, `autoReview`, `sandbox`, `trust`, `resumeLatest`, `createNewSession`, optimization or compression, `idleTimeoutMs`, and `forceRefresh`) are rejected. Sync-only: `cursor_request_async` always runs the CLI transport and does not accept `transport`
+- `transport` (string, optional): `"cli"` (default) or `"acp"`; ACP fails closed unless its global and Cursor provider gates are enabled. ACP accepts only `prompt`, `model`, `sessionId`, and a registered `workspace`; non-default Cursor CLI controls (`mode`, non-text `outputFormat`, `workingDir`, non-empty `addDir`, `force`, `autoReview`, `sandbox`, `trust`, `resumeLatest`, `createNewSession`, optimization or compression, `idleTimeoutMs`, and `forceRefresh`) are rejected. Sync-only: `cursor_request_async` always runs the CLI transport and does not accept `transport`
 - `force` (boolean, optional): Emit `--force` for non-interactive operation.
 - `autoReview` (boolean, optional): Emit `--auto-review`.
 - `sandbox` (string, optional): `"enabled"` or `"disabled"` (`--sandbox`).
 - `trust` (boolean, optional): Emit `--trust` for this invocation.
 - `workspace` (string, optional): On `transport: "cli"`, a Cursor workspace path or name (`--workspace`); remote HTTP/OAuth callers must pass a registered workspace alias, while local stdio callers may pass paths. An unregistered relative local value is preserved verbatim as a provider-native saved-workspace name and is never resolved against the gateway process cwd; pass an absolute path to select a local directory cwd. On `transport: "acp"`, it must be a registered gateway workspace alias. A fresh remote ACP request uses the supplied alias or `[workspaces].default`; a remote ACP resume stays bound to its recorded canonical alias and cwd
+- `workingDir` (string, optional): Local Cursor Agent process working directory, CLI transport only. Distinct from `workspace`, which is Cursor's own selector; passing an absolute `workspace` path that disagrees with `workingDir` is rejected rather than silently ranked. Rejected on `transport: "acp"`, which resolves its own scope, rather than being accepted and discarded.
 - `addDir` (string[], optional): Additional workspace roots (one `--add-dir` per entry); remote HTTP/OAuth callers must use registered workspace roots.
 - `sessionId` (string, optional): On `transport: "cli"`, a Cursor chat/session ID to resume (`--resume <id>`). The `gw-*` id minted for a brand-new gateway session is not resumable through the CLI transport; continue with `resumeLatest: true`. On `transport: "acp"`, pass the gateway-owned ACP session ID returned by an earlier ACP call; Cursor-native and CLI session IDs are rejected
 - `resumeLatest` (boolean, optional): CLI only: resume the most recent Cursor chat (`--continue`). `true` is rejected on ACP.

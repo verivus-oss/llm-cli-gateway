@@ -350,7 +350,7 @@ devin_request_async({
 
 cursor_request_async({
   prompt:"Independently review <packet> and <repo>. Verify claims directly and return the required terminal JSON verdict: APPROVED_UNCONDITIONALLY, CHANGES_REQUIRED, or BLOCKED_EXTERNAL.",
-  workspace:"<repo>",
+  workingDir:"<repo>",
   approvalStrategy:"legacy",
   correlationId:"review-cursor"
 })

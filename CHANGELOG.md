@@ -27,6 +27,24 @@ All notable changes to the llm-cli-gateway project.
   the caller never named. Identical values are admitted, so passing the same
   directory both ways is not an error.
 
+  `cursor_request` with `transport: "acp"` rejects `workingDir` rather than
+  accepting and discarding it. The ACP route resolves its own scope and has no
+  `workingDir` parameter, so a caller could otherwise name a directory and have
+  the child run somewhere else, which is the failure this change exists to
+  remove. `addDir` was already rejected there for the same reason. Found by two
+  independent reviewers; the `provider_tool_capabilities` discovery text for
+  Gemini and Cursor was corrected to match.
+
+- **Shipped agent skills contradicted the fix above.** Adding `workingDir`
+  falsified guidance in skills that ship to npm consumers: `session-workflow`
+  asserted "Gemini has no `workingDir`", and the `multi-llm-review` local target
+  matrix still routed Gemini and Cursor through a registered `workspace`. An
+  agent following those skills would have avoided the field the fix adds.
+  Corrected across six skills (`session-workflow`, `multi-llm-review`,
+  `async-job-orchestration`, `implement-review-fix`, and the unshipped
+  maintainer `provider-gemini` and `provider-cursor`), including the worked
+  examples, not only the prose.
+
 - **Three agent skills still pointed at `codex_fork_session`**, which
   `3.1.0-rc.2` made explicitly unavailable, so the shipped guidance told callers
   to use a tool that now refuses by design. `async-job-orchestration` and

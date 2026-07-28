@@ -250,7 +250,12 @@ describe("provider tool capabilities", () => {
     expect(capabilities.gemini?.controls).toMatchObject({
       approvalMode: { supported: true, requestField: "approvalMode/yolo" },
       sandbox: { supported: true, requestField: "sandbox", cliFlag: "--sandbox" },
-      workspace: { supported: true, requestField: "includeDirs/workspace/worktree" },
+      // #243 added workingDir to gemini, so the discovery surface names it first;
+      // includeDirs remains a read path that does not select cwd.
+      workspace: {
+        supported: true,
+        requestField: "workingDir/includeDirs/workspace/worktree",
+      },
       session: { supported: true, requestField: "sessionId/resumeLatest/createNewSession" },
     });
     expect(capabilities.gemini?.unsupportedInputs).toEqual(

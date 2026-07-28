@@ -50,7 +50,11 @@ metadata is authoritative; the TOML is scanner input only.
 4. Keep provider-owned MCP configuration separate from gateway metadata. Do not
    assume every Cursor CLI control is safe to expose through a request.
 5. Cursor accepts flat `prompt` only, not `promptParts`. `workingDir` selects
-   the child process cwd, as it does for every other provider. Its `workspace`
+   the child process cwd on `transport:"cli"`, as it does for every other
+   provider. It is CLI-only: `transport:"acp"` rejects it in
+   `rejectUnsupportedCursorAcpParams` alongside `addDir`, because the ACP route
+   resolves its own scope and would otherwise discard it silently. Its
+   `workspace`
    field is separate and selects a local target directory, registered alias, or
    provider-native `.code-workspace` file. A directory/alias establishes child
    cwd; a workspace file remains a native argument and is not misused as

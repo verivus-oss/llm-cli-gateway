@@ -13710,10 +13710,6 @@ function rejectUnsupportedCursorAcpParams(
   // failure #243 exists to remove: the caller believes it named a directory and
   // the child runs somewhere else.
   if (params.workingDir) unsupported.push("workingDir");
-  // Same reason as addDir directly above. The ACP route resolves its own scope
-  // and would drop this, and a silently ignored scoping input is precisely the
-  // failure #243 exists to remove: the caller believes it named a directory and
-  // the child runs somewhere else.
   if (params.resumeLatest) unsupported.push("resumeLatest");
   if (params.createNewSession) unsupported.push("createNewSession");
   if (params.optimizePrompt) unsupported.push("optimizePrompt");

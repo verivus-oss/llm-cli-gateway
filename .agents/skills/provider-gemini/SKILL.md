@@ -70,8 +70,8 @@ metadata is authoritative; the TOML is scanner input only.
 7. For continuity, use a verified caller-owned Antigravity conversation ID or
    `resumeLatest:true`. Gateway-generated `gw-*` IDs are bookkeeping IDs and
    are rejected if replayed as Gemini session IDs; check the response
-   `resumable` field. `resumeLatest:true` requires `workspace` or a configured
-   default workspace so `--continue` remains bound to a stable cwd.
+   `resumable` field. `resumeLatest:true` requires `workingDir`, `workspace`, or a
+   configured default workspace so `--continue` remains bound to a stable cwd.
 8. Antigravity's current print contract carries the prompt in argv. Oversized
    UTF-8 input fails before spawn as non-retryable `input_too_large`; the
    gateway never truncates instructions. All other caller-controlled argv
