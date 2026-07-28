@@ -17974,11 +17974,29 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
       );
 
       try {
+        // `deferWorktree` when fork cannot run, which is always today.
+        //
+        // The guard below has to come AFTER this call, because resolution is what
+        // enforces remote workspace containment: moving the guard earlier made a
+        // remote caller without a registered workspace receive "fork unavailable"
+        // instead of the workspace requirement, masking a containment error.
+        //
+        // But resolution is not side-effect free. With both a sessionId and a
+        // workspace it persists workspaceAlias/workspaceRoot onto the session
+        // (persistResolvedSessionScope), so a request that is guaranteed never to
+        // run could still change the scope a later resume inherits. A reviewer
+        // caught that.
+        //
+        // deferWorktree keeps every validation, including the containment throw,
+        // and skips only worktree materialization and the scope write. Deriving
+        // it from the same predicate means full behaviour returns automatically
+        // if a headless fork ever lands upstream.
         const worktreeResolution = await resolveWorkspaceAndWorktreeForRequest({
           provider: "codex",
           workspace,
           sessionId,
           runtime,
+          deferWorktree: !codexForkCanRunHeadless(),
         });
 
         // Deliberately the LAST check, after argument shape, argv admission,

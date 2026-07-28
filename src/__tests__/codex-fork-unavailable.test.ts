@@ -97,4 +97,58 @@ describe("codex_fork_session reports its own unavailability", () => {
     });
     expect(Date.now() - started).toBeLessThan(2_000);
   });
+
+  it("does not persist session workspace scope for a request that cannot run", async () => {
+    // Resolution has to run BEFORE the guard, because it is what enforces remote
+    // workspace containment. But with a sessionId and a RESOLVABLE workspace it
+    // also writes workspaceAlias onto the session, so an unavailable request
+    // could change the scope a later resume inherits. The handler passes
+    // deferWorktree while fork cannot run, keeping validation and skipping the
+    // write. Raised by a cross-LLM reviewer.
+    //
+    // The workspace must genuinely resolve. An unknown alias throws during
+    // resolution and never reaches the persistence branch, so a test using one
+    // passes whether or not the fix is present (confirmed by mutation).
+    const { createGatewayServer } = await import("../index.js");
+    const sessions = await createSessionManager(undefined, undefined, noopLogger);
+    const workspaces = {
+      enabled: true,
+      defaultAlias: "probe-ws",
+      allowUnregisteredWorkingDir: false,
+      repos: [
+        {
+          alias: "probe-ws",
+          path: process.cwd(),
+          providers: ["codex"],
+          allowWorktree: false,
+          allowAddDir: false,
+          kind: "git",
+          operatorEntry: true,
+        },
+      ],
+      allowedRoots: [],
+    };
+    const server = createGatewayServer({
+      asyncJobManager: new AsyncJobManager(noopLogger, undefined, new MemoryJobStore()),
+      persistence: mkPersistence(),
+      sessionManager: sessions,
+      workspaces,
+      isolateState: true,
+    } as unknown as Parameters<typeof createGatewayServer>[0]);
+    const [ct, st] = InMemoryTransport.createLinkedPair();
+    const scoped = new Client({ name: "scope-probe", version: "1.0.0" }, { capabilities: {} });
+    await Promise.all([server.connect(st), scoped.connect(ct)]);
+    try {
+      const created = await sessions.createSession("codex", "scope-write probe");
+      const before = JSON.stringify((await sessions.getSession(created.id))?.metadata ?? {});
+      await scoped.callTool({
+        name: "codex_fork_session",
+        arguments: { prompt: "hi", sessionId: created.id, workspace: "probe-ws" },
+      });
+      const after = JSON.stringify((await sessions.getSession(created.id))?.metadata ?? {});
+      expect(after, "session scope was written for a request that can never run").toBe(before);
+    } finally {
+      await scoped.close();
+    }
+  });
 });
