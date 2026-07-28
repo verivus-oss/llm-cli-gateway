@@ -804,15 +804,18 @@ Options:
       expect((ACP_ENTRYPOINT_CONTRACTS.claude.adapterCandidates ?? []).length).toBeGreaterThan(0);
     });
 
-    it("keeps agy on the watchlist with no ACP surface at agy 1.1.7", () => {
+    it("keeps agy on the watchlist with no ACP surface at agy 1.1.8", () => {
       const agy = ACP_ENTRYPOINT_CONTRACTS.gemini;
       expect(agy.status).toBe("absent_watchlist");
       expect(agy.executable).toBe("agy");
       // Deliberately a literal, not derived from PROVIDER_TARGET_VERSIONS: bumping
       // the target must fail here so the ACP claim is re-probed rather than
-      // restamped. Re-probed at agy 1.1.7: absent_watchlist, no native entrypoint
-      // (`agy acp --help` prints general usage; `agy --help` does not list acp).
-      expect(agy.targetVersion).toContain("1.1.7");
+      // restamped. This tripwire fired on the 1.1.7 -> 1.1.8 rebaseline and did
+      // its job. Re-probed at agy 1.1.8: still absent_watchlist, still no native
+      // entrypoint. `agy --help` lists no acp subcommand, and `agy acp --help`
+      // prints byte-identical general usage rather than subcommand help, which is
+      // how an unrecognised subcommand presents.
+      expect(agy.targetVersion).toContain("1.1.8");
       expect(agy.entrypointArgs).toEqual([]);
       expect(agy.probeArgs).toEqual([]);
     });

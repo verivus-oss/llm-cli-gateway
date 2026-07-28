@@ -18,12 +18,20 @@ import { CLI_TYPES } from "../provider-types.js";
 const REAL_INSTALLED: Record<string, string> = {
   claude: "2.1.220 (Claude Code)",
   codex: "codex-cli 0.145.0",
-  gemini: "1.1.7",
+  // agy reports a bare version with no product prefix, unlike codex and mistral.
+  gemini: "1.1.8",
   grok: "grok 0.2.112 (9bbd559437)",
   mistral: "vibe 2.22.0",
   devin: "devin 3000.2.17 (2c489dfc)",
   cursor: "2026.07.23-e383d2b",
 };
+
+// Refresh this alongside `npm run providers:rebaseline:apply`. It deliberately
+// pins the exact strings the installed binaries report, because the normalizer
+// exists precisely because those spellings differ from the contracted ones, so
+// deriving it from PROVIDER_TARGET_VERSIONS would make the match tests
+// tautological. The cost is that a provider upgrade makes it stale, which is
+// how the agy 1.1.7 -> 1.1.8 bump surfaced here.
 
 describe("normalizeProviderVersion", () => {
   it("strips a trailing product name in parentheses", () => {
