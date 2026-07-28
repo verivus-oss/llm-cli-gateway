@@ -46,9 +46,16 @@ metadata is authoritative; the TOML is scanner input only.
    provider_tool_capabilities({cli:"codex"})
    ```
    For a cached read-only resource, use `provider-tools://codex`.
-2. Use `codex_request` for normal implementation/review turns,
-   `codex_request_async` for long-running work, and `codex_fork_session` when a
-   real Codex session needs to branch.
+2. Use `codex_request` for normal implementation/review turns and
+   `codex_request_async` for long-running work. To continue an existing Codex
+   conversation, pass `codex_request` a real Codex session UUID from
+   `~/.codex/sessions/`, or `resumeLatest:true`; both route through
+   `codex exec resume` and work headlessly. `codex_fork_session` is registered
+   but cannot run from the gateway: `codex fork` is interactive and requires a
+   controlling terminal, and Codex exposes no non-interactive equivalent
+   (`codex exec` has only resume/review/help). Re-check that on each Codex
+   release; if a headless fork lands, `codexForkCanRunHeadless` in
+   `src/index.ts` is the single predicate to flip.
 3. Omit `model` unless the caller explicitly asked for a specific variant; the
    gateway resolves the configured Codex default/profile.
 4. Prefer `sandboxMode:"workspace-write"` when Codex needs a writable
@@ -84,7 +91,9 @@ metadata is authoritative; the TOML is scanner input only.
    native `-` marker. They do not consume the platform's single-argv prompt
    allowance and are never truncated. `codex_fork_session` uses the distinct
    `codex fork` contract, remains argv-bound, and rejects oversized UTF-8 prompts
-   as non-retryable `input_too_large`. An otherwise unscoped child still runs in
+   as non-retryable `input_too_large`. That rejection is deliberately evaluated
+   before the tool's availability check, so argv admission stays observable even
+   though the call cannot ultimately run. An otherwise unscoped child still runs in
    a fresh neutral temporary cwd, not the gateway repository. All other
    caller-controlled argv values are admitted in their final encoded form
    before spawn. Embedded NUL bytes return non-retryable `invalid_input`

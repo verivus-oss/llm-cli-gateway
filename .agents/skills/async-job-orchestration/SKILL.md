@@ -142,6 +142,7 @@ Use `*_request_async` when:
 | `llm_job_result`        | Retrieve job output (in-memory + durable store fallback) |
 | `llm_job_cancel`        | Cancel running job                                       |
 | `llm_process_health`    | Inspect in-memory job/process health                     |
+| `llm_request_result`    | Read back any persisted request by `correlationId`       |
 
 ## Single Job
 
@@ -243,6 +244,25 @@ stderr streams. Remote callers use the same offset protocol but receive
 provider-session-ID-redacted, sanitized pages, not byte-for-byte provider
 output.
 
+### Read a request back instead of re-running it
+
+`llm_request_result({correlationId})` returns any persisted request, sync or
+async, from the flight recorder. Reach for it whenever a response was lost:
+a wrapper timed out, a client disconnected, or the transcript was truncated.
+Re-issuing the request instead burns the provider call again and produces a
+different answer.
+
+```
+llm_request_result({correlationId:"corr-abc123"})
+```
+
+Prefer it over `llm_job_result` when you want the provider's complete final
+response. For Codex in particular, `llm_job_result` surfaces `codexDisplayText`,
+which can be a truncated interim line rather than the finished answer, while the
+flight recorder holds the whole thing. Every request carries a `correlationId`
+in its response envelope, including the deferral payload shown above, so capture
+it before you need it.
+
 ### Cancel
 
 ```
@@ -340,8 +360,13 @@ Exit codes 125/126 are non-transient; the retry engine skips them. An
 argv-bound prompt that exceeds the platform-safe UTF-8 byte ceiling returns
 `errorCategory:"input_too_large"` and is never truncated. Codex new and resume
 prompts use stdin and do not consume the single-argv prompt allowance.
-`codex_fork_session` remains argv-bound and applies the size rejection. Adjust
-the scope or choose a verified stdin, ACP, or HTTP transport. All other
+`codex_fork_session` remains argv-bound and still applies the size rejection
+ahead of its own availability check, so an oversized prompt returns
+`input_too_large` there rather than the unavailability message. The tool itself
+cannot run from the gateway: `codex fork` requires a controlling terminal. To
+continue a Codex conversation, call `codex_request` with a real Codex session
+UUID or `resumeLatest:true`. Adjust the scope or choose a verified stdin, ACP,
+or HTTP transport. All other
 caller-controlled argv values are admitted in their final encoded form before
 spawn, including serialized JSON and joined lists. The resolved command line
 also has a conservative platform-specific aggregate byte budget and a
