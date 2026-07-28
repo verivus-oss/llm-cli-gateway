@@ -112,12 +112,21 @@ jobs:
           # supply-chain pin is unchanged, which is the whole point of
           # installing zizmor from a hash-pinned requirements file rather than
           # as a standalone binary.
-          python3 -m venv /tmp/zizmor-venv
-          /tmp/zizmor-venv/bin/pip install --quiet --require-hashes -r requirements/ci/requirements-security.txt
+          #
+          # Scratch paths use $RUNNER_TEMP, never a fixed /tmp path. A
+          # GitHub-hosted runner gets a fresh /tmp per job, so a hardcoded name
+          # is harmless there; a self-hosted runner does not. /tmp persists
+          # across jobs and is shared with every other user on the box, so a
+          # leftover directory owned by someone else makes the step fail with
+          # EACCES (observed: a stale werner-owned /tmp/zizmor-venv broke this
+          # step for the `runners` user). $RUNNER_TEMP is per-job, owned by the
+          # runner account, and cleaned between runs.
+          python3 -m venv "$RUNNER_TEMP/zizmor-venv"
+          "$RUNNER_TEMP/zizmor-venv/bin/pip" install --quiet --require-hashes -r requirements/ci/requirements-security.txt
           # Default min-severity (low+); informational findings (job
           # names, concurrency limits, superfluous actions) are tracked
           # but not enforced, those don't move the security needle.
-          /tmp/zizmor-venv/bin/zizmor .github/workflows/
+          "$RUNNER_TEMP/zizmor-venv/bin/zizmor" .github/workflows/
 
       # ---------------------------------------------------------------
       # Content correctness — cheap, broad coverage.
@@ -139,10 +148,10 @@ jobs:
             range="${HEAD_SHA}"
           fi
 
-          git log --format='%H%n%an <%ae>%n%cn <%ce>%n%B%n---END---' "${range}" > /tmp/commit-attribution.txt
+          git log --format='%H%n%an <%ae>%n%cn <%ce>%n%B%n---END---' "${range}" > "$RUNNER_TEMP/commit-attribution.txt"
           if grep -Ein \
             'Co-authored-by:[[:space:]]*Claude|<[^>]*@anthropic\.com>|noreply@anthropic\.com' \
-            /tmp/commit-attribution.txt; then
+            "$RUNNER_TEMP/commit-attribution.txt"; then
             echo "FAIL: commit attribution must not credit Claude/Anthropic accounts." >&2
             echo "Use human or project-owned author identity only; remove Claude/Anthropic co-author trailers before merging." >&2
             exit 1
@@ -183,19 +192,19 @@ jobs:
           # SHA256 of the published release artifact, fetched and verified on
           # 2026-07-28. Update this pin when bumping VERSION above.
           EXPECTED_SHA="bc98e15319ed0d515e3f9235287ba53cdc5535d576d24fd573978ecfe9ab92dc"
-          curl -fsSL "https://github.com/google/osv-scanner/releases/download/v${VERSION}/${BINARY}" -o /tmp/osv-scanner
-          actual=$(sha256sum /tmp/osv-scanner | awk '{print $1}')
+          curl -fsSL "https://github.com/google/osv-scanner/releases/download/v${VERSION}/${BINARY}" -o "$RUNNER_TEMP/osv-scanner"
+          actual=$(sha256sum "$RUNNER_TEMP/osv-scanner" | awk '{print $1}')
           if [ "${actual}" != "${EXPECTED_SHA}" ]; then
             echo "FAIL: osv-scanner binary SHA256 mismatch."
             echo "  expected: ${EXPECTED_SHA}"
             echo "  actual:   ${actual}"
             exit 1
           fi
-          chmod +x /tmp/osv-scanner
+          chmod +x "$RUNNER_TEMP/osv-scanner"
           # --no-resolve disables network-required transitive dependency
           # resolution. package-lock.json has full transitive info baked in,
           # and requirements/ci uses hash-pinned direct tool dependencies.
-          /tmp/osv-scanner scan \
+          "$RUNNER_TEMP/osv-scanner" scan \
             --recursive \
             --no-resolve \
             ./
@@ -213,17 +222,17 @@ jobs:
           # SHA256 fetched from the release artifact directly on
           # 2026-05-26. Update this pin when bumping the VERSION above.
           EXPECTED_SHA="551f6fc83ea457d62a0d98237cbad105af8d557003051f41f3e7ca7b3f2470eb"
-          curl -fsSL "https://github.com/gitleaks/gitleaks/releases/download/v${VERSION}/${TARBALL}" -o "/tmp/${TARBALL}"
-          actual=$(sha256sum "/tmp/${TARBALL}" | awk '{print $1}')
+          curl -fsSL "https://github.com/gitleaks/gitleaks/releases/download/v${VERSION}/${TARBALL}" -o "$RUNNER_TEMP/${TARBALL}"
+          actual=$(sha256sum "$RUNNER_TEMP/${TARBALL}" | awk '{print $1}')
           if [ "${actual}" != "${EXPECTED_SHA}" ]; then
             echo "FAIL: gitleaks tarball SHA256 mismatch."
             echo "  expected: ${EXPECTED_SHA}"
             echo "  actual:   ${actual}"
             exit 1
           fi
-          mkdir -p /tmp/gitleaks-bin
-          tar -xzf "/tmp/${TARBALL}" -C /tmp/gitleaks-bin gitleaks
-          /tmp/gitleaks-bin/gitleaks detect \
+          mkdir -p "$RUNNER_TEMP/gitleaks-bin"
+          tar -xzf "$RUNNER_TEMP/${TARBALL}" -C "$RUNNER_TEMP/gitleaks-bin" gitleaks
+          "$RUNNER_TEMP/gitleaks-bin/gitleaks" detect \
             --source . \
             --config .gitleaks.toml \
             --no-banner \

@@ -66,16 +66,21 @@ jobs:
           # so the hash is captured here directly (same approach as gitleaks
           # in security.yml).
           EXPECTED_SHA="45bcd58440e397ed52c50e953ccf5948909ea77087c9186fc7d277216f62e319"
-          curl -fsSL "https://github.com/opengrep/opengrep/releases/download/v${VERSION}/opengrep_manylinux_x86" -o /tmp/opengrep
-          actual="$(sha256sum /tmp/opengrep | awk '{print $1}')"
+          # $RUNNER_TEMP, not a fixed /tmp path: /tmp is fresh per job on a
+          # GitHub-hosted runner but persists and is shared between users on a
+          # self-hosted one, where a leftover file owned by another account
+          # makes this step fail with EACCES. See the matching note in
+          # security.yml.
+          curl -fsSL "https://github.com/opengrep/opengrep/releases/download/v${VERSION}/opengrep_manylinux_x86" -o "$RUNNER_TEMP/opengrep"
+          actual="$(sha256sum "$RUNNER_TEMP/opengrep" | awk '{print $1}')"
           if [ "${actual}" != "${EXPECTED_SHA}" ]; then
             echo "FAIL: opengrep binary SHA256 mismatch."
             echo "  expected: ${EXPECTED_SHA}"
             echo "  actual:   ${actual}"
             exit 1
           fi
-          chmod +x /tmp/opengrep
-          /tmp/opengrep --version
+          chmod +x "$RUNNER_TEMP/opengrep"
+          "$RUNNER_TEMP/opengrep" --version
 
       - name: Opengrep SAST gate (JS/TS, src/ excluding tests)
         run: |
@@ -84,7 +89,7 @@ jobs:
           # to exercise the HTTP transport, which the rules forbid in prod code.
           # --error makes ERROR-severity findings fail the job; warnings are
           # surfaced by the advisory step below without blocking.
-          /tmp/opengrep scan \
+          "$RUNNER_TEMP/opengrep" scan \
             --config .sast/opengrep \
             --exclude='*.test.ts' --exclude='*.spec.ts' --exclude='__tests__' \
             --severity ERROR --error \
@@ -94,7 +99,7 @@ jobs:
       - name: Opengrep advisory findings (warnings, non-blocking)
         if: always()
         run: |
-          /tmp/opengrep scan \
+          "$RUNNER_TEMP/opengrep" scan \
             --config .sast/opengrep \
             --exclude='*.test.ts' --exclude='*.spec.ts' --exclude='__tests__' \
             src || true
