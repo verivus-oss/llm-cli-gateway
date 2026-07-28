@@ -68,12 +68,12 @@ commands, and native MCP facts. A response must be
 
 ## Target the Same Repository
 
-| Provider                     | Local target rule                                                                                                                          |
-| ---------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------ |
-| Claude, Codex, Grok, Mistral | Use workingDir on a new session, or select a registered workspace explicitly or by configured default.                                     |
-| Gemini                       | Use workingDir to select the process cwd. includeDirs is auxiliary and does not select cwd. |
-| Devin                        | Use workingDir on a new CLI session, or select a registered workspace explicitly or by configured default.                                 |
-| Cursor                       | Use workingDir for the process cwd. workspace is Cursor's own selector (saved-workspace name, .code-workspace file, or directory); an absolute workspace path disagreeing with workingDir is rejected, not ranked.                                                                                  |
+| Provider                     | Local target rule                                                                                                                                                                                                  |
+| ---------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| Claude, Codex, Grok, Mistral | Use workingDir on a new session, or select a registered workspace explicitly or by configured default.                                                                                                             |
+| Gemini                       | Use workingDir to select the process cwd. includeDirs is auxiliary and does not select cwd.                                                                                                                        |
+| Devin                        | Use workingDir on a new CLI session, or select a registered workspace explicitly or by configured default.                                                                                                         |
+| Cursor                       | Use workingDir for the process cwd. workspace is Cursor's own selector (saved-workspace name, .code-workspace file, or directory); an absolute workspace path disagreeing with workingDir is rejected, not ranked. |
 
 Do not use workspace_* tools to fix a local stdio targeting failure. For managed
 Claude, a custom working directory or other posture-expanding input needs its
@@ -205,7 +205,8 @@ Before relying on Mistral resume, run doctor and correct an explicit
 
 Codex native continuation requires a real Codex UUID and inherits its original
 target directory. The sandbox posture is not guaranteed to carry over: a resume
-cannot select one, `configOverrides` still passes through, and Codex re-resolves
+`sandboxMode` cannot select one on resume, `configOverrides` still can, and
+Codex re-resolves
 configuration. Each other provider has provider-native continuity;
 verify the live capability before relying on a stored handle.
 

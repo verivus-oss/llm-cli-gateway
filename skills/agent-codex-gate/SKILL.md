@@ -64,7 +64,8 @@ command inspection. Accept only `APPROVED_UNCONDITIONALLY`; otherwise require
 evidence-backed `CHANGES_REQUIRED` or a concrete `BLOCKED_EXTERNAL` error. Do
 not set caller caps, and when the user requests 90-second progress checks, do
 not poll earlier. Reapply this posture on every new review job: the gateway
-drops `sandboxMode` on resume, so a resumed request cannot select one, and the
+drops `sandboxMode` on resume, so that field cannot select one there
+(`configOverrides` still can), and the
 resumed posture is not guaranteed to match the original either.
 
 ## Orchestrator Protocol

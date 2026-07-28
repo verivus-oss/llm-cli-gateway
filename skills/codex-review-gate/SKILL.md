@@ -58,7 +58,8 @@ and commands directly, not accept the report as proof. Require
 `BLOCKED_EXTERNAL` with its exact error. Set no caller caps. If the user asks
 for 90-second progress checks, do not poll earlier, and reapply the full posture
 on every new job: the gateway drops `sandboxMode` on resume, so a resumed
-request cannot select one, and the resumed posture is not guaranteed to match
+request cannot select one that way (`configOverrides` still can), and the
+resumed posture is not guaranteed to match
 the original either.
 
 ## Submit the Initial Review

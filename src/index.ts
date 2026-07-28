@@ -6191,7 +6191,10 @@ function prepareCodexRequestInternal(
 
   const requestedMcpServers = params.mcpServers ? [...new Set(params.mcpServers)] : [];
 
-  // Resume inherits Codex's native approval and sandbox state. Codex rejects
+  // The gateway emits no sandbox/approval flags on resume, so it cannot select
+  // that posture there. That is NOT inheritance of the original session's state:
+  // `-c`/configOverrides is not filtered and can set sandbox_mode, and Codex
+  // re-resolves configuration on a cold resume (see #258). Codex rejects
   // mcp_managed before this preparation path, so its native controls remain
   // provider-owned on the legacy path.
   let sessionPlan: ReturnType<typeof resolveCodexSessionArgs>;
@@ -6247,8 +6250,10 @@ function prepareCodexRequestInternal(
   }
   if (resolvedModel) args.push("--model", resolvedModel);
   // Codex sandbox / approval: resolve modern flags + legacy fullAuto shorthand.
-  // `codex exec resume` rejects all of these (the original session's policy is
-  // inherited), so we only emit them when starting a NEW session.
+  // `codex exec resume` rejects all of these in the after-subcommand position
+  // the gateway emits, so we only emit them when starting a NEW session. That
+  // rejection does not mean the original session's policy is inherited: see the
+  // CodexSessionMode note in request-helpers.ts.
   const sandboxFlags = resolveCodexSandboxFlags({
     sandboxMode: params.sandboxMode,
     askForApproval: params.askForApproval,

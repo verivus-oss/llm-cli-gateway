@@ -78,12 +78,12 @@ does not authorize review mutation unless the user separately asks for it.
 
 ## Target the Correct Repository
 
-| Provider                     | Local target rule                                                                                                                          |
-| ---------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------ |
-| Claude, Codex, Grok, Mistral | Use workingDir on a new session, or select a registered workspace explicitly or by configured default.                                     |
-| Gemini                       | Use workingDir to select the process cwd. includeDirs is auxiliary and does not select cwd. |
-| Devin                        | Use workingDir on a new CLI session, or select a registered workspace explicitly or by configured default.                                 |
-| Cursor                       | Use workingDir for the process cwd. workspace is Cursor's own selector (saved-workspace name, .code-workspace file, or directory); an absolute workspace path disagreeing with workingDir is rejected, not ranked.                                                                        |
+| Provider                     | Local target rule                                                                                                                                                                                                  |
+| ---------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| Claude, Codex, Grok, Mistral | Use workingDir on a new session, or select a registered workspace explicitly or by configured default.                                                                                                             |
+| Gemini                       | Use workingDir to select the process cwd. includeDirs is auxiliary and does not select cwd.                                                                                                                        |
+| Devin                        | Use workingDir on a new CLI session, or select a registered workspace explicitly or by configured default.                                                                                                         |
+| Cursor                       | Use workingDir for the process cwd. workspace is Cursor's own selector (saved-workspace name, .code-workspace file, or directory); an absolute workspace path disagreeing with workingDir is rejected, not ranked. |
 
 Do not use workspace_* administration tools to repair a local stdio path. Under
 managed Claude, custom workingDir, expanded workspace, custom tool selectors,

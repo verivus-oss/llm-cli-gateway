@@ -16,15 +16,15 @@ Call provider_tool_capabilities before planning a cross-provider workflow and
 use cli_versions when behavior is unexpected. The canonical CLI provider roster
 has seven members:
 
-| Provider | Request tools                          | Important boundary                                           |
-| -------- | -------------------------------------- | ------------------------------------------------------------ |
-| Claude   | claude_request, claude_request_async   | Only provider with mcp_managed.                              |
-| Codex    | codex_request, codex_request_async     | Use sandboxMode, not fullAuto.                               |
-| Gemini   | gemini_request, gemini_request_async   | Antigravity owns native MCP configuration; use workingDir for cwd.    |
-| Grok     | grok_request, grok_request_async       | Native ACP capability is also available through the gateway. |
-| Mistral  | mistral_request, mistral_request_async | Native ACP capability; programmatic default is accept-edits. |
-| Devin    | devin_request, devin_request_async     | Native ACP capability; accepts flat prompt only.             |
-| Cursor   | cursor_request, cursor_request_async   | Native ACP capability; accepts flat prompt only.             |
+| Provider | Request tools                          | Important boundary                                                 |
+| -------- | -------------------------------------- | ------------------------------------------------------------------ |
+| Claude   | claude_request, claude_request_async   | Only provider with mcp_managed.                                    |
+| Codex    | codex_request, codex_request_async     | Use sandboxMode, not fullAuto.                                     |
+| Gemini   | gemini_request, gemini_request_async   | Antigravity owns native MCP configuration; use workingDir for cwd. |
+| Grok     | grok_request, grok_request_async       | Native ACP capability is also available through the gateway.       |
+| Mistral  | mistral_request, mistral_request_async | Native ACP capability; programmatic default is accept-edits.       |
+| Devin    | devin_request, devin_request_async     | Native ACP capability; accepts flat prompt only.                   |
+| Cursor   | cursor_request, cursor_request_async   | Native ACP capability; accepts flat prompt only.                   |
 
 Async tools and llm_job_* tools are absent when persistence.backend = "none".
 Do not invent an unavailable tool or silently change a required reviewer roster.
@@ -46,12 +46,12 @@ as an unannounced replacement for a required source-inspecting CLI reviewer.
 - For local stdio calls, never use workspace_* tools merely to fix a path.
   Those tools are remote HTTP/OAuth administration surfaces.
 
-| Provider                     | Local repository targeting                                                                                                          |
-| ---------------------------- | ----------------------------------------------------------------------------------------------------------------------------------- |
-| Claude, Codex, Grok, Mistral | Use workingDir on a new session, or select a registered workspace explicitly or by configured default.                              |
-| Gemini                       | Use workingDir to select the process cwd. includeDirs is auxiliary and does not select cwd. |
-| Devin                        | Use workingDir on a new CLI session, or select a registered workspace explicitly or by configured default.                          |
-| Cursor                       | Use workingDir for the process cwd. workspace is Cursor's own selector (saved-workspace name, .code-workspace file, or directory); an absolute workspace path disagreeing with workingDir is rejected, not ranked.                                                                           |
+| Provider                     | Local repository targeting                                                                                                                                                                                         |
+| ---------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| Claude, Codex, Grok, Mistral | Use workingDir on a new session, or select a registered workspace explicitly or by configured default.                                                                                                             |
+| Gemini                       | Use workingDir to select the process cwd. includeDirs is auxiliary and does not select cwd.                                                                                                                        |
+| Devin                        | Use workingDir on a new CLI session, or select a registered workspace explicitly or by configured default.                                                                                                         |
+| Cursor                       | Use workingDir for the process cwd. workspace is Cursor's own selector (saved-workspace name, .code-workspace file, or directory); an absolute workspace path disagreeing with workingDir is rejected, not ranked. |
 
 Managed Claude treats expanded workspace, custom workingDir, custom selectors,
 native continuation, and similar posture changes as approval-gated. Do not
