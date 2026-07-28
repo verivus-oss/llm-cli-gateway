@@ -114,7 +114,8 @@ For a mandatory review, use the evidence packet and seven-provider roster in
 - Repaired findings require fresh evidence and re-review. A conditional,
   malformed, timed-out, or unavailable required reviewer means
   `INCOMPLETE`/`BLOCKED`, never approval.
-- An `idleTimeoutMs` is a no-output safeguard, not an acceptance deadline. If
+- An `idleTimeoutMs` is a no-output safeguard on incremental providers and a
+  total-runtime bound on terminal-burst ones, never an acceptance deadline. If
   it terminates a review, repair/retry the dispatch or report the reviewer
   blocked; never accept the partial result as a pass.
 

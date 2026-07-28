@@ -335,9 +335,9 @@ gateway process repository.
 - Poll `llm_job_status` **every 60 seconds by default**. When the user requires
   a 90-second cadence, do not check earlier than 90 seconds after the prior
   status call.
-- No wallclock timeout: good reviews take minutes to tens of minutes
+- No caller-imposed wallclock timeout: good reviews take minutes to tens of minutes
 - Do **not** cancel jobs for "taking too long"; cancel only on explicit user instruction or hard failure (process dead, non-transient error such as exit 125/126)
-- `idleTimeoutMs` remains a no-output safeguard where configured (10 minutes for the listed CLIs except Devin, which has no gateway default). It is separate from wallclock timeout and does not need tightening for normal reviews.
+- `idleTimeoutMs` carries two meanings and neither needs tightening for normal reviews. For incremental providers (claude, codex, grok) it is a 10-minute no-output safeguard. For terminal-burst providers (gemini, mistral, devin, cursor) it is a one-hour total-runtime bound, because those emit nothing until exit and an idle timer would kill healthy work. Devin is included; it has no separate exemption. See [Idle Timeout and Runtime Cap](#idle-timeout-and-runtime-cap).
 - When using `ScheduleWakeup` or sleep loops, use the requested cadence. The
   default is 60 s; a user-required 90 s cadence wins. The 5-minute prompt-cache
   window also favors intervals ≤ 270 s or ≥ 20 min.
@@ -360,15 +360,15 @@ Treat the wait as "yield control for ~60 s, then poll once," not "block the shel
 
 ## Error Handling
 
-| Status      | Exit Code | Meaning             | Action                                     |
-| ----------- | --------- | ------------------- | ------------------------------------------ |
-| `completed` | 0         | Success             | Retrieve result                            |
-| `failed`    | 124       | CLI timeout         | Check stderr                               |
-| `failed`    | 125       | Idle timeout        | Increase `idleTimeoutMs` or check CLI      |
-| `failed`    | 126       | Bounded I/O failure | Inspect `error`; reduce input/output scope |
-| `failed`    | non-zero  | CLI error           | Check stderr                               |
-| `failed`    | null      | Process error       | Check `job.error`                          |
-| `canceled`  | any       | Canceled            | Result still retrievable                   |
+| Status      | Exit Code | Meaning                                                               | Action                                     |
+| ----------- | --------- | --------------------------------------------------------------------- | ------------------------------------------ |
+| `completed` | 0         | Success                                                               | Retrieve result                            |
+| `failed`    | 124       | CLI timeout                                                           | Check stderr                               |
+| `failed`    | 125       | Idle timeout, or the total-runtime bound on a terminal-burst provider | Increase `idleTimeoutMs` or check CLI      |
+| `failed`    | 126       | Bounded I/O failure                                                   | Inspect `error`; reduce input/output scope |
+| `failed`    | non-zero  | CLI error                                                             | Check stderr                               |
+| `failed`    | null      | Process error                                                         | Check `job.error`                          |
+| `canceled`  | any       | Canceled                                                              | Result still retrievable                   |
 
 Only `exitCode===0` → `completed`. All non-zero → `failed`. Results retrievable for ALL terminal states.
 
@@ -532,7 +532,7 @@ For long-running async loops on a Claude session, treat the warning as a hint to
 - **When durable async jobs are enabled, sync tools can auto-defer at the 45 s deadline:** check for `status:"deferred"` in sync responses, then poll every 60 s by default or at a user-required 90-second cadence. With `persistence.backend = "none"`, async and job tools are absent and sync requests run to completion.
 - `SYNC_DEADLINE_MS=0` disables auto-deferral
 - For Gemini, check `resumable`: only `true` for a user-provided `sessionId`
-- Set higher `idleTimeoutMs` for tasks with long silent periods
+- Raise `idleTimeoutMs` for tasks with long silent periods on an incremental provider. On a terminal-burst provider silence is normal for the whole run, so raising it raises the total-runtime bound rather than an idle window
 - Review jobs: every required healthy reviewer must return an evidence-backed
   `APPROVED_UNCONDITIONALLY`. Do not downgrade, skip, vote around, or impose a
   budget/round/turn/wallclock cap. A provider failure is incomplete review work,
