@@ -512,7 +512,7 @@ describe("AcpProcessManager", () => {
           "setInterval(() => {}, 1000);",
         ].join("");
         const stubSource = [
-          "#!/usr/bin/env node",
+          `#!${process.execPath}`,
           'const { spawn } = require("node:child_process");',
           'const { writeFileSync } = require("node:fs");',
           'const readline = require("node:readline");',

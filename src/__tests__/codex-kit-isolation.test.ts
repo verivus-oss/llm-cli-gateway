@@ -412,7 +412,7 @@ describe("Codex Personal Agent Config isolation", () => {
         "setInterval(() => {}, 1000);",
       ].join("");
       const stubSource = [
-        "#!/usr/bin/env node",
+        `#!${process.execPath}`,
         'const { spawn } = require("node:child_process");',
         'const { writeFileSync } = require("node:fs");',
         `const descendant = spawn(process.execPath, ["-e", ${JSON.stringify(
