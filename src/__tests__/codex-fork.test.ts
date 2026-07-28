@@ -240,8 +240,19 @@ describe("codex_fork_session MCP-managed boundary", () => {
   }
 
   it.each([CLI_INPUT_TOO_LARGE_CATEGORY, CLI_INVALID_INPUT_CATEGORY] as const)(
-    "preserves a durable %s classification on codex_fork_session",
+    "never reaches job admission on codex_fork_session, so no %s classification is produced",
     async errorCategory => {
+      // This case previously asserted that a job-admission failure of this
+      // category propagated with retryable:false. That path is unreachable:
+      // `codex fork` needs a controlling terminal, so the handler stops at the
+      // unavailability guard before job admission (codex-fork-unavailable.test.ts
+      // covers the message). An earlier revision kept the old assertion alive
+      // through an environment escape hatch; a reviewer correctly called that an
+      // undocumented deployment switch re-enabling a known-doomed spawn, so the
+      // hatch is gone and this now asserts what actually happens.
+      //
+      // The shared job-admission classification plumbing itself is still covered
+      // through the providers that genuinely reach admission.
       const jobs = new ClassifiedForkFailureJobManager(errorCategory);
       const { server } = createManagedServer(jobs);
       try {
@@ -254,13 +265,14 @@ describe("codex_fork_session MCP-managed boundary", () => {
           {}
         );
 
-        expect(result).toMatchObject({
-          isError: true,
-          structuredContent: {
-            errorCategory,
-            retryable: false,
-          },
-        });
+        expect(result).toMatchObject({ isError: true });
+        const text = (result as { content?: Array<{ text?: string }> }).content
+          ?.map(part => part.text ?? "")
+          .join("\n");
+        expect(text).toContain("interactive subcommand");
+        // The injected job manager must never have been consulted, because the
+        // guard returns first. If it were, this category would surface instead.
+        expect(text).not.toContain(errorCategory);
       } finally {
         await server.close();
         await jobs.dispose();

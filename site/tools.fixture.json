@@ -894,7 +894,7 @@
     },
     {
       "name": "codex_fork_session",
-      "description": "Fork an existing Codex session into a new branch (codex fork <ID|--last>) without mutating the original. This prompt remains argv-bound and rejects oversized UTF-8 input as non-retryable input_too_large.",
+      "description": "UNAVAILABLE from the gateway: `codex fork` is an interactive subcommand requiring a controlling terminal, which an MCP server cannot provide, so every call fails fast with an explanation instead of spawning a child that cannot succeed. To continue an existing Codex conversation use codex_request with a real Codex session UUID or resumeLatest: true, which run `codex exec resume` and work headlessly. Retained because Codex exposes no non-interactive fork today; this prompt remains argv-bound and still rejects oversized UTF-8 input as non-retryable input_too_large before the unavailability check, so the argv builder stays ready if a headless fork appears.",
       "inputSchema": {
         "type": "object",
         "properties": {

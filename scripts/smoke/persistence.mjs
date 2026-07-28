@@ -12,11 +12,15 @@
 
 import { mkdtempSync, rmSync, writeFileSync } from "fs";
 import { tmpdir } from "os";
-import { join } from "path";
+import { dirname, join, resolve } from "path";
+import { fileURLToPath } from "url";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js";
 
-const REPO_ROOT = "/srv/repos/internal/verivusai-labs/rvwr/llm-cli-gateway";
+// Derive the checkout from this file's own location (scripts/smoke/ -> repo
+// root) so the smoke test runs in any clone. GATEWAY_SMOKE_REPO overrides it.
+const REPO_ROOT =
+  process.env.GATEWAY_SMOKE_REPO ?? resolve(dirname(fileURLToPath(import.meta.url)), "..", "..");
 const GATEWAY = "dist/index.js";
 
 const ASYNC_TOOLS = new Set([

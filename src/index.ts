@@ -259,6 +259,7 @@ import {
   validateClaudeAgentsMap,
   prepareCodexHighImpactFlags,
   prepareCodexForkRequest,
+  CODEX_FORK_UNAVAILABLE,
   CODEX_CONFIG_OVERRIDES_SCHEMA,
   resolveGeminiSessionPlan,
   GEMINI_HIGH_IMPACT_PARAMS_SCHEMA,
@@ -588,7 +589,7 @@ export function buildServerInstructions(
   ).join(", ");
   return `llm-cli-gateway: Multi-LLM orchestration via MCP.
 
-Tools: ${syncRequestToolList}${apiToolsNote} (sync)${asyncToolsNote} | codex_fork_session (fork a Codex session into a new branch)
+Tools: ${syncRequestToolList}${apiToolsNote} (sync)${asyncToolsNote} | codex_fork_session (UNAVAILABLE: codex fork needs a terminal; use codex_request with a session UUID or resumeLatest instead)
 ${validationLine}${jobsLine}Sessions: session_create, session_list, session_set_active, session_get, session_delete, session_clear_all
 Other: list_models, provider_tool_capabilities, cli_versions, upstream_contracts, provider_subcommands_* (read-only subcommand contract/drift introspection), cli_upgrade, approval_list, llm_process_health, llm_request_result (read back any persisted request, sync or async, by correlationId)
 Workspaces: workspace_create, workspace_list, workspace_get, workspace_register_existing_repo (remote HTTP/OAuth workspace registry only; do not use workspace_* to fix stdio/local provider path access)
@@ -601,7 +602,7 @@ ${deferralLine}
 - An unscoped local CLI child uses a fresh private neutral cwd, not the gateway repository. Cwd-scoped resumeLatest requires workingDir, workspace, or a configured default workspace.
 - Codex new and resume prompts use stdin. codex_fork_session remains argv-bound and rejects oversized UTF-8 prompts as non-retryable input_too_large. Prompts are never truncated.
 - Upstream drift detection: After upgrading any provider CLI (especially grok), use upstream_contracts with probeInstalled:true and provider_subcommand_drift for declared subcommand help surfaces. Probes are safe, read-only --help checks.
-- Idle timeout kills stuck processes (default 10min, configurable via idleTimeoutMs).
+- Idle timeout kills stuck processes (default 10min for providers that stream; providers that emit nothing until they exit (gemini, mistral, devin, cursor) instead get a 1h total-runtime bound, since an idle timer never advances for them). Configurable via idleTimeoutMs.
 
 Skills (full docs via MCP resources):
 ${loadedSkills.map(s => `- skills://${s.name} — ${s.description}`).join("\n")}`;
@@ -1209,7 +1210,8 @@ export function resolveGatewayServerRuntime(
             deps.providers ?? getProvidersConfig(runtimeLogger),
             undefined,
             deps.acpConfig ?? getAcpConfig(runtimeLogger),
-            deps.leastCost ?? getLeastCostConfig(runtimeLogger)
+            deps.leastCost ?? getLeastCostConfig(runtimeLogger),
+            () => runtimePersonalConfig.settings.enabled
           )
         : resourceProvider),
     db: "db" in deps ? (deps.db ?? null) : db,
@@ -1237,17 +1239,81 @@ export function shouldRegisterGrokApiTools(providers: ProvidersConfig): boolean 
 // Per-CLI idle timeouts: kill process if no stdout/stderr activity for this duration.
 // Claude idle timeout only applies in stream-json mode (with --include-partial-messages).
 // In text/json mode, Claude produces no output until done, so idle timeout would false-positive.
+//
+// Only providers whose registry `outputDiscipline.streaming` is "incremental"
+// belong here. For a "terminal-burst" provider the timer below is not an idle
+// timer at all, because no output ever arrives before exit. See
+// TERMINAL_BURST_RUNTIME_CAP_MS.
 const CLI_IDLE_TIMEOUTS: Record<string, number | undefined> = {
-  claude: 600_000, // 10 minutes — only used when outputFormat=stream-json
-  codex: 600_000, // 10 minutes — Codex streams stderr progress
-  gemini: 600_000, // 10 minutes — Gemini streams stdout in real-time
-  grok: 600_000, // 10 minutes — Grok streams stderr/stdout activity in headless mode
-  mistral: 600_000, // 10 minutes — Vibe streams stdout/stderr in headless mode
-  cursor: 600_000, // 10 minutes — Cursor Agent can stream stdout in print mode
+  claude: 600_000, // 10 minutes, only used when outputFormat=stream-json
+  codex: 600_000, // 10 minutes; Codex streams stderr progress
+  grok: 600_000, // 10 minutes; Grok streams stderr/stdout activity in headless mode
 };
 
-function resolveIdleTimeout(cli: string, override?: number): number | undefined {
+/**
+ * Total-runtime bound for providers that emit nothing until they exit.
+ *
+ * gemini, mistral, devin and cursor declare `outputDiscipline.streaming:
+ * "terminal-burst"`. Their stdout stays at zero bytes for the whole run, so an
+ * "idle" timer never resets and silently degrades into a wall-clock cap. At the
+ * previous 600_000ms that killed perfectly healthy work: a real cross-LLM review
+ * job was terminated at exactly 600000ms of "inactivity" having produced exactly
+ * the zero bytes its own registry entry predicts.
+ *
+ * Removing the bound entirely is not an option, because `checkStalledJobs` only
+ * warns and never kills, so this timer is the sole protection against a hung
+ * child. The bound is therefore kept and sized for real work rather than for a
+ * streaming provider's silence. An explicit caller `idleTimeoutMs` still wins.
+ */
+const TERMINAL_BURST_RUNTIME_CAP_MS = 3_600_000; // 1 hour, the schema maximum
+
+/** True when the provider's registry entry says it emits nothing before exit. */
+function emitsOnlyOnExit(cli: string): boolean {
+  try {
+    return getProviderDefinition(cli as CliType).outputDiscipline?.streaming === "terminal-burst";
+  } catch {
+    // Not a registry provider; validation pseudo-CLIs reach here too.
+    return false;
+  }
+}
+
+/**
+ * Whether `codex fork` can run in this process.
+ *
+ * Always false today. Codex's fork is an interactive subcommand that needs a
+ * controlling terminal, and provider children are spawned with pipes, so the
+ * child exits 1 with "stdin is not a terminal" on both the `--last` and the
+ * explicit-session paths. Codex offers no non-interactive equivalent (`codex
+ * exec` has only resume/review/help), and allocating a PTY would require a
+ * native dependency this package does not carry.
+ *
+ * Kept as a predicate, rather than deleting the spawn path, so the argv builder
+ * and its tests continue to compile and run. If a headless fork appears
+ * upstream, this becomes the single place to flip.
+ */
+export function codexForkCanRunHeadless(): boolean {
+  // Deliberately a constant with no runtime override.
+  //
+  // An earlier version read an environment variable so the retained spawn path
+  // could keep its test coverage. A reviewer correctly called that a footgun: it
+  // is an undocumented deployment switch that re-enables a known-doomed,
+  // remote-triggerable child spawn and contradicts the tool's own advertised
+  // "fails fast" contract, in exchange for exercising code that cannot run in
+  // production anyway. Losing that coverage is the better trade, and the shared
+  // job-admission classifications it exercised are covered through the other
+  // providers that actually reach job admission.
+  //
+  // If a headless `codex fork` lands upstream, this becomes `true` and the
+  // retained argv path below is already built and type-checked for it.
+  return false;
+}
+
+export function resolveIdleTimeout(cli: string, override?: number): number | undefined {
   if (override !== undefined) return override;
+  // Derived from the registry rather than a hand-maintained table: the previous
+  // table asserted in comments that gemini and mistral "stream in real-time",
+  // which their own probed `outputDiscipline` evidence contradicts.
+  if (emitsOnlyOnExit(cli)) return TERMINAL_BURST_RUNTIME_CAP_MS;
   return CLI_IDLE_TIMEOUTS[cli];
 }
 
@@ -4651,6 +4717,49 @@ export function registerBaseResources(server: McpServer, runtime: GatewayServerR
         };
       }
     );
+  }
+
+  // LCR phase_2 observability. These were declared in ResourceProvider but never
+  // registered here, so they were unreachable in every configuration: absent
+  // from resources/list and -32602 on read, even with [least_cost] enabled.
+  //
+  // The gate matches the route-tool gate (`leastCost.enabled &&
+  // !personalConfigEnabled`), not merely `leastCost.enabled`. An earlier version
+  // used the latter to mirror ResourceProvider.readResource, on the reasoning
+  // that the original defect was a declaration disagreeing with exposure. A
+  // reviewer correctly pointed out that this violates the Kit boundary rule
+  // stated at the route-tool gate: an enabled [least_cost] block must not
+  // advertise a route surface that cannot preserve that boundary. With the Kit
+  // enabled the route tools are suppressed, so there is no routing for these to
+  // observe, and exposing them anyway would advertise exactly the surface that
+  // gate exists to withhold. readResource stays permissive underneath; it is
+  // simply never reached for an unregistered URI.
+  if (runtime.leastCost?.enabled && !runtime.personalConfig.settings.enabled) {
+    for (const [name, uri, title, description] of [
+      [
+        "routing-decisions",
+        "routing://decisions",
+        "Routing Decisions",
+        "Recent redacted least-cost routing decisions (provider/model/tier/est cost/confidence)",
+      ],
+      [
+        "routing-priors",
+        "routing://priors",
+        "Routing Priors",
+        "Learned output-token priors + input-token calibration (k, samples, quality) + price asOf",
+      ],
+    ] as const) {
+      server.registerResource(
+        name,
+        uri,
+        { title, description, mimeType: "application/json" },
+        async resourceUri => {
+          runtime.logger.debug(`Reading ${uri} resource`);
+          const contents = await runtime.resourceProvider.readResource(resourceUri.href);
+          return { contents: contents ? [contents] : [] };
+        }
+      );
+    }
   }
 }
 
@@ -17698,7 +17807,7 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
 
   server.tool(
     "codex_fork_session",
-    "Fork an existing Codex session into a new branch (codex fork <ID|--last>) without mutating the original. This prompt remains argv-bound and rejects oversized UTF-8 input as non-retryable input_too_large.",
+    "UNAVAILABLE from the gateway: `codex fork` is an interactive subcommand requiring a controlling terminal, which an MCP server cannot provide, so every call fails fast with an explanation instead of spawning a child that cannot succeed. To continue an existing Codex conversation use codex_request with a real Codex session UUID or resumeLatest: true, which run `codex exec resume` and work headlessly. Retained because Codex exposes no non-interactive fork today; this prompt remains argv-bound and still rejects oversized UTF-8 input as non-retryable input_too_large before the unavailability check, so the argv builder stays ready if a headless fork appears.",
     {
       prompt: z
         .string()
@@ -17865,12 +17974,56 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
       );
 
       try {
+        // `deferWorktree` when fork cannot run, which is always today.
+        //
+        // The guard below has to come AFTER this call, because resolution is what
+        // enforces remote workspace containment: moving the guard earlier made a
+        // remote caller without a registered workspace receive "fork unavailable"
+        // instead of the workspace requirement, masking a containment error.
+        //
+        // But resolution is not side-effect free. With both a sessionId and a
+        // workspace it persists workspaceAlias/workspaceRoot onto the session
+        // (persistResolvedSessionScope), so a request that is guaranteed never to
+        // run could still change the scope a later resume inherits. A reviewer
+        // caught that.
+        //
+        // deferWorktree keeps every validation, including the containment throw,
+        // and skips only worktree materialization and the scope write. Deriving
+        // it from the same predicate means full behaviour returns automatically
+        // if a headless fork ever lands upstream.
         const worktreeResolution = await resolveWorkspaceAndWorktreeForRequest({
           provider: "codex",
           workspace,
           sessionId,
           runtime,
+          deferWorktree: !codexForkCanRunHeadless(),
         });
+
+        // Deliberately the LAST check, after argument shape, argv admission,
+        // session lookup and workspace/worktree resolution. Each of those
+        // produces a more specific and more important error than this one: a
+        // remote caller without a registered workspace must be told about the
+        // workspace requirement, not about fork being unavailable, or a
+        // containment failure would be masked by an unrelated message.
+        //
+        // Everything below spawns `codex fork`, which cannot succeed from an MCP
+        // server: see CODEX_FORK_UNAVAILABLE. Returning here avoids a doomed
+        // child and replaces an opaque "stdin is not a terminal", which reads
+        // like a broken environment, with the reason and the working route.
+        //
+        // A predicate rather than an unconditional return, so the spawn path
+        // below stays reachable to the compiler and keeps type-checking instead
+        // of rotting while we wait for a headless fork upstream.
+        if (!codexForkCanRunHeadless()) {
+          return createErrorResponse(
+            "codex_fork_session",
+            1,
+            "",
+            corrId,
+            new Error(CODEX_FORK_UNAVAILABLE)
+          );
+        }
+
         const result = await awaitJobOrDefer(
           "codex",
           finalArgs,
@@ -18036,8 +18189,12 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
       // U23: emit `-o json` to extract token usage via parseGeminiJson. Default
       // remains text so existing callers see no behavior change. Phase 4 slice
       // ε adds `stream-json` (NDJSON event stream parsed by
-      // parseGeminiStreamJson — `init`/`message`/`result` lines, idle-timeout
-      // semantics covered by Gemini's existing real-time stdout streaming).
+      // parseGeminiStreamJson: `init`/`message`/`result` lines). NOTE: gemini's
+      // registry outputDiscipline is "terminal-burst", so under the default argv it
+      // emits nothing until exit. An idle timer therefore never advances for it, and
+      // resolveIdleTimeout gives it a total-runtime bound instead. An earlier version
+      // of this comment claimed "real-time stdout streaming", which the probed
+      // evidence contradicts.
       outputFormat: z
         .enum(["text", "json", "stream-json"])
         .default("text")
@@ -20094,8 +20251,10 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
         // U23: emit `-o json` to extract token usage via parseGeminiJson. Default
         // remains text so existing callers see no behavior change. Phase 4 slice
         // ε adds `stream-json` (NDJSON event stream parsed by
-        // parseGeminiStreamJson — `init`/`message`/`result` lines, idle-timeout
-        // semantics covered by Gemini's existing real-time stdout streaming).
+        // parseGeminiStreamJson: `init`/`message`/`result` lines). NOTE: gemini's
+        // registry outputDiscipline is "terminal-burst", so under the default argv it
+        // emits nothing until exit; resolveIdleTimeout gives it a total-runtime bound
+        // rather than an idle bound.
         outputFormat: z
           .enum(["text", "json", "stream-json"])
           .default("text")
@@ -22886,7 +23045,10 @@ async function initializeSessionManager(): Promise<void> {
     getProvidersConfig(logger),
     undefined,
     getAcpConfig(logger),
-    getLeastCostConfig(logger)
+    getLeastCostConfig(logger),
+    // Read lazily: this provider is built during session-manager init, and the
+    // Kit setting is resolved from config each time rather than captured here.
+    () => loadPersonalConfigSettings(undefined, logger).settings.enabled
   );
 }
 

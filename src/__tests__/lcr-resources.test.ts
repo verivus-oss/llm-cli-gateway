@@ -209,4 +209,30 @@ describe("routing:// resources (LCR phase_2)", () => {
     expect(res!.text).not.toContain("ownerPrincipal");
     expect(res!.text).not.toContain("owner_principal");
   });
+  it("stays dormant when least-cost is enabled but the Personal Agent Config Kit is on", async () => {
+    // The route_request tools gate on `leastCost.enabled && !personalConfigEnabled`.
+    // index.ts already refuses to register the routing URIs under the Kit, so this
+    // reader gate is defence in depth: leaving it permissive would reproduce, in
+    // mirror image, the defect this work fixed (a declaration disagreeing with what
+    // the server exposes). Raised by a cross-LLM reviewer against resources.ts.
+    const rec = new FlightRecorder(path.join(tmpDir, "kit.db"));
+    seedRoutedRow(rec);
+    const provider = new ResourceProvider(
+      sessionManagerStub,
+      new PerformanceMetrics(),
+      rec,
+      undefined,
+      undefined,
+      undefined,
+      null,
+      enabledLeastCost(),
+      () => true
+    );
+    const uris = provider.listResources().map(r => r.uri);
+    expect(uris).not.toContain("routing://decisions");
+    expect(uris).not.toContain("routing://priors");
+    expect(await provider.readResource("routing://decisions")).toBeNull();
+    expect(await provider.readResource("routing://priors")).toBeNull();
+    rec.close();
+  });
 });

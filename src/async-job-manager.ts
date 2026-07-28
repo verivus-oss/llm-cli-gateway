@@ -1278,6 +1278,14 @@ export class AsyncJobManager {
   /** Issue #130: configurable in-memory retention + output cap (durable store keeps its own retention). */
   private readonly completedJobMemoryTtlMs: number;
   private readonly maxJobOutputBytes: number;
+  /**
+   * Job ids already reported as retaining an unreclaimable MCP artifact.
+   *
+   * A legacy row with no captured scope can never acquire one, so the condition
+   * recurs on every startup for the lifetime of that row. Reporting it once per
+   * process keeps the signal without training operators to ignore it.
+   */
+  private readonly reportedUnscopedArtifacts = new Set<string>();
 
   // #139 durable-lease state.
   private readonly instanceId: string = randomUUID();
@@ -1828,9 +1836,21 @@ export class AsyncJobManager {
     // reclaimed. This applies to legacy unpinned rows too: their argv remains
     // recovery input, never authority to delete a current local path.
     if (!row.mcpArtifactScope) {
-      this.logger.error(
-        `#139 orphaned Claude MCP artifact cleanup has no captured scope for job ${jobId}; retaining artifact path`
-      );
+      // Retaining the artifact is correct and unconditional. Only the REPORTING
+      // changes here: a row predating scope capture can never gain one, so an
+      // ERROR on every startup is permanent and unactionable, and it arrives
+      // before the "connected and ready" line. Report it once per process, at
+      // WARN, so a genuinely new occurrence is still visible without teaching
+      // operators that ERROR lines from this path are ignorable.
+      if (!this.reportedUnscopedArtifacts.has(jobId)) {
+        this.reportedUnscopedArtifacts.add(jobId);
+        const message =
+          `#139 orphaned Claude MCP artifact cleanup has no captured scope for job ${jobId}; ` +
+          `retaining artifact path. This row predates scope capture and cannot be reclaimed ` +
+          `automatically; no action is available and this will not be repeated this process.`;
+        if (this.logger.warn) this.logger.warn(message);
+        else this.logger.info(message);
+      }
       return;
     }
     const artifactPath = row.mcpArtifactPath ?? parseClaudeMcpArtifactArg(row.argsJson);
