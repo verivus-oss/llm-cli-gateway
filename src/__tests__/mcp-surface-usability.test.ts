@@ -154,15 +154,26 @@ describe("MCP tool-surface usability (post-usability-review regressions)", () =>
 
     for (const toolName of ["codex_request", "codex_request_async"]) {
       const description = descriptionFor(toolName, "resumeLatest");
-      expect(description, `${toolName}.resumeLatest must identify the global selector`).toMatch(
-        /globally latest/i
+      // This ratchet previously required the description to claim `--last` is
+      // the GLOBAL selector, that the resumed session inherits its original
+      // cwd, and that workingDir/addDir cannot retarget it. All three are false
+      // against codex-cli 0.145.0 and the current spawn path, so the test was
+      // holding a false contract in place: `--last` is cwd-filtered upstream
+      // unless `--all` is passed (the gateway never emits it), and the child is
+      // spawned with the gateway-resolved cwd even though `-C` is dropped from
+      // the resume argv.
+      //
+      // Whether the code or the documented contract is wrong is #258. Until
+      // that is decided, pin the interim contract instead: the description must
+      // warn rather than promise, so neither outcome of #258 is foreclosed.
+      expect(description, `${toolName}.resumeLatest must flag the open question`).toMatch(/#258/);
+      expect(description, `${toolName}.resumeLatest must not promise a target`).toMatch(
+        /do not rely on/i
       );
-      expect(description, `${toolName}.resumeLatest must preserve the original cwd`).toMatch(
-        /inherits that session's original cwd/i
-      );
-      expect(description, `${toolName}.resumeLatest must reject path retargeting claims`).toMatch(
-        /workingDir\/addDir do not retarget it/i
-      );
+      expect(
+        description,
+        `${toolName}.resumeLatest must not reassert the global-selector claim`
+      ).not.toMatch(/globally latest/i);
       expect(description, `${toolName}.resumeLatest must explain explicit UUID targeting`).toMatch(
         /explicit real Codex UUID targets that session/i
       );

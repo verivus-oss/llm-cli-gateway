@@ -17652,7 +17652,7 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
         .boolean()
         .default(false)
         .describe(
-          "Resume Codex's globally latest session via `codex exec resume --last`; it inherits that session's original cwd, and workingDir/addDir do not retarget it. Ignored if sessionId is set; an explicit real Codex UUID targets that session. A brand-new session returns no resumable sessionId; continue with resumeLatest:true or a real Codex UUID."
+          "Resume a previous Codex session via `codex exec resume --last`. UNDER REVIEW (#258): do not rely on which session this selects or on the resumed working directory. `--last` is filtered by cwd upstream unless `--all` is passed, which the gateway does not emit, and the child is still spawned with the gateway-resolved cwd even though `-C`/`--add-dir` are dropped from the resume argv. Verify the target, or start a fresh session when it must be certain. Ignored if sessionId is set; an explicit real Codex UUID targets that session. A brand-new session returns no resumable sessionId; continue with resumeLatest:true or a real Codex UUID."
         ),
       createNewSession: z.boolean().default(false).describe("Force a fresh session (no resume)"),
       correlationId: z.string().optional().describe("Request trace ID (auto if omitted)"),
@@ -20061,7 +20061,7 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
           .boolean()
           .default(false)
           .describe(
-            "Resume Codex's globally latest session via `codex exec resume --last`; it inherits that session's original cwd, and workingDir/addDir do not retarget it. Ignored if sessionId is set; an explicit real Codex UUID targets that session. A brand-new session returns no resumable sessionId; continue with resumeLatest:true or a real Codex UUID."
+            "Resume a previous Codex session via `codex exec resume --last`. UNDER REVIEW (#258): do not rely on which session this selects or on the resumed working directory. `--last` is filtered by cwd upstream unless `--all` is passed, which the gateway does not emit, and the child is still spawned with the gateway-resolved cwd even though `-C`/`--add-dir` are dropped from the resume argv. Verify the target, or start a fresh session when it must be certain. Ignored if sessionId is set; an explicit real Codex UUID targets that session. A brand-new session returns no resumable sessionId; continue with resumeLatest:true or a real Codex UUID."
           ),
         createNewSession: z.boolean().default(false).describe("Force a fresh session (no resume)"),
         correlationId: z.string().optional().describe("Request trace ID (auto if omitted)"),

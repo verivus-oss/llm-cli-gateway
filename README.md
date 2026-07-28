@@ -647,7 +647,7 @@ Execute a Codex request with optional session tracking.
 - `approvalPolicy` (string, optional): Has no effect for Codex because `mcp_managed` is unavailable.
 - `mcpServers` (string[], optional): Metadata only. It does not configure or isolate Codex MCP servers.
 - `sessionId` (string, optional): Session identifier for tracking.
-- `resumeLatest` (boolean, optional): Resume the globally most recent Codex session (`codex exec resume --last`); the resumed session inherits its original cwd and is not selected by `workingDir`. Ignored if `sessionId` is set.
+- `resumeLatest` (boolean, optional): Resume a previous Codex session (`codex exec resume --last`). Do not rely on which session `--last` selects or on the resumed working directory (#258): `--last` is cwd-filtered upstream and the child is still spawned with the gateway-resolved cwd. Verify the target, or start a fresh session when it must be certain. Ignored if `sessionId` is set.
 - `createNewSession` (boolean, optional): Always create a new session
 - `forceRefresh` (boolean, optional): Bypass dedup and force a fresh CLI run, default: false
 - `outputFormat` (string, optional): `text` (default) or `json` (`--json` JSONL events for token usage extraction)

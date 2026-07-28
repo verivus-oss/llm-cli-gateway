@@ -88,7 +88,8 @@ codex_request({
 
 Use `sandboxMode:"read-only"` only for inspection. `fullAuto:true` is a
 deprecated compatibility shorthand for `workspace-write`; do not use it in new
-dispatches. A resumed Codex session drops sandbox selection, so choose a fresh
+dispatches. A resumed Codex session drops `sandboxMode`/`fullAuto` (`configOverrides` can
+still set `sandbox_mode`), so choose a fresh
 session if the required native posture has changed.
 
 Run the smallest relevant local tests/builds after implementation. Preserve the

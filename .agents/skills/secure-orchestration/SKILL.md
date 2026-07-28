@@ -72,7 +72,8 @@ codex_request({
 
 Use `sandboxMode:"workspace-write"` only when testing must write artifacts.
 `fullAuto:true` is deprecated compatibility shorthand, not a modern security
-control. On a Codex resume the sandbox setting is dropped.
+control. On a Codex resume `sandboxMode` and `fullAuto` are dropped, though
+`configOverrides` can still set `sandbox_mode`.
 
 Gemini/Antigravity rejects non-empty `allowedTools`, `skipTrust:true`, JSON and
 stream-JSON output in the current headless path, plus unsupported policy and

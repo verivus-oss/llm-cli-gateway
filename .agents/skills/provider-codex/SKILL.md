@@ -81,8 +81,10 @@ metadata is authoritative; the TOML is scanner input only.
    dropped on resume, so those fields cannot select a posture there. That is not
    a guarantee that the original posture is retained: `configOverrides` is not
    filtered and can set `sandbox_mode`, and Codex re-resolves configuration on a
-   cold resume. `resumeLatest` selects Codex's globally latest session, inherits that
-   session's original cwd, and is not scoped by `workingDir`.
+   cold resume. `resumeLatest` is under review (#258): `--last` is cwd-filtered
+   upstream unless `--all` is passed, which the gateway does not emit, and the
+   child is still spawned with the gateway-resolved cwd. Do not rely on which
+   session it selects or on the resumed working directory.
    The provider-native `workingDir` and `addDir` flags scope new sessions only;
    the gateway accepts but omits those fields on resume. A verified `workspace`
    or gateway `worktree` can still select the child process launch cwd and bind
