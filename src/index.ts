@@ -18937,7 +18937,7 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
         .max(3_600_000)
         .optional()
         .describe(
-          "Total-runtime bound, not an idle timer: this provider emits no output until it exits, so the child is killed after this duration even while healthy. Min 30s, max 1h, omit=1h default."
+          "Total-runtime bound, not an idle timer: this provider emits no output until it exits, so the child is killed after this duration even while healthy. Min 30s, max 1h, omit=1h default. Cursor only: this holds for the default text invocation; with outputFormat stream-json the CLI streams incrementally, so the same timer behaves as a genuine idle window."
         ),
       forceRefresh: z
         .boolean()
@@ -21086,7 +21086,7 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
           .max(3_600_000)
           .optional()
           .describe(
-            "Total-runtime bound, not an idle timer: this provider emits no output until it exits, so the child is killed after this duration even while healthy. Min 30s, max 1h, omit=1h default."
+            "Total-runtime bound, not an idle timer: this provider emits no output until it exits, so the child is killed after this duration even while healthy. Min 30s, max 1h, omit=1h default. Cursor only: this holds for the default text invocation; with outputFormat stream-json the CLI streams incrementally, so the same timer behaves as a genuine idle window."
           ),
         forceRefresh: z
           .boolean()

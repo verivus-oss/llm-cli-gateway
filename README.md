@@ -1224,7 +1224,7 @@ Run a Cursor Agent request synchronously. The default CLI transport uses headles
 - `approvalPolicy` (string, optional): Has no effect on CLI because `mcp_managed` is unavailable. ACP rejects it because ACP uses its own permission bridge.
 - `optimizePrompt` / `optimizeResponse` (boolean, optional): Token-efficiency optimisation, default: false
 - `correlationId` (string, optional): Request trace ID (auto-generated if omitted)
-- `idleTimeoutMs` (integer, optional): Total-runtime bound, not an idle timer: this provider emits no output until it exits, so the process is killed after this duration even while healthy. 30,000 to 3,600,000 ms, default 3,600,000 ms
+- `idleTimeoutMs` (integer, optional): Total-runtime bound, not an idle timer: this provider emits no output until it exits, so the process is killed after this duration even while healthy. 30,000 to 3,600,000 ms, default 3,600,000 ms. This holds for the default text invocation; with `outputFormat: "stream-json"` Cursor streams incrementally, so the same timer behaves as a genuine idle window
 - `forceRefresh` (boolean, optional): Bypass dedup and force a fresh CLI run, default: false
 
 ##### `claude_request_async` / `codex_request_async` / `gemini_request_async` / `grok_request_async` / `mistral_request_async` / `devin_request_async` / `cursor_request_async`

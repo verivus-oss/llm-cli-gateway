@@ -284,15 +284,15 @@ For **terminal-burst** providers it is not an idle timeout at all. Those
 providers emit zero bytes until they exit, so an idle timer would kill healthy
 work; they instead get a total-runtime bound.
 
-| CLI          | Discipline     | Default     | Meaning                                                                                        |
-| ------------ | -------------- | ----------- | ---------------------------------------------------------------------------------------------- |
-| Claude       | incremental    | 600,000ms   | Idle. **stream-json mode only.** text/json produce no output until done (would false-positive) |
-| Codex        | incremental    | 600,000ms   | Idle. Streams stderr progress: works all modes                                                 |
-| Grok         | incremental    | 600,000ms   | Idle. Streams stdout: works all modes                                                          |
-| Gemini       | terminal-burst | 3,600,000ms | Total runtime, not idle. Emits nothing until exit                                              |
-| Mistral Vibe | terminal-burst | 3,600,000ms | Total runtime, not idle. Emits nothing until exit                                              |
-| Devin        | terminal-burst | 3,600,000ms | Total runtime, not idle. Emits nothing until exit                                              |
-| Cursor Agent | terminal-burst | 3,600,000ms | Total runtime, not idle. Emits nothing until exit                                              |
+| CLI          | Discipline     | Default     | Meaning                                                                                                                                              |
+| ------------ | -------------- | ----------- | ---------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Claude       | incremental    | 600,000ms   | Idle. **stream-json mode only.** text/json produce no output until done (would false-positive)                                                       |
+| Codex        | incremental    | 600,000ms   | Idle. Streams stderr progress: works all modes                                                                                                       |
+| Grok         | incremental    | 600,000ms   | Idle. Streams stdout: works all modes                                                                                                                |
+| Gemini       | terminal-burst | 3,600,000ms | Total runtime, not idle. Emits nothing until exit                                                                                                    |
+| Mistral Vibe | terminal-burst | 3,600,000ms | Total runtime, not idle. Emits nothing until exit                                                                                                    |
+| Devin        | terminal-burst | 3,600,000ms | Total runtime, not idle. Emits nothing until exit                                                                                                    |
+| Cursor Agent | terminal-burst | 3,600,000ms | Total runtime, not idle, under the default text invocation. With `outputFormat: "stream-json"` Cursor streams, so the timer is a genuine idle window |
 
 The bound on terminal-burst providers is kept rather than removed because the
 stall checker only warns and never kills, so nothing else would bound a hung
