@@ -35,6 +35,27 @@ All notable changes to the llm-cli-gateway project.
   independent reviewers; the `provider_tool_capabilities` discovery text for
   Gemini and Cursor was corrected to match.
 
+- **The documented Codex `sandboxMode` default was wrong, on every surface that
+  stated it.** Three schema descriptions in `src/index.ts` (and the generated
+  tool fixture), the `codex-request` plugin command, `docs/launch/devto-tutorial.md`,
+  and `docs/development/supply-chain-guard/RUNBOOK.md` all said that omitting
+  `sandboxMode` yields read-only. It does not. The gateway emits no `--sandbox`
+  flag when the field is omitted, and Codex then resolves the policy from its
+  own configuration, project trust, and an internal fallback: the fallback is
+  read-only, but a **trusted project can resolve to `workspace-write`**. Callers
+  who omitted the field believing it was safe were not guaranteed a read-only
+  child.
+
+  The correction also has a resume half. `codex exec resume` rejects sandbox
+  policy flags outright (`error: unexpected argument '--sandbox' found`), so a
+  resumed request inherits the original session's posture and `sandboxMode` has
+  no effect. Every surface now says new-session-only, and says to establish the
+  posture on the first request. Inspection should pass
+  `sandboxMode: "read-only"` explicitly rather than relying on omission.
+
+  The RUNBOOK instance mattered most: it is the supply-chain-guard skill's
+  source of truth, so the false claim was steering release reviewers.
+
 - **Agent-facing guidance across every surface contradicted the fix above.**
   Adding `workingDir` falsified claims wherever the old capability was written
   down, and those claims were scattered across four distinct surfaces that no
@@ -113,7 +134,7 @@ that candidate. Anyone testing rc.1 should move to rc.2.
 - **`codex_fork_session` leaked an opaque terminal error.** `codex fork` is an
   interactive subcommand requiring a controlling terminal, and provider children
   are spawned with pipes, so every call failed with `exit code 1: Error: stdin is
-  not a terminal`, which reads like a broken environment. Codex exposes no
+not a terminal`, which reads like a broken environment. Codex exposes no
   non-interactive equivalent. The tool now returns the reason and the route that
   works (`codex_request` with a session UUID or `resumeLatest`), without spawning
   a child that cannot succeed, and without writing session workspace scope for a

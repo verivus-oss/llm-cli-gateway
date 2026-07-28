@@ -422,7 +422,7 @@ Identical `*_request` / `*_request_async` calls within the dedup window (default
 - Pass `forceRefresh: true` on a single call to bypass dedup for that request:
 
 ```
-codex_request_async({prompt:"...",sandboxMode:"workspace-write",approvalStrategy:"legacy",forceRefresh:true})
+codex_request_async({prompt:"...",workingDir:"<repo>",sandboxMode:"workspace-write",approvalStrategy:"legacy",forceRefresh:true})
 ```
 
 Use `forceRefresh` when you genuinely need a fresh CLI run (e.g., file contents changed since the last dispatch, retry after manual fix). For normal "I crashed and restarted, let me re-issue" recovery, **omit `forceRefresh`**; dedup is exactly what you want.
@@ -438,8 +438,10 @@ Use `forceRefresh` when you genuinely need a fresh CLI run (e.g., file contents 
 ```
 // 1. Wrapper agent died after dispatching; you have no jobId in memory.
 // 2. Re-issue the identical *_request_async call. The gateway dedups onto
-//    the existing in-flight or completed job and returns its jobId.
-result = codex_request_async({prompt:"<same prompt as before>",sandboxMode:"workspace-write",approvalStrategy:"legacy",correlationId:"<same correlationId>"})
+//    the existing in-flight or completed job and returns its jobId. Dedup is
+//    cwd-aware, so the scope must match the original call too, not just the
+//    prompt and correlationId.
+result = codex_request_async({prompt:"<same prompt as before>",workingDir:"<same workingDir as before>",sandboxMode:"workspace-write",approvalStrategy:"legacy",correlationId:"<same correlationId>"})
 // result.job.id is the original job
 // 3. Poll/fetch as normal; works whether the job is running, completed, or completed days ago.
 ```
