@@ -1254,11 +1254,17 @@ const CLI_IDLE_TIMEOUTS: Record<string, number | undefined> = {
  * Total-runtime bound for providers that emit nothing until they exit.
  *
  * gemini, mistral, devin and cursor declare `outputDiscipline.streaming:
- * "terminal-burst"`. Their stdout stays at zero bytes for the whole run, so an
+ * "terminal-burst"`. Under that classification, which describes each provider's
+ * DEFAULT invocation, their stdout stays at zero bytes for the whole run, so an
  * "idle" timer never resets and silently degrades into a wall-clock cap. At the
  * previous 600_000ms that killed perfectly healthy work: a real cross-LLM review
  * job was terminated at exactly 600000ms of "inactivity" having produced exactly
  * the zero bytes its own registry entry predicts.
+ *
+ * Cursor is the exception to that default. With `outputFormat: "stream-json"` it
+ * streams incrementally, so output resets the timer and this same value behaves
+ * as a real idle window. resolveIdleTimeout does not distinguish the two modes;
+ * see #259.
  *
  * Removing the bound entirely is not an option, because `checkStalledJobs` only
  * warns and never kills, so this timer is the sole protection against a hung
