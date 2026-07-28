@@ -83,6 +83,7 @@ After implementing:
        APPROVED_UNCONDITIONALLY, CHANGES_REQUIRED, or BLOCKED_EXTERNAL with
        inspected evidence.",
      sandboxMode: "read-only",
+     workingDir: "[repo]",
      approvalStrategy: "legacy"
    })
 
@@ -129,8 +130,10 @@ than a synchronous sleep that freezes the agent.
 ## Target and Evidence Discipline
 
 Codex accepts local workingDir and addDir on a new session. Pass the actual
-target directory or start the stdio gateway in that repository; never allow a
-default workspace to silently redirect the review. Native Codex resume inherits
+target directory. Starting the stdio gateway inside that repository does NOT
+scope the review: an unscoped local child runs in a fresh private neutral cwd,
+not the gateway's own directory. Never allow a default workspace to silently
+redirect the review either. Native Codex resume inherits
 the original working directory and sandbox posture, so establish them correctly
 on the first request. A Codex sessionId must be a real Codex UUID; gateway
 generated gw- identifiers are not valid native resume identifiers.
@@ -149,6 +152,7 @@ codex_request({
     task: "Re-review after the listed fixes. Return terminal JSON verdict APPROVED_UNCONDITIONALLY, CHANGES_REQUIRED, or BLOCKED_EXTERNAL with inspected evidence."
   },
   sandboxMode: "read-only",
+  workingDir: "[repo]",
   approvalStrategy: "legacy"
 })
 ```

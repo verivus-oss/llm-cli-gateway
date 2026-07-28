@@ -62,8 +62,9 @@ on every new job because Codex resume inherits its original sandbox.
 ## Submit the Initial Review
 
 State the change, target paths, acceptance criteria, and requested evidence.
-Make sure the local stdio gateway is operating in the intended repository, or
-pass Codex a local workingDir on the first new session.
+Pass Codex a local workingDir on the first new session. The gateway's own
+working directory does not scope the review: an unscoped local child runs in a
+fresh private neutral cwd, not the repository the gateway was started in.
 
 ```
 codex_request({
@@ -73,6 +74,7 @@ codex_request({
     JSON verdict APPROVED_UNCONDITIONALLY, CHANGES_REQUIRED, or
     BLOCKED_EXTERNAL with inspected evidence.",
   sandboxMode: "read-only",
+  workingDir: "[repo]",
   approvalStrategy: "legacy",
   correlationId: "review-initial"
 })
@@ -102,6 +104,7 @@ codex_request({
     verdict APPROVED_UNCONDITIONALLY, CHANGES_REQUIRED, or BLOCKED_EXTERNAL with
     inspected evidence.",
   sandboxMode: "read-only",
+  workingDir: "[repo]",
   approvalStrategy: "legacy",
   correlationId: "review-follow-up"
 })
@@ -141,6 +144,7 @@ codex_request({
     task: "Re-review the fixes. Return terminal JSON verdict APPROVED_UNCONDITIONALLY, CHANGES_REQUIRED, or BLOCKED_EXTERNAL with inspected evidence."
   },
   sandboxMode: "read-only",
+  workingDir: "[repo]",
   approvalStrategy: "legacy"
 })
 ```

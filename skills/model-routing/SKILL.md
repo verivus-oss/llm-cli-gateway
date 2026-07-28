@@ -123,11 +123,13 @@ Omit model by default:
 codex_request({
   prompt: "Inspect [path] and explain the defect.",
   sandboxMode: "read-only",
+  workingDir: "[repo]",
   approvalStrategy: "legacy"
 })
 
 mistral_request({
   prompt: "Independently inspect [path].",
+  workingDir: "[repo]",
   approvalStrategy: "legacy"
 })
 ```
@@ -149,6 +151,7 @@ codex_request({
     task: "Inspect the current implementation."
   },
   sandboxMode: "read-only",
+  workingDir: "[repo]",
   approvalStrategy: "legacy"
 })
 ```

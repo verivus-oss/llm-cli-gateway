@@ -89,6 +89,7 @@ codex_request({
     task: "Implement or review the current task."
   },
   sandboxMode: "read-only",
+  workingDir: "[repo]",
   approvalStrategy: "legacy"
 })
 ```
