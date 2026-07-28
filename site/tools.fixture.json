@@ -1510,7 +1510,7 @@
             "items": {
               "type": "string"
             },
-            "description": "Codex --add-dir <DIR>: additional writable workspace directories (repeat per entry). New sessions only. Stdio/local callers may pass local paths directly. Remote HTTP/OAuth callers must use relative paths inside a selected registered workspace. Do not call workspace_* tools to fix stdio/local provider path access."
+            "description": "Codex --add-dir <DIR>: additional writable workspace directories (repeat per entry). Emitted once per entry on new sessions only: the flag is filtered from resume argv. That does NOT pin a resumed session's writable-dir policy; do not rely on it. Stdio/local callers may pass local paths directly. Remote HTTP/OAuth callers must use relative paths inside a selected registered workspace. Do not call workspace_* tools to fix stdio/local provider path access."
           },
           "enable": {
             "type": "array",

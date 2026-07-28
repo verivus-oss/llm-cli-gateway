@@ -20129,7 +20129,7 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
           .array(z.string())
           .optional()
           .describe(
-            "Codex --add-dir <DIR>: additional writable workspace directories (repeat per entry). New sessions only." +
+            "Codex --add-dir <DIR>: additional writable workspace directories (repeat per entry). Emitted once per entry on new sessions only: the flag is filtered from resume argv. That does NOT pin a resumed session's writable-dir policy; do not rely on it." +
               LOCAL_ADD_DIR_FIELD_SUFFIX
           ),
         ...CODEX_PART_A_FIELDS,

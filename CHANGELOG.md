@@ -91,6 +91,32 @@ All notable changes to the llm-cli-gateway project.
   providers is invisible to any search for a negative claim, which is how it
   survived several sweeps.
 
+- **The documented Codex resume contract was wrong about the working directory
+  and about which session `--last` selects.** Every surface that described it,
+  including both `codex_request` schemas and the generated fixture, `README.md`,
+  and ten agent skills, said a resumed session keeps its original cwd and that
+  `workingDir`/`addDir` cannot retarget it. Neither holds against
+  `codex-cli 0.145.0` and the current spawn path. `codex exec resume --last` is
+  filtered by cwd upstream unless `--all` is passed, which the gateway never
+  emits, so `workingDir` also determines _which_ session `resumeLatest` picks.
+  And although `-C`/`--cd`/`--add-dir` are filtered out of the resume argv, the
+  child is still spawned with the gateway-resolved cwd, so the flag filtering
+  pins nothing.
+
+  Whether the code or the documented contract is the defect is a live design
+  question, tracked internally: silently relocating a resumed session to another
+  repository may itself be the bug, in which case the original contract was
+  right. Rather than prejudge that, every surface now carries neutral interim
+  guidance: do not rely on the resumed working directory or on which session
+  `--last` selects; verify, or start a fresh session when the target must be
+  certain.
+
+  `src/__tests__/mcp-surface-usability.test.ts` previously **required** the
+  false claims, so it would have failed any honest correction. It is inverted
+  rather than deleted: it now requires the interim warning to name both
+  uncertainties and rejects reassertion of the inheritance and global-selector
+  forms.
+
 - **Three agent skills still pointed at `codex_fork_session`**, which
   `3.1.0-rc.2` made explicitly unavailable, so the shipped guidance told callers
   to use a tool that now refuses by design. `async-job-orchestration` and
