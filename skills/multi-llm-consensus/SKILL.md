@@ -36,7 +36,7 @@ For a mandatory approval review:
    sandboxMode: "workspace-write" only when it must create build or test
    artifacts. Do not use fullAuto.
 5. Do not impose a review-round, turn, token, price, cost, or wallclock cap.
-   The configured idle-timeout safeguard is only for lack of process output on incremental providers. For terminal-burst providers (gemini, mistral, devin, cursor) It is instead a total-runtime bound, since those emit nothing until exit..
+   The configured idle-timeout safeguard is only for lack of process output on incremental providers. For terminal-burst providers (gemini, mistral, devin, cursor) it is instead a total-runtime bound, since those emit nothing until exit.
 6. Accept the gate only when every required reviewer gives explicit,
    evidence-backed `APPROVED_UNCONDITIONALLY`. Conditional approval, residual
    issues, a malformed response, inability to verify, cancellation, timeout, or

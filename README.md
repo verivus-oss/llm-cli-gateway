@@ -607,7 +607,7 @@ Execute a Claude Code request with optional session management.
 - `optimizePrompt` (boolean, optional): Optimize prompt for token efficiency (44% reduction), default: false
 - `optimizeResponse` (boolean, optional): Optimize response for token efficiency (37% reduction), default: false
 - `correlationId` (string, optional): Request trace ID (auto-generated if omitted)
-- `idleTimeoutMs` (integer, optional): Kill a stuck process after output inactivity; 30,000 to 3,600,000 ms
+- `idleTimeoutMs` (integer, optional): Kill a stuck process after output inactivity; 30,000 to 3,600,000 ms. Idle enforcement applies only when `outputFormat` is `stream-json`; it is ignored for text/json, which produce no output until the run completes
 - `worktree` (boolean|object, optional): Run inside a gateway-owned git worktree (slice λ). A worktree requires a registered workspace selected explicitly, through caller-owned session metadata, or by the configured default; it never inherits process cwd or combines with `workingDir`, `addDir`, or `includeDirs`. Materialization suppresses repository, system, and global Git hooks and configured clean, smudge, and process checkout filters, so filter-dependent content such as Git LFS remains in its repository representation instead of executing host commands. Requesting a worktree is a high-risk managed input that requires approval and `LLM_GATEWAY_APPROVAL_ALLOW_BYPASS=1`, but remains bounded.
 - `promptParts` (object, optional): Cache-aware structured prompt `{ system?, tools?, context?, task }`; mutually exclusive with `prompt`
 - `forceRefresh` (boolean, optional): Bypass dedup and force a fresh CLI run, default: false
