@@ -75,7 +75,7 @@ Apply these rules:
    sandboxMode: "workspace-write" only if the review must create generated
    build or test output. Do not use fullAuto; it is deprecated shorthand.
 5. Do not set review-round, turn, token, price, cost, or wallclock limits.
-   The configured idle-timeout safeguard detects lack of output on incremental providers, not completion. For terminal-burst providers (gemini, mistral, devin, cursor) it is instead a total-runtime bound, since those emit nothing until exit.
+   The configured idle-timeout safeguard detects lack of output on incremental providers, not completion. For terminal-burst providers (gemini, mistral, devin, cursor) it is instead a total-runtime bound, since those emit nothing until exit. That classification is each provider's default invocation; cursor with `outputFormat: "stream-json"` streams, so there it is a real idle window.
 6. Accept only explicit, evidence-backed `APPROVED_UNCONDITIONALLY` results. A
    condition, remaining finding, incomplete evidence, malformed response,
    timeout, cancellation, or provider failure is not approval.

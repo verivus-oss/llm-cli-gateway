@@ -282,7 +282,9 @@ process.
 
 For **terminal-burst** providers it is not an idle timeout at all. Those
 providers emit zero bytes until they exit, so an idle timer would kill healthy
-work; they instead get a total-runtime bound.
+work; they instead get a total-runtime bound. The classification describes each
+provider's default invocation: cursor with `outputFormat: "stream-json"` does
+stream, and there the same value behaves as a real idle window.
 
 | CLI          | Discipline     | Default     | Meaning                                                                                                                                              |
 | ------------ | -------------- | ----------- | ---------------------------------------------------------------------------------------------------------------------------------------------------- |
@@ -337,7 +339,7 @@ gateway process repository.
   status call.
 - No caller-imposed wallclock timeout: good reviews take minutes to tens of minutes
 - Do **not** cancel jobs for "taking too long"; cancel only on explicit user instruction or hard failure (process dead, non-transient error such as exit 125/126)
-- `idleTimeoutMs` carries two meanings and neither needs tightening for normal reviews. For incremental providers (claude, codex, grok) it is a 10-minute no-output safeguard. For terminal-burst providers (gemini, mistral, devin, cursor) it is a one-hour total-runtime bound, because those emit nothing until exit and an idle timer would kill healthy work. Devin is included; it has no separate exemption. See [Idle Timeout and Runtime Cap](#idle-timeout-and-runtime-cap).
+- `idleTimeoutMs` carries two meanings and neither needs tightening for normal reviews. For incremental providers (claude, codex, grok) it is a 10-minute no-output safeguard. For terminal-burst providers (gemini, mistral, devin, and cursor under its default text output) it is a one-hour total-runtime bound, because those emit nothing until exit and an idle timer would kill healthy work. Devin is included; it has no separate exemption. Cursor with `outputFormat: "stream-json"` does stream, so there the same value behaves as a real idle window. See [Idle Timeout and Runtime Cap](#idle-timeout-and-runtime-cap).
 - When using `ScheduleWakeup` or sleep loops, use the requested cadence. The
   default is 60 s; a user-required 90 s cadence wins. The 5-minute prompt-cache
   window also favors intervals ≤ 270 s or ≥ 20 min.
@@ -532,7 +534,7 @@ For long-running async loops on a Claude session, treat the warning as a hint to
 - **When durable async jobs are enabled, sync tools can auto-defer at the 45 s deadline:** check for `status:"deferred"` in sync responses, then poll every 60 s by default or at a user-required 90-second cadence. With `persistence.backend = "none"`, async and job tools are absent and sync requests run to completion.
 - `SYNC_DEADLINE_MS=0` disables auto-deferral
 - For Gemini, check `resumable`: only `true` for a user-provided `sessionId`
-- Raise `idleTimeoutMs` for tasks with long silent periods on an incremental provider. On a terminal-burst provider silence is normal for the whole run, so raising it raises the total-runtime bound rather than an idle window
+- Raise `idleTimeoutMs` for tasks with long silent periods on an incremental provider. On a terminal-burst provider in its default mode silence is normal for the whole run, so raising it raises the total-runtime bound rather than an idle window
 - Review jobs: every required healthy reviewer must return an evidence-backed
   `APPROVED_UNCONDITIONALLY`. Do not downgrade, skip, vote around, or impose a
   budget/round/turn/wallclock cap. A provider failure is incomplete review work,

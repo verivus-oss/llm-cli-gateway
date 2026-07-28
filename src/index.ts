@@ -602,7 +602,7 @@ ${deferralLine}
 - An unscoped local CLI child uses a fresh private neutral cwd, not the gateway repository. Cwd-scoped resumeLatest requires workingDir, workspace, or a configured default workspace.
 - Codex new and resume prompts use stdin. codex_fork_session remains argv-bound and rejects oversized UTF-8 prompts as non-retryable input_too_large. Prompts are never truncated.
 - Upstream drift detection: After upgrading any provider CLI (especially grok), use upstream_contracts with probeInstalled:true and provider_subcommand_drift for declared subcommand help surfaces. Probes are safe, read-only --help checks.
-- Idle timeout kills stuck processes (default 10min for providers that stream; providers that emit nothing until they exit (gemini, mistral, devin, cursor) instead get a 1h total-runtime bound, since an idle timer never advances for them). Configurable via idleTimeoutMs.
+- Idle timeout kills stuck processes (default 10min for providers that stream). Providers that emit nothing until they exit get a 1h total-runtime bound instead, since an idle timer never advances for them: gemini, mistral, devin, and cursor under its default text output. Cursor with outputFormat stream-json does stream, so there the same 1h value behaves as a real idle window. Configurable via idleTimeoutMs.
 
 Skills (full docs via MCP resources):
 ${loadedSkills.map(s => `- skills://${s.name} — ${s.description}`).join("\n")}`;

@@ -48,7 +48,7 @@ Apply these rules:
    sandboxMode: "workspace-write" only when red-team verification needs to
    create build or test artifacts. Do not use fullAuto.
 5. Do not set review-round, turn, token, price, cost, or wallclock caps. The
-   configured idle-timeout safeguard only detects a silent process on incremental providers. For terminal-burst providers (gemini, mistral, devin, cursor) it is instead a total-runtime bound, since those emit nothing until exit.
+   configured idle-timeout safeguard only detects a silent process on incremental providers. For terminal-burst providers (gemini, mistral, devin, cursor) it is instead a total-runtime bound, since those emit nothing until exit. That classification is each provider's default invocation; cursor with `outputFormat: "stream-json"` streams, so there it is a real idle window.
 6. Continue red-team, blue-team, and reassessment work until every required
    reviewer returns `APPROVED_UNCONDITIONALLY`.
 
