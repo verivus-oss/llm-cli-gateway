@@ -132,8 +132,9 @@ have not changed.
 ## Continuity and Stable Prompts
 
 On a new Codex session, establish the target working directory and sandbox
-correctly, because a resume cannot change them: the gateway filters `-C`/`--cd`,
-`--add-dir` and `--sandbox` out of the resume argv. Do not read that as a
+correctly, because a resume cannot select them through those fields: the gateway
+filters `-C`/`--cd`, `--add-dir` and `--sandbox` out of the resume argv. Do not
+read that as a
 guarantee that the resumed session keeps the original posture, though;
 `configOverrides` still passes through and Codex re-resolves configuration on a
 cold resume, so verify the posture when it matters. resumeLatest:true or a real

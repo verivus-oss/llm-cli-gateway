@@ -174,6 +174,18 @@ describe("MCP tool-surface usability (post-usability-review regressions)", () =>
       expect(description, `${toolName}.resumeLatest must not promise a target`).toMatch(
         /do not rely on/i
       );
+      // "under review" plus a disclaimer is not enough on its own: a
+      // description could warn generically and still assert inheritance in the
+      // next sentence. Pin BOTH uncertainties by name, so a future edit cannot
+      // drop one and keep the reassuring preamble.
+      expect(
+        description,
+        `${toolName}.resumeLatest must name the session-selection uncertainty`
+      ).toMatch(/which session/i);
+      expect(
+        description,
+        `${toolName}.resumeLatest must name the working-directory uncertainty`
+      ).toMatch(/working directory/i);
       expect(
         description,
         `${toolName}.resumeLatest must not reassert the global-selector claim`
@@ -181,8 +193,10 @@ describe("MCP tool-surface usability (post-usability-review regressions)", () =>
       // A half-applied edit can leave an affirmative inheritance clause sitting
       // next to the warning, which is how the same sentence ended up asserting
       // both sides in a plugin skill. Forbid the affirmative form outright.
+      // Negative lookbehind so a legitimate DENIAL ("never inherits the original
+      // cwd") is not rejected alongside the affirmative form this targets.
       expect(description, `${toolName}.resumeLatest must not reassert cwd inheritance`).not.toMatch(
-        /inherits[^.]*original/i
+        /(?<!never |not |n't )inherits[^.]*original/i
       );
       expect(description, `${toolName}.resumeLatest must explain explicit UUID targeting`).toMatch(
         /explicit real Codex UUID targets that session/i

@@ -136,8 +136,10 @@ target directory. Starting the stdio gateway inside that repository does NOT
 scope the review: an unscoped local child runs in a fresh private neutral cwd,
 not the gateway's own directory. Never allow a default workspace to silently
 redirect the review either. The gateway filters `-C`/`--cd`, `--add-dir` and
-`--sandbox` out of a Codex resume, so a resumed request cannot retarget the
-working directory or select a sandbox; establish both on the first request. Do
+`--sandbox` out of a Codex resume, so a resumed request cannot select either
+through those fields. That does not pin them: the child is still spawned with
+the gateway-resolved cwd, and `configOverrides` can still set `sandbox_mode`.
+Establish both on the first request and verify when it matters. Do
 not assume the resumed session simply keeps the original posture, since
 `configOverrides` still passes through and Codex re-resolves configuration. A Codex sessionId must be a real Codex UUID; gateway
 generated gw- identifiers are not valid native resume identifiers.
