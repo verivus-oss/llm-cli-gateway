@@ -3,7 +3,9 @@
 // A hand-maintained table previously gave gemini, mistral and cursor a 600000ms
 // "idle" timeout with comments asserting they "stream in real-time". Their own
 // registry evidence says the opposite: outputDiscipline.streaming is
-// "terminal-burst", meaning stdout stays at zero bytes until the process exits.
+// "terminal-burst", meaning stdout stays at zero bytes until the process exits
+// under the default invocation. Cursor streams under outputFormat stream-json,
+// which resolveIdleTimeout does not currently distinguish (see #259).
 // An idle timer that never resets is a wall-clock cap, and it killed a real
 // cross-LLM review job at exactly 600000ms of "inactivity" while that job was
 // perfectly healthy.

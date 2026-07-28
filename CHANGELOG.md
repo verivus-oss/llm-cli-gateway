@@ -165,7 +165,8 @@ that candidate. Anyone testing rc.1 should move to rc.2.
   observability surface exactly as it withholds the routing tools.
 - **The idle timeout was a hard wall-clock cap for providers that never
   stream.** gemini, mistral, devin and cursor declare
-  `outputDiscipline.streaming: "terminal-burst"`, meaning zero bytes until exit,
+  `outputDiscipline.streaming: "terminal-burst"`, meaning zero bytes until exit
+  under their default invocation (cursor streams under `outputFormat: "stream-json"`),
   yet a hand-maintained table gave three of them a 600000ms _idle_ timeout with
   comments asserting they "stream in real-time". The timer never reset, so
   healthy work was killed at ten minutes: a real cross-LLM review job died at

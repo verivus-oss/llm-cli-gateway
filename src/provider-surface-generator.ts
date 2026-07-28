@@ -104,7 +104,9 @@ export interface ProviderCapabilityRow {
   /**
    * Whether this provider's stdout advances during a job. Callers need it to
    * read `stdoutBytes`: under `terminal-burst` a 0 is normal for a healthy run
-   * and says nothing about liveness, and a cancel retains nothing.
+   * and says nothing about liveness, and a cancel retains nothing. The value
+   * describes the provider's default invocation; cursor streams under
+   * outputFormat stream-json.
    */
   readonly outputStreaming: string;
   readonly flushesOnSigterm: boolean;

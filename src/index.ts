@@ -1243,7 +1243,7 @@ export function shouldRegisterGrokApiTools(providers: ProvidersConfig): boolean 
 // Only providers whose registry `outputDiscipline.streaming` is "incremental"
 // belong here. For a "terminal-burst" provider the timer below is not an idle
 // timer at all, because no output ever arrives before exit. See
-// TERMINAL_BURST_RUNTIME_CAP_MS.
+// TERMINAL_BURST_RUNTIME_CAP_MS. The registry classifies each provider's DEFAULT invocation; cursor with outputFormat stream-json does stream, so there the same value behaves as a real idle window.
 const CLI_IDLE_TIMEOUTS: Record<string, number | undefined> = {
   claude: 600_000, // 10 minutes, only used when outputFormat=stream-json
   codex: 600_000, // 10 minutes; Codex streams stderr progress
@@ -1267,7 +1267,15 @@ const CLI_IDLE_TIMEOUTS: Record<string, number | undefined> = {
  */
 const TERMINAL_BURST_RUNTIME_CAP_MS = 3_600_000; // 1 hour, the schema maximum
 
-/** True when the provider's registry entry says it emits nothing before exit. */
+/**
+ * True when the provider's registry entry says it emits nothing before exit.
+ *
+ * NOTE: this reads the registry's DEFAULT-invocation classification and does not
+ * consider outputFormat. Cursor is terminal-burst under its default text argv
+ * but streams under stream-json, so for that combination the returned bound
+ * behaves as a real idle window rather than a total-runtime cap. Mode-aware
+ * classification is tracked in #259.
+ */
 function emitsOnlyOnExit(cli: string): boolean {
   try {
     return getProviderDefinition(cli as CliType).outputDiscipline?.streaming === "terminal-burst";
