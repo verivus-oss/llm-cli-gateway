@@ -80,11 +80,11 @@ working directory that each provider will see.
 | -------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | Claude   | Pass local `workingDir:"<repo>"`. With Claude managed approval this is a high-risk posture input and needs an approval decision plus the operator's managed-bypass setting.           |
 | Codex    | Pass local `workingDir:"<repo>"`; start with `sandboxMode:"read-only"` for inspection, or use `workspace-write` only for write-producing checks.                                      |
-| Gemini   | Pass a verified registered `workspace` to select cwd. `includeDirs` is an extra read path, not cwd selection.                                                                         |
+| Gemini   | Pass local `workingDir:"<repo>"`. `includeDirs` is an extra read path, not cwd selection.                                                                                             |
 | Grok     | Pass local `workingDir:"<repo>"`.                                                                                                                                                     |
 | Mistral  | Pass local `workingDir:"<repo>"`.                                                                                                                                                     |
 | Devin    | Pass local `workingDir:"<repo>"` or a verified registered `workspace`. Use gateway `worktree` only with an explicit provider-native `sessionId` not overridden by `createNewSession`. |
-| Cursor   | Pass local `workspace:"<repo>"` or a verified registered workspace alias.                                                                                                             |
+| Cursor   | Pass local `workingDir:"<repo>"`. `workspace` is Cursor's own selector; an absolute workspace path disagreeing with `workingDir` is rejected, not ranked.                             |
 
 Do not request a fresh gateway worktree for Grok, Mistral, or Devin. For these
 providers, gateway worktree admission requires an explicit provider-native
@@ -321,8 +321,8 @@ codex_request_async({
 })
 
 gemini_request_async({
-  prompt:"Review <packet> in the verified target workspace. Inspect security, edge cases, and documentation. Return the required terminal JSON verdict: APPROVED_UNCONDITIONALLY, CHANGES_REQUIRED, or BLOCKED_EXTERNAL.",
-  workspace:"<verified-gemini-workspace>",
+  prompt:"Review <packet> in the target checkout. Inspect security, edge cases, and documentation. Return the required terminal JSON verdict: APPROVED_UNCONDITIONALLY, CHANGES_REQUIRED, or BLOCKED_EXTERNAL.",
+  workingDir:"<repo>",
   approvalStrategy:"legacy",
   correlationId:"review-gemini"
 })

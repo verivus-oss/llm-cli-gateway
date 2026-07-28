@@ -57,8 +57,9 @@ required roster after every material change until each reachable reviewer return
    `provider_tool_capabilities({cli:"..."})` for Claude, Codex, Gemini, Grok,
    Mistral, Devin, and Cursor.
 3. Use the target-routing matrix in `multi-llm-review`: explicit `workingDir`
-   for Claude/Codex/Grok/Mistral/Devin, a verified registered `workspace` for
-   Gemini, and `workspace` for Cursor. Do not let a default workspace decide the
+   for all seven providers. For Cursor, `workspace` remains its own native
+   selector, and an absolute workspace path disagreeing with `workingDir` is
+   rejected rather than ranked. Do not let a default workspace decide the
    review target. An unscoped child uses a neutral temporary cwd, not the
    gateway repository.
 4. Start an exhaustive CLI review roster with all seven canonical providers.

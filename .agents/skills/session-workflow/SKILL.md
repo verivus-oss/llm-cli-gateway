@@ -46,7 +46,7 @@ Cursor, and must never be replayed to Gemini either.
 | Grok     | Native ID maps to `--resume`; `resumeLatest:true` maps to `--continue`.                                                       | A fresh `gw-*` ID is bookkeeping only. Cwd affects `--continue` context.                                                                                                                |
 | Mistral  | Native ID maps to `--resume`; `resumeLatest:true` maps to `--continue`.                                                       | A fresh `gw-*` ID is bookkeeping only. Vibe session logging defaults on; `doctor --json` flags only explicit `[session_logging] enabled = false`.                                       |
 | Devin    | Native ID maps to `--resume`; `resumeLatest:true` maps to `--continue`.                                                       | A fresh `gw-*` ID is bookkeeping only. Use `workingDir` or `workspace` to bind the selected cwd.                                                                                        |
-| Cursor   | Native chat/session ID maps to `--resume`; `resumeLatest:true` maps to `--continue`.                                          | A fresh `gw-*` ID is bookkeeping only. Use a verified `workspace` for its checkout.                                                                                                     |
+| Cursor   | Native chat/session ID maps to `--resume`; `resumeLatest:true` maps to `--continue`.                                          | A fresh `gw-*` ID is bookkeeping only. Use `workingDir` for its checkout, or a verified `workspace`.                                                                                    |
 
 All non-Claude providers use `approvalStrategy:"legacy"`; they reject
 Claude-only `mcp_managed` and ignore `approvalPolicy`. `mcp_managed` is usable
@@ -113,7 +113,7 @@ gemini_request({
 grok_request({prompt:"Continue.",resumeLatest:true,workingDir:"<repo>",approvalStrategy:"legacy"})
 mistral_request({prompt:"Continue.",resumeLatest:true,workingDir:"<repo>",approvalStrategy:"legacy"})
 devin_request({prompt:"Continue.",resumeLatest:true,workingDir:"<repo>",approvalStrategy:"legacy"})
-cursor_request({prompt:"Continue.",resumeLatest:true,workspace:"<repo>",approvalStrategy:"legacy"})
+cursor_request({prompt:"Continue.",resumeLatest:true,workingDir:"<repo>",approvalStrategy:"legacy"})
 ```
 
 Codex `resumeLatest` is global, not cwd-scoped. It inherits the selected
@@ -134,9 +134,12 @@ simultaneously:
 - Use explicit `workingDir` for Claude, Grok, Mistral, and Devin.
 - Use `workingDir` for a fresh Codex session. It does not scope Codex
   `resumeLatest`; use a verified real Codex UUID to target a specific session.
-- Gemini has no `workingDir`; `includeDirs` does not select cwd. Use a verified
-  configured/registered target workspace.
-- Use Cursor `workspace` for its target checkout.
+- Use `workingDir` for Gemini's target checkout. `includeDirs` remains an extra
+  read path and still does not select cwd.
+- Use `workingDir` for Cursor's process cwd. Its `workspace` is a separate
+  Cursor-native selector (a saved-workspace name, a `.code-workspace` file, or a
+  directory), so passing both an absolute workspace path and a different
+  `workingDir` is rejected rather than silently ranked.
 
 For providers whose latest-session selection is cwd-scoped, an unscoped local
 CLI child runs in a fresh neutral temporary directory, not the gateway

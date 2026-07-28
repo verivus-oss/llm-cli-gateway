@@ -49,10 +49,14 @@ metadata is authoritative; the TOML is scanner input only.
    effect.
 4. Keep provider-owned MCP configuration separate from gateway metadata. Do not
    assume every Cursor CLI control is safe to expose through a request.
-5. Cursor accepts flat `prompt` only, not `promptParts`. Its `workspace` field
-   selects a local target directory, registered alias, or provider-native
-   `.code-workspace` file. A directory/alias establishes child cwd; a workspace
-   file remains a native argument and is not misused as `spawn.cwd`. Verify the
+5. Cursor accepts flat `prompt` only, not `promptParts`. `workingDir` selects
+   the child process cwd, as it does for every other provider. Its `workspace`
+   field is separate and selects a local target directory, registered alias, or
+   provider-native `.code-workspace` file. A directory/alias establishes child
+   cwd; a workspace file remains a native argument and is not misused as
+   `spawn.cwd`. Because both inputs can name a cwd, `resolveCursorWorkingDir`
+   rejects an absolute workspace path that disagrees with `workingDir` instead
+   of ranking them; identical values are admitted. Verify the
    target before reviewing concurrent repositories. An unregistered relative
    value remains a provider-native saved-workspace name and is passed through
    verbatim, never resolved against the gateway process cwd. Use an absolute

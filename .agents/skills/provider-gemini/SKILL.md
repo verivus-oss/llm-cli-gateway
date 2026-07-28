@@ -62,8 +62,8 @@ metadata is authoritative; the TOML is scanner input only.
    `createNewSession`, `project`, and `newProject` are the relevant request
    controls. `workspace` and `worktree` are gateway routing selections, not
    Antigravity-native flags. `includeDirs` is an additional read path and does
-   not select cwd. Use a verified registered `workspace` to select the process
-   cwd. An unscoped child uses a fresh neutral temporary cwd, not the gateway
+   not select cwd. Use `workingDir` to select the process cwd, or a verified
+   registered `workspace` for remote HTTP/OAuth callers. An unscoped child uses a fresh neutral temporary cwd, not the gateway
    repository. JSON or stream-json output, attachments, policy files, admin
    policy files, and `skipTrust` are unsupported or rejected in the current
    Antigravity path.

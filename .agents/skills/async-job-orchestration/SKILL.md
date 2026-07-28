@@ -296,23 +296,26 @@ Start all, then collect:
 ```
 claude_request_async({prompt:"Review architecture in <repo>. Return terminal JSON verdict APPROVED_UNCONDITIONALLY, CHANGES_REQUIRED, or BLOCKED_EXTERNAL with inspected evidence.",workingDir:"<repo>",approvalStrategy:"legacy",correlationId:"review-arch"})
 codex_request_async({prompt:"Check <repo> for bugs. Return terminal JSON verdict APPROVED_UNCONDITIONALLY, CHANGES_REQUIRED, or BLOCKED_EXTERNAL with inspected evidence.",workingDir:"<repo>",sandboxMode:"read-only",approvalStrategy:"legacy",correlationId:"review-impl"})
-gemini_request_async({prompt:"Security audit the configured target checkout. Return terminal JSON verdict APPROVED_UNCONDITIONALLY, CHANGES_REQUIRED, or BLOCKED_EXTERNAL with inspected evidence.",workspace:"<verified-gemini-workspace>",approvalStrategy:"legacy",correlationId:"review-sec"})
+gemini_request_async({prompt:"Security audit <repo>. Return terminal JSON verdict APPROVED_UNCONDITIONALLY, CHANGES_REQUIRED, or BLOCKED_EXTERNAL with inspected evidence.",workingDir:"<repo>",approvalStrategy:"legacy",correlationId:"review-sec"})
 grok_request_async({prompt:"Independently review <repo>. Return terminal JSON verdict APPROVED_UNCONDITIONALLY, CHANGES_REQUIRED, or BLOCKED_EXTERNAL with inspected evidence.",workingDir:"<repo>",approvalStrategy:"legacy",correlationId:"review-grok"})
 mistral_request_async({prompt:"Independently review <repo>. Return terminal JSON verdict APPROVED_UNCONDITIONALLY, CHANGES_REQUIRED, or BLOCKED_EXTERNAL with inspected evidence.",workingDir:"<repo>",approvalStrategy:"legacy",correlationId:"review-mistral"})
 devin_request_async({prompt:"Independently review <repo>. Return terminal JSON verdict APPROVED_UNCONDITIONALLY, CHANGES_REQUIRED, or BLOCKED_EXTERNAL with inspected evidence.",workingDir:"<repo>",approvalStrategy:"legacy",correlationId:"review-devin"})
-cursor_request_async({prompt:"Independently review <repo>. Return terminal JSON verdict APPROVED_UNCONDITIONALLY, CHANGES_REQUIRED, or BLOCKED_EXTERNAL with inspected evidence.",workspace:"<repo>",approvalStrategy:"legacy",correlationId:"review-cursor"})
+cursor_request_async({prompt:"Independently review <repo>. Return terminal JSON verdict APPROVED_UNCONDITIONALLY, CHANGES_REQUIRED, or BLOCKED_EXTERNAL with inspected evidence.",workingDir:"<repo>",approvalStrategy:"legacy",correlationId:"review-cursor"})
 ```
 
 Poll each with `llm_job_status` every 60s by default, or every 90s when the user
 explicitly requires that cadence. Retrieve with `llm_job_result` when terminal.
 
 Before a review fan-out, verify the target checkout. `workingDir` selects the
-local checkout for Claude, Codex, Grok, Mistral, and Devin. Gemini has no
-`workingDir`; `includeDirs` is an extra read path, not a cwd selector, so use a
-correctly configured registered `workspace`. Cursor's local `workspace` selects
-its checkout. Never let a reviewer silently inspect an unrelated configured
-default workspace. An unscoped local child runs in a fresh neutral temporary
-directory, not the gateway process repository.
+local checkout for all seven providers. For Gemini, `includeDirs` is an extra
+read path and not a cwd selector, so `workingDir` is the scoping input. For
+Cursor, `workspace` is its own native selector (a saved-workspace name, a
+`.code-workspace` file, or a directory); an absolute workspace path that
+disagrees with `workingDir` is rejected rather than silently ranked.
+
+Never let a reviewer silently inspect an unrelated configured default workspace.
+An unscoped local child runs in a fresh neutral temporary directory, not the
+gateway process repository.
 
 ## Polling Strategy
 
