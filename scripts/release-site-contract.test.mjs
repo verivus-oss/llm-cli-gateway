@@ -19,6 +19,15 @@ function commandPosition(text, command) {
   return position(text, `\n${command}\n`);
 }
 
+/**
+ * Blank out YAML comment bodies, preserving byte offsets so positions computed
+ * on the result stay comparable to each other. Assertions about what a workflow
+ * *does* must not be satisfied, or defeated, by prose describing what it does.
+ */
+function withoutComments(text) {
+  return text.replace(/#[^\n]*/g, match => " ".repeat(match.length));
+}
+
 describe("release to public Pages contract", () => {
   const releaseWorkflow = readRepositoryFile(".github/workflows/release-tag-publish.yml");
   const pagesWorkflow = readRepositoryFile(".github/workflows/pages-deploy.yml");
@@ -131,6 +140,53 @@ describe("release to public Pages contract", () => {
     expect(build).toBeLessThan(tests);
     expect(tests).toBeLessThan(strip);
     expect(strip).toBeLessThan(publish);
+  });
+
+  it("publishes from a digest-pinned artefact, never from a repository checkout", () => {
+    // The publishing identity must not execute repository code. Compromised
+    // source that reaches the build job can at worst produce a tarball, which
+    // the publish job then refuses on digest mismatch.
+    const buildStart = position(npmPublishWorkflow, "\n  build:\n");
+    const publishStart = position(npmPublishWorkflow, "\n  publish:\n");
+    expect(buildStart).toBeLessThan(publishStart);
+
+    // Comments are stripped first: prose about `npm ci` or "npm runs no ..."
+    // would otherwise satisfy or defeat these assertions by accident.
+    const buildJob = withoutComments(npmPublishWorkflow.slice(buildStart, publishStart));
+    const publishJob = withoutComments(npmPublishWorkflow.slice(publishStart));
+
+    // Only the publish job may hold a publishing identity.
+    expect(buildJob).not.toContain("id-token: write");
+    expect(publishJob).toContain("id-token: write");
+
+    // The publish job checks out nothing and runs no repository script.
+    expect(publishJob).not.toContain("actions/checkout");
+    expect(publishJob).not.toMatch(/npm[@\d.]* ci\b/);
+    expect(publishJob).not.toMatch(/\bnpm run\b/);
+
+    // Its only input is the build job's artefact, bound by digest.
+    expect(publishJob).toContain("actions/download-artifact");
+    expect(publishJob).toContain("Verify tarball digest");
+    expect(publishJob).toContain('if [ "$ACTUAL" != "$EXPECTED_SHA" ]');
+    expect(publishJob).toContain(
+      'npm publish --ignore-scripts --tag "$DIST_TAG" "release/$TARBALL"'
+    );
+  });
+
+  it("gates the committed lockfile before any dependency code runs", () => {
+    // The supply-chain scan used to run only inside security:audit, after a
+    // script-enabled install had already executed whatever the tree contained.
+    const ciWorkflow = readRepositoryFile(".github/workflows/ci.yml");
+    for (const workflow of [ciWorkflow, npmPublishWorkflow]) {
+      const body = withoutComments(workflow);
+      const scan = position(body, "dep-drift-scan.mjs --frozen");
+      // Matches both `npm ci` and the pinned `npm@12.0.1 ci` form.
+      const install = body.search(/npm[@\d.]* ci\b/);
+      expect(install, "no clean install found in workflow").toBeGreaterThanOrEqual(0);
+      expect(scan).toBeLessThan(install);
+    }
+    // Ordinary CI installs under npm 12's script policy, not npm 11 defaults.
+    expect(ciWorkflow).toContain("ci --strict-allow-scripts");
   });
 
   it("keeps public maintainer guidance free of internal service-account identities", () => {

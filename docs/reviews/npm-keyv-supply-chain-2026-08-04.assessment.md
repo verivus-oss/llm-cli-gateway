@@ -580,6 +580,52 @@ them in disposable credential-free environments. `SECURITY.md:52` already
 acknowledges that provider authentication tokens flow through spawned child
 environments and are not covered by automated CI.
 
+**NOT DONE.** This is a runner-topology change, not a workflow edit: the
+internal repo pins jobs to the self-hosted `workhorse3` pool while the public
+mirror already uses `ubuntu-latest`. Changing it means either provisioning
+ephemeral JIT runners or accepting GitHub-hosted runtime for the internal repo,
+and neither is a decision to slip into a supply-chain commit. Tracked as
+outstanding, not accepted: the exposure is real, since a malicious dependency
+update executes on a runner that holds cross-job state.
+
+### P1.5 status: applied 2026-08-08
+
+P1.5.1 to P1.5.3 are implemented and committed. What was verified, and how:
+
+- **Strict script policy promoted** to `ci.yml` `build-and-test` and
+  `pack-smoke-test`. Exactly two packages in the tree declare install scripts
+  (`better-sqlite3@12.11.1`, `fsevents@2.3.3`), both covered by the allowlist,
+  so the promotion cannot break the install. Confirmed by running the exact CI
+  command against a copy of the manifest and lockfile: 290 packages, exit 0,
+  `better_sqlite3.node` built.
+- **The gate is real, not decorative.** Removing the `better-sqlite3` approval
+  and re-running produced `npm error code ESTRICTALLOWSCRIPTS`, exit 1, naming
+  the offending package. A newly introduced dependency that wants install-time
+  code now fails the build instead of executing.
+- **Supply-chain scan moved ahead of install** in both `ci.yml` jobs and the
+  release build job. `--frozen` reads only the committed lockfile, imports
+  nothing outside `node:` builtins and two local modules, needs no
+  `node_modules`, and runs in ~0.12s, so ordering it first costs nothing.
+- **Build split from publish.** `npm-publish.yml` now has a `build` job with
+  `contents: read` only, and a `publish` job that is the sole holder of
+  `id-token: write`. The publish job checks out nothing, runs no repository
+  script, and takes one input: the tarball the build job packed, bound by a
+  sha256 carried as a job output and re-checked after download. The former
+  `.github/scripts/verify-npm-oidc.mjs` is removed and its check inlined, so the
+  publishing identity executes no repository file at all.
+- **Ratcheted in `scripts/release-site-contract.test.mjs`**, which now asserts
+  the build job has no `id-token: write`, the publish job has no checkout, no
+  `npm ci` and no `npm run`, and that the frozen scan precedes the install in
+  both workflows. Comments are blanked before matching, because two of these
+  assertions initially passed or failed on prose rather than on steps.
+
+**Not verifiable here, and the reason:** a real publish cannot be rehearsed
+locally. The specific thing to watch on the next release is **provenance
+attestation**, since npm now generates it while publishing a prebuilt tarball
+from a job that did not build it. Validate with the `dry-run` dispatch input
+before a live release; that path deliberately stayed in the build job, where it
+needs no credentials.
+
 ### P2: detection and response, which is what makes an open set survivable
 
 **P2.1 A drift check**, in `doctor` or a small user timer, that answers: which

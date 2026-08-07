@@ -35,7 +35,20 @@ jobs:
         with:
           node-version: ${{ matrix.node-version }}
           cache: "npm"
-      - run: npm ci
+      # Supply-chain gate runs BEFORE any dependency code executes. Previously
+      # this only ran inside security:audit, after a script-enabled `npm ci`
+      # had already run whatever the tree contained. --frozen scores the
+      # committed package-lock.json alone: no install, no npm subprocess, no
+      # node_modules, ~0.1s.
+      - run: node scripts/supply-chain/dep-drift-scan.mjs --frozen
+      # npm 12 refuses lifecycle scripts unless package.json `allowScripts`
+      # approves them by exact version, so a newly introduced dependency that
+      # wants to run install-time code fails the build instead of executing it.
+      # Only better-sqlite3 and fsevents declare install scripts today and both
+      # are covered; npm12-install-policy below asserts that independently.
+      # --no-audit keeps this step off the advisory endpoint: security:audit is
+      # the real gate and runs below.
+      - run: npx --yes npm@12.0.1 ci --strict-allow-scripts --no-audit --no-fund
       - run: npm run build
       - run: npm run lint
       - run: npm run format:check
@@ -58,7 +71,10 @@ jobs:
         with:
           node-version: 24
           cache: "npm"
-      - run: npm ci
+      # Same ordering as build-and-test: gate the committed lockfile before any
+      # dependency code runs, then install under npm 12's script policy.
+      - run: node scripts/supply-chain/dep-drift-scan.mjs --frozen
+      - run: npx --yes npm@12.0.1 ci --strict-allow-scripts --no-audit --no-fund
       - run: npm run build
       # Generate the prod-only shrinkwrap so the packed contents match what
       # an actual publish ships (it is generated, never committed).
