@@ -626,6 +626,7 @@ Owner: Werner. Review date: **2027-02-01**, or immediately on any trigger below.
 | Provider CLIs self-update through their own channels | Not centrally enforceable | A provider CLI compromise |
 | Long-dwell compromise older than the age gate, and validly signed malicious source | No age or provenance control addresses either | Nothing; this is structural |
 | MCP servers run with ambient user authority | Sandboxing each server is real work and not scheduled | A compromise, or capacity to do it properly |
+| The revoked ref.tools key remains in 5836 files across ~20 GB of `~/.cache/agentfed-*` sandboxes, and in any copy outside `$HOME` that the timed-out scan never reached | The key is revoked and returns 401, so the copies are inert. Redacting caches is effort spent on a dead credential | Any *live* secret being found in an agentfed sandbox. These are full home-directory copies, so they capture whatever an agent run touched, not just this key |
 
 Naming these is the point. A plan that claims to cover every launcher while
 shipping one package manager's control invites an operator to believe the problem
