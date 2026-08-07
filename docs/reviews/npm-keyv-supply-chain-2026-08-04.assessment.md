@@ -377,17 +377,41 @@ directly (`dist/chunk-65X3S4HB.js`, `parseCommandLineArgs`). Moving the key from
 the URL to a header therefore moves it from one argv position to another and
 changes nothing. This was checked rather than assumed.
 
-**Only one option survives the standing rule below.** Replace `mcp-remote` on
-this path with a small stdio shim that reads the key from its own environment and
-injects the header itself, so the secret never appears in argv. The shim can live
-in the pinned root from P0.2. Reducing npm log retention
-(`npm config set logs-max 0`, already applied) narrows one capture path but is
-not a fix, because argv is captured by more than npm. "Accept and monitor" is not
-available.
+**Header injection is not available either.** ref.tools authenticates *only* by
+query parameter. Tested against the live endpoint on 2026-08-08:
 
-Review the Exa wrapper separately. It exports `EXA_API_KEY` into an `npx -y`
-child, which is an environment exposure rather than an argv one, so it is
-compliant with the rule as written and is addressed by P0.2.
+| Auth presented | HTTP |
+|---|---|
+| `?apiKey=<key>` | **200** |
+| `Authorization: Bearer <key>` | 401 |
+| `x-api-key: <key>` | 401 |
+| `X-Ref-Api-Key: <key>` | 400 |
+| none (control) | 401 |
+
+So the key must reach the URL. The fix is therefore not "inject a header", which
+is what an earlier revision of this section said twice: it is to build the URL
+**in process** from an environment variable, so it never becomes a command-line
+argument at all.
+
+**DONE** (2026-08-08). `~/.mcp-servers/bin/ref-tools-stdio.mjs` takes the key
+from `REF_TOOLS_API_KEY`, deletes it from the environment so no child inherits
+it, sets `process.argv` (a JS array, not the OS command line) before importing
+`mcp-remote/dist/proxy.js`, which parses `process.argv.slice(2)` at import time,
+and wraps `process.stderr.write` to redact the key. `stdout` is untouched because
+it carries the MCP protocol.
+
+Verified: handshake succeeds and both `ref_*` tools list; the previously leaking
+stderr line now reads `Connecting to remote server: https://api.ref.tools/mcp?apiKey=<REDACTED>`;
+and a scan of `/proc/<pid>/cmdline` for every process in the shim tree, plus
+every `node` process on the host, finds the key in none of them.
+
+Reducing npm log retention (`npm config set logs-max 0`, applied) narrows one
+capture path but was never a fix, because argv is captured by more than npm.
+"Accept and monitor" is not available under the standing rule.
+
+The Exa wrapper needed no shim: it passes `EXA_API_KEY` through the environment,
+which the server reads natively, so it was already compliant. It was repointed at
+the pinned root under P0.2.
 
 Rotate the key, and check the issuer's logs for use of the old one.
 
@@ -433,21 +457,49 @@ environment rather than a file; where a tool demands a file path, give it
 and verify secrets by length, hash prefix or an authenticated request with a
 negative control, never by echoing them.
 
-**P0.2 Replace the two credential-bearing wrappers with an owned pin root.**
-Build `~/.mcp-servers/` in a credential-free environment: exact pins with
-`--save-exact`, committed lockfile, `npm ci --ignore-scripts`. Point the shared
-wrappers at `~/.mcp-servers/node_modules/.bin/<binary>`. Note that binary names
-are not always the obvious basename (`@playwright/mcp` installs
-`playwright-mcp`). Verify each MCP handshake before switching.
+**P0.2 Replace the credential-bearing wrappers with an owned pin root.** **DONE**
+(2026-08-08). `~/.mcp-servers/` (mode `0700`) holds exact pins with
+`--save-exact`, a lockfile carrying 177 integrity hashes, installed with
+`--ignore-scripts`: `exa-mcp-server@3.4.0`, `mcp-remote@0.1.38`,
+`@playwright/mcp@0.0.78`. Both wrappers now exec from that root and neither
+mentions `npx`. Handshakes verified end to end through the real launch path
+before and after switching.
+
+Note that binary names are not always the obvious basename: `@playwright/mcp`
+installs `playwright-mcp`.
+
+**The age gate proved itself during this install.** `@playwright/mcp@0.0.79` was
+refused outright:
+
+```
+npm error code ETARGET
+npm error notarget No matching version found for @playwright/mcp@0.0.79
+                   with a date before 8/5/2026, 8:36:01 AM.
+```
+
+That is P1.1 working at install time rather than merely being configured, and the
+same run confirmed `logs-max=0` ("Log files were not written due to the config
+logs-max=0"). The pin went to `0.0.78`, the newest **stable** release older than
+the gate; note that the newest packages clearing the gate were alpha builds, so
+version selection has to filter prereleases rather than take the newest eligible.
 
 The unit of work is an **owned launch path**, not an edited cache manifest. This
 covers both Claude and Codex for those servers, because both go through the
 wrappers.
 
-**P0.3 Take Playwright off the marketplace launch path.** Deregister the plugin
-and register the pinned binary directly from the same root, or failing that
-disable that marketplace's auto-update. Editing the cached manifest is not a fix,
-because the updater reverts it and gives no signal when it does.
+**P0.3 Take Playwright off the marketplace launch path.** **DONE** (2026-08-08).
+The plugin was MCP-only (0 skills, 0 agents, 0 hooks, 1 server), so it was
+disabled with `claude plugin disable playwright@claude-plugins-official` and the
+pinned binary registered directly at user scope. Editing the cached manifest was
+never a fix, because the updater reverts it and gives no signal when it does, and
+this plugin's `lastUpdated` of `2026-08-07T21:36:20Z` is precisely the refresh
+that the round-8 review triggered by accident.
+
+Two permission entries had to move from `mcp__plugin_playwright_playwright__*` to
+`mcp__playwright__*`, since deregistering a plugin changes the tool namespace.
+
+Result: every active Claude MCP launcher now resolves to a fixed path or an HTTPS
+URL, and none performs package resolution at session start.
 
 **P0.4 Put `gateway-autoupgrade` in notify-only mode.** **DONE** (drop-in at `~/.config/systemd/user/gateway-autoupgrade.service.d/10-notify-only.conf`, 2026-08-08; remove it and `daemon-reload` to revert). Set
 `GATEWAY_AUTOUPGRADE_MODE=notify`, or require an explicit reviewed version.
