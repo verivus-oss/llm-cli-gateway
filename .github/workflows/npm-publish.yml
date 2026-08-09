@@ -75,7 +75,10 @@ jobs:
           package-manager-cache: false
 
       # Gate the committed lockfile before any dependency code executes.
-      - run: node scripts/supply-chain/dep-drift-scan.mjs --frozen
+      # --allow-missing-dist because this runs before the build; the scan's
+      # fetch-in-dist invariant fails closed on an absent dist/. The strict
+      # form runs later in this job via security:audit, after the build.
+      - run: node scripts/supply-chain/dep-drift-scan.mjs --frozen --allow-missing-dist
 
       - run: npm ci --ignore-scripts --no-audit --no-fund
       # The full suite imports the dev-only better-sqlite3 writer in legacy/WAL

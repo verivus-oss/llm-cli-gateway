@@ -251,6 +251,36 @@ describe("fetch-in-dist detector (mirrors release-security-audit.sh scope)", () 
       rmSync(root, { recursive: true, force: true });
     }
   });
+  it("fails closed on a missing dist/ by default", () => {
+    const root = mkdtempSync(join(tmpdir(), "sc-dist-absent-"));
+    try {
+      const findings = fetchInDistFindings(root);
+      expect(findings).toHaveLength(1);
+      expect(findings[0].class).toBe("missing-dist");
+      expect(findings[0].exit).toBe(3);
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+  it("allowMissingDist tolerates an absent dist/ but still walks a present one", () => {
+    // The pre-install lockfile gate runs before npm ci and so before any
+    // build. The flag narrows the check to "dist may be absent", never to
+    // "dist is not inspected": a built tree is walked exactly as before.
+    const absent = mkdtempSync(join(tmpdir(), "sc-dist-allow-absent-"));
+    const built = mkdtempSync(join(tmpdir(), "sc-dist-allow-built-"));
+    try {
+      expect(fetchInDistFindings(absent, { allowMissingDist: true })).toEqual([]);
+
+      mkdirSync(join(built, "dist"), { recursive: true });
+      writeFileSync(join(built, "dist", "shipped.js"), "await fetch(url);\n");
+      const findings = fetchInDistFindings(built, { allowMissingDist: true });
+      expect(findings.some(f => f.path.endsWith("dist/shipped.js"))).toBe(true);
+      expect(findings.every(f => f.exit === 3)).toBe(true);
+    } finally {
+      rmSync(absent, { recursive: true, force: true });
+      rmSync(built, { recursive: true, force: true });
+    }
+  });
   it("allows only the reviewed Kit Git operation lines", () => {
     const root = mkdtempSync(join(tmpdir(), "sc-dist-approved-git-"));
     try {
