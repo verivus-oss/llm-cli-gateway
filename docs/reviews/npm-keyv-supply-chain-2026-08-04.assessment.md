@@ -580,13 +580,39 @@ them in disposable credential-free environments. `SECURITY.md:52` already
 acknowledges that provider authentication tokens flow through spawned child
 environments and are not covered by automated CI.
 
-**NOT DONE.** This is a runner-topology change, not a workflow edit: the
+**APPLIED 2026-08-10, in the idempotent form; the ephemeral form is implemented
+but dormant.** This is a runner-topology change, not a workflow edit: the
 internal repo pins jobs to the self-hosted `workhorse3` pool while the public
-mirror already uses `ubuntu-latest`. Changing it means either provisioning
-ephemeral JIT runners or accepting GitHub-hosted runtime for the internal repo,
-and neither is a decision to slip into a supply-chain commit. Tracked as
-outstanding, not accepted: the exposure is real, since a malicious dependency
-update executes on a runner that holds cross-job state.
+mirror already uses `ubuntu-latest`.
+
+The exposure named above was cross-job state, so that is what was removed.
+`workhorse3` now runs the gateway runner under a wrapper that deletes `_work`
+and `_diag` on every service start, relocates `HOME` and every package-manager
+cache (npm, yarn, pnpm, pip, Go module and build, cargo) inside `_work` so a
+single delete reaches all of them, and repeats the workspace wipe through
+`ACTIONS_RUNNER_HOOK_JOB_STARTED` and `ACTIONS_RUNNER_HOOK_JOB_COMPLETED`. A
+malicious dependency update no longer executes against anything a previous job
+left behind. The unit additionally masks `/home`, which is where the Azure CLI
+token, the `gh` PAT and every agent transcript on that machine live, and gives
+each job a private `/tmp`, which retires the shared-`/tmp` hazard that
+`sast.yml:69` and `security.yml` both carry notes about.
+
+One thing to be clear about, because it is easy to assume otherwise: on a
+self-hosted runner `--ephemeral` does not clean the disk. It means one job per
+registration and nothing more. The disk hygiene above is what actually clears
+state. What ephemeral adds on top is that a job which compromises the runner
+cannot hold the registration open to receive a second job.
+
+That remaining increment is implemented and fails closed rather than being left
+unwritten, but it is off. A just-in-time registration needs a credential holding
+`administration:write` on the repository, `workhorse3` is bare metal with no
+Azure managed identity, and so that credential could only reach a system service
+by sitting on disk. That is forbidden by the standing rule above. The code path
+takes its token from the stdout of `RUNNER_JIT_TOKEN_COMMAND` and refuses to
+start if it is unset. Enable it when the host gains a vault-reachable identity.
+
+Not done, and named rather than quietly skipped: the other seven runner
+registrations on `workhorse3` remain on the old topology.
 
 ### P1.5 status: applied 2026-08-08
 
@@ -618,6 +644,21 @@ P1.5.1 to P1.5.3 are implemented and committed. What was verified, and how:
   `npm ci` and no `npm run`, and that the frozen scan precedes the install in
   both workflows. Comments are blanked before matching, because two of these
   assertions initially passed or failed on prose rather than on steps.
+
+**Verified locally, not in CI, and here is why that distinction matters.**
+Implementing P1.5.4 turned up that every one of the eight self-hosted runner
+registrations on `workhorse3` had been failing `203/EXEC` at boot for as long as
+the journal reaches back. The runner trees sit inside the Samba-exported
+`/srv/repos` mount, so every file under them carries the SELinux type
+`samba_share_t`; SELinux is enforcing on that host, and `init_t` may not execute
+`samba_share_t`. `chcon` clears it until the next relabel, which is why the
+gateway tree was moved to `/opt/actions-runners/gateway-1` under a persistent
+`semanage fcontext` rule rather than patched in place.
+
+The consequence for the bullets above: none of the P1.5.1 to P1.5.3 CI changes
+had actually executed on the internal repository. Each was verified by running
+the exact command locally, which is why those verifications hold, but "committed
+and green" was never available to claim and is not claimed here.
 
 **Not verifiable here, and the reason:** a real publish cannot be rehearsed
 locally. The specific thing to watch on the next release is **provenance
