@@ -658,7 +658,33 @@ gateway tree was moved to `/opt/actions-runners/gateway-1` under a persistent
 The consequence for the bullets above: none of the P1.5.1 to P1.5.3 CI changes
 had actually executed on the internal repository. Each was verified by running
 the exact command locally, which is why those verifications hold, but "committed
-and green" was never available to claim and is not claimed here.
+and green" was never available to claim.
+
+**And a local verification was not enough.** The first real CI run after the
+runners came back failed immediately, on P1.5.2's own step. Moving the scan
+ahead of `npm ci` also moved it ahead of `npm run build`, and the scan's
+`fetch-in-dist` invariant fails closed on an absent `dist/`, so it returned
+`exit 3` / `missing-dist` every time. It would have blocked both CI jobs and the
+release build. Locally it passed because a built `dist/` was already sitting in
+the working tree, which is exactly the difference a clean checkout exposes and a
+developer machine hides.
+
+Fixed in `af8dda5` with a narrow `--allow-missing-dist`, set only on the
+pre-install step. It narrows rather than disables: a present `dist/` is still
+walked in full, so the flag cannot conceal a violation in a built tree, and the
+strict form remains the default for `release-security-audit.sh` and
+`supply-chain:scan:check`, both of which run after a build. `pack-smoke-test`
+gained a second, strict scan after its build, which it never had before: that
+job packs the tarball, so the invariant belongs there and not only in
+`build-and-test`'s `security:audit`, which never sees this job's output.
+
+**Where CI stands as of 2026-08-10.** `sast`, `npm12-install-policy` and
+`pack-smoke-test` pass. `build-and-test` runs the whole chain (install under the
+strict script policy, build, lint, format, fuzz, full suite, shrinkwrap) and
+stops at `npm audit`; `security` stops at `osv-scanner`. Both are the same
+finding: `fast-uri`, `hono` and `ip-address` advisories, ordinary dependency
+drift on a branch last touched on 2026-07-28, unrelated to anything in this
+assessment. Tracked as dependency work, not as a supply-chain-plan item.
 
 **Not verifiable here, and the reason:** a real publish cannot be rehearsed
 locally. The specific thing to watch on the next release is **provenance
