@@ -1,0 +1,992 @@
+// captured-by: gh api repos/honojs/hono/compare/v4.12.31...v4.12.34 (full patch for src/ files)
+########## src/adapter/aws-lambda/handler.test.ts (+60/-1)
+@@ -1,13 +1,14 @@
+ import { setCookie } from '../../helper/cookie'
+ import { Hono } from '../../hono'
+ import { bodyLimit } from '../../middleware/body-limit'
+-import type { LambdaEvent, LatticeProxyEventV2 } from './handler'
++import type { APIGatewayProxyEventV2, LambdaEvent, LatticeProxyEventV2 } from './handler'
+ import {
+   getProcessor,
+   handle,
+   isContentEncodingBinary,
+   defaultIsContentTypeBinary,
+ } from './handler'
++import type { ApiGatewayRequestContextV2 } from './types'
+ 
+ // Base event objects to reduce duplication
+ const baseV1Event: LambdaEvent = {
+@@ -572,3 +573,61 @@ describe('handle', () => {
+     expect(result.statusCode).toBe(413)
+   })
+ })
++
++describe('V2 request context authorizer', () => {
++  const baseV2RequestContext = baseV2Event.requestContext as ApiGatewayRequestContextV2
++
++  it('Should expose the context of a Lambda (REQUEST) authorizer', async () => {
++    const app = new Hono<{ Bindings: { event: APIGatewayProxyEventV2 } }>()
++    app.get('/my/path', (c) => c.json(c.env.event.requestContext.authorizer.lambda))
++    const handler = handle(app)
++
++    const event: LambdaEvent = {
++      ...baseV2Event,
++      requestContext: {
++        ...baseV2RequestContext,
++        http: { ...baseV2RequestContext.http, method: 'GET' },
++        authorizer: { lambda: { userId: 'user-123', isAdmin: true } },
++      },
++    }
++
++    const result = await handler(event)
++    expect(result.statusCode).toBe(200)
++    expect(JSON.parse(result.body)).toEqual({ userId: 'user-123', isAdmin: true })
++  })
++
++  it('Should expose the claims and scopes of a JWT authorizer', async () => {
++    const app = new Hono<{ Bindings: { event: APIGatewayProxyEventV2 } }>()
++    app.get('/my/path', (c) => c.json(c.env.event.requestContext.authorizer.jwt))
++    const handler = handle(app)
++
++    const event: LambdaEvent = {
++      ...baseV2Event,
++      requestContext: {
++        ...baseV2RequestContext,
++        http: { ...baseV2RequestContext.http, method: 'GET' },
++        authorizer: {
++          jwt: { claims: { sub: 'user-123', email_verified: true }, scopes: ['read'] },
++        },
++      },
++    }
++
++    const result = await handler(event)
++    expect(result.statusCode).toBe(200)
++    expect(JSON.parse(result.body)).toEqual({
++      claims: { sub: 'user-123', email_verified: true },
++      scopes: ['read'],
++    })
++  })
++
++  it('Should type each authorizer variant as optional', () => {
++    const authorizer: ApiGatewayRequestContextV2['authorizer'] = {}
++    expectTypeOf(authorizer.lambda).toEqualTypeOf<Record<string, unknown> | null | undefined>()
++    expectTypeOf(authorizer.jwt).toEqualTypeOf<
++      | { claims: Record<string, string | number | boolean | string[]>; scopes: string[] | null }
++      | undefined
++    >()
++    // A JWT authorizer reports no scopes as `null`.
++    expectTypeOf<null>().toMatchTypeOf<NonNullable<typeof authorizer.jwt>['scopes']>()
++  })
++})
+
+########## src/adapter/aws-lambda/types.ts (+9/-0)
+@@ -114,6 +114,15 @@ interface Authorizer {
+     userArn: string
+     userId: string
+   }
++  jwt?: {
++    claims: Record<string, string | number | boolean | string[]>
++    scopes: string[] | null
++  }
++  /**
++   * The `context` object returned by a Lambda (REQUEST) authorizer.
++   * It is `null` when the authorizer returns no context.
++   */
++  lambda?: Record<string, unknown> | null
+ }
+ 
+ export interface ApiGatewayRequestContextV2 {
+
+########## src/adapter/cloudflare-workers/websocket.test.ts (+104/-1)
+@@ -54,6 +54,109 @@ describe('upgradeWebSocket middleware', () => {
+       ),
+       next
+     )
+-    expect(next).toBeCalled()
++    expect(next).toHaveBeenCalled()
++  })
++
++  const closePromise = new Promise((resolve) =>
++    app.get(
++      '/ws-close',
++      upgradeWebSocket(() => ({
++        onClose(evt, ws) {
++          resolve(true)
++        },
++      }))
++    )
++  )
++
++  it('Should call onClose when close event fires', async () => {
++    await app.request('/ws-close', {
++      headers: {
++        Upgrade: 'websocket',
++      },
++    })
++
++    server.dispatchEvent(new Event('close'))
++
++    expect(await closePromise).toBe(true)
++  })
++
++  const error = new Promise((resolve) => {
++    app.get(
++      '/ws-error',
++      upgradeWebSocket(() => ({
++        onError(evt, ws) {
++          resolve(true)
++        },
++      }))
++    )
++  })
++
++  it('Should call onError when error event fires', async () => {
++    await app.request('/ws-error', {
++      headers: {
++        Upgrade: 'websocket',
++      },
++    })
++
++    server.dispatchEvent(new Event('error'))
++    expect(await error).toBe(true)
++  })
++
++  const sendWsRef: Promise<any> = new Promise((resolve) =>
++    app.get(
++      '/ws-send',
++      upgradeWebSocket(() => ({
++        onMessage(evt, ws) {
++          resolve(ws)
++        },
++      }))
++    )
++  )
++
++  it('Should call server.send when ws.send is called', async () => {
++    // @ts-expect-error adding a mock method for the test
++    server.send = vi.fn()
++
++    await app.request('/ws-send', {
++      headers: {
++        Upgrade: 'websocket',
++      },
++    })
++    server.dispatchEvent(new MessageEvent('message', { data: 'trigger' }))
++
++    const ws = await sendWsRef
++    ws.send('hello')
++
++    // @ts-expect-error mock method
++    expect(server.send).toHaveBeenCalledWith('hello')
++  })
++
++  const closeWsRef: Promise<any> = new Promise((resolve) =>
++    app.get(
++      '/ws-close-call',
++      upgradeWebSocket(() => ({
++        onMessage(evt, ws) {
++          resolve(ws)
++        },
++      }))
++    )
++  )
++
++  it('Should call server.close when ws.close is called', async () => {
++    // @ts-expect-error adding a mock method for the test
++    server.close = vi.fn()
++
++    await app.request('/ws-close-call', {
++      headers: {
++        Upgrade: 'websocket',
++      },
++    })
++    server.dispatchEvent(new MessageEvent('message', { data: 'trigger' }))
++
++    const ws = await closeWsRef
++    ws.close(1000, 'done')
++
++    // @ts-expect-error mock method
++    expect(server.close).toHaveBeenCalledWith(1000, 'done')
+   })
+ })
+
+########## src/helper/proxy/index.test.ts (+20/-0)
+@@ -50,6 +50,16 @@ describe('Proxy Middleware', () => {
+               },
+             })
+           )
++        } else if (req.url === 'https://example.com/connection-listed') {
++          return Promise.resolve(
++            new Response('ok', {
++              headers: {
++                Connection: 'x-connection-scoped, bad name',
++                'X-Connection-Scoped': 'should not be forwarded',
++                'X-Normal': 'kept',
++              },
++            })
++          )
+         } else if (req.url === 'https://example.com/set-cookie') {
+           return Promise.resolve(
+             new Response('ok', {
+@@ -233,6 +243,16 @@ describe('Proxy Middleware', () => {
+       expect(res.headers.get('Transfer-Encoding')).toBeNull()
+     })
+ 
++    it('remove response headers listed in the Connection header', async () => {
++      const app = new Hono()
++      app.get('/proxy/:path', (c) => proxy(`https://example.com/${c.req.param('path')}`))
++      const res = await app.request('/proxy/connection-listed')
++      expect(res.status).toBe(200)
++      expect(res.headers.get('Connection')).toBeNull()
++      expect(res.headers.get('X-Connection-Scoped')).toBeNull()
++      expect(res.headers.get('X-Normal')).toBe('kept')
++    })
++
+     it('modify header', async () => {
+       const app = new Hono()
+       app.get('/proxy/:path', (c) =>
+
+########## src/helper/proxy/index.ts (+12/-0)
+@@ -173,6 +173,18 @@ export const proxy: ProxyFetch = async (input, proxyInit) => {
+ 
+   const res = await (customFetch || fetch)(req)
+   const resHeaders = new Headers(res.headers)
++
++  // https://datatracker.ietf.org/doc/html/rfc9110#section-7.6.1
++  // Remove headers listed in the response's own Connection header (MUST per RFC 9110)
++  const connectionValue = resHeaders.get('connection')
++  if (connectionValue) {
++    connectionValue
++      .split(',')
++      .map((h) => h.trim())
++      .filter((h) => ALLOWED_TOKEN_PATTERN.test(h))
++      .forEach((h) => resHeaders.delete(h))
++  }
++
+   hopByHopHeaders.forEach((header) => {
+     resHeaders.delete(header)
+   })
+
+########## src/helper/streaming/sse.test.tsx (+11/-0)
+@@ -154,6 +154,17 @@ describe('SSE Streaming helper', () => {
+     expect(decodedValue).toContain('retry: 0\n\n')
+   })
+ 
++  it('Should emit an empty id to reset Last-Event-ID', async () => {
++    const res = streamSSE(c, async (stream) => {
++      await stream.writeSSE({
++        data: 'reset',
++        id: '',
++      })
++    })
++
++    expect(await res.text()).toBe('data: reset\nid: \n\n')
++  })
++
+   it('Check stream Response if error occurred', async () => {
+     const onError = vi.fn()
+     const res = streamSSE(
+
+########## src/helper/streaming/sse.ts (+1/-1)
+@@ -35,7 +35,7 @@ export class SSEStreamingApi extends StreamingApi {
+       [
+         message.event && `event: ${message.event}`,
+         dataLines,
+-        message.id && `id: ${message.id}`,
++        message.id !== undefined && `id: ${message.id}`,
+         message.retry !== undefined && `retry: ${message.retry}`,
+       ]
+         .filter(Boolean)
+
+########## src/jsx/base.ts (+1/-9)
+@@ -384,15 +384,7 @@ export const memo = <T>(
+   component: FC<T>,
+   propsAreEqual: (prevProps: Readonly<T>, nextProps: Readonly<T>) => boolean = shallowEqual
+ ): FC<T> => {
+-  let computed: ReturnType<FC<T>> = null
+-  let prevProps: T | undefined = undefined
+-  const wrapper: MemorableFC<T> = ((props: T) => {
+-    if (prevProps && !propsAreEqual(prevProps, props)) {
+-      computed = null
+-    }
+-    prevProps = props
+-    return (computed ||= component(props))
+-  }) as MemorableFC<T>
++  const wrapper: MemorableFC<T> = ((props: T) => component(props)) as MemorableFC<T>
+ 
+   // This function is for toString(), but it can also be used for DOM renderer.
+   // So, set DOM_MEMO and DOM_RENDERER for DOM renderer.
+
+########## src/jsx/hooks/dom.test.tsx (+126/-2)
+@@ -13,6 +13,7 @@ import {
+   useDeferredValue,
+   useId,
+   useImperativeHandle,
++  useLayoutEffect,
+   useReducer,
+   useState,
+   useSyncExternalStore,
+@@ -674,7 +675,7 @@ describe('Hooks', () => {
+       let count = 0
+       const unsubscribe = vi.fn()
+       const subscribe = vi.fn(() => unsubscribe)
+-      const getSnapshot = vi.fn(() => count++)
++      const getSnapshot = vi.fn(() => count)
+       const SubApp = () => {
+         const count = useSyncExternalStore(subscribe, getSnapshot)
+         return <div>{count}</div>
+@@ -695,16 +696,138 @@ describe('Hooks', () => {
+       await new Promise((r) => setTimeout(r))
+       expect(root.innerHTML).toBe('<button>toggle</button>')
+       expect(unsubscribe).toBeCalled()
++      count = 1
+       root.querySelector('button')?.click()
+       await new Promise((r) => setTimeout(r))
+       expect(root.innerHTML).toBe('<div>1</div><button>toggle</button>')
+     })
+ 
++    it('updates the snapshot when subscribe changes', async () => {
++      const unsubscribeA = vi.fn()
++      const subscribeA = vi.fn(() => unsubscribeA)
++      const unsubscribeB = vi.fn()
++      const subscribeB = vi.fn(() => unsubscribeB)
++      const stores = [
++        { subscribe: subscribeA, getSnapshot: () => 'a1' },
++        { subscribe: subscribeB, getSnapshot: () => 'b0' },
++      ]
++
++      const App = () => {
++        const [index, setIndex] = useState(0)
++        const store = stores[index]
++        const value = useSyncExternalStore(store.subscribe, store.getSnapshot)
++        return <button onClick={() => setIndex(1)}>{value}</button>
++      }
++
++      render(<App />, root)
++      await new Promise((r) => setTimeout(r))
++      expect(root.innerHTML).toBe('<button>a1</button>')
++      expect(subscribeA).toBeCalledTimes(1)
++
++      root.querySelector('button')?.click()
++      await Promise.resolve()
++      expect(root.innerHTML).toBe('<button>b0</button>')
++      // the old store stays subscribed until the new subscription is set up at effect flush
++      expect(unsubscribeA).not.toBeCalled()
++      await new Promise((r) => setTimeout(r))
++      expect(unsubscribeA).toBeCalledTimes(1)
++      expect(subscribeB).toBeCalledTimes(1)
++      expect(unsubscribeB).not.toBeCalled()
++    })
++
++    it('updates the snapshot when getSnapshot changes', async () => {
++      const state: Record<string, string> = { a: 'a0', b: 'b0' }
++      const listeners = new Set<() => void>()
++      const subscribe = vi.fn((listener: () => void) => {
++        listeners.add(listener)
++        return () => listeners.delete(listener)
++      })
++
++      const App = () => {
++        const [key, setKey] = useState('a')
++        const value = useSyncExternalStore(subscribe, () => state[key])
++        return <button onClick={() => setKey('b')}>{value}</button>
++      }
++
++      render(<App />, root)
++      await new Promise((r) => setTimeout(r))
++      expect(root.innerHTML).toBe('<button>a0</button>')
++      expect(subscribe).toBeCalledTimes(1)
++
++      root.querySelector('button')?.click()
++      await new Promise((r) => setTimeout(r))
++      expect(root.innerHTML).toBe('<button>b0</button>')
++      expect(subscribe).toBeCalledTimes(1)
++
++      state.b = 'b1'
++      listeners.forEach((listener) => listener())
++      await new Promise((r) => setTimeout(r))
++      expect(root.innerHTML).toBe('<button>b1</button>')
++    })
++
++    it('uses the latest getSnapshot when subscribing after a layout effect update', async () => {
++      const state = { a: 'a0', b: 'b0' }
++      const subscribe = vi.fn((_listener: () => void) => vi.fn())
++
++      const App = () => {
++        const [key, setKey] = useState<keyof typeof state>('a')
++        const value = useSyncExternalStore(subscribe, () => state[key])
++
++        useLayoutEffect(() => {
++          setKey('b')
++          queueMicrotask(() => {
++            state.b = 'b1'
++          })
++        }, [])
++
++        return <div>{value}</div>
++      }
++
++      render(<App />, root)
++      expect(root.innerHTML).toBe('<div>a0</div>')
++
++      await new Promise((r) => setTimeout(r))
++      expect(root.innerHTML).toBe('<div>b1</div>')
++    })
++
++    it('does not loop when subscribe changes on every render', async () => {
++      const unsubscribes: ReturnType<typeof vi.fn>[] = []
++      const subscribe = vi.fn((_listener: () => void) => {
++        const unsubscribe = vi.fn()
++        unsubscribes.push(unsubscribe)
++        return unsubscribe
++      })
++      const getSnapshot = () => 'snapshot'
++      let renderCount = 0
++
++      const App = () => {
++        const [count, setCount] = useState(0)
++        renderCount++
++        const value = useSyncExternalStore((listener) => subscribe(listener), getSnapshot)
++        return <button onClick={() => setCount((count) => count + 1)}>{`${value}:${count}`}</button>
++      }
++
++      render(<App />, root)
++      await new Promise((r) => setTimeout(r))
++      expect(root.innerHTML).toBe('<button>snapshot:0</button>')
++      expect(renderCount).toBe(1)
++      expect(subscribe).toBeCalledTimes(1)
++
++      root.querySelector('button')?.click()
++      await Promise.resolve()
++      await new Promise((r) => setTimeout(r))
++      expect(root.innerHTML).toBe('<button>snapshot:1</button>')
++      expect(renderCount).toBe(2)
++      expect(subscribe).toBeCalledTimes(2)
++      expect(unsubscribes[0]).toBeCalledTimes(1)
++      expect(unsubscribes[1]).not.toBeCalled()
++    })
++
+     it('with getServerSnapshot', async () => {
+       let count = 0
+       const unsubscribe = vi.fn()
+       const subscribe = vi.fn(() => unsubscribe)
+-      const getSnapshot = vi.fn(() => count++)
++      const getSnapshot = vi.fn(() => count)
+       const getServerSnapshot = vi.fn(() => 100)
+       const SubApp = () => {
+         const count = useSyncExternalStore(subscribe, getSnapshot, getServerSnapshot)
+@@ -727,6 +850,7 @@ describe('Hooks', () => {
+       await new Promise((r) => setTimeout(r))
+       expect(root.innerHTML).toBe('<button>toggle</button>')
+       expect(unsubscribe).toBeCalled()
++      count = 1
+       root.querySelector('button')?.click()
+       await new Promise((r) => setTimeout(r))
+       expect(root.innerHTML).toBe('<div>1</div><button>toggle</button>')
+
+########## src/jsx/hooks/index.ts (+19/-11)
+@@ -408,18 +408,26 @@ export const useSyncExternalStore = <T>(
+     return getServerSnapshot()
+   }
+ 
+-  const [serverSnapshotIsUsed] = useState<boolean>(!!(buildData[0][4] && getServerSnapshot))
+-  const [state, setState] = useState(() =>
+-    serverSnapshotIsUsed ? (getServerSnapshot as () => T)() : getSnapshot()
+-  )
++  const snapshot =
++    buildData[0][4] && getServerSnapshot ? (getServerSnapshot as () => T)() : getSnapshot()
++  const [, setVersion] = useState(0)
++  const latestSnapshot = useRef<[T, () => T]>([snapshot, getSnapshot])
++  latestSnapshot.current = [snapshot, getSnapshot]
++  const unsubscribeRef = useRef<() => void>(null)
++
++  // Swap subscriptions at effect flush: a returned cleanup would run synchronously
++  // during render when `subscribe` changes, leaving a window with no subscription.
+   useEffect(() => {
+-    if (serverSnapshotIsUsed) {
+-      setState(getSnapshot())
++    const update = () => setVersion((version) => version + 1)
++    unsubscribeRef.current?.()
++    unsubscribeRef.current = subscribe(update)
++    const [snapshot, getSnapshot] = latestSnapshot.current!
++    if (!Object.is(snapshot, getSnapshot())) {
++      update()
+     }
+-    return subscribe(() => {
+-      setState(getSnapshot())
+-    })
+-  }, [])
++  }, [subscribe])
++
++  useEffect(() => () => unsubscribeRef.current?.(), [])
+ 
+-  return state
++  return snapshot
+ }
+
+########## src/jsx/index.test.tsx (+24/-14)
+@@ -2,6 +2,7 @@
+ /* eslint-disable @typescript-eslint/no-explicit-any */
+ import { html } from '../helper/html'
+ import { Hono } from '../hono'
++import { DOM_MEMO } from './constants'
+ import { captureRenderContext } from './context'
+ import { Suspense, renderToReadableStream } from './streaming'
+ import DefaultExport, {
+@@ -742,7 +743,7 @@ describe('className', () => {
+ })
+ 
+ describe('memo', () => {
+-  it('memoized', () => {
++  it('does not reuse the result of a previous render', () => {
+     let counter = 0
+     const Header = memo(() => <title>Test Site {counter}</title>)
+     const Body = () => <span>{counter}</span>
+@@ -773,10 +774,24 @@ describe('memo', () => {
+       </html>
+     )
+     expect(template.toString()).toBe(
+-      '<html><head><title>Test Site 0</title></head><body><span>1</span></body></html>'
++      '<html><head><title>Test Site 1</title></head><body><span>1</span></body></html>'
+     )
+   })
+ 
++  it('does not carry a context value into a later render', () => {
++    const NameContext = createContext('anonymous')
++    const Panel = memo(() => <p>{useContext(NameContext)}</p>)
++    const render = (name: string) =>
++      (
++        <NameContext.Provider value={name}>
++          <Panel />
++        </NameContext.Provider>
++      ).toString()
++
++    expect(render('alice')).toBe('<p>alice</p>')
++    expect(render('bob')).toBe('<p>bob</p>')
++  })
++
+   it('props are updated', () => {
+     const Body = memo(({ counter }: { counter: number }) => <span>{counter}</span>)
+ 
+@@ -787,20 +802,15 @@ describe('memo', () => {
+     expect(template.toString()).toBe('<span>1</span>')
+   })
+ 
+-  it('custom propsAreEqual', () => {
+-    const Body = memo(
+-      ({ counter }: { counter: number; refresh?: boolean }) => <span>{counter}</span>,
+-      (_, nextProps) => (typeof nextProps.refresh == 'undefined' ? true : !nextProps.refresh)
+-    )
+-
+-    let template = <Body counter={0} />
+-    expect(template.toString()).toBe('<span>0</span>')
++  it('custom propsAreEqual is handed to the DOM renderer', () => {
++    const propsAreEqual = (_: { counter: number }, nextProps: { counter: number }) =>
++      nextProps.counter === 0
++    const Body = memo(({ counter }: { counter: number }) => <span>{counter}</span>, propsAreEqual)
+ 
+-    template = <Body counter={1} />
+-    expect(template.toString()).toBe('<span>0</span>')
++    expect((Body as any)[DOM_MEMO]).toBe(propsAreEqual)
+ 
+-    template = <Body counter={2} refresh={true} />
+-    expect(template.toString()).toBe('<span>2</span>')
++    expect((<Body counter={0} />).toString()).toBe('<span>0</span>')
++    expect((<Body counter={1} />).toString()).toBe('<span>1</span>')
+   })
+ })
+ 
+
+########## src/middleware/cors/index.test.ts (+7/-0)
+@@ -158,6 +158,13 @@ describe('CORS by Middleware', () => {
+     ])
+   })
+ 
++  it('Preflight handles a large Access-Control-Request-Headers value', async () => {
++    const req = new Request('https://localhost/api/abc', { method: 'OPTIONS' })
++    req.headers.append('Access-Control-Request-Headers', 'x' + ' '.repeat(200000) + 'x')
++    const res = await app.request(req)
++    expect(res.status).toBe(204)
++  })
++
+   it('Preflight with options', async () => {
+     const req = new Request('https://localhost/api2/abc', {
+       method: 'OPTIONS',
+
+########## src/middleware/cors/index.ts (+1/-1)
+@@ -129,7 +129,7 @@ export const cors = (options?: CORSOptions): MiddlewareHandler => {
+       if (!headers?.length) {
+         const requestHeaders = c.req.header('Access-Control-Request-Headers')
+         if (requestHeaders) {
+-          headers = requestHeaders.split(/\s*,\s*/)
++          headers = requestHeaders.split(',').map((h) => h.trim())
+         }
+       }
+       if (headers?.length) {
+
+########## src/middleware/language/index.test.ts (+38/-1)
+@@ -1,5 +1,5 @@
+ import { Hono } from '../../hono'
+-import { detectors } from './language'
++import { DEFAULT_OPTIONS, detectors, normalizeLanguage } from './language'
+ import { languageDetector } from '.'
+ 
+ describe('languageDetector', () => {
+@@ -107,6 +107,21 @@ describe('languageDetector', () => {
+       expect(await res.text()).toBe('zh-Hant')
+     })
+ 
++    it('should select the longest truncated match regardless of supported language order', async () => {
++      const app = createTestApp({
++        supportedLanguages: ['zh', 'zh-Hant'],
++        fallbackLanguage: 'zh',
++        order: ['header'],
++      })
++
++      const res = await app.request('/', {
++        headers: {
++          'accept-language': 'zh-Hant-CN',
++        },
++      })
++      expect(await res.text()).toBe('zh-Hant')
++    })
++
+     it('should fallback when truncation does not match any supported language', async () => {
+       const app = createTestApp({
+         supportedLanguages: ['en', 'ja'],
+@@ -185,6 +200,28 @@ describe('languageDetector', () => {
+     })
+   })
+ 
++  describe('Language Normalization', () => {
++    it('should preserve the configured value for a case-insensitive truncated match', () => {
++      expect(
++        normalizeLanguage('zh-HANT-CN', {
++          ...DEFAULT_OPTIONS,
++          supportedLanguages: ['en', 'ZH-Hant'],
++        })
++      ).toBe('ZH-Hant')
++    })
++
++    it('should handle a large unsupported language tag', () => {
++      const unsupportedLanguage = 'x-'.repeat(30_000).slice(0, -1)
++
++      expect(
++        normalizeLanguage(unsupportedLanguage, {
++          ...DEFAULT_OPTIONS,
++          supportedLanguages: ['en', 'ja'],
++        })
++      ).toBeUndefined()
++    })
++  })
++
+   describe('Path Detection', () => {
+     it('should detect language from path', async () => {
+       const app = createTestApp({
+
+########## src/middleware/language/language.ts (+15/-6)
+@@ -107,14 +107,23 @@ export const normalizeLanguage = (
+     }
+ 
+     // Progressive truncation (RFC 4647 Lookup)
+-    const parts = compLang.split('-')
+-    for (let i = parts.length - 1; i > 0; i--) {
+-      const candidate = parts.slice(0, i).join('-')
+-      const prefixIndex = compSupported.indexOf(candidate)
+-      if (prefixIndex !== -1) {
+-        return options.supportedLanguages[prefixIndex]
++    let longestMatchIndex = -1
++    let longestMatchLength = -1
++    for (let i = 0; i < compSupported.length; i++) {
++      const candidate = compSupported[i]
++      if (
++        candidate.length < compLang.length &&
++        candidate.length > longestMatchLength &&
++        compLang.startsWith(candidate) &&
++        compLang[candidate.length] === '-'
++      ) {
++        longestMatchIndex = i
++        longestMatchLength = candidate.length
+       }
+     }
++    if (longestMatchIndex !== -1) {
++      return options.supportedLanguages[longestMatchIndex]
++    }
+ 
+     return undefined
+   } catch {
+
+########## src/middleware/secure-headers/index.test.ts (+75/-0)
+@@ -481,6 +481,81 @@ describe('Secure Headers Middleware', () => {
+     })
+   })
+ 
++  describe('CSP with combined modes', () => {
++    it('keeps the enforced policy when report-only uses a nonce', async () => {
++      const app = new Hono()
++      app.use(
++        '/test',
++        secureHeaders({
++          contentSecurityPolicy: {
++            defaultSrc: ["'self'"],
++          },
++          contentSecurityPolicyReportOnly: {
++            scriptSrc: ["'self'", NONCE],
++          },
++        })
++      )
++      app.all('*', (c) => c.text('test'))
++
++      const res = await app.request('/test')
++
++      expect(res.status).toBe(200)
++      expect(res.headers.get('Content-Security-Policy')).toBe("default-src 'self'")
++      expect(res.headers.get('Content-Security-Policy-Report-Only')).toMatch(
++        /^script-src 'self' 'nonce-[a-zA-Z0-9+/]+=*'$/
++      )
++    })
++
++    it('keeps the report-only policy when the enforced policy uses a nonce', async () => {
++      const app = new Hono()
++      app.use(
++        '/test',
++        secureHeaders({
++          contentSecurityPolicy: {
++            scriptSrc: ["'self'", NONCE],
++          },
++          contentSecurityPolicyReportOnly: {
++            defaultSrc: ["'self'"],
++          },
++        })
++      )
++      app.all('*', (c) => c.text('test'))
++
++      const res = await app.request('/test')
++
++      expect(res.status).toBe(200)
++      expect(res.headers.get('Content-Security-Policy')).toMatch(
++        /^script-src 'self' 'nonce-[a-zA-Z0-9+/]+=*'$/
++      )
++      expect(res.headers.get('Content-Security-Policy-Report-Only')).toBe("default-src 'self'")
++    })
++
++    it('supports nonces in both policies', async () => {
++      const app = new Hono()
++      app.use(
++        '/test',
++        secureHeaders({
++          contentSecurityPolicy: {
++            scriptSrc: ["'self'", NONCE],
++          },
++          contentSecurityPolicyReportOnly: {
++            styleSrc: ["'self'", NONCE],
++          },
++        })
++      )
++      app.all('*', (c) => c.text('test'))
++
++      const res = await app.request('/test')
++      const csp = res.headers.get('Content-Security-Policy')
++      const reportOnly = res.headers.get('Content-Security-Policy-Report-Only')
++      const nonce = csp?.match(/'nonce-([^']+)'/)?.[1]
++
++      expect(res.status).toBe(200)
++      expect(nonce).toBeTruthy()
++      expect(reportOnly).toContain(`'nonce-${nonce}'`)
++    })
++  })
++
+   // OUR NEW REPORT-URI TESTS
+   describe('CSP report-uri directive', () => {
+     it('should set report-uri with single endpoint', async () => {
+
+########## src/middleware/secure-headers/secure-headers.ts (+11/-7)
+@@ -182,15 +182,21 @@ export const secureHeaders = (customOptions?: SecureHeadersOptions): MiddlewareH
+   const callbacks: SecureHeadersCallback[] = []
+ 
+   if (options.contentSecurityPolicy) {
+-    const [callback, value] = getCSPDirectives(options.contentSecurityPolicy)
++    const [callback, value] = getCSPDirectives(
++      options.contentSecurityPolicy,
++      'Content-Security-Policy'
++    )
+     if (callback) {
+       callbacks.push(callback)
+     }
+     headersToSet.push(['Content-Security-Policy', value as string])
+   }
+ 
+   if (options.contentSecurityPolicyReportOnly) {
+-    const [callback, value] = getCSPDirectives(options.contentSecurityPolicyReportOnly)
++    const [callback, value] = getCSPDirectives(
++      options.contentSecurityPolicyReportOnly,
++      'Content-Security-Policy-Report-Only'
++    )
+     if (callback) {
+       callbacks.push(callback)
+     }
+@@ -238,7 +244,8 @@ function getFilteredHeaders(options: SecureHeadersOptions): [string, string][] {
+ }
+ 
+ function getCSPDirectives(
+-  contentSecurityPolicy: ContentSecurityPolicyOptions
++  contentSecurityPolicy: ContentSecurityPolicyOptions,
++  headerName: 'Content-Security-Policy' | 'Content-Security-Policy-Report-Only'
+ ): [SecureHeadersCallback | undefined, string | string[]] {
+   const callbacks: ((ctx: Context, values: string[]) => void)[] = []
+   const resultValues: string[] = []
+@@ -270,10 +277,7 @@ function getCSPDirectives(
+     : [
+         (ctx, headersToSet) =>
+           headersToSet.map((values) => {
+-            if (
+-              values[0] === 'Content-Security-Policy' ||
+-              values[0] === 'Content-Security-Policy-Report-Only'
+-            ) {
++            if (values[0] === headerName) {
+               const clone = values[1].slice() as unknown as string[]
+               callbacks.forEach((cb) => {
+                 cb(ctx, clone)
+
+########## src/request.test.ts (+6/-0)
+@@ -236,6 +236,12 @@ describe('headers', () => {
+     expect(req.header('Content-Type')).toBe('application/json')
+     expect(req.header('ApiKey')).toBe('abc')
+   })
++
++  test('req.header() is not affected by a `__proto__` header name', () => {
++    const req = new HonoRequest(new Request('http://localhost', { headers: { __proto__: 'evil' } }))
++    const headers = req.header()
++    expect(Object.getPrototypeOf(headers)).toBeNull()
++  })
+ })
+ 
+ const text = '{"foo":"bar"}'
+
+########## src/request.ts (+1/-1)
+@@ -190,7 +190,7 @@ export class HonoRequest<P extends string = '/', I extends Input['out'] = {}> {
+       return this.raw.headers.get(name) ?? undefined
+     }
+ 
+-    const headerData: Record<string, string | undefined> = {}
++    const headerData: Record<string, string | undefined> = Object.create(null)
+     this.raw.headers.forEach((value, key) => {
+       headerData[key] = value
+     })
+
+########## src/utils/accept.test.ts (+6/-0)
+@@ -70,6 +70,12 @@ describe('parseAccept Comprehensive Tests', () => {
+       expect(result[0].params.key).toBe('2')
+       expect(result[0].params.KEY).toBe('3')
+     })
++
++    test('treats `__proto__` as a normal parameter without changing the prototype', () => {
++      const result = parseAccept('text/html;__proto__=x')
++      expect(Object.getPrototypeOf(result[0].params)).toBeNull()
++      expect(result[0].params['__proto__']).toBe('x')
++    })
+   })
+ 
+   describe('Media Type Edge Cases', () => {
+
+########## src/utils/accept.ts (+1/-1)
+@@ -162,7 +162,7 @@ const getNextAcceptValue = (
+ ): [number, Accept | undefined] => {
+   const accept: Accept = {
+     type: '',
+-    params: {},
++    params: Object.create(null),
+     q: 1,
+   }
+   startIndex = consumeWhitespace(acceptHeader, startIndex)
+
+########## src/utils/cookie.test.ts (+26/-0)
+@@ -80,6 +80,32 @@ describe('Parse cookie', () => {
+     expect(cookie['']).toBeUndefined()
+   })
+ 
++  it('Should parse cookies whose names are not RFC 6265 tokens', () => {
++    const cookieString =
++      'paraglide:lang=en; CognitoIdentityServiceProvider.abc.user@example.com.idToken=token; round(brackets)=ok; square[brackets]=ok; curly{brackets}=ok'
++    const cookie: Cookie = parse(cookieString)
++    expect(cookie['paraglide:lang']).toBe('en')
++    expect(cookie['CognitoIdentityServiceProvider.abc.user@example.com.idToken']).toBe('token')
++    expect(cookie['round(brackets)']).toBe('ok')
++    expect(cookie['square[brackets]']).toBe('ok')
++    expect(cookie['curly{brackets}']).toBe('ok')
++  })
++
++  it('Should parse one cookie specified by a name that is not an RFC 6265 token', () => {
++    const cookieString = 'paraglide:lang=en; test=ok'
++    const cookie: Cookie = parse(cookieString, 'paraglide:lang')
++    expect(cookie['paraglide:lang']).toBe('en')
++    expect(cookie['test']).toBeUndefined()
++  })
++
++  it('Should ignore cookie names containing non-ASCII or control characters', () => {
++    const cookieString = 'yummy_cookie=choco; クッキー=strawberry; bad\x01name=sugar'
++    const cookie: Cookie = parse(cookieString)
++    expect(cookie['yummy_cookie']).toBe('choco')
++    expect(cookie['クッキー']).toBeUndefined()
++    expect(cookie['bad\x01name']).toBeUndefined()
++  })
++
+   it('Should ignore invalid cookie values', () => {
+     const cookieString = 'yummy_cookie=choco\\nchip; tasty_cookie=strawberry; best_cookie="sugar'
+     const cookie: Cookie = parse(cookieString)
+
+########## src/utils/cookie.ts (+8/-1)
+@@ -67,8 +67,15 @@ const verifySignature = async (
+ 
+ // all alphanumeric chars and all of _!#$%&'*.^`|~+-
+ // (see: https://datatracker.ietf.org/doc/html/rfc6265#section-4.1.1)
++// used only when producing cookies via serialize(); parsing uses the relaxed regex below
+ const validCookieNameRegEx = /^[\w!#$%&'*.^`|~+-]+$/
+ 
++// all ASCII chars 33-126 except 34, 59, 61, and 92 (i.e. "!" to "~" but not double quote, semicolon, equals, or backslash)
++// the strict RFC 6265 token rule above is a requirement for cookie producers; when consuming
++// the Cookie header we accept the names other producers emit in the wild, e.g. "paraglide:lang"
++// (see: https://datatracker.ietf.org/doc/html/draft-ietf-httpbis-rfc6265bis#section-5.6 and https://github.com/honojs/hono/issues/3189)
++const relaxedCookieNameRegEx = /^[!#-:<>-[\]-~]+$/
++
+ // all ASCII chars 32-126 except 34, 59, and 92 (i.e. space to tilde but not double quote, semicolon, or backslash)
+ // (see: https://datatracker.ietf.org/doc/html/rfc6265#section-4.1.1)
+ //
+@@ -115,7 +122,7 @@ export const parse = (cookie: string, name?: string): Cookie => {
+     const cookieName = trimCookieWhitespace(pairStr.substring(0, valueStartPos))
+     if (
+       (name && name !== cookieName) ||
+-      !validCookieNameRegEx.test(cookieName) ||
++      !relaxedCookieNameRegEx.test(cookieName) ||
+       cookieName in parsedCookie
+     ) {
+       continue
+
+########## src/utils/url.test.ts (+9/-0)
+@@ -359,5 +359,14 @@ describe('url', () => {
+         toString: [''],
+       })
+     })
++
++    it('should treat `__proto__` as a normal key without changing the prototype', () => {
++      const params = getQueryParams('http://example.com/?__proto__=a&__proto__=b') as Record<
++        string,
++        string[]
++      >
++      expect(Object.getPrototypeOf(params)).toBeNull()
++      expect(params['__proto__']).toEqual(['a', 'b'])
++    })
+   })
+ })
+
+########## src/utils/url.ts (+1/-1)
+@@ -252,7 +252,7 @@ const _getQueryParam = (
+     // fallback to default routine
+   }
+ 
+-  const results: Record<string, string> | Record<string, string[]> = {}
++  const results: Record<string, string> | Record<string, string[]> = Object.create(null)
+   encoded ??= /[%+]/.test(url)
+ 
+   let keyIndex = url.indexOf('?', 8)
+

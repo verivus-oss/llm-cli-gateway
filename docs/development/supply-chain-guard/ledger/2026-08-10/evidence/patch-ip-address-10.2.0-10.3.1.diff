@@ -1,0 +1,462 @@
+// captured-by: gh api repos/beaugunderson/ip-address/compare/v10.2.0...v10.3.1 (full patch for src/ files)
+########## src/common.ts (+26/-4)
+@@ -6,16 +6,38 @@ export interface ReverseFormOptions {
+   omitSuffix?: boolean;
+ }
+ 
++/**
++ * Returns whether this address's *network* is contained within `address`,
++ * i.e. whether every address this one can represent also falls inside
++ * `address`. A network wider than `address` is not contained in it, so
++ * `10.0.0.0/8` is not in `10.0.0.0/16`.
++ *
++ * To ask whether the address itself falls inside a range, ignoring any CIDR
++ * suffix it was written with, use {@link isHostInSubnet} instead. That is the
++ * question the special-use classifiers ask.
++ */
+ export function isInSubnet(this: Address4 | Address6, address: Address4 | Address6) {
+   if (this.subnetMask < address.subnetMask) {
+     return false;
+   }
+ 
+-  if (this.mask(address.subnetMask) === address.mask()) {
+-    return true;
+-  }
++  return isHostInSubnet.call(this, address);
++}
+ 
+-  return false;
++/**
++ * Returns whether this address's host bits fall inside `address`, ignoring
++ * this address's own subnet mask.
++ *
++ * This is the primitive the special-use classifiers (`isLoopback`,
++ * `isPrivate`, `isLinkLocal`, `getType`, …) are built on: they answer a
++ * question about the address, so the answer must not change with the CIDR
++ * suffix the caller happened to write. Use this rather than
++ * {@link isInSubnet} when classifying a single address — notably when the
++ * address came from untrusted input and the result backs a trust-boundary
++ * decision such as an SSRF allow/deny filter.
++ */
++export function isHostInSubnet(this: Address4 | Address6, address: Address4 | Address6) {
++  return this.mask(address.subnetMask) === address.mask();
+ }
+ 
+ export function isCorrect(defaultBits: number) {
+
+########## src/ipv4.ts (+21/-7)
+@@ -70,6 +70,12 @@ export class Address4 {
+   parse(address: string) {
+     const groups = address.split('.');
+ 
++    // Checked before the general match so the error names the actual problem.
++    // Address6 rejects the same notation on its v4-in-v6 path.
++    if (groups.some((group) => /^0\d/.test(group))) {
++      throw new AddressError("IPv4 addresses can't have leading zeroes.");
++    }
++
+     if (!address.match(constants.RE_ADDRESS)) {
+       throw new AddressError('Invalid IPv4 address.');
+     }
+@@ -449,60 +455,68 @@ export class Address4 {
+    */
+   isInSubnet = common.isInSubnet;
+ 
++  /**
++   * Returns true if this address's host bits fall inside the given subnet,
++   * ignoring this address's own subnet mask. See
++   * {@link common.isHostInSubnet}.
++   * @returns {boolean}
++   */
++  isHostInSubnet = common.isHostInSubnet;
++
+   /**
+    * Returns true if the given address is a multicast address
+    * @returns {boolean}
+    */
+   isMulticast(): boolean {
+-    return this.isInSubnet(MULTICAST_V4);
++    return this.isHostInSubnet(MULTICAST_V4);
+   }
+ 
+   /**
+    * Returns true if the address is in one of the [RFC 1918](https://datatracker.ietf.org/doc/html/rfc1918) private address ranges (`10.0.0.0/8`, `172.16.0.0/12`, `192.168.0.0/16`).
+    * @returns {boolean}
+    */
+   isPrivate(): boolean {
+-    return PRIVATE_V4.some((subnet) => this.isInSubnet(subnet));
++    return PRIVATE_V4.some((subnet) => this.isHostInSubnet(subnet));
+   }
+ 
+   /**
+    * Returns true if the address is in the loopback range `127.0.0.0/8` ([RFC 1122](https://datatracker.ietf.org/doc/html/rfc1122)).
+    * @returns {boolean}
+    */
+   isLoopback(): boolean {
+-    return this.isInSubnet(LOOPBACK_V4);
++    return this.isHostInSubnet(LOOPBACK_V4);
+   }
+ 
+   /**
+    * Returns true if the address is in the link-local range `169.254.0.0/16` ([RFC 3927](https://datatracker.ietf.org/doc/html/rfc3927)).
+    * @returns {boolean}
+    */
+   isLinkLocal(): boolean {
+-    return this.isInSubnet(LINK_LOCAL_V4);
++    return this.isHostInSubnet(LINK_LOCAL_V4);
+   }
+ 
+   /**
+    * Returns true if the address is the unspecified address `0.0.0.0`.
+    * @returns {boolean}
+    */
+   isUnspecified(): boolean {
+-    return this.isInSubnet(UNSPECIFIED_V4);
++    return this.isHostInSubnet(UNSPECIFIED_V4);
+   }
+ 
+   /**
+    * Returns true if the address is the limited broadcast address `255.255.255.255` ([RFC 919](https://datatracker.ietf.org/doc/html/rfc919)).
+    * @returns {boolean}
+    */
+   isBroadcast(): boolean {
+-    return this.isInSubnet(BROADCAST_V4);
++    return this.isHostInSubnet(BROADCAST_V4);
+   }
+ 
+   /**
+    * Returns true if the address is in the carrier-grade NAT range `100.64.0.0/10` ([RFC 6598](https://datatracker.ietf.org/doc/html/rfc6598)).
+    * @returns {boolean}
+    */
+   isCGNAT(): boolean {
+-    return this.isInSubnet(CGNAT_V4);
++    return this.isHostInSubnet(CGNAT_V4);
+   }
+ 
+   /**
+
+########## src/ipv6.ts (+145/-30)
+@@ -136,7 +136,12 @@ export class Address6 {
+       }
+ 
+       address = address.replace(constants6.RE_SUBNET_STRING, '');
+-    } else if (/\//.test(address)) {
++    }
++
++    // RE_SUBNET_STRING anchors on the end of the address, so it strips only
++    // the trailing suffix. A second one left behind (`::/0/1`) is malformed
++    // and must be rejected rather than parsed as an address group.
++    if (/\//.test(address)) {
+       throw new AddressError('Invalid subnet mask.');
+     }
+ 
+@@ -246,8 +251,8 @@ export class Address6 {
+     if (port) {
+       port = parseInt(port, 10);
+ 
+-      // squelch out of range ports
+-      if (port < 0 || port > 65536) {
++      // squelch out of range ports (valid ports are 0-65535)
++      if (port < 0 || port > 65535) {
+         port = null;
+       }
+     } else {
+@@ -567,7 +572,7 @@ export class Address6 {
+   getType(): string {
+     for (let i = 0; i < TYPE_SUBNETS.length; i++) {
+       const entry = TYPE_SUBNETS[i];
+-      if (this.isInSubnet(entry[0])) {
++      if (this.isHostInSubnet(entry[0])) {
+         return entry[1];
+       }
+     }
+@@ -740,28 +745,34 @@ export class Address6 {
+     const groups = address.split(':');
+     const lastGroup = groups.slice(-1)[0];
+ 
++    // RE_ADDRESS rejects octets with a leading zero, so a dotted-quad tail is
++    // matched permissively first: that way this notation still gets its own
++    // message with the offending octet highlighted, rather than falling
++    // through as an unrecognized group.
++    const v4Octets = lastGroup.split('.');
++
++    if (v4Octets.length === constants4.GROUPS && v4Octets.every((octet) => /^\d{1,3}$/.test(octet))) {
++      if (v4Octets.some((octet) => /^0\d/.test(octet))) {
++        // The prefix groups haven't been through the bad-character check
++        // yet, so escape them before including in the error HTML.
++        const highlighted = v4Octets.map(spanLeadingZeroes4).join('.');
++        const prefix = groups.slice(0, -1).map(helpers.escapeHtml).join(':');
++        const separator = groups.length > 1 ? ':' : '';
++
++        throw new AddressError(
++          "IPv4 addresses can't have leading zeroes.",
++          `${prefix}${separator}${highlighted}`,
++        );
++      }
++    }
++
+     const address4 = lastGroup.match(constants4.RE_ADDRESS);
+ 
+     if (address4) {
+       this.parsedAddress4 = address4[0];
+       const v4Suffix = this.subnetMask >= 96 ? `/${this.subnetMask - 96}` : '';
+       this.address4 = new Address4(`${this.parsedAddress4}${v4Suffix}`);
+ 
+-      for (let i = 0; i < this.address4.groups; i++) {
+-        if (/^0[0-9]+/.test(this.address4.parsedAddress[i])) {
+-          // The prefix groups haven't been through the bad-character check
+-          // yet, so escape them before including in the error HTML.
+-          const highlighted = this.address4.parsedAddress.map(spanLeadingZeroes4).join('.');
+-          const prefix = groups.slice(0, -1).map(helpers.escapeHtml).join(':');
+-          const separator = groups.length > 1 ? ':' : '';
+-
+-          throw new AddressError(
+-            "IPv4 addresses can't have leading zeroes.",
+-            `${prefix}${separator}${highlighted}`,
+-          );
+-        }
+-      }
+-
+       this.v4 = true;
+ 
+       groups[groups.length - 1] = this.address4.toGroup6();
+@@ -1094,7 +1105,7 @@ export class Address6 {
+       throw new AddressError('NAT64 prefix length must be 32, 40, 48, 56, 64, or 96');
+     }
+ 
+-    if (!this.isInSubnet(prefix6)) {
++    if (!this.isHostInSubnet(prefix6)) {
+       return null;
+     }
+ 
+@@ -1122,10 +1133,7 @@ export class Address6 {
+    * @returns {Array}
+    */
+   toByteArray(): number[] {
+-    const valueWithoutPadding = this.bigInt().toString(16);
+-    const leadingPad = '0'.repeat(valueWithoutPadding.length % 2);
+-
+-    const value = `${leadingPad}${valueWithoutPadding}`;
++    const value = this.bigInt().toString(16).padStart(constants6.BITS / 4, '0');
+ 
+     const bytes = [];
+     for (let i = 0, length = value.length; i < length; i += 2) {
+@@ -1182,6 +1190,14 @@ export class Address6 {
+    */
+   isInSubnet = common.isInSubnet;
+ 
++  /**
++   * Returns true if this address's host bits fall inside the given subnet,
++   * ignoring this address's own subnet mask. See
++   * {@link common.isHostInSubnet}.
++   * @returns {boolean}
++   */
++  isHostInSubnet = common.isHostInSubnet;
++
+   /**
+    * Returns true if the address is correct, false otherwise
+    * @returns {boolean}
+@@ -1201,7 +1217,12 @@ export class Address6 {
+    * @returns {boolean}
+    */
+   isLinkLocal(): boolean {
+-    // Zeroes are required, i.e. we can't check isInSubnet with 'fe80::/10'
++    const embedded = this.embeddedIPv4();
++    if (embedded) {
++      return embedded.isLinkLocal();
++    }
++
++    // Zeroes are required, i.e. we can't check isHostInSubnet with 'fe80::/10'
+     if (
+       this.getBitsBase2(0, 64) ===
+       '1111111010000000000000000000000000000000000000000000000000000000'
+@@ -1217,6 +1238,11 @@ export class Address6 {
+    * @returns {boolean}
+    */
+   isMulticast(): boolean {
++    const embedded = this.embeddedIPv4();
++    if (embedded) {
++      return embedded.isMulticast();
++    }
++
+     const type = this.getType();
+     return type === 'Multicast' || type.startsWith('Multicast ');
+   }
+@@ -1241,30 +1267,60 @@ export class Address6 {
+    * @returns {boolean}
+    */
+   isMapped4(): boolean {
+-    return this.isInSubnet(IPV4_MAPPED_SUBNET);
++    return this.isHostInSubnet(IPV4_MAPPED_SUBNET);
++  }
++
++  /**
++   * If this address embeds a routable IPv4 address — i.e. it is IPv4-mapped
++   * (`::ffff:0:0/96`) or sits in the NAT64 well-known prefix (`64:ff9b::/96`,
++   * [RFC 6052](https://datatracker.ietf.org/doc/html/rfc6052)) — return that
++   * embedded address as an {@link Address4}; otherwise return null.
++   *
++   * The special-property checks (`isLoopback`, `isLinkLocal`, `isMulticast`,
++   * `isUnspecified`, `isPrivate`, `isCGNAT`, `isBroadcast`) call this first and
++   * delegate to the embedded {@link Address4} when present, so a literal such as
++   * `::ffff:127.0.0.1` is classified by what it actually reaches (loopback)
++   * rather than by its IPv6 wrapper (which `getType()` reports as IPv4-mapped).
++   * This matters wherever the checks back a trust-boundary decision (e.g. an
++   * SSRF allow/deny filter): without normalization, `::ffff:10.0.0.1`,
++   * `::ffff:169.254.169.254`, `64:ff9b::7f00:1`, etc. would all read as
++   * non-internal.
++   * @returns {Address4 | null}
++   */
++  embeddedIPv4(): Address4 | null {
++    if (this.isMapped4() || this.isHostInSubnet(NAT64_WELL_KNOWN_SUBNET)) {
++      return this.to4();
++    }
++
++    return null;
+   }
+ 
+   /**
+    * Returns true if the address is a Teredo address, false otherwise
+    * @returns {boolean}
+    */
+   isTeredo(): boolean {
+-    return this.isInSubnet(TEREDO_SUBNET);
++    return this.isHostInSubnet(TEREDO_SUBNET);
+   }
+ 
+   /**
+    * Returns true if the address is a 6to4 address, false otherwise
+    * @returns {boolean}
+    */
+   is6to4(): boolean {
+-    return this.isInSubnet(SIX_TO_FOUR_SUBNET);
++    return this.isHostInSubnet(SIX_TO_FOUR_SUBNET);
+   }
+ 
+   /**
+    * Returns true if the address is a loopback address, false otherwise
+    * @returns {boolean}
+    */
+   isLoopback(): boolean {
++    const embedded = this.embeddedIPv4();
++    if (embedded) {
++      return embedded.isLoopback();
++    }
++
+     return this.getType() === 'Loopback';
+   }
+ 
+@@ -1273,14 +1329,72 @@ export class Address6 {
+    * @returns {boolean}
+    */
+   isULA(): boolean {
+-    return this.isInSubnet(ULA_SUBNET);
++    return this.isHostInSubnet(ULA_SUBNET);
++  }
++
++  /**
++   * Returns true if the address is private, i.e. a Unique Local Address in
++   * `fc00::/7` ([RFC 4193](https://datatracker.ietf.org/doc/html/rfc4193)) or an
++   * IPv4-mapped / NAT64 address whose embedded IPv4 address is in one of the
++   * [RFC 1918](https://datatracker.ietf.org/doc/html/rfc1918) private ranges
++   * (e.g. `::ffff:10.0.0.1`). This is the IPv6 counterpart to
++   * {@link Address4.isPrivate}; use it instead of {@link isULA} when you need to
++   * catch mapped RFC 1918 addresses as well as native ULAs.
++   * @returns {boolean}
++   */
++  isPrivate(): boolean {
++    const embedded = this.embeddedIPv4();
++    if (embedded) {
++      return embedded.isPrivate();
++    }
++
++    return this.isULA();
++  }
++
++  /**
++   * Returns true if the address is an IPv4-mapped / NAT64 address whose embedded
++   * IPv4 address is in the carrier-grade NAT range `100.64.0.0/10`
++   * ([RFC 6598](https://datatracker.ietf.org/doc/html/rfc6598)), false
++   * otherwise. There is no native IPv6 CGNAT range, so this only ever returns
++   * true for an embedded IPv4 address (e.g. `::ffff:100.64.0.1`).
++   * @returns {boolean}
++   */
++  isCGNAT(): boolean {
++    const embedded = this.embeddedIPv4();
++    if (embedded) {
++      return embedded.isCGNAT();
++    }
++
++    return false;
++  }
++
++  /**
++   * Returns true if the address is an IPv4-mapped / NAT64 address whose embedded
++   * IPv4 address is the limited broadcast address `255.255.255.255`
++   * ([RFC 919](https://datatracker.ietf.org/doc/html/rfc919)), false otherwise.
++   * There is no IPv6 broadcast, so this only ever returns true for an embedded
++   * IPv4 address (e.g. `::ffff:255.255.255.255`).
++   * @returns {boolean}
++   */
++  isBroadcast(): boolean {
++    const embedded = this.embeddedIPv4();
++    if (embedded) {
++      return embedded.isBroadcast();
++    }
++
++    return false;
+   }
+ 
+   /**
+    * Returns true if the address is the unspecified address `::`.
+    * @returns {boolean}
+    */
+   isUnspecified(): boolean {
++    const embedded = this.embeddedIPv4();
++    if (embedded) {
++      return embedded.isUnspecified();
++    }
++
+     return this.getType() === 'Unspecified';
+   }
+ 
+@@ -1289,7 +1403,7 @@ export class Address6 {
+    * @returns {boolean}
+    */
+   isDocumentation(): boolean {
+-    return this.isInSubnet(DOCUMENTATION_SUBNET);
++    return this.isHostInSubnet(DOCUMENTATION_SUBNET);
+   }
+   // #endregion
+ 
+@@ -1478,3 +1592,4 @@ const SIX_TO_FOUR_SUBNET = new Address6('2002::/16');
+ const ULA_SUBNET = new Address6('fc00::/7');
+ const DOCUMENTATION_SUBNET = new Address6('2001:db8::/32');
+ const IPV4_MAPPED_SUBNET = new Address6('::ffff:0:0/96');
++const NAT64_WELL_KNOWN_SUBNET = new Address6('64:ff9b::/96');
+
+########## src/v4/constants.ts (+5/-1)
+@@ -1,7 +1,11 @@
+ export const BITS = 32;
+ export const GROUPS = 4;
+ 
++// Each octet is 0-255 written without a leading zero. A leading zero is
++// octal to the WHATWG URL parser, inet_aton, and getaddrinfo, but decimal to
++// parseInt(part, 10), so accepting the notation would make this library
++// disagree with the network stack about which host a string names.
+ export const RE_ADDRESS =
+-  /^(25[0-5]|2[0-4][0-9]|[01]?[0-9][0-9]?)\.(25[0-5]|2[0-4][0-9]|[01]?[0-9][0-9]?)\.(25[0-5]|2[0-4][0-9]|[01]?[0-9][0-9]?)\.(25[0-5]|2[0-4][0-9]|[01]?[0-9][0-9]?)$/g;
++  /^(25[0-5]|2[0-4][0-9]|1[0-9][0-9]|[1-9]?[0-9])\.(25[0-5]|2[0-4][0-9]|1[0-9][0-9]|[1-9]?[0-9])\.(25[0-5]|2[0-4][0-9]|1[0-9][0-9]|[1-9]?[0-9])\.(25[0-5]|2[0-4][0-9]|1[0-9][0-9]|[1-9]?[0-9])$/g;
+ 
+ export const RE_SUBNET_STRING = /\/\d{1,2}$/;
+
+########## src/v6/constants.ts (+1/-0)
+@@ -43,6 +43,7 @@ export const TYPES: { [key: string]: string | undefined } = {
+   'ff05::1:3/128': 'Multicast (All DHCP servers in this site)',
+   '::/128': 'Unspecified',
+   '::1/128': 'Loopback',
++  '::ffff:0:0/96': 'IPv4-mapped',
+   'ff00::/8': 'Multicast',
+   'fe80::/10': 'Link-local unicast',
+   'fc00::/7': 'Unique local',
+
