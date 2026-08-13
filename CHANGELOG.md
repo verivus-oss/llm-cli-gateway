@@ -4,6 +4,8 @@ All notable changes to the llm-cli-gateway project.
 
 ## [Unreleased]
 
+## [3.1.0-rc.4] - 2026-08-14: upstream deprecations are applied, not reviewed
+
 ### Changed
 
 - **`npm run providers:rebaseline` now applies flag removals instead of
