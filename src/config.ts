@@ -344,6 +344,25 @@ function applyEnvOverrides(
         : undefined;
   if (dbEnvRaw !== undefined) {
     const normalized = dbEnvRaw.trim().toLowerCase();
+    // A PATH in these deprecated variables must not silently rewrite an
+    // explicit backend. Previously it always won, so setting
+    // LLM_GATEWAY_LOGS_DB (a variable named for the flight recorder, a
+    // different subsystem) rewrote an explicit `backend = "postgres"` or
+    // `"memory"` to "sqlite". A config file being overridden by a variable that
+    // does not appear to be about it is the worst kind of precedence rule.
+    //
+    // `= "none"` is deliberately EXEMPT and still wins: it is a documented kill
+    // switch for disabling persistence, and an operator setting it is asking
+    // for exactly that regardless of what the file says.
+    const explicitBackend = typeof base.backend === "string";
+    if (explicitBackend && normalized !== "none") {
+      logWarn(
+        logger,
+        `${jobsDbEnv && jobsDbEnv.length > 0 ? "LLM_GATEWAY_JOBS_DB" : "LLM_GATEWAY_LOGS_DB"} is set but [persistence].backend is explicitly configured; the config file wins. Remove the environment variable.`,
+        { backend: base.backend }
+      );
+      return out;
+    }
     if (normalized === "none") {
       out.backend = "none";
       out.path = undefined;
