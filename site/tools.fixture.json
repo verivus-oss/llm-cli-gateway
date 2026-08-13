@@ -1,7 +1,7 @@
 {
   "generatedAt": "deterministic build output",
   "packageName": "llm-cli-gateway",
-  "packageVersion": "3.1.0-rc.2",
+  "packageVersion": "3.1.0-rc.3",
   "siteVersion": "3.0.0",
   "captureCommand": "node scripts/generate-site-discovery.mjs",
   "source": "runtime MCP tools/list from dist/index.js over in-memory MCP transport",
@@ -2207,10 +2207,6 @@
             "type": "boolean",
             "description": "Respect workspace trust (Devin --respect-workspace-trust <bool>). Devin defaults true for interactive and false for print mode; set explicitly to override."
           },
-          "agentConfig": {
-            "type": "string",
-            "description": "Agent config file path (Devin --agent-config <FILE>)"
-          },
           "agentType": {
             "type": "string",
             "enum": [
@@ -2373,10 +2369,6 @@
           "respectWorkspaceTrust": {
             "type": "boolean",
             "description": "Respect workspace trust (Devin --respect-workspace-trust <bool>). Devin defaults true for interactive and false for print mode; set explicitly to override."
-          },
-          "agentConfig": {
-            "type": "string",
-            "description": "Agent config file path (Devin --agent-config <FILE>)"
           },
           "sessionId": {
             "type": "string",

@@ -4,7 +4,56 @@ All notable changes to the llm-cli-gateway project.
 
 ## [Unreleased]
 
+## [3.1.0-rc.3] - 2026-08-13: test isolation, and prompt bodies off the routing path
+
+### Changed
+
+- **Least-cost routing no longer reads prompt bodies.** `loadLcrPriorRows` bulk
+  read `requests.prompt` on every load. It was the only production query that
+  read a prompt body in bulk, and it was the blocker for encrypting the body
+  columns at rest. `estimateInputTokens` touches its text in exactly two ways,
+  `text.length` and `classifyContent(text)`, so those two signals are now
+  persisted at write time and the estimate is reconstructed from them.
+  Persisting the signals rather than a finished estimate is deliberate: the
+  tokenizer-family multiplier and the calibration factor are applied at read
+  time from live values, so a change to either does not invalidate anything
+  already stored. A property test over 2000 random inputs asserts the
+  reconstruction is exactly equal to the original estimator, with a negative
+  control showing that a mislabelled content class diverges.
+
+  Flight-recorder migration v11 adds `derived_prompt_chars`,
+  `derived_content_class` and `derivation_version` to the `requests` table.
+  Signals are derived after redaction, so they describe the text actually
+  persisted. Rows written before v11 keep NULL and are skipped for calibration
+  rather than treated as zero, which would bias the ratios;
+  `scripts/backfill-prompt-derivations.mjs` fills them in and is idempotent.
+  That script must be run before any body encryption, because it is the last
+  point at which prompt text can be read in bulk.
+
+  `LcrPriorRow.prompt` is replaced by `LcrPriorRow.derivation`. The row no
+  longer carries a prompt, because the routing path no longer needs one.
+
 ### Fixed
+
+- **The test suite wrote into the user's live flight recorder.**
+  `src/__tests__/setup.ts` deleted `LLM_GATEWAY_LOGS_DB`, with a comment
+  claiming that kept tests off `~/.llm-cli-gateway/logs.db`. It did the
+  opposite: `resolveFlightRecorderDbPath` reads that variable and falls back to
+  the real file when it is unset, so every test that constructed a recorder
+  wrote into live data. The `[persistence] backend = "memory"` config above it
+  only governs the job store, and the flight recorder is a separate subsystem
+  with its own selector, so isolating one left the other pointed at the user's
+  database. The variable is now pinned to a per-process temp path. Verified by
+  three full suite runs that write nothing to the live database.
+
+- **A path in `LLM_GATEWAY_LOGS_DB` or `LLM_GATEWAY_JOBS_DB` silently rewrote an
+  explicit `[persistence].backend`.** Setting either variable forced the backend
+  to `sqlite`, so an operator with `backend = "postgres"` in `config.toml` could
+  be moved off Postgres by a variable named for a different subsystem, with only
+  a deprecation warning. An explicitly configured backend now wins and the
+  override is refused with a warning naming the variable. `= "none"` is
+  deliberately exempt and still overrides, because it is a documented kill
+  switch for disabling persistence entirely.
 
 - **`cursor_request` and `gemini_request` exposed no `workingDir`, so the
   scoping advice in the server instructions could not be followed for two of the
