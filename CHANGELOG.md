@@ -4,6 +4,37 @@ All notable changes to the llm-cli-gateway project.
 
 ## [Unreleased]
 
+### Changed
+
+- **`npm run providers:rebaseline` now applies flag removals instead of
+  reporting them.** The gateway passes through what the upstream binary
+  supports and nothing else, so a provider's deprecation cycle is not something
+  it tracks by hand. When an installed CLI stops advertising a flag the contract
+  declares, `--apply` deletes it from `src/upstream-contracts.ts` and from the
+  contract-derived generation tables in `src/provider-codegen.ts` in the same
+  run, together with the comments that described it. Stale
+  `acknowledgedUpstreamFlags` entries, previously reported only as a warning
+  string that nothing consumed, are dropped on the same pass.
+
+  This supersedes the behaviour documented under 3.0.0, where additive drift and
+  removals were both reported rather than applied. The reason given there was
+  that a removal has to be made in lock-step across the contract, the generator
+  and the request path. That coupling is real and is why the first two now land
+  together; it was not a reason to make every vendor deprecation a review item.
+
+  `hiddenFromHelp` on a flag contract remains the way to declare "real but
+  deliberately undocumented", and the writer refuses to remove such a flag, so a
+  contrary belief is recorded in the contract rather than defended by hand.
+
+  The hand-written argv emission in `src/index.ts` is reported with file:line
+  rather than rewritten, because it is not derivable from a flag string: the
+  devin `--agent-config` removal touched 22 references, none of which spell the
+  flag. Exit code 3 changes meaning accordingly, from "a human must judge an
+  upstream change" to "the gateway still references a flag the binary dropped",
+  which is a defect in code this project owns. The JSON result drops
+  `manualActionRequired` in favour of `residualReferences` and
+  `staleAcknowledgements`.
+
 ## [3.1.0-rc.3] - 2026-08-13: test isolation, and prompt bodies off the routing path
 
 ### Changed

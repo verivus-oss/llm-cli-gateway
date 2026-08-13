@@ -1,0 +1,306 @@
+# Implementation plan: auto-apply upstream flag REMOVALS, closing the last
+# manual step in provider contract rebaselining.
+#
+# Context. `scripts/rebaseline-provider-contracts.mjs` today auto-applies three
+# of the four drift classes (version, additive flags, newly discovered
+# commands) and deliberately refuses the fourth. When an installed binary stops
+# advertising a flag the contract declares, the tool prints a three-file repair
+# recipe, sets `manualActionRequired`, and exits 3.
+#
+# That refusal is now overruled. It treated a vendor's deprecation as something
+# the gateway has to deliberate about, which it is not.
+#
+# Principle that shapes this plan (Werner, 2026-08-14): if an upstream dropped
+# something, we drop it. We ONLY pass through what the upstream supports.
+# Management of that cycle DOES NOT BELONG TO US. There is no need to look at
+# it. We do not own that tool and we do not own that release.
+#
+# This is the mirror image of the reachability principle already recorded in
+# provider-contract-drift-rc3.dag.toml: the gateway wires up access to provider
+# capability, it does not replace or interpret it. Wiring up appearing
+# capability and unwiring disappearing capability are the same rule applied in
+# two directions, so they belong under the same automation.
+
+[meta]
+name = "auto-apply upstream flag removals"
+schema_version = "1.1"
+owner = "verivus-oss"
+target_branch = "fix/pre-3.1.0-workingdir-and-skill-coverage"
+supersedes = "provider-contract-drift-rc3.dag.toml#automation_expectation"
+acceptance_resource = """
+`npm run providers:rebaseline` classifies a flag removal as auto-applicable;
+`--apply` writes it to every registry the gateway owns; `npm test` is green;
+`npm run upstream:drift` exits 0; the removal path has offline unit tests that
+fail if a writer corrupts the file it edits.
+"""
+invariant_sources = [
+  "scripts/rebaseline-provider-contracts.mjs",
+  "scripts/rebaseline-provider-contracts.test.mjs",
+  "src/upstream-contracts.ts",
+  "src/provider-codegen.ts",
+  "src/__tests__/provider-codegen-grok-parity.test.ts",
+]
+
+[decision]
+removal_policy = "auto_apply"
+removal_policy_reason = """
+Superseding the rc3 `automation_expectation`, which read: "Only a flag REMOVAL
+is manual, because `flags` is the argv emit allowlist and a removal has to be
+made in lock-step across the contract, `provider-codegen.ts` and `index.ts`."
+
+The lock-step observation is accurate but it is an argument for automating all
+three edits together, not for stopping. Requiring a human turns every vendor
+deprecation into a review item on our side, which inverts ownership: we would be
+tracking somebody else's release cycle by hand in order to keep our own registry
+truthful. The registry describes what the binary supports. When the binary stops
+supporting something, the truthful registry is the one without it.
+"""
+
+evidence_for_removal = """
+Help-text absence is the signal, and that is already the contract's own declared
+semantics rather than a new inference:
+
+  - `computeFlagDrift` (src/upstream-contracts.ts:4196) reports a contract flag
+    as missing when the installed binary's `--help` does not mention it.
+  - `CliFlagContract.hiddenFromHelp` (src/upstream-contracts.ts:41) is the
+    declared escape hatch for "real and accepted, deliberately undocumented".
+    `computeFlagDrift` skips those entirely, and warns instead if such a flag
+    reappears in help.
+
+So a flag that is absent from help and NOT marked `hiddenFromHelp` has already
+been declared, by us, to mean "upstream no longer offers this". Auto-removal
+acts on that declaration; it does not add a new heuristic. The escape hatch is
+the place to record a contrary belief, and it is a one-word contract edit rather
+than a standing human gate on every run.
+
+Deliberately NOT doing: probing the binary with the flag to confirm rejection.
+That was sound for `devin --agent-config` (a bogus path is inert) but it is not
+sound in general, because an arbitrary dropped flag may carry a side effect.
+"""
+
+ownership_boundary = """
+The tool edits the registries the gateway owns and derives from the contract:
+
+  1. `src/upstream-contracts.ts` `flags`                  (the declaration)
+  2. `src/upstream-contracts.ts` `acknowledgedUpstreamFlags` (probe-quieting)
+  3. `src/provider-codegen.ts` `GROK_FLAG_GENERATION` / `UNGENERATED_GROK_FLAGS`
+     (contract-derived generation metadata)
+
+It does NOT rewrite request-handler plumbing in `src/index.ts`. That is not
+deference to the vendor cycle, it is a limit of what is derivable: a flag string
+does not determine which parameter names, destructures, Zod fields, size
+assertions and presence tuples feed it. The devin `--agent-config` removal
+touched 22 such references, none of which spell the flag.
+
+That residual is OUR code, so it is detected rather than deliberated:
+  - Handler tests assert `validateUpstreamCliArgs(cli, preparedArgs).ok` (for
+    example src/__tests__/grok-handler.test.ts:299). Once the flag leaves the
+    contract, any handler still emitting it fails that assertion by name.
+  - The rebaseliner additionally reports residual source references with
+    file:line, so the follow-up edit is located rather than searched for.
+"""
+
+exit_codes = """
+Rebalanced now that removals are applied rather than deferred:
+  0  clean
+  2  drift found and auto-applied (or applicable, in report mode)
+  3  the gateway still references a flag the installed binary dropped
+`3` therefore stops meaning "a human must judge an upstream change" and starts
+meaning "our own tree is now internally inconsistent", which is a defect report
+about code we own.
+"""
+
+[[steps]]
+id = "supersede-rc3-decision"
+depends_on = []
+actor = "assistant"
+status = "done"
+action = """
+Amend `docs/plans/provider-contract-drift-rc3.dag.toml` `[decision]`
+`automation_expectation` to record that its "only a flag REMOVAL is manual"
+clause is superseded by this plan, with the date and the reason. Do not delete
+the original wording: the rc3 DAG is the historical record of what was believed
+at the time, and rewriting it to look prescient repeats the failure mode that
+file already documents about itself.
+"""
+idempotent = true
+validation = "The rc3 DAG names this file as its successor and keeps the original text."
+
+[[steps]]
+id = "classify-acknowledged-removals"
+depends_on = ["supersede-rc3-decision"]
+actor = "assistant"
+status = "done"
+action = """
+`computeFlagDrift` reports a vanished `acknowledgedUpstreamFlags` entry as a
+`warnings` string, not as drift, so `classifyRebaseline` never sees it and the
+stale acknowledgement lingers. Extend the classifier to surface these as their
+own removal class (`acknowledgedRemovals`), keyed by cli and command path.
+
+Safe to write unconditionally: `acknowledgedUpstreamFlags` is probe-quieting
+only and is never consulted as an emit allowlist, which is the same reason the
+additive writer was already allowed to write it mechanically.
+"""
+idempotent = true
+validation = """
+An offline unit test over a probe fixture carrying a stale acknowledged flag
+produces a non-empty `acknowledgedRemovals` and leaves `removals` untouched.
+"""
+
+[[steps]]
+id = "writer-remove-contract-flags"
+depends_on = ["classify-acknowledged-removals"]
+actor = "assistant"
+status = "done"
+action = """
+Add `rewriteRemovedFlags(source, cli, commandPath, flags)` to the rebaseliner,
+using the AST-for-location plus text-splice technique the additive writer
+already uses (`findContractsObject`, `propByName`, `findSubcommandCall`). Never
+reprint a node: the flag records carry per-entry explanatory comments that a
+printer-based rewrite silently discards.
+
+Deletion spans the whole property, from the start of its leading comment block
+through its trailing comma and line break, so no orphaned comment is left
+describing a flag that is gone. Reuse `lineStartAt` for the leading edge.
+
+Guards, matching the existing writers' standard:
+  - refuse if the edit raises the file's parse-diagnostic count;
+  - refuse if any provider other than `cli` changed;
+  - refuse if the flag is marked `hiddenFromHelp` (that should be unreachable,
+    since `computeFlagDrift` skips those, so reaching it means the classifier
+    and the writer disagree and the run must stop rather than guess).
+"""
+idempotent = true
+validation = """
+Unit tests over a fixture: removing a flag deletes its record and its leading
+comment, leaves neighbouring flags and their comments byte-identical, keeps the
+file parsing, and is a no-op when the flag is already absent.
+"""
+
+[[steps]]
+id = "writer-remove-codegen-entries"
+depends_on = ["writer-remove-contract-flags"]
+actor = "assistant"
+status = "done"
+action = """
+Add a writer for `src/provider-codegen.ts` that deletes the `GROK_FLAG_GENERATION`
+element whose `flag:` property matches, and the matching string element of
+`UNGENERATED_GROK_FLAGS`. Both are contract-derived tables; `deriveGrokArgs` and
+the schema derivation throw at module load if a generation entry names a flag
+absent from the contract (src/provider-codegen.ts:92, :170), so leaving the
+contract half applied without this one is the failure the old three-file recipe
+was warning about.
+
+Order matters: apply the codegen deletion in the same run as the contract
+deletion, so the tree is never left in the half-applied state.
+"""
+idempotent = true
+validation = """
+`provider-codegen-grok-parity.test.ts` stays green after a simulated removal of
+a covered grok flag from both files, and its COVERAGE assertion (every covered
+flag exists in the contract) is what proves the two halves stayed in step.
+"""
+defect_found = """
+The first implementation was a SILENT NO-OP against the real file, and every
+fixture test passed. `GROK_FLAG_GENERATION` is not a list of flag records: it is
+`[...GROK_GEN_OUTPUT_FORMAT, ...GROK_GEN_MAIN, ...GROK_GEN_PROMPT_FILE,
+...GROK_GEN_TAIL]`. The writer located the declaration, found only
+SpreadElements, matched nothing, and reported success, so a real removal would
+have written the contract half and left the generation half dangling: exactly
+the state this step exists to prevent.
+
+Found by running the writer against the live `src/provider-codegen.ts` rather
+than the fixture, which is the same lesson already recorded in
+`feedback_registration_is_not_reachability`: locating a declaration is not
+reaching its contents. The writer now follows spread references transitively,
+and three tests were added that exercise the REAL sources, because a fixture
+only ever proves the writer handles the shape the fixture was written in.
+"""
+
+[[steps]]
+id = "residual-emission-scan"
+depends_on = ["writer-remove-codegen-entries"]
+actor = "assistant"
+status = "done"
+action = """
+After applying removals, scan `src/**/*.ts` (excluding `__tests__` and
+`upstream-contracts.ts` itself) for surviving occurrences of each removed flag
+literal and report them as `residualReferences` with file:line.
+
+Report, do not rewrite. Text matching cannot tell a grok `--model` reference
+from a claude one, so this is a located pointer for the follow-up edit rather
+than an authority to delete. Exit 3 when the list is non-empty, per the
+`exit_codes` decision.
+"""
+idempotent = true
+validation = """
+A fixture where the removed flag still appears in a handler yields a non-empty
+`residualReferences` with a correct file:line; a clean removal yields an empty
+list and exit 2.
+"""
+
+[[steps]]
+id = "wire-into-main"
+depends_on = ["residual-emission-scan"]
+actor = "assistant"
+status = "done"
+action = """
+In `main()`: apply removals under `--apply` alongside the existing writers,
+drop `manualActionRequired` from the JSON result in favour of
+`residualReferences`, replace the three-file advisory block in the human output
+with what was actually written, and apply the new exit-code mapping.
+
+`--no-declare-new` suppresses declaring NEW commands for one run. Removals get
+no equivalent opt-out flag: an opt-out would reintroduce the human gate this
+plan removes, and `hiddenFromHelp` already covers the only legitimate "keep it"
+case, declaratively and in the contract where it belongs.
+"""
+idempotent = true
+validation = "`node scripts/rebaseline-provider-contracts.mjs --json` reports the new shape."
+
+[[steps]]
+id = "rewrite-header-policy"
+depends_on = ["wire-into-main"]
+actor = "assistant"
+status = "done"
+action = """
+The rebaseliner's file header (lines 4 to 19) argues at length that removals are
+NOT automatable. It is now the opposite of the code beneath it. Rewrite it to
+state the pass-through principle and the ownership boundary, and keep the
+lock-step observation as the reason all three edits happen in one run.
+
+Sweep for the same claim restated elsewhere rather than only where the tokens
+changed: `docs/plans/provider-contract-drift-rc3.dag.toml`, the `provider-*`
+maintainer skills, and any CHANGELOG entry describing rebaseliner scope.
+"""
+idempotent = true
+validation = "No surviving text claims a flag removal requires a human."
+
+[[steps]]
+id = "unit-tests"
+depends_on = ["writer-remove-contract-flags", "writer-remove-codegen-entries"]
+actor = "assistant"
+status = "done"
+action = """
+Extend `scripts/rebaseline-provider-contracts.test.mjs`. Follow the existing
+"refuses input it cannot embed safely" pattern: those cases were found by
+probing the function rather than reading it, and every one of them had already
+corrupted a source file. Cover at minimum comment-block deletion, neighbour
+preservation, subcommand-scoped removal, idempotence, and the guard that stops a
+rewrite which disturbs another provider.
+"""
+idempotent = true
+validation = "`npx vitest run scripts/rebaseline-provider-contracts.test.mjs` is green."
+
+[[steps]]
+id = "verify-gate"
+depends_on = ["rewrite-header-policy", "unit-tests"]
+actor = "assistant"
+status = "done"
+action = """
+`npm run build`, `npm test`, `npm run upstream:drift`, and a report-mode
+rebaseliner run against the live host (which currently has zero drift, so the
+expected result is exit 0 and no writes).
+"""
+idempotent = true
+validation = "All green; working tree contains only the intended edits."

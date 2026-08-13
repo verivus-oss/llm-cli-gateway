@@ -1,22 +1,35 @@
 #!/usr/bin/env node
 // Auto-rebaseline provider contracts against the installed CLIs.
 //
-// Drift comes in two kinds, and they are NOT equally automatable. That split
-// is a property of how the contract is wired, established by evidence rather
-// than preference:
+// Governing principle: the gateway passes through what the upstream binary
+// supports, and NOTHING else. It wires up capability as it appears and unwires
+// it as it disappears. A provider's deprecation cycle is not ours to manage, so
+// every class of drift is applied mechanically rather than queued for review:
 //
-//   VERSION drift and ADDITIVE flag drift are safely rewritable. A version
-//   target is a factual record of what was validated against; an upstream flag
-//   the gateway does not emit is an acknowledgement. Neither changes behaviour.
+//   VERSION drift        the target is a factual record of what was validated.
+//   ADDITIVE flag drift  an upstream flag the gateway does not emit, recorded
+//                        as an acknowledgement so the probe stays quiet.
+//   NEW commands         declared reachable per the provider's `autoDeclare`.
+//   REMOVALS             a flag the installed binary stopped advertising. The
+//                        contract describes what the binary supports, so the
+//                        truthful contract is the one without it.
 //
-//   A flag REMOVAL is not. `flags` in a contract entry is the argv EMIT
-//   allowlist, and src/__tests__/provider-codegen-grok-parity.test.ts asserts
-//   that every covered flag exists in the contract. So deleting a flag from
-//   the contract alone leaves GROK_FLAG_GENERATION in provider-codegen.ts and
-//   the hand-written emission in index.ts still referring to it, and the tree
-//   goes red. Repairing it properly is the three-file coordinated edit PR #236
-//   did by hand. A textual rewrite cannot do that reliably, so removals are
-//   reported precisely instead of half-applied.
+// An earlier version of this file refused removals, on the grounds that `flags`
+// is the argv emit allowlist and a removal has to be made in lock-step across
+// the contract, `provider-codegen.ts` and `index.ts`. The lock-step observation
+// holds and is why the first two land in one run here. The conclusion did not:
+// it made a vendor's deprecation a standing review item on our side.
+//
+// `hiddenFromHelp` on a flag contract is the declared way to say "real but
+// deliberately undocumented"; `computeFlagDrift` skips those, so a contrary
+// belief is recorded in the contract rather than defended by a human gate.
+//
+// What is NOT rewritten is the hand-written emission in `src/index.ts`, because
+// it is not derivable from a flag string (the devin `--agent-config` removal
+// touched 22 references, none of which spell the flag). Those are reported with
+// file:line, and the handler tests asserting `validateUpstreamCliArgs(...).ok`
+// fail by name once the contract stops declaring the flag.
+// See docs/plans/provider-contract-removal-autoapply.dag.toml.
 //
 // Usage:
 //   node scripts/rebaseline-provider-contracts.mjs            # report only
@@ -25,15 +38,16 @@
 //   node scripts/rebaseline-provider-contracts.mjs --apply --no-declare-new
 //                                                            # skip declaring
 //                                                            # NEW commands
-import { readFileSync, realpathSync, writeFileSync } from "node:fs";
+import { readdirSync, readFileSync, realpathSync, writeFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
-import { dirname, join, resolve } from "node:path";
+import { dirname, join, relative, resolve, sep } from "node:path";
 import ts from "typescript";
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const REPO = resolve(HERE, "..");
 const DEFINITIONS = join(REPO, "src", "provider-definitions.ts");
 const CONTRACTS = join(REPO, "src", "upstream-contracts.ts");
+const CODEGEN = join(REPO, "src", "provider-codegen.ts");
 
 const args = process.argv.slice(2);
 const APPLY = args.includes("--apply");
@@ -427,6 +441,447 @@ export function rewriteAcknowledgedFlags(source, cli, commandPath, flags) {
   return { source: next, skipped: null };
 }
 
+// ---------------------------------------------------------------------------
+// Removal rebaselining (a flag the installed binary stopped advertising).
+//
+// Deleting is harder than inserting for one reason: an entry owns explanatory
+// text around it. A flag record in `flags` is routinely preceded by a comment
+// block saying why its arity or value set is what it is, and deleting the
+// record alone strands that comment describing something that no longer exists.
+// So a deletion spans the whole entry, its own leading comments, its trailing
+// comma and any same-line trailing comment.
+//
+// The one genuinely ambiguous case is a comment sitting between two entries:
+// it may belong to either. It is attributed to the PREVIOUS entry when it
+// begins on the same line that entry ends on, and to the following entry
+// otherwise, which is how the file is actually written.
+// ---------------------------------------------------------------------------
+
+/** Zero-based line index of `pos`. */
+function lineOf(source, pos) {
+  let line = 0;
+  for (let i = 0; i < pos && i < source.length; i++) if (source[i] === "\n") line++;
+  return line;
+}
+
+/**
+ * The text span to delete for `node`, including the comments it owns.
+ *
+ * @param previousEnd End offset of the preceding sibling, or null when first.
+ */
+function deletionSpan(source, node, previousEnd) {
+  const prevLine = previousEnd === null ? -1 : lineOf(source, previousEnd);
+  let start = node.getStart();
+  for (const comment of ts.getLeadingCommentRanges(source, node.getFullStart()) ?? []) {
+    // Same line as the previous entry's end: that comment annotates the entry
+    // being kept, so deleting it would remove an explanation of live code.
+    if (lineOf(source, comment.pos) <= prevLine) continue;
+    start = comment.pos;
+    break;
+  }
+  // Take the whole line when only indentation precedes the entry, so a deletion
+  // never leaves a whitespace-only line behind.
+  const lineStart = lineStartAt(source, start);
+  if (/^[ \t]*$/.test(source.slice(lineStart, start))) start = lineStart;
+
+  let end = node.getEnd();
+  const hadTrailingComma = source[end] === ",";
+  if (hadTrailingComma) end += 1;
+  const trailing = ts.getTrailingCommentRanges(source, end) ?? [];
+  if (trailing.length > 0) {
+    end = trailing[trailing.length - 1].end;
+  } else {
+    // Separator spacing on a single-line array: `["--a", "--b"]` must collapse
+    // to `["--b"]`, not `[ "--b"]`.
+    while (source[end] === " " || source[end] === "\t") end += 1;
+  }
+  if (source[end] === "\r") end += 1;
+  if (source[end] === "\n") end += 1;
+
+  // The LAST element carries no trailing comma, so the separator that has to go
+  // is the one BEFORE it. Without this, deleting the tail of an array leaves a
+  // dangling `["--a", ]`, which parses but is not something anyone wrote.
+  if (!hadTrailingComma && previousEnd !== null) {
+    let i = start - 1;
+    while (i >= 0 && /\s/.test(source[i])) i--;
+    if (source[i] === ",") start = i;
+  }
+  return { start, end };
+}
+
+/**
+ * Apply deletions computed against the ORIGINAL offsets.
+ *
+ * Descending order, so an earlier splice cannot shift a later one's offsets.
+ */
+function spliceOut(source, spans) {
+  let next = source;
+  for (const span of [...spans].sort((a, b) => b.start - a.start)) {
+    next = next.slice(0, span.start) + next.slice(span.end);
+  }
+  return next;
+}
+
+/**
+ * Root-level flag key sets per provider, for the disturbance guard.
+ *
+ * Cheaper and more direct than diffing text: it asserts the property that
+ * matters (nothing but the named provider's flag set moved) rather than a
+ * proxy for it.
+ */
+function rootFlagKeysByCli(source) {
+  const contracts = findContractsObject(parseContracts(source));
+  const out = {};
+  if (!contracts) return out;
+  for (const prop of contracts.properties) {
+    if (!ts.isPropertyAssignment(prop) || !ts.isObjectLiteralExpression(prop.initializer)) continue;
+    const cli = ts.isIdentifier(prop.name) || ts.isStringLiteral(prop.name) ? prop.name.text : null;
+    if (!cli) continue;
+    const flags = propByName(prop.initializer, "flags");
+    out[cli] =
+      flags && ts.isObjectLiteralExpression(flags.initializer)
+        ? flags.initializer.properties
+            .map(p =>
+              ts.isPropertyAssignment(p) && (ts.isIdentifier(p.name) || ts.isStringLiteral(p.name))
+                ? p.name.text
+                : null
+            )
+            .filter(Boolean)
+            .sort()
+        : [];
+  }
+  return out;
+}
+
+/** Shared post-edit guard: the result must parse no worse than the input. */
+function assertNoNewParseErrors(source, next, what, fileName = "upstream-contracts.ts") {
+  const parse = text =>
+    ts.createSourceFile(fileName, text, ts.ScriptTarget.Latest, true, ts.ScriptKind.TS)
+      .parseDiagnostics?.length ?? 0;
+  const before = parse(source);
+  const after = parse(next);
+  if (after > before) {
+    throw new Error(
+      `Refusing to write ${what}: the edit introduced ${after - before} parse error(s).`
+    );
+  }
+}
+
+/**
+ * Delete flags the installed binary no longer advertises from a provider's
+ * contract: the `flags` record at root level, or the flag-name array of a
+ * `subcommand(...)` declaration.
+ *
+ * @returns `{ source, skipped, removed }`. `skipped` is a reason string when
+ *   the target could not be located, so one unmappable entry never aborts the
+ *   rest of the run.
+ */
+export function rewriteRemovedFlags(source, cli, commandPath, flags) {
+  const sourceFile = parseContracts(source);
+  const contracts = findContractsObject(sourceFile);
+  if (!contracts) throw new Error("UPSTREAM_CLI_CONTRACTS object literal not found");
+  const entry = propByName(contracts, cli);
+  if (!entry || !ts.isObjectLiteralExpression(entry.initializer)) {
+    throw new Error(`No contract entry for ${cli}`);
+  }
+
+  const wanted = new Set(flags);
+  const spans = [];
+  const removed = [];
+
+  if (commandPath === null) {
+    const flagsProp = propByName(entry.initializer, "flags");
+    if (!flagsProp || !ts.isObjectLiteralExpression(flagsProp.initializer)) {
+      return { source, skipped: `${cli} (no literal flags record)`, removed: [] };
+    }
+    const properties = flagsProp.initializer.properties;
+    for (let i = 0; i < properties.length; i++) {
+      const prop = properties[i];
+      if (!ts.isPropertyAssignment(prop)) continue;
+      const key =
+        ts.isIdentifier(prop.name) || ts.isStringLiteral(prop.name) ? prop.name.text : null;
+      if (!key || !wanted.has(key)) continue;
+      // Unreachable via the classifier, because `computeFlagDrift` skips
+      // hiddenFromHelp flags entirely. Reaching it means the classifier and this
+      // writer disagree about what the contract says, and guessing which one is
+      // right is exactly how a real, working flag gets deleted.
+      if (
+        ts.isObjectLiteralExpression(prop.initializer) &&
+        propByName(prop.initializer, "hiddenFromHelp")
+      ) {
+        throw new Error(
+          `Refusing to remove ${key} from ${cli}: it is marked hiddenFromHelp, so its ` +
+            `absence from help output is expected and is not evidence of removal.`
+        );
+      }
+      spans.push(deletionSpan(source, prop, i > 0 ? properties[i - 1].getEnd() : null));
+      removed.push(key);
+    }
+  } else {
+    const call = findSubcommandCall(entry.initializer, commandPath);
+    if (!call) {
+      return {
+        source,
+        skipped: `${cli} ${commandPath.join(" ")} (no subcommand() declaration)`,
+        removed: [],
+      };
+    }
+    const flagsArg = call.arguments[3];
+    if (!flagsArg || !ts.isArrayLiteralExpression(flagsArg)) {
+      return {
+        source,
+        skipped: `${cli} ${commandPath.join(" ")} (no literal flag array)`,
+        removed: [],
+      };
+    }
+    const elements = flagsArg.elements;
+    for (let i = 0; i < elements.length; i++) {
+      const el = elements[i];
+      if (!ts.isStringLiteral(el) || !wanted.has(el.text)) continue;
+      spans.push(deletionSpan(source, el, i > 0 ? elements[i - 1].getEnd() : null));
+      removed.push(el.text);
+    }
+  }
+
+  if (spans.length === 0) return { source, skipped: null, removed: [] };
+
+  const next = spliceOut(source, spans);
+  const where = commandPath ? ` ${commandPath.join(" ")}` : "";
+  assertNoNewParseErrors(source, next, `flag removal for ${cli}${where}`);
+
+  const before = rootFlagKeysByCli(source);
+  const after = rootFlagKeysByCli(next);
+  for (const key of Object.keys(before)) {
+    const expected =
+      key === cli && commandPath === null ? before[key].filter(f => !wanted.has(f)) : before[key];
+    if (JSON.stringify(after[key]) !== JSON.stringify(expected)) {
+      throw new Error(
+        `Refusing to remove flags for ${cli}${where}: the edit also changed ${key}'s flag set.`
+      );
+    }
+  }
+
+  return { source: next, skipped: null, removed: removed.sort() };
+}
+
+/**
+ * Delete entries from `acknowledgedUpstreamFlags` that the installed binary no
+ * longer advertises.
+ *
+ * Always safe to write: the list is probe-quieting only and is never consulted
+ * as an emit allowlist, which is the same property that let the additive writer
+ * add to it mechanically.
+ */
+export function rewriteRemovedAcknowledgedFlags(source, cli, commandPath, flags) {
+  const contracts = findContractsObject(parseContracts(source));
+  if (!contracts) throw new Error("UPSTREAM_CLI_CONTRACTS object literal not found");
+  const entry = propByName(contracts, cli);
+  if (!entry || !ts.isObjectLiteralExpression(entry.initializer)) {
+    throw new Error(`No contract entry for ${cli}`);
+  }
+
+  let target = null;
+  if (commandPath === null) {
+    target = entry.initializer;
+  } else {
+    const call = findSubcommandCall(entry.initializer, commandPath);
+    const options = call?.arguments[4];
+    if (options && ts.isObjectLiteralExpression(options)) target = options;
+  }
+  if (!target) {
+    const where = commandPath ? ` ${commandPath.join(" ")}` : "";
+    return { source, skipped: `${cli}${where} (no acknowledged list)`, removed: [] };
+  }
+
+  const prop = propByName(target, "acknowledgedUpstreamFlags");
+  if (!prop || !ts.isArrayLiteralExpression(prop.initializer)) {
+    return { source, skipped: null, removed: [] };
+  }
+
+  const wanted = new Set(flags);
+  const elements = prop.initializer.elements;
+  const spans = [];
+  const removed = [];
+  for (let i = 0; i < elements.length; i++) {
+    const el = elements[i];
+    if (!ts.isStringLiteral(el) || !wanted.has(el.text)) continue;
+    spans.push(deletionSpan(source, el, i > 0 ? elements[i - 1].getEnd() : null));
+    removed.push(el.text);
+  }
+  if (spans.length === 0) return { source, skipped: null, removed: [] };
+
+  const next = spliceOut(source, spans);
+  assertNoNewParseErrors(source, next, `acknowledged-flag removal for ${cli}`);
+  return { source: next, skipped: null, removed: removed.sort() };
+}
+
+/**
+ * Delete a removed flag from the contract-DERIVED generation tables in
+ * `src/provider-codegen.ts`.
+ *
+ * This is the edit that makes the contract half safe to apply on its own run.
+ * `deriveGrokArgs` and the schema derivation throw at call time when a
+ * generation entry names a flag absent from the contract
+ * (src/provider-codegen.ts:92, :170), so a contract-only removal leaves the
+ * tree in exactly the half-applied state the old three-file manual recipe was
+ * warning about. Both halves land in the same run instead.
+ *
+ * Table names are derived from the provider (`GROK_FLAG_GENERATION`,
+ * `UNGENERATED_GROK_FLAGS`); a provider with no such tables is a no-op, which
+ * is every provider but grok today.
+ */
+export function rewriteRemovedCodegenFlags(source, cli, flags) {
+  const upper = cli.toUpperCase();
+  const wanted = new Set(flags);
+  const sourceFile = ts.createSourceFile(
+    "provider-codegen.ts",
+    source,
+    ts.ScriptTarget.Latest,
+    true,
+    ts.ScriptKind.TS
+  );
+
+  /** The array literal initialising a top-level `const <name>`. */
+  const arrayNamed = name => {
+    for (const stmt of sourceFile.statements) {
+      if (!ts.isVariableStatement(stmt)) continue;
+      for (const decl of stmt.declarationList.declarations) {
+        if (!ts.isIdentifier(decl.name) || decl.name.text !== name) continue;
+        let init = decl.initializer;
+        while (
+          init &&
+          (ts.isAsExpression(init) ||
+            ts.isSatisfiesExpression(init) ||
+            ts.isParenthesizedExpression(init))
+        ) {
+          init = init.expression;
+        }
+        if (init && ts.isArrayLiteralExpression(init)) return init;
+      }
+    }
+    return null;
+  };
+
+  /**
+   * The named array plus every array it spreads in, flattened.
+   *
+   * `GROK_FLAG_GENERATION` is `[...GROK_GEN_OUTPUT_FORMAT, ...GROK_GEN_MAIN,
+   * ...]`, so its own elements are SpreadElements and none of them is a flag
+   * record. Scanning only the named array found the declaration, matched
+   * nothing, and reported success: a silent no-op that would have left every
+   * real removal half-applied.
+   */
+  const arraysUnder = (name, seen = new Set()) => {
+    if (seen.has(name)) return [];
+    seen.add(name);
+    const arr = arrayNamed(name);
+    if (!arr) return [];
+    const found = [{ name, arr }];
+    for (const el of arr.elements) {
+      if (ts.isSpreadElement(el) && ts.isIdentifier(el.expression)) {
+        found.push(...arraysUnder(el.expression.text, seen));
+      }
+    }
+    return found;
+  };
+
+  const spans = [];
+  const removed = [];
+
+  for (const { name, arr } of arraysUnder(`${upper}_FLAG_GENERATION`)) {
+    for (let i = 0; i < arr.elements.length; i++) {
+      const el = arr.elements[i];
+      if (!ts.isObjectLiteralExpression(el)) continue;
+      const flagProp = propByName(el, "flag");
+      const value =
+        flagProp && ts.isStringLiteral(flagProp.initializer) ? flagProp.initializer.text : null;
+      if (!value || !wanted.has(value)) continue;
+      spans.push(deletionSpan(source, el, i > 0 ? arr.elements[i - 1].getEnd() : null));
+      removed.push(`${name} ${value}`);
+    }
+  }
+
+  for (const { name, arr } of arraysUnder(`UNGENERATED_${upper}_FLAGS`)) {
+    for (let i = 0; i < arr.elements.length; i++) {
+      const el = arr.elements[i];
+      if (!ts.isStringLiteral(el) || !wanted.has(el.text)) continue;
+      spans.push(deletionSpan(source, el, i > 0 ? arr.elements[i - 1].getEnd() : null));
+      removed.push(`${name} ${el.text}`);
+    }
+  }
+
+  if (spans.length === 0) return { source, removed: [] };
+  const next = spliceOut(source, spans);
+  assertNoNewParseErrors(source, next, `codegen removal for ${cli}`, "provider-codegen.ts");
+  return { source: next, removed: removed.sort() };
+}
+
+// ---------------------------------------------------------------------------
+// Residual-emission reporting.
+//
+// Removing a flag from the contract does not stop `src/index.ts` emitting it,
+// and that plumbing is not derivable from the flag string: the devin
+// `--agent-config` removal touched 22 references, none of which spell the flag.
+// So this REPORTS rather than rewrites. A text match cannot tell a grok
+// `--model` reference from a claude one, which makes it a located pointer for
+// the follow-up edit, not an authority to delete.
+//
+// The suite is the other half of this: handler tests assert
+// `validateUpstreamCliArgs(cli, preparedArgs).ok`, so a handler still emitting
+// a dropped flag fails by name once the contract no longer declares it.
+// ---------------------------------------------------------------------------
+
+/** Source files that may still emit a removed flag. */
+function emittingSourceFiles() {
+  const src = join(REPO, "src");
+  return readdirSync(src, { recursive: true, withFileTypes: true })
+    .filter(e => e.isFile() && e.name.endsWith(".ts"))
+    .map(e => join(e.parentPath ?? e.path, e.name))
+    .filter(p => !p.includes(`${sep}__tests__${sep}`))
+    .filter(p => p !== CONTRACTS && p !== join(src, "provider-codegen.ts"));
+}
+
+/**
+ * Match a flag as a whole token, so removing `--model` does not report every
+ * `--model-name` and `--dry-run` does not match `--dry-run-only`.
+ */
+export function flagTokenPattern(flag) {
+  return new RegExp(`${flag.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}(?![\\w-])`);
+}
+
+/**
+ * Occurrences of each removed flag still present in the tree, as file:line.
+ *
+ * @param files Paths to read, or `{ file, text }` pairs for offline callers.
+ */
+export function findResidualReferences(flags, files = emittingSourceFiles()) {
+  const hits = [];
+  for (const flag of flags) {
+    const pattern = flagTokenPattern(flag);
+    for (const entry of files) {
+      let file = entry;
+      let text = entry?.text;
+      if (typeof entry === "string") {
+        file = entry;
+        try {
+          text = readFileSync(entry, "utf8");
+        } catch {
+          continue;
+        }
+      } else {
+        file = entry.file;
+      }
+      if (!text?.includes(flag)) continue;
+      text.split("\n").forEach((line, i) => {
+        if (pattern.test(line)) {
+          hits.push({ flag, file: relative(REPO, file), line: i + 1, text: line.trim() });
+        }
+      });
+    }
+  }
+  return hits;
+}
+
 /** A property key that needs quoting in an object literal. */
 function objectKey(name) {
   return /^[A-Za-z_$][A-Za-z0-9_$]*$/.test(name) ? name : JSON.stringify(name);
@@ -638,12 +1093,20 @@ export function rewriteAdminSubcommands(source, cli, families) {
  *
  * @param probes Per-provider installed probe results.
  * @param versionVerdicts Per-provider version comparison verdicts.
+ * @param contracts Optional `UPSTREAM_CLI_CONTRACTS`, needed only to classify
+ *   stale acknowledgements. Omitted, `acknowledgedRemovals` is empty.
  * @returns Classified actions.
  */
-export function classifyRebaseline(probes, versionVerdicts) {
+export function classifyRebaseline(probes, versionVerdicts, contracts = null) {
   const versionUpdates = [];
   const additive = [];
   const removals = [];
+  // A vanished `acknowledgedUpstreamFlags` entry is reported by
+  // `computeFlagDrift` as a warning STRING rather than as drift, so it never
+  // reached this classifier and the stale acknowledgement lingered. Recompute
+  // it from the probe's own `discoveredFlags` instead of parsing that warning
+  // text: the fact is already in the data, and a message format is not an API.
+  const acknowledgedRemovals = [];
 
   for (const verdict of versionVerdicts) {
     if (verdict.state === "drift" && verdict.installed) {
@@ -663,6 +1126,12 @@ export function classifyRebaseline(probes, versionVerdicts) {
     }
     const missing = probe.missingFlags ?? [];
     if (missing.length > 0) removals.push({ cli: probe.cli, flags: [...missing].sort() });
+
+    const entry = contracts?.[probe.cli] ?? null;
+    const staleRoot = staleAcknowledged(entry?.acknowledgedUpstreamFlags, probe.discoveredFlags);
+    if (staleRoot.length > 0) {
+      acknowledgedRemovals.push({ cli: probe.cli, commandPath: null, flags: staleRoot });
+    }
 
     // Subcommand-level drift is the same class of fact as root level, so it is
     // equally safe to acknowledge. It was previously neither classified nor
@@ -685,14 +1154,32 @@ export function classifyRebaseline(probes, versionVerdicts) {
           flags: [...subMissing].sort(),
         });
       }
+
+      const declared = entry?.subcommands?.[(sub.commandPath ?? []).join(" ")] ?? null;
+      const staleSub = staleAcknowledged(declared?.acknowledgedUpstreamFlags, sub.discoveredFlags);
+      if (staleSub.length > 0) {
+        acknowledgedRemovals.push({
+          cli: probe.cli,
+          commandPath: [...(sub.commandPath ?? [])],
+          flags: staleSub,
+        });
+      }
     }
   }
 
-  return { versionUpdates, additive, removals };
+  return { versionUpdates, additive, removals, acknowledgedRemovals };
+}
+
+/** Acknowledged flags the installed binary's help no longer advertises. */
+function staleAcknowledged(acknowledged, discoveredFlags) {
+  if (!acknowledged?.length || !discoveredFlags) return [];
+  const discovered = new Set(discoveredFlags);
+  return [...acknowledged].filter(flag => !discovered.has(flag)).sort();
 }
 
 async function main() {
-  const { buildUpstreamContractReport } = await import(join(REPO, "dist", "upstream-contracts.js"));
+  const { buildUpstreamContractReport, UPSTREAM_CLI_CONTRACTS, flattenCliSubcommands } =
+    await import(join(REPO, "dist", "upstream-contracts.js"));
   // The shipped normalizer, reused rather than reimplemented, so the rebaseliner
   // and the version guard can never disagree about what a version string means.
   const contractsModule = await import(join(REPO, "dist", "provider-version-guard.js"));
@@ -707,7 +1194,25 @@ async function main() {
   const report = buildUpstreamContractReport({ probeInstalled: true });
   const probes = Object.values(report.installedProbe ?? {}).filter(p => p && p.cli);
 
-  const plan = classifyRebaseline(probes, verdicts);
+  // Only the acknowledged lists are needed, flattened to the same
+  // space-joined command path the probe reports, so the classifier stays a pure
+  // function over plain data and remains testable offline.
+  const contractView = Object.fromEntries(
+    Object.entries(UPSTREAM_CLI_CONTRACTS).map(([cli, contract]) => [
+      cli,
+      {
+        acknowledgedUpstreamFlags: contract.acknowledgedUpstreamFlags ?? [],
+        subcommands: Object.fromEntries(
+          flattenCliSubcommands(contract.subcommands).map(sub => [
+            sub.commandPath.join(" "),
+            { acknowledgedUpstreamFlags: sub.acknowledgedUpstreamFlags ?? [] },
+          ])
+        ),
+      },
+    ])
+  );
+
+  const plan = classifyRebaseline(probes, verdicts, contractView);
 
   const applied = [];
   if (APPLY && plan.versionUpdates.length > 0) {
@@ -845,14 +1350,73 @@ async function main() {
     writeFileSync(CONTRACTS, source);
   }
 
+  // Removals: the contract and its derived generation tables are edited in the
+  // SAME run, because the codegen tables throw at call time on a flag the
+  // contract no longer declares. Applying one without the other is the only
+  // genuinely broken intermediate state, so it is never written.
+  const skippedRemovals = [];
+  if (APPLY && (plan.removals.length > 0 || plan.acknowledgedRemovals.length > 0)) {
+    let source = readFileSync(CONTRACTS, "utf8");
+    for (const removal of plan.removals) {
+      const outcome = rewriteRemovedFlags(
+        source,
+        removal.cli,
+        removal.commandPath ?? null,
+        removal.flags
+      );
+      source = outcome.source;
+      if (outcome.skipped) {
+        skippedRemovals.push(`${outcome.skipped}: ${removal.flags.join(" ")}`);
+        continue;
+      }
+      if (outcome.removed.length > 0) {
+        const where = removal.commandPath?.length ? ` ${removal.commandPath.join(" ")}` : "";
+        applied.push(`${removal.cli}${where}: dropped ${outcome.removed.join(" ")}`);
+      }
+    }
+    for (const removal of plan.acknowledgedRemovals) {
+      const outcome = rewriteRemovedAcknowledgedFlags(
+        source,
+        removal.cli,
+        removal.commandPath ?? null,
+        removal.flags
+      );
+      source = outcome.source;
+      if (outcome.removed.length > 0) {
+        const where = removal.commandPath?.length ? ` ${removal.commandPath.join(" ")}` : "";
+        applied.push(
+          `${removal.cli}${where}: dropped stale acknowledgement ${outcome.removed.join(" ")}`
+        );
+      }
+    }
+    writeFileSync(CONTRACTS, source);
+
+    let codegen = readFileSync(CODEGEN, "utf8");
+    for (const removal of plan.removals) {
+      const outcome = rewriteRemovedCodegenFlags(codegen, removal.cli, removal.flags);
+      codegen = outcome.source;
+      for (const entry of outcome.removed) applied.push(`${removal.cli}: dropped ${entry}`);
+    }
+    writeFileSync(CODEGEN, codegen);
+  }
+
+  // Reported after the writes, so it describes what actually survives rather
+  // than what was there before the contract was corrected.
+  const residualReferences =
+    plan.removals.length > 0
+      ? findResidualReferences([...new Set(plan.removals.flatMap(r => r.flags))])
+      : [];
+
   const result = {
     generatedAt: new Date().toISOString(),
     applied: APPLY,
     versionUpdates: plan.versionUpdates,
     additiveFlagDrift: plan.additive,
     removedFlagDrift: plan.removals,
+    staleAcknowledgements: plan.acknowledgedRemovals,
     changesWritten: applied,
-    manualActionRequired: plan.removals.length > 0,
+    skippedRemovals,
+    residualReferences,
   };
 
   if (AS_JSON) {
@@ -861,7 +1425,8 @@ async function main() {
     if (
       plan.versionUpdates.length === 0 &&
       plan.additive.length === 0 &&
-      plan.removals.length === 0
+      plan.removals.length === 0 &&
+      plan.acknowledgedRemovals.length === 0
     ) {
       console.log("No provider contract drift: installed CLIs match their contracts.");
     }
@@ -874,38 +1439,58 @@ async function main() {
       );
     }
     for (const r of plan.removals) {
-      console.error(
-        `\n${r.cli}: contract declares flag(s) the installed binary NO LONGER advertises: ${r.flags.join(" ")}`
+      const where = r.commandPath?.length ? ` ${r.commandPath.join(" ")}` : "";
+      console.log(
+        `${r.cli}${where}: installed binary NO LONGER advertises ${r.flags.join(" ")}; ` +
+          `${APPLY ? "dropped from" : "would drop from"} the contract`
       );
-      console.error(
-        "  NOT auto-applied. `flags` is the argv emit allowlist, so a removal has to be made in"
+    }
+    for (const r of plan.acknowledgedRemovals) {
+      const where = r.commandPath?.length ? ` ${r.commandPath.join(" ")}` : "";
+      console.log(
+        `${r.cli}${where}: stale acknowledgement ${r.flags.join(" ")}; ` +
+          `${APPLY ? "dropped" : "would drop"}`
       );
-      console.error("  lock-step across three places or the tree goes red:");
-      console.error("    1. src/upstream-contracts.ts   (the contract entry's `flags`)");
-      console.error("    2. src/provider-codegen.ts     (the generation table)");
-      console.error("    3. src/index.ts                (the hand-written argv emission)");
+    }
+    for (const s of skippedRemovals) {
+      console.error(`skipped removal, target not located: ${s}`);
+    }
+    if (residualReferences.length > 0) {
       console.error(
-        "  Removing it from the contract alone leaves provider-codegen-grok-parity.test.ts red,"
+        "\nThe gateway still references flag(s) the installed binary dropped. The contract is" +
+          "\ncorrect now; these emission sites are not, and each one produces a request the" +
+          "\nprovider rejects at argument parsing:"
       );
+      for (const hit of residualReferences) {
+        console.error(`  ${hit.file}:${hit.line}  ${hit.flag}  ${hit.text}`);
+      }
       console.error(
-        "  because that test asserts every covered flag exists in the contract. More importantly a"
+        "\nNot auto-edited: a flag string does not determine which parameter names, Zod fields" +
+          "\nand pass-throughs feed it, and a text match cannot tell one provider's --model from" +
+          "\nanother's. Handler tests asserting validateUpstreamCliArgs(...).ok will now name the" +
+          "\nsame sites."
       );
-      console.error(
-        "  flag that upstream dropped while the gateway still emits it is a live breakage, which is"
-      );
-      console.error("  exactly the grok 0.2.112 --best-of-n case, so it wants eyes on it.");
     }
   }
 
   // Exit codes are the scheduled job's whole signal, so they distinguish the
   // three outcomes that need different responses:
   //   0  clean
-  //   2  drift found that this tool can rebaseline on its own
-  //   3  drift found that needs a human (a flag removal)
+  //   2  drift found that this tool rebaselined (or can, in report mode)
+  //   3  the gateway still references a flag the installed binary dropped
   // Treating version drift as clean, which an earlier version did, makes a
   // timer silently report success while the contract is stale.
-  if (plan.removals.length > 0) process.exit(3);
-  const rebaselinable = plan.versionUpdates.length > 0 || plan.additive.length > 0;
+  //
+  // 3 no longer means "a human must judge an upstream change". Upstream's
+  // deprecation cycle is not ours to manage, so it is applied, not deliberated.
+  // It now means our own tree is internally inconsistent, which is a defect
+  // report about code we own.
+  if (residualReferences.length > 0) process.exit(3);
+  const rebaselinable =
+    plan.versionUpdates.length > 0 ||
+    plan.additive.length > 0 ||
+    plan.removals.length > 0 ||
+    plan.acknowledgedRemovals.length > 0;
   process.exit(rebaselinable ? 2 : 0);
 }
 

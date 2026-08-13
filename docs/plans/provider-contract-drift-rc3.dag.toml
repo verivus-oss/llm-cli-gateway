@@ -52,6 +52,13 @@ Version drift, additive flag drift, and newly discovered commands are all
 mechanical and belong in `providers:rebaseline`. Only a flag REMOVAL is manual,
 because `flags` is the argv emit allowlist and a removal has to be made in
 lock-step across the contract, `provider-codegen.ts` and `index.ts`.
+
+SUPERSEDED 2026-08-14 by docs/plans/provider-contract-removal-autoapply.dag.toml.
+The original wording is kept above because this file records what was believed
+while the work was done, not what turned out to be right. The lock-step
+observation held; the conclusion drawn from it did not. Requiring a human for a
+removal made the gateway track a vendor's deprecation cycle by hand, and that
+cycle is not ours to manage. All three edits are now made together by the tool.
 """
 reachability_model = """
 Two registries, both required, and they compose:
