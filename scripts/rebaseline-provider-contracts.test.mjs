@@ -181,7 +181,9 @@ describe("classifyRebaseline", () => {
       ],
       []
     );
-    expect(plan.additive).toEqual([{ cli: "grok", flags: ["--sandbox-new"] }]);
+    // `commandPath` is null for root-level drift and carries the path for a
+    // subcommand, so the acknowledgement writer knows which object to edit.
+    expect(plan.additive).toEqual([{ cli: "grok", commandPath: null, flags: ["--sandbox-new"] }]);
     expect(plan.removals).toEqual([{ cli: "grok", flags: ["--best-of-n"] }]);
   });
 
@@ -190,7 +192,67 @@ describe("classifyRebaseline", () => {
       [{ cli: "grok", available: true, extraFlags: ["-x", "--real"], missingFlags: [] }],
       []
     );
-    expect(plan.additive).toEqual([{ cli: "grok", flags: ["--real"] }]);
+    expect(plan.additive).toEqual([{ cli: "grok", commandPath: null, flags: ["--real"] }]);
+  });
+
+  it("classifies subcommand-level drift with its command path", () => {
+    // Subcommand drift was previously neither classified nor written, so
+    // findings the tool could have cleared were left for a human. The path is
+    // what lets the writer target the right `subcommand()` declaration rather
+    // than the provider's root acknowledgement list.
+    const plan = classifyRebaseline(
+      [
+        {
+          cli: "codex",
+          available: true,
+          extraFlags: [],
+          missingFlags: [],
+          subcommands: {
+            exec: {
+              commandPath: ["exec"],
+              available: true,
+              extraFlags: ["--approve-for-me", "-q"],
+              missingFlags: [],
+            },
+            gone: {
+              commandPath: ["gone"],
+              available: true,
+              extraFlags: [],
+              missingFlags: ["--vanished"],
+            },
+          },
+        },
+      ],
+      []
+    );
+    expect(plan.additive).toEqual([
+      { cli: "codex", commandPath: ["exec"], flags: ["--approve-for-me"] },
+    ]);
+    expect(plan.removals).toEqual([{ cli: "codex", commandPath: ["gone"], flags: ["--vanished"] }]);
+  });
+
+  it("skips subcommands the probe could not reach, rather than inventing drift", () => {
+    const plan = classifyRebaseline(
+      [
+        {
+          cli: "codex",
+          available: true,
+          extraFlags: [],
+          missingFlags: [],
+          subcommands: {
+            unreachable: {
+              commandPath: ["unreachable"],
+              available: false,
+              extraFlags: ["--phantom"],
+              missingFlags: [],
+            },
+          },
+        },
+      ],
+      []
+    );
+    expect(plan.additive).toEqual([]);
+    expect(plan.removals).toEqual([]);
   });
 
   it("skips providers whose binary is unavailable", () => {

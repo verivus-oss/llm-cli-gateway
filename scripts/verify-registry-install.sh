@@ -197,9 +197,25 @@ echo "==> fresh consumer install from ${REGISTRY}"
 pushd "${CONSUMER_DIR}" >/dev/null
 # Consumer-local .npmrc pins the registry + cache so nothing leaks to the user's
 # global config or the public registry.
+# min-release-age is a PUBLIC-registry supply-chain control: it refuses packages
+# published within the last N days, so a freshly uploaded malicious version
+# cannot be installed before anyone notices it. An operator setting it in
+# ~/.npmrc is doing the right thing, and npm merges that user config into this
+# ephemeral consumer project.
+#
+# It cannot apply here. This script publishes to a local verdaccio and installs
+# seconds later, so the package under verification is always newer than any
+# floor, and the gate becomes unrunnable on a host that sets one:
+#   npm error notarget No matching version found for llm-cli-gateway@<ver>
+#     with a date before <today minus N days>
+#
+# Pin it to 0 for THIS project only. The threat the control addresses (an
+# attacker publishing to the public registry) does not exist for a tarball this
+# script just built from the working tree.
 cat > .npmrc <<NPMRC
 registry=${REGISTRY}
 cache=${NPM_CACHE}
+min-release-age=0
 NPMRC
 npm init -y >/dev/null 2>&1
 # Install our package by name from the registry. In 2.0.0 the prod graph has no
