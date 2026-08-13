@@ -1,7 +1,7 @@
 {
   "schemaVersion": "upstream-scan-snapshot.v2",
   "cli": "mistral",
-  "fetchedAt": "2026-07-28T01:53:02.786Z",
+  "fetchedAt": "2026-08-13T12:24:57.294Z",
   "sources": [
     {
       "url": "https://api.github.com/repos/mistralai/mistral-vibe/releases/latest",
@@ -25,10 +25,10 @@
     }
   ],
   "helpSurface": {
-    "probedAt": "2026-07-28T01:53:01.299Z",
+    "probedAt": "2026-08-13T12:24:55.764Z",
     "available": true,
-    "version": "vibe 2.22.0",
-    "targetVersion": "vibe 2.22.0",
+    "version": "vibe 2.24.1",
+    "targetVersion": "vibe 2.24.1",
     "versionMatchesTarget": true,
     "discoveredFlags": [
       "--add-dir",
@@ -51,12 +51,33 @@
       "--worktree",
       "--yolo"
     ],
-    "helpHash": "c12e04642b45bb3e33c371c619e626e5ba78439a14c2711b01a3fbd6cac530f4",
+    "helpHash": "36b56195ea2244c8bbdcd35355580fc3f05266f6e2359e7e7161ffb3320edf69",
     "extraVsContract": [],
     "missingFromBinary": [],
     "arityMismatches": [],
     "enumMismatches": []
   },
-  "rootCommands": [],
-  "subcommands": {}
+  "rootCommands": [
+    "mcp"
+  ],
+  "subcommands": {
+    "mcp": {
+      "commandPath": [
+        "mcp"
+      ],
+      "probedAt": "2026-08-13T12:24:55.763Z",
+      "available": true,
+      "existence": "present",
+      "discoveredFlags": [],
+      "helpHash": "054cf0998787d73ecc9e51befa7e3760aa8899d8106054ecfd2d4587af12196b",
+      "extraVsContract": [],
+      "missingFromBinary": [],
+      "arityMismatches": [],
+      "enumMismatches": [],
+      "risk": "writes_local_config",
+      "exposure": "tracked_only",
+      "tier": "catalog",
+      "summary": "Upstream-declared mistral command (auto-catalogued, unverified)."
+    }
+  }
 }

@@ -529,6 +529,19 @@ export const UPSTREAM_CLI_CONTRACTS: Record<CliType, CliContract> = {
     },
     helpArgs: [["--help"]],
     subcommands: {
+      // Auto-declared by `npm run providers:rebaseline`: upstream advertises
+      // this command. Catalogued only (exposure defaults to tracked_only, so it
+      // is not reachable by callers); risk is a conservative default pending
+      // maintainer verification.
+      import: subcommand(
+        ["import"],
+        "Upstream-declared claude command (auto-catalogued, unverified).",
+        "writes_local_config",
+        [],
+        {
+          acknowledgedUpstreamFlags: ["--dry-run", "--yes"],
+        }
+      ),
       doctor: subcommand(["doctor"], "Run Claude Code diagnostic checks.", "read_only", [], {
         tier: "diagnostic",
       }),
@@ -619,6 +632,7 @@ export const UPSTREAM_CLI_CONTRACTS: Record<CliType, CliContract> = {
         "executes_agent",
         ["--json", "--timeout"],
         {
+          acknowledgedUpstreamFlags: ["--no-post", "--post"],
           tier: "diagnostic",
           tokenCost: "medium",
           flagArities: { "--json": "none" },
@@ -846,14 +860,17 @@ export const UPSTREAM_CLI_CONTRACTS: Record<CliType, CliContract> = {
     acknowledgedUpstreamFlags: [
       "--allow-dangerously-skip-permissions",
       "--allowed", // alias of --allowed-tools
+      "--autocompact",
       "--ax-screen-reader",
       "--background", // start the session as a background agent
       "--betas",
       "--bg", // short form of --background
       "--brief",
       "--chrome",
+      "--cloud",
       "--dangerously-skip-permissions",
       "--disallowed", // alias of --disallowed-tools
+      "--environment",
       "--file",
       "--forward-subagent-text", // forwards subagent text/thinking into output; gateway captures the final reply
       "--from-pr",
@@ -863,6 +880,7 @@ export const UPSTREAM_CLI_CONTRACTS: Record<CliType, CliContract> = {
       "--prompt-suggestions",
       "--remote-control",
       "--remote-control-session-name-prefix",
+      "--teleport",
       "--tmux",
       "--version",
       "--worktree",
@@ -1035,6 +1053,7 @@ export const UPSTREAM_CLI_CONTRACTS: Record<CliType, CliContract> = {
     ],
   },
   codex: {
+    acknowledgedUpstreamFlags: ["--approve-for-me"],
     cli: "codex",
     executable: "codex",
     upstream: "OpenAI Codex CLI",
@@ -1092,6 +1111,7 @@ export const UPSTREAM_CLI_CONTRACTS: Record<CliType, CliContract> = {
           "--version",
         ],
         {
+          acknowledgedUpstreamFlags: ["--approve-for-me"],
           children: {
             resume: subcommand(
               ["exec", "resume"],
@@ -1213,7 +1233,10 @@ export const UPSTREAM_CLI_CONTRACTS: Record<CliType, CliContract> = {
           "--ws-token-file",
           "--ws-token-sha256",
         ],
-        { exposure: "not_exposed" }
+        {
+          acknowledgedUpstreamFlags: ["--code-mode-host"],
+          exposure: "not_exposed",
+        }
       ),
       "remote-control": subcommand(
         ["remote-control"],
@@ -1315,6 +1338,7 @@ export const UPSTREAM_CLI_CONTRACTS: Record<CliType, CliContract> = {
           "--version",
         ],
         {
+          acknowledgedUpstreamFlags: ["--approve-for-me"],
           exposure: "not_exposed",
           maxPositionals: 2,
           flagArities: {
@@ -1355,6 +1379,7 @@ export const UPSTREAM_CLI_CONTRACTS: Record<CliType, CliContract> = {
           "--strict-config",
         ],
         {
+          acknowledgedUpstreamFlags: ["--approve-for-me"],
           exposure: "not_exposed",
           adminProjection: "not_exposed",
           maxPositionals: 1,
@@ -1389,7 +1414,10 @@ export const UPSTREAM_CLI_CONTRACTS: Record<CliType, CliContract> = {
           "--sandbox",
           "--strict-config",
         ],
-        { exposure: "not_exposed" }
+        {
+          acknowledgedUpstreamFlags: ["--approve-for-me"],
+          exposure: "not_exposed",
+        }
       ),
       unarchive: subcommand(
         ["unarchive"],
@@ -1413,7 +1441,10 @@ export const UPSTREAM_CLI_CONTRACTS: Record<CliType, CliContract> = {
           "--sandbox",
           "--strict-config",
         ],
-        { exposure: "not_exposed" }
+        {
+          acknowledgedUpstreamFlags: ["--approve-for-me"],
+          exposure: "not_exposed",
+        }
       ),
       fork: subcommand(
         ["fork"],
@@ -1443,7 +1474,11 @@ export const UPSTREAM_CLI_CONTRACTS: Record<CliType, CliContract> = {
           "--strict-config",
           "--version",
         ],
-        { maxPositionals: 1, allowsEndOfOptionsPrompt: true }
+        {
+          acknowledgedUpstreamFlags: ["--approve-for-me"],
+          maxPositionals: 1,
+          allowsEndOfOptionsPrompt: true,
+        }
       ),
       cloud: subcommand(["cloud"], "Inspect or manage Codex cloud features.", "network", [
         "--config",
@@ -1466,7 +1501,10 @@ export const UPSTREAM_CLI_CONTRACTS: Record<CliType, CliContract> = {
           "--strict-config",
           "--use-agent-identity-auth",
         ],
-        { exposure: "not_exposed" }
+        {
+          acknowledgedUpstreamFlags: ["--concurrent-requests", "--exit-on-stdin-close"],
+          exposure: "not_exposed",
+        }
       ),
       features: subcommand(
         ["features"],
@@ -1870,6 +1908,7 @@ export const UPSTREAM_CLI_CONTRACTS: Record<CliType, CliContract> = {
     // than being lost in a permanently failing probe.
     acknowledgedUpstreamFlags: [
       "--agent",
+      "--disable-slash-commands",
       "--effort",
       "--json-schema",
       "--log-file",
@@ -1973,6 +2012,19 @@ export const UPSTREAM_CLI_CONTRACTS: Record<CliType, CliContract> = {
     helpArgs: [["--help"]],
     subcommands: acknowledgeSubcommandFlags(
       {
+        // Auto-declared by `npm run providers:rebaseline`: upstream advertises
+        // this command. Catalogued only (exposure defaults to tracked_only, so it
+        // is not reachable by callers); risk is a conservative default pending
+        // maintainer verification.
+        du: subcommand(
+          ["du"],
+          "Upstream-declared grok command (auto-catalogued, unverified).",
+          "writes_local_config",
+          [],
+          {
+            acknowledgedUpstreamFlags: ["--json", "--leader-socket"],
+          }
+        ),
         agent: subcommand(
           ["agent"],
           "Run Grok agent service helpers.",
@@ -2217,6 +2269,7 @@ export const UPSTREAM_CLI_CONTRACTS: Record<CliType, CliContract> = {
     acknowledgedUpstreamFlags: [
       ...GROK_DEBUG_HELP_FLAGS,
       "--fullscreen",
+      "--include-partial-messages",
       "--minimal",
       "--session-id",
     ],
@@ -2621,7 +2674,17 @@ export const UPSTREAM_CLI_CONTRACTS: Record<CliType, CliContract> = {
       watchCategories: ["flags", "agent-modes", "session-logging", "output-formats", "env-model"],
     },
     helpArgs: [["--help"]],
-    subcommands: {},
+    subcommands: {
+      // Auto-declared by `npm run providers:rebaseline`: upstream advertises
+      // this command. Catalogued only (exposure defaults to tracked_only, so it
+      // is not reachable by callers); risk is a conservative default pending
+      // maintainer verification.
+      mcp: subcommand(
+        ["mcp"],
+        "Upstream-declared mistral command (auto-catalogued, unverified).",
+        "writes_local_config"
+      ),
+    },
     maxPositionals: 0,
     mcpTools: ["mistral_request", "mistral_request_async"],
     mcpParameters: [
@@ -2955,6 +3018,7 @@ export const UPSTREAM_CLI_CONTRACTS: Record<CliType, CliContract> = {
         "starts_server",
         ["--agent-type"],
         {
+          acknowledgedUpstreamFlags: ["--model"],
           exposure: "not_exposed",
           flagArities: { "--agent-type": "one" },
         }
@@ -3028,13 +3092,9 @@ export const UPSTREAM_CLI_CONTRACTS: Record<CliType, CliContract> = {
           flagArities: { "--force-manual-token-flow": "none" },
         }
       ),
-      shell: subcommand(
-        ["shell"],
-        "Integrate Devin with the local shell.",
-        "writes_local_config",
-        [],
-        { exposure: "not_exposed", maxPositionals: "variadic" }
-      ),
+      // `shell` removed in devin 3000.4.16: the binary no longer advertises it
+      // as a root command. It was `not_exposed`, so nothing reachable depended
+      // on it and the removal is catalogue-only.
       skills: subcommand(["skills"], "Manage Devin skills.", "writes_local_config", [], {
         exposure: "not_exposed",
         maxPositionals: "variadic",
@@ -3079,7 +3139,6 @@ export const UPSTREAM_CLI_CONTRACTS: Record<CliType, CliContract> = {
       "sandbox",
       "exportSession",
       "respectWorkspaceTrust",
-      "agentConfig",
     ],
     // The gateway emits headless print-mode argv only, and only the flags below.
     // `-p` always carries the prompt (arity one); session continuity uses the
@@ -3110,13 +3169,21 @@ export const UPSTREAM_CLI_CONTRACTS: Record<CliType, CliContract> = {
         description:
           "Respect workspace trust (defaults true for interactive, false for print mode)",
       },
-      "--agent-config": { arity: "one", description: "Agent config file path" },
       "--resume": { arity: "one", description: "Resume a specific session by ID" },
       "--continue": { arity: "none", description: "Resume the most recent session in cwd" },
     },
     // Devin flags the gateway deliberately does not emit (or are for interactive/cloud use).
-    // Probe acknowledgement only. (--config/--sandbox/--export/--respect-workspace-trust/
-    // --agent-config graduated to the flags allowlist as wired request fields.)
+    // Probe acknowledgement only. (--config/--sandbox/--export/--respect-workspace-trust
+    // graduated to the flags allowlist as wired request fields.)
+    //
+    // `--agent-config` was removed in devin 3000.4.16: the binary no longer
+    // advertises it, so the gateway must stop emitting it. Keeping it in `flags`
+    // would leave the gateway sending a dead flag on every request that set the
+    // parameter, the same failure shape as the grok `--best-of-n` regression.
+    // The `agentConfig` request parameter went with it, since a parameter whose
+    // only effect is a rejected invocation is worse than no parameter. Unrelated
+    // to the Personal Agent Config Kit, whose `~/.agent-config` is a baseline
+    // DIRECTORY and shares only the name.
     acknowledgedUpstreamFlags: ["--print", "--version"],
     env: {},
     conformanceFixtures: [
@@ -3217,10 +3284,10 @@ export const UPSTREAM_CLI_CONTRACTS: Record<CliType, CliContract> = {
         expect: "fail",
       },
       {
-        id: "devin-agent-config",
-        description: "--agent-config path is accepted",
+        id: "devin-agent-config-removed",
+        description: "--agent-config is rejected: devin 3000.4.16 dropped it",
         args: ["-p", "hello", "--agent-config", "/tmp/agent.toml"],
-        expect: "pass",
+        expect: "fail",
       },
     ],
   },
@@ -3247,6 +3314,15 @@ export const UPSTREAM_CLI_CONTRACTS: Record<CliType, CliContract> = {
     },
     helpArgs: [["--help"]],
     subcommands: {
+      // Auto-declared by `npm run providers:rebaseline`: upstream advertises
+      // this command. Catalogued only (exposure defaults to tracked_only, so it
+      // is not reachable by callers); risk is a conservative default pending
+      // maintainer verification.
+      bedrock: subcommand(
+        ["bedrock"],
+        "Upstream-declared cursor command (auto-catalogued, unverified).",
+        "writes_local_config"
+      ),
       about: subcommand(
         ["about"],
         "Display Cursor Agent version, system, and account information.",
@@ -3359,6 +3435,13 @@ export const UPSTREAM_CLI_CONTRACTS: Record<CliType, CliContract> = {
           "--worker-dir",
         ],
         {
+          acknowledgedUpstreamFlags: [
+            "--computer-use",
+            "--identity-socket",
+            "--mint-github-token",
+            "--sync-dashboard-secrets",
+            "--wait",
+          ],
           exposure: "not_exposed",
           flagArities: { "--debug": "none", "--single-use": "none" },
         }

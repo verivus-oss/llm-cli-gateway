@@ -928,20 +928,6 @@ describe("provider argv admission", () => {
         ),
     ],
     [
-      "devin",
-      "agentConfig",
-      () =>
-        prepareDevinRequest(
-          {
-            prompt: "review",
-            agentConfig: OVERSIZED,
-            optimizePrompt: false,
-            operation: "devin_request",
-          },
-          TEST_RUNTIME
-        ),
-    ],
-    [
       "cursor",
       "model",
       () =>

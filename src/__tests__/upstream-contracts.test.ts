@@ -277,7 +277,7 @@ describe("upstream CLI contracts", () => {
     }
   });
 
-  it("declares subcommand metadata for all providers and an explicit empty Vibe tree", () => {
+  it("declares subcommand metadata for all providers, and Vibe's current tree", () => {
     for (const [cli, contract] of Object.entries(UPSTREAM_CLI_CONTRACTS)) {
       expect(contract.subcommands, `${cli} subcommands field`).toBeDefined();
       for (const subcommand of flattenCliSubcommands(contract.subcommands)) {
@@ -302,7 +302,16 @@ describe("upstream CLI contracts", () => {
         ).toMatch(/^(tiny|small|medium|large)$/);
       }
     }
-    expect(flattenCliSubcommands(UPSTREAM_CLI_CONTRACTS.mistral.subcommands)).toEqual([]);
+    // Vibe's tree was empty because vibe genuinely advertised no subcommands,
+    // which was a FACT about upstream rather than a decision to track nothing.
+    // vibe 2.24.1 added `mcp` (with add/remove children), so the tree is no
+    // longer empty and asserting that it is would pin an expired premise.
+    // Assert the current surface instead, which still fails loudly if vibe
+    // grows another command.
+    const vibeCommands = flattenCliSubcommands(UPSTREAM_CLI_CONTRACTS.mistral.subcommands).map(s =>
+      s.commandPath.join(" ")
+    );
+    expect(vibeCommands).toEqual(["mcp"]);
   });
 
   it("validates subcommand argv through a separate API without loosening request argv", () => {
@@ -804,18 +813,19 @@ Options:
       expect((ACP_ENTRYPOINT_CONTRACTS.claude.adapterCandidates ?? []).length).toBeGreaterThan(0);
     });
 
-    it("keeps agy on the watchlist with no ACP surface at agy 1.1.8", () => {
+    it("keeps agy on the watchlist with no ACP surface at agy 1.1.12", () => {
       const agy = ACP_ENTRYPOINT_CONTRACTS.gemini;
       expect(agy.status).toBe("absent_watchlist");
       expect(agy.executable).toBe("agy");
       // Deliberately a literal, not derived from PROVIDER_TARGET_VERSIONS: bumping
       // the target must fail here so the ACP claim is re-probed rather than
       // restamped. This tripwire fired on the 1.1.7 -> 1.1.8 rebaseline and did
-      // its job. Re-probed at agy 1.1.8: still absent_watchlist, still no native
+      // its job. It fired again on the 1.1.8 -> 1.1.12 rebaseline (2026-08-13).
+      // Re-probed at agy 1.1.12: still absent_watchlist, still no native
       // entrypoint. `agy --help` lists no acp subcommand, and `agy acp --help`
       // prints byte-identical general usage rather than subcommand help, which is
       // how an unrecognised subcommand presents.
-      expect(agy.targetVersion).toContain("1.1.8");
+      expect(agy.targetVersion).toContain("1.1.12");
       expect(agy.entrypointArgs).toEqual([]);
       expect(agy.probeArgs).toEqual([]);
     });

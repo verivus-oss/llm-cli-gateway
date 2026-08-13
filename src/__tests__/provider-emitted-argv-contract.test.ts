@@ -266,7 +266,6 @@ function devinKitchenSinkArgv(): string[] {
       sandbox: true,
       exportSession: "/tmp/session.json",
       respectWorkspaceTrust: true,
-      agentConfig: "/tmp/agent.toml",
     } as never,
     resolveGatewayServerRuntime()
   );

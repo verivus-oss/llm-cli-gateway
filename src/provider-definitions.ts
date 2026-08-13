@@ -448,13 +448,13 @@ const KIT_UNSUPPORTED: ProviderPersonalConfigKit = {
  * all follow automatically.
  */
 export const PROVIDER_TARGET_VERSIONS: Record<CliType, string> = {
-  claude: "claude 2.1.220",
-  codex: "codex-cli 0.145.0",
-  gemini: "1.1.8",
-  grok: "grok 0.2.112 (9bbd559437)",
-  mistral: "vibe 2.22.0",
-  devin: "devin 3000.2.17 (2c489dfc)",
-  cursor: "cursor-agent 2026.07.23-e383d2b",
+  claude: "claude 2.1.229",
+  codex: "codex-cli 0.147.0",
+  gemini: "1.1.12",
+  grok: "grok 1.0.3 (1a29d5bc12)",
+  mistral: "vibe 2.24.1",
+  devin: "devin 3000.4.16 (355c3c9e)",
+  cursor: "cursor-agent 2026.08.11-e8db854",
 };
 
 const PROVIDER_DEFINITIONS = {
@@ -530,6 +530,12 @@ const PROVIDER_DEFINITIONS = {
       },
     },
     adminSubcommands: [
+      {
+        family: "import",
+        safety: "mutating-gated",
+        evidence:
+          "2.1.229 (Claude Code) root help advertises `import`. Auto-declared by `npm run providers:rebaseline`. safety is the conservative default: a read-only misclassification would remove a control, a gated one only adds an approval, so generated families are never `read-only`. UNVERIFIED pending maintainer review.",
+      },
       { family: "auth", safety: "mutating-gated", evidence: "claude auth login/logout/status" },
       { family: "agents", safety: "mutating-gated", evidence: "claude agents" },
       {
@@ -942,6 +948,12 @@ const PROVIDER_DEFINITIONS = {
       },
     },
     adminSubcommands: [
+      {
+        family: "du",
+        safety: "mutating-gated",
+        evidence:
+          "grok 1.0.3 (1a29d5bc12) root help advertises `du`. Auto-declared by `npm run providers:rebaseline`. safety is the conservative default: a read-only misclassification would remove a control, a gated one only adds an approval, so generated families are never `read-only`. UNVERIFIED pending maintainer review.",
+      },
       { family: "models", safety: "read-only", evidence: "grok models" },
       { family: "inspect", safety: "read-only", evidence: "grok inspect" },
       { family: "mcp", safety: "mutating-gated", evidence: "grok mcp" },
@@ -1056,9 +1068,10 @@ const PROVIDER_DEFINITIONS = {
       },
     },
     adminSubcommands: [
-      // The ONLY real vibe CLI admin surface is two top-level FLAGS (vibe --help
-      // advertises no subcommands). --setup writes an API key; --check-upgrade
-      // "Check for a Vibe update now, prompt to install it, and exit" mutates.
+      // Two top-level FLAGS plus, since vibe 2.24.1, one subcommand. --setup
+      // writes an API key; --check-upgrade "Check for a Vibe update now, prompt
+      // to install it, and exit" mutates. The older claim that vibe advertises
+      // no subcommands expired when 2.24.1 added "mcp" (with add/remove).
       {
         family: "setup",
         safety: "mutating-gated",
@@ -1328,6 +1341,12 @@ const PROVIDER_DEFINITIONS = {
       },
     },
     adminSubcommands: [
+      {
+        family: "bedrock",
+        safety: "mutating-gated",
+        evidence:
+          "2026.08.11-e8db854 root help advertises `bedrock`. Auto-declared by `npm run providers:rebaseline`. safety is the conservative default: a read-only misclassification would remove a control, a gated one only adds an approval, so generated families are never `read-only`. UNVERIFIED pending maintainer review.",
+      },
       {
         family: "version",
         safety: "read-only",

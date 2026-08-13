@@ -10,20 +10,25 @@ import { PROVIDER_TARGET_VERSIONS } from "../provider-definitions.js";
 import { CLI_TYPES } from "../provider-types.js";
 
 /**
- * Versions exactly as this host reported them on 2026-07-27, captured from
- * `doctor --json` against the seven installed CLIs. These are the real strings,
+ * Versions exactly as this host reported them on 2026-08-13, captured from
+ * `cli_versions` against the seven installed CLIs. These are the real strings,
  * not invented ones: the whole point of the normalizer is that the reported
  * spelling differs from the contracted spelling for several providers.
+ *
+ * Refreshed alongside `npm run providers:rebaseline:apply` after every provider
+ * CLI was brought to latest. claude and cursor still report a spelling that
+ * differs from their contracted one, which is what keeps the naive-equality
+ * test below meaningful.
  */
 const REAL_INSTALLED: Record<string, string> = {
-  claude: "2.1.220 (Claude Code)",
-  codex: "codex-cli 0.145.0",
+  claude: "2.1.229 (Claude Code)",
+  codex: "codex-cli 0.147.0",
   // agy reports a bare version with no product prefix, unlike codex and mistral.
-  gemini: "1.1.8",
-  grok: "grok 0.2.112 (9bbd559437)",
-  mistral: "vibe 2.22.0",
-  devin: "devin 3000.2.17 (2c489dfc)",
-  cursor: "2026.07.23-e383d2b",
+  gemini: "1.1.12",
+  grok: "grok 1.0.3 (1a29d5bc12)",
+  mistral: "vibe 2.24.1",
+  devin: "devin 3000.4.16 (355c3c9e)",
+  cursor: "2026.08.11-e8db854",
 };
 
 // Refresh this alongside `npm run providers:rebaseline:apply`. It deliberately
@@ -147,15 +152,20 @@ describe("compareInstalledToTargets", () => {
   });
 
   it("flags a provider whose installed version moved ahead of the contract", () => {
-    // The grok 0.2.112 scenario that blocked a release, one version later.
-    const verdicts = compareInstalledToTargets({ ...REAL_INSTALLED, grok: "grok 0.2.113" });
+    // Originally the grok 0.2.112 scenario that blocked a release, kept as the
+    // same shape one baseline later: grok is now 1.0.3, so the moved-ahead case
+    // is 1.0.4. Derive the contracted half from PROVIDER_TARGET_VERSIONS rather
+    // than hardcoding it, so a future rebaseline does not silently turn this
+    // into an assertion about a version nobody ships any more. The INSTALLED
+    // half stays a literal, because inventing drift is the point of the case.
+    const verdicts = compareInstalledToTargets({ ...REAL_INSTALLED, grok: "grok 1.0.4" });
     const summary = summarizeVersionGuard(verdicts);
     expect(summary.ok).toBe(false);
     expect(summary.drifted).toEqual(["grok"]);
     const grok = verdicts.find(v => v.cli === "grok");
     expect(grok?.state).toBe("drift");
-    expect(grok?.detail).toContain("0.2.113");
-    expect(grok?.detail).toContain("0.2.112");
+    expect(grok?.detail).toContain("1.0.4");
+    expect(grok?.detail).toContain(normalizeProviderVersion(PROVIDER_TARGET_VERSIONS.grok).version);
   });
 
   it("treats an absent CLI as not-installed, not as drift", () => {

@@ -1,7 +1,7 @@
 {
   "schemaVersion": "upstream-scan-snapshot.v2",
   "cli": "codex",
-  "fetchedAt": "2026-07-28T01:52:46.945Z",
+  "fetchedAt": "2026-08-13T12:24:40.582Z",
   "sources": [
     {
       "url": "https://api.github.com/repos/openai/codex/releases/latest",
@@ -185,14 +185,15 @@
     }
   ],
   "helpSurface": {
-    "probedAt": "2026-07-28T01:52:46.945Z",
+    "probedAt": "2026-08-13T12:24:40.582Z",
     "available": true,
-    "version": "codex-cli 0.145.0",
-    "targetVersion": "codex-cli 0.145.0",
+    "version": "codex-cli 0.147.0",
+    "targetVersion": "codex-cli 0.147.0",
     "versionMatchesTarget": true,
     "discoveredFlags": [
       "--add-dir",
       "--all",
+      "--approve-for-me",
       "--cd",
       "--color",
       "--config",
@@ -217,7 +218,7 @@
       "--strict-config",
       "--version"
     ],
-    "helpHash": "a0758ed066eec3d6650b430f53ba2dcc177eb9cd8f66f1c0c56a3b5a64b5b339",
+    "helpHash": "c9b6137920b3e9e17b88e5b30a6426aac25027cd79c8142a99d72eba372b8a91",
     "extraVsContract": [],
     "missingFromBinary": [],
     "arityMismatches": [],
@@ -254,11 +255,12 @@
       "commandPath": [
         "app-server"
       ],
-      "probedAt": "2026-07-28T01:52:46.302Z",
+      "probedAt": "2026-08-13T12:24:39.944Z",
       "available": true,
       "existence": "present",
       "discoveredFlags": [
         "--analytics-default-enabled",
+        "--code-mode-host",
         "--config",
         "--disable",
         "--enable",
@@ -273,7 +275,7 @@
         "--ws-token-file",
         "--ws-token-sha256"
       ],
-      "helpHash": "aeddb81bcc227080fd1d4d22b10f9470b623fb55b220e5877b6a9da9ac104b3c",
+      "helpHash": "388dfba2561238c522a808784ba52f2a5da03194515ea858765bf2aeb7bcd99a",
       "extraVsContract": [],
       "missingFromBinary": [],
       "arityMismatches": [],
@@ -287,7 +289,7 @@
       "commandPath": [
         "apply"
       ],
-      "probedAt": "2026-07-28T01:52:46.328Z",
+      "probedAt": "2026-08-13T12:24:39.968Z",
       "available": true,
       "existence": "present",
       "discoveredFlags": [
@@ -309,11 +311,12 @@
       "commandPath": [
         "archive"
       ],
-      "probedAt": "2026-07-28T01:52:46.353Z",
+      "probedAt": "2026-08-13T12:24:39.993Z",
       "available": true,
       "existence": "present",
       "discoveredFlags": [
         "--add-dir",
+        "--approve-for-me",
         "--cd",
         "--config",
         "--dangerously-bypass-approvals-and-sandbox",
@@ -330,7 +333,7 @@
         "--sandbox",
         "--strict-config"
       ],
-      "helpHash": "f078c26deb2cf967e8e6aae39183d83722f2ddd7a7d7df2884fc7b2d27cff359",
+      "helpHash": "1c3f3052b1a35276014d640add4add58e0ace5d2cd3f8304a8d0dbf928c6b6b1",
       "extraVsContract": [],
       "missingFromBinary": [],
       "arityMismatches": [],
@@ -344,7 +347,7 @@
       "commandPath": [
         "cloud"
       ],
-      "probedAt": "2026-07-28T01:52:46.379Z",
+      "probedAt": "2026-08-13T12:24:40.019Z",
       "available": true,
       "existence": "present",
       "discoveredFlags": [
@@ -367,7 +370,7 @@
       "commandPath": [
         "completion"
       ],
-      "probedAt": "2026-07-28T01:52:46.405Z",
+      "probedAt": "2026-08-13T12:24:40.045Z",
       "available": true,
       "existence": "present",
       "discoveredFlags": [
@@ -389,7 +392,7 @@
       "commandPath": [
         "debug"
       ],
-      "probedAt": "2026-07-28T01:52:46.429Z",
+      "probedAt": "2026-08-13T12:24:40.071Z",
       "available": true,
       "existence": "present",
       "discoveredFlags": [
@@ -411,11 +414,12 @@
       "commandPath": [
         "delete"
       ],
-      "probedAt": "2026-07-28T01:52:46.454Z",
+      "probedAt": "2026-08-13T12:24:40.096Z",
       "available": true,
       "existence": "present",
       "discoveredFlags": [
         "--add-dir",
+        "--approve-for-me",
         "--cd",
         "--config",
         "--dangerously-bypass-approvals-and-sandbox",
@@ -433,7 +437,7 @@
         "--sandbox",
         "--strict-config"
       ],
-      "helpHash": "8b33e88808537d060ce2e11fe73f3a62b83a859646cc9ad157841de240cace1e",
+      "helpHash": "4bafe71c759fd67680ed128dcdb0152ca8c5bac9530607eaec109fb77b434616",
       "extraVsContract": [],
       "missingFromBinary": [],
       "arityMismatches": [],
@@ -447,7 +451,7 @@
       "commandPath": [
         "doctor"
       ],
-      "probedAt": "2026-07-28T01:52:46.480Z",
+      "probedAt": "2026-08-13T12:24:40.121Z",
       "available": true,
       "existence": "present",
       "discoveredFlags": [
@@ -460,7 +464,7 @@
         "--no-color",
         "--summary"
       ],
-      "helpHash": "cdb25b4451267406d0d8e277e75c3921d640e11cfa0bff53c096fa220463be86",
+      "helpHash": "8e7c6c7d711d9d100f0367b834b227ae1ab0f7a47302828be52695aa1fdc1fde",
       "extraVsContract": [],
       "missingFromBinary": [],
       "arityMismatches": [],
@@ -474,11 +478,12 @@
       "commandPath": [
         "exec"
       ],
-      "probedAt": "2026-07-28T01:52:46.506Z",
+      "probedAt": "2026-08-13T12:24:40.146Z",
       "available": true,
       "existence": "present",
       "discoveredFlags": [
         "--add-dir",
+        "--approve-for-me",
         "--cd",
         "--color",
         "--config",
@@ -502,7 +507,7 @@
         "--strict-config",
         "--version"
       ],
-      "helpHash": "da7f8d58749fb3084723cded1620d133235a090ebe5ee412ef404f171415d434",
+      "helpHash": "0b3f5ef7104d38d706ce1c94c47b605bf29b4b3cbcc30ad22fda1edc4bc53919",
       "extraVsContract": [],
       "missingFromBinary": [],
       "arityMismatches": [],
@@ -517,7 +522,7 @@
         "exec",
         "resume"
       ],
-      "probedAt": "2026-07-28T01:52:46.557Z",
+      "probedAt": "2026-08-13T12:24:40.197Z",
       "available": true,
       "existence": "present",
       "discoveredFlags": [
@@ -539,7 +544,7 @@
         "--skip-git-repo-check",
         "--strict-config"
       ],
-      "helpHash": "2fb5070886a2e64bd4d18db982096c2d3f295afd207bd50a1a8981aaa9148158",
+      "helpHash": "f0c94fc4de73f773244c1b3d0dee617d2498e019273a8050401d96ff61db2e6c",
       "extraVsContract": [],
       "missingFromBinary": [],
       "arityMismatches": [],
@@ -554,7 +559,7 @@
         "exec",
         "review"
       ],
-      "probedAt": "2026-07-28T01:52:46.584Z",
+      "probedAt": "2026-08-13T12:24:40.223Z",
       "available": true,
       "existence": "present",
       "discoveredFlags": [
@@ -577,7 +582,7 @@
         "--title",
         "--uncommitted"
       ],
-      "helpHash": "60cf6f4eaf5bf09f8a691a695f9a06f905d6bfb3c6412562279b50612672c2e3",
+      "helpHash": "02b804f1cb719460dbff7a948a441ee828797659c4080edff98fc7547f871974",
       "extraVsContract": [],
       "missingFromBinary": [],
       "arityMismatches": [],
@@ -591,21 +596,23 @@
       "commandPath": [
         "exec-server"
       ],
-      "probedAt": "2026-07-28T01:52:46.610Z",
+      "probedAt": "2026-08-13T12:24:40.248Z",
       "available": true,
       "existence": "present",
       "discoveredFlags": [
+        "--concurrent-requests",
         "--config",
         "--disable",
         "--enable",
         "--environment-id",
+        "--exit-on-stdin-close",
         "--listen",
         "--name",
         "--remote",
         "--strict-config",
         "--use-agent-identity-auth"
       ],
-      "helpHash": "fafa5d052856a381de54525e55b099ece4ae893b61800af3e760abf4d6a67c2a",
+      "helpHash": "aafee4809c91917afb9cd546cbacff7b33dc9423c4a0cf7a2e4657e3af0d6ce9",
       "extraVsContract": [],
       "missingFromBinary": [],
       "arityMismatches": [],
@@ -619,7 +626,7 @@
       "commandPath": [
         "features"
       ],
-      "probedAt": "2026-07-28T01:52:46.634Z",
+      "probedAt": "2026-08-13T12:24:40.274Z",
       "available": true,
       "existence": "present",
       "discoveredFlags": [
@@ -641,12 +648,13 @@
       "commandPath": [
         "fork"
       ],
-      "probedAt": "2026-07-28T01:52:46.659Z",
+      "probedAt": "2026-08-13T12:24:40.300Z",
       "available": true,
       "existence": "present",
       "discoveredFlags": [
         "--add-dir",
         "--all",
+        "--approve-for-me",
         "--ask-for-approval",
         "--cd",
         "--config",
@@ -668,7 +676,7 @@
         "--strict-config",
         "--version"
       ],
-      "helpHash": "6b77cc7fd7dcbf3250621b658ae94bb000a5c444eccc7ed1ddf74e196b0df626",
+      "helpHash": "53d92e4760abbe5854ab0b8c937383a04c1de7be4c904e557061a3b200f7861f",
       "extraVsContract": [],
       "missingFromBinary": [],
       "arityMismatches": [],
@@ -682,7 +690,7 @@
       "commandPath": [
         "login"
       ],
-      "probedAt": "2026-07-28T01:52:46.687Z",
+      "probedAt": "2026-08-13T12:24:40.325Z",
       "available": true,
       "existence": "present",
       "discoveredFlags": [
@@ -693,7 +701,7 @@
         "--with-access-token",
         "--with-api-key"
       ],
-      "helpHash": "92b59bdace262549c63f4225f89c659fc48beffafd60226983d50e7ee3dd600c",
+      "helpHash": "e612161ccbeac23341f8b70c569a777251c102b776fe93a1ce2d59233cba9ef6",
       "extraVsContract": [],
       "missingFromBinary": [],
       "arityMismatches": [],
@@ -707,7 +715,7 @@
       "commandPath": [
         "logout"
       ],
-      "probedAt": "2026-07-28T01:52:46.714Z",
+      "probedAt": "2026-08-13T12:24:40.350Z",
       "available": true,
       "existence": "present",
       "discoveredFlags": [
@@ -729,7 +737,7 @@
       "commandPath": [
         "mcp"
       ],
-      "probedAt": "2026-07-28T01:52:46.741Z",
+      "probedAt": "2026-08-13T12:24:40.375Z",
       "available": true,
       "existence": "present",
       "discoveredFlags": [
@@ -751,7 +759,7 @@
       "commandPath": [
         "mcp-server"
       ],
-      "probedAt": "2026-07-28T01:52:46.766Z",
+      "probedAt": "2026-08-13T12:24:40.400Z",
       "available": true,
       "existence": "present",
       "discoveredFlags": [
@@ -760,7 +768,7 @@
         "--enable",
         "--strict-config"
       ],
-      "helpHash": "2fd3e8fec2e4dbf1c4731e59733968f522d6228d14fac87d8eb4e35f5133cc11",
+      "helpHash": "b5fcb7275d06ee1d9fc348bf02892e695c54962b3b9a6eb31e5ebb271fc65f4b",
       "extraVsContract": [],
       "missingFromBinary": [],
       "arityMismatches": [],
@@ -774,7 +782,7 @@
       "commandPath": [
         "plugin"
       ],
-      "probedAt": "2026-07-28T01:52:46.792Z",
+      "probedAt": "2026-08-13T12:24:40.425Z",
       "available": true,
       "existence": "present",
       "discoveredFlags": [
@@ -796,7 +804,7 @@
       "commandPath": [
         "remote-control"
       ],
-      "probedAt": "2026-07-28T01:52:46.818Z",
+      "probedAt": "2026-08-13T12:24:40.451Z",
       "available": true,
       "existence": "present",
       "discoveredFlags": [
@@ -805,7 +813,7 @@
         "--enable",
         "--json"
       ],
-      "helpHash": "141aad68297586f1130cc2258b40d6c12306384193077641983443fc8f081419",
+      "helpHash": "460b10cde9660393af54cdc16ac9ae64770f9f114945d7b9dd59f1ee799d7172",
       "extraVsContract": [],
       "missingFromBinary": [],
       "arityMismatches": [],
@@ -819,12 +827,13 @@
       "commandPath": [
         "resume"
       ],
-      "probedAt": "2026-07-28T01:52:46.843Z",
+      "probedAt": "2026-08-13T12:24:40.478Z",
       "available": true,
       "existence": "present",
       "discoveredFlags": [
         "--add-dir",
         "--all",
+        "--approve-for-me",
         "--ask-for-approval",
         "--cd",
         "--config",
@@ -847,7 +856,7 @@
         "--strict-config",
         "--version"
       ],
-      "helpHash": "f5e05f73691a8e8b399a9e9d70f26e9c6dab02d5903360f261818821b9023f37",
+      "helpHash": "e375a60b7b4e5c1477e20d0997d23caa452e4531319e3034d31c0463c5cb36f7",
       "extraVsContract": [],
       "missingFromBinary": [],
       "arityMismatches": [],
@@ -861,7 +870,7 @@
       "commandPath": [
         "review"
       ],
-      "probedAt": "2026-07-28T01:52:46.869Z",
+      "probedAt": "2026-08-13T12:24:40.502Z",
       "available": true,
       "existence": "present",
       "discoveredFlags": [
@@ -874,7 +883,7 @@
         "--title",
         "--uncommitted"
       ],
-      "helpHash": "fc02e73477306269139f9e013ba626932e936e3c151d2031a3bca742f5c400fd",
+      "helpHash": "069724fdf8db365e51023d30337bedda187aa6b8f737e86ef30f73be05f46f02",
       "extraVsContract": [],
       "missingFromBinary": [],
       "arityMismatches": [],
@@ -888,7 +897,7 @@
       "commandPath": [
         "sandbox"
       ],
-      "probedAt": "2026-07-28T01:52:46.894Z",
+      "probedAt": "2026-08-13T12:24:40.529Z",
       "available": true,
       "existence": "present",
       "discoveredFlags": [
@@ -903,7 +912,7 @@
         "--sandbox-state-json",
         "--sandbox-state-readable-root"
       ],
-      "helpHash": "97178d90ade3864159cfa8ac1e94a49144c5f61eb9277713f17273d0c255e295",
+      "helpHash": "2fed76c2d76b4c88653c269c15ba2cd67fb99c6fa5e1afc4b93819429bf9b1d8",
       "extraVsContract": [],
       "missingFromBinary": [],
       "arityMismatches": [],
@@ -917,11 +926,12 @@
       "commandPath": [
         "unarchive"
       ],
-      "probedAt": "2026-07-28T01:52:46.920Z",
+      "probedAt": "2026-08-13T12:24:40.556Z",
       "available": true,
       "existence": "present",
       "discoveredFlags": [
         "--add-dir",
+        "--approve-for-me",
         "--cd",
         "--config",
         "--dangerously-bypass-approvals-and-sandbox",
@@ -938,7 +948,7 @@
         "--sandbox",
         "--strict-config"
       ],
-      "helpHash": "a15d70bdb6745fc5aca1c4ca8ae3cba001406f04792e6ce61b8be5e55c46dcc5",
+      "helpHash": "3104190a370bdd0db4b12edc4a9a7e1a273ba2db75924a52348ee4e72aa162e9",
       "extraVsContract": [],
       "missingFromBinary": [],
       "arityMismatches": [],
@@ -952,7 +962,7 @@
       "commandPath": [
         "update"
       ],
-      "probedAt": "2026-07-28T01:52:46.944Z",
+      "probedAt": "2026-08-13T12:24:40.582Z",
       "available": true,
       "existence": "present",
       "discoveredFlags": [

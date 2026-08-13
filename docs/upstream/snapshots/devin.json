@@ -1,7 +1,7 @@
 {
   "schemaVersion": "upstream-scan-snapshot.v2",
   "cli": "devin",
-  "fetchedAt": "2026-07-28T01:53:02.853Z",
+  "fetchedAt": "2026-08-13T12:24:57.361Z",
   "sources": [
     {
       "url": "https://cli.devin.ai/docs/reference/commands",
@@ -29,13 +29,12 @@
     }
   ],
   "helpSurface": {
-    "probedAt": "2026-07-28T01:53:02.850Z",
+    "probedAt": "2026-08-13T12:24:57.358Z",
     "available": true,
-    "version": "devin 3000.2.17 (2c489dfc)",
-    "targetVersion": "devin 3000.2.17 (2c489dfc)",
+    "version": "devin 3000.4.16 (355c3c9e)",
+    "targetVersion": "devin 3000.4.16 (355c3c9e)",
     "versionMatchesTarget": true,
     "discoveredFlags": [
-      "--agent-config",
       "--config",
       "--continue",
       "--export",
@@ -48,7 +47,7 @@
       "--sandbox",
       "--version"
     ],
-    "helpHash": "bf63d38cbfec3a8e493837cf840a5cb0e7bb90fb8ca15d4370490d3eaf280bad",
+    "helpHash": "99f38bbc7e6f9fc7ae05179e22051776596a90d521177f28c16f30bfbd7d9fc9",
     "extraVsContract": [],
     "missingFromBinary": [],
     "arityMismatches": [],
@@ -67,7 +66,6 @@
     "rules",
     "sandbox",
     "setup",
-    "shell",
     "skills",
     "uninstall",
     "update",
@@ -78,13 +76,14 @@
       "commandPath": [
         "acp"
       ],
-      "probedAt": "2026-07-28T01:53:02.801Z",
+      "probedAt": "2026-08-13T12:24:57.310Z",
       "available": true,
       "existence": "present",
       "discoveredFlags": [
-        "--agent-type"
+        "--agent-type",
+        "--model"
       ],
-      "helpHash": "a9080e5a29dbfcb543fe85424d850a1d4037a8829f5495e8aa4dcabb5ad33744",
+      "helpHash": "b6a912f1a7663eda24467b6b7d4a56931ff4158cba0dacf35c6fdb0ec2bea1e8",
       "extraVsContract": [],
       "missingFromBinary": [],
       "arityMismatches": [],
@@ -98,7 +97,7 @@
       "commandPath": [
         "auth"
       ],
-      "probedAt": "2026-07-28T01:53:02.804Z",
+      "probedAt": "2026-08-13T12:24:57.313Z",
       "available": true,
       "existence": "present",
       "discoveredFlags": [],
@@ -116,7 +115,7 @@
       "commandPath": [
         "cloud"
       ],
-      "probedAt": "2026-07-28T01:53:02.807Z",
+      "probedAt": "2026-08-13T12:24:57.317Z",
       "available": true,
       "existence": "present",
       "discoveredFlags": [],
@@ -134,7 +133,7 @@
       "commandPath": [
         "list"
       ],
-      "probedAt": "2026-07-28T01:53:02.811Z",
+      "probedAt": "2026-08-13T12:24:57.321Z",
       "available": true,
       "existence": "present",
       "discoveredFlags": [
@@ -154,7 +153,7 @@
       "commandPath": [
         "mcp"
       ],
-      "probedAt": "2026-07-28T01:53:02.814Z",
+      "probedAt": "2026-08-13T12:24:57.324Z",
       "available": true,
       "existence": "present",
       "discoveredFlags": [],
@@ -172,7 +171,7 @@
       "commandPath": [
         "migrate"
       ],
-      "probedAt": "2026-07-28T01:53:02.817Z",
+      "probedAt": "2026-08-13T12:24:57.328Z",
       "available": true,
       "existence": "present",
       "discoveredFlags": [],
@@ -190,7 +189,7 @@
       "commandPath": [
         "models"
       ],
-      "probedAt": "2026-07-28T01:53:02.820Z",
+      "probedAt": "2026-08-13T12:24:57.331Z",
       "available": true,
       "existence": "present",
       "discoveredFlags": [],
@@ -208,11 +207,11 @@
       "commandPath": [
         "plugins"
       ],
-      "probedAt": "2026-07-28T01:53:02.824Z",
+      "probedAt": "2026-08-13T12:24:57.335Z",
       "available": true,
       "existence": "present",
       "discoveredFlags": [],
-      "helpHash": "15465cb396e3b08e029bc1fb37a2827ac2dc4ef9737a55fbd888b251c9f988a8",
+      "helpHash": "e944f93d9316af4ee63f76e50e8b811f1870cd556bacca0316ccf1a66c7fb50a",
       "extraVsContract": [],
       "missingFromBinary": [],
       "arityMismatches": [],
@@ -226,7 +225,7 @@
       "commandPath": [
         "rules"
       ],
-      "probedAt": "2026-07-28T01:53:02.827Z",
+      "probedAt": "2026-08-13T12:24:57.338Z",
       "available": true,
       "existence": "present",
       "discoveredFlags": [],
@@ -244,7 +243,7 @@
       "commandPath": [
         "sandbox"
       ],
-      "probedAt": "2026-07-28T01:53:02.831Z",
+      "probedAt": "2026-08-13T12:24:57.341Z",
       "available": true,
       "existence": "present",
       "discoveredFlags": [],
@@ -262,13 +261,13 @@
       "commandPath": [
         "setup"
       ],
-      "probedAt": "2026-07-28T01:53:02.834Z",
+      "probedAt": "2026-08-13T12:24:57.345Z",
       "available": true,
       "existence": "present",
       "discoveredFlags": [
         "--force-manual-token-flow"
       ],
-      "helpHash": "3e2c9d096a76f651899913aef47a498750e21aa5457ca0ca6599fe32841cbce7",
+      "helpHash": "7d323cf99f6564702b068619171f4e0d5036204704d002c0b0b2af945ad47ae7",
       "extraVsContract": [],
       "missingFromBinary": [],
       "arityMismatches": [],
@@ -278,29 +277,11 @@
       "tier": "catalog",
       "summary": "Run Devin interactive setup."
     },
-    "shell": {
-      "commandPath": [
-        "shell"
-      ],
-      "probedAt": "2026-07-28T01:53:02.837Z",
-      "available": true,
-      "existence": "present",
-      "discoveredFlags": [],
-      "helpHash": "0fd928d1d3228c813ddf9e15d1f46b18460a8bc667804116da8a72b2fb1ef354",
-      "extraVsContract": [],
-      "missingFromBinary": [],
-      "arityMismatches": [],
-      "enumMismatches": [],
-      "risk": "writes_local_config",
-      "exposure": "not_exposed",
-      "tier": "catalog",
-      "summary": "Integrate Devin with the local shell."
-    },
     "skills": {
       "commandPath": [
         "skills"
       ],
-      "probedAt": "2026-07-28T01:53:02.840Z",
+      "probedAt": "2026-08-13T12:24:57.348Z",
       "available": true,
       "existence": "present",
       "discoveredFlags": [],
@@ -318,7 +299,7 @@
       "commandPath": [
         "uninstall"
       ],
-      "probedAt": "2026-07-28T01:53:02.843Z",
+      "probedAt": "2026-08-13T12:24:57.351Z",
       "available": true,
       "existence": "present",
       "discoveredFlags": [
@@ -339,7 +320,7 @@
       "commandPath": [
         "update"
       ],
-      "probedAt": "2026-07-28T01:53:02.847Z",
+      "probedAt": "2026-08-13T12:24:57.354Z",
       "available": true,
       "existence": "present",
       "discoveredFlags": [
@@ -359,7 +340,7 @@
       "commandPath": [
         "version"
       ],
-      "probedAt": "2026-07-28T01:53:02.850Z",
+      "probedAt": "2026-08-13T12:24:57.357Z",
       "available": true,
       "existence": "present",
       "discoveredFlags": [],

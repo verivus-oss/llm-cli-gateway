@@ -5037,7 +5037,7 @@ function resolvePromptOrPartsForPrep(args: {
  * by alias; see `resolveWorkspaceAndWorktreeForRequest`) and `workingDir`/
  * `addDir` are already path-confined against that workspace. But the advanced
  * per-provider path fields (systemPromptFile/appendSystemPromptFile/settings/
- * config/agentConfig/promptFile/images/outputSchema to READ, debugFile/
+ * config/promptFile/images/outputSchema to READ, debugFile/
  * outputLastMessage/exportSession to WRITE, pluginDir/pluginUrl to load code)
  * are pushed to the CLI verbatim, so without this gate a remote principal could
  * read, write, or execute arbitrary host paths outside its workspace. These
@@ -12915,8 +12915,6 @@ export interface DevinRequestParams {
    * interactive mode and false for print (non-interactive) mode.
    */
   respectWorkspaceTrust?: boolean;
-  /** Devin `--agent-config <FILE>`: agent config file path. */
-  agentConfig?: string;
   /**
    * Devin ACP `--agent-type <type>` (summarizer|review). Only applies when
    * transport=acp; threaded into the `devin acp` spawn argv. Ignored for the CLI
@@ -12951,7 +12949,6 @@ export function prepareDevinRequest(
     sandbox?: boolean;
     exportSession?: boolean | string;
     respectWorkspaceTrust?: boolean;
-    agentConfig?: string;
     correlationId?: string;
     optimizePrompt: boolean;
     operation: string;
@@ -12976,7 +12973,6 @@ export function prepareDevinRequest(
   const remoteFieldErr = remoteHostPathFieldError(params.operation, corrId, {
     promptFile: params.promptFile,
     config: params.config,
-    agentConfig: params.agentConfig,
     exportSession: typeof params.exportSession === "string" ? params.exportSession : undefined,
   });
   if (remoteFieldErr) return remoteFieldErr;
@@ -13026,7 +13022,6 @@ export function prepareDevinRequest(
   if (params.respectWorkspaceTrust !== undefined) {
     args.push("--respect-workspace-trust", params.respectWorkspaceTrust ? "true" : "false");
   }
-  if (params.agentConfig) args.push("--agent-config", params.agentConfig);
   try {
     if (resolvedModel) {
       assertCliArgUtf8Size(resolvedModel, { provider: "devin", inputName: "model" });
@@ -13041,12 +13036,6 @@ export function prepareDevinRequest(
       assertCliArgUtf8Size(params.exportSession, {
         provider: "devin",
         inputName: "exportSession",
-      });
-    }
-    if (params.agentConfig) {
-      assertCliArgUtf8Size(params.agentConfig, {
-        provider: "devin",
-        inputName: "agentConfig",
       });
     }
     assertCliArgUtf8Size(prompt, { provider: "devin", inputName: "prompt argv element" });
@@ -13079,7 +13068,6 @@ function rejectUnsupportedDevinAcpParams(
     ["sandbox", params.sandbox === true],
     ["exportSession", params.exportSession !== undefined],
     ["respectWorkspaceTrust", params.respectWorkspaceTrust !== undefined],
-    ["agentConfig", params.agentConfig !== undefined],
     ["resumeLatest", params.resumeLatest === true],
     ["createNewSession", params.createNewSession === true],
     ["optimizePrompt", params.optimizePrompt],
@@ -13139,7 +13127,6 @@ export async function handleDevinRequest(
       sandbox: params.sandbox,
       exportSession: params.exportSession,
       respectWorkspaceTrust: params.respectWorkspaceTrust,
-      agentConfig: params.agentConfig,
       correlationId: params.correlationId,
       optimizePrompt: params.optimizePrompt,
       operation: "devin_request",
@@ -13394,7 +13381,6 @@ export async function handleDevinRequestAsync(
       sandbox: params.sandbox,
       exportSession: params.exportSession,
       respectWorkspaceTrust: params.respectWorkspaceTrust,
-      agentConfig: params.agentConfig,
       correlationId: params.correlationId,
       optimizePrompt: params.optimizePrompt,
       operation: "devin_request_async",
@@ -18727,10 +18713,6 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
         .describe(
           "Respect workspace trust (Devin --respect-workspace-trust <bool>). Devin defaults true for interactive and false for print mode; set explicitly to override."
         ),
-      agentConfig: z
-        .string()
-        .optional()
-        .describe("Agent config file path (Devin --agent-config <FILE>)"),
       agentType: z
         .enum(DEVIN_ACP_AGENT_TYPES)
         .optional()
@@ -18804,7 +18786,6 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
       sandbox,
       exportSession,
       respectWorkspaceTrust,
-      agentConfig,
       agentType,
       sessionId,
       resumeLatest,
@@ -18833,7 +18814,6 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
           sandbox,
           exportSession,
           respectWorkspaceTrust,
-          agentConfig,
           agentType,
           sessionId,
           resumeLatest,
@@ -20904,10 +20884,6 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
           .describe(
             "Respect workspace trust (Devin --respect-workspace-trust <bool>). Devin defaults true for interactive and false for print mode; set explicitly to override."
           ),
-        agentConfig: z
-          .string()
-          .optional()
-          .describe("Agent config file path (Devin --agent-config <FILE>)"),
         sessionId: z
           .string()
           .optional()
@@ -20970,7 +20946,6 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
         sandbox,
         exportSession,
         respectWorkspaceTrust,
-        agentConfig,
         sessionId,
         resumeLatest,
         createNewSession,
@@ -20996,7 +20971,6 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
             sandbox,
             exportSession,
             respectWorkspaceTrust,
-            agentConfig,
             sessionId,
             resumeLatest,
             createNewSession,

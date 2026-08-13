@@ -3,8 +3,8 @@
  *
  * Locks the EXACT `prepareDevinRequest(params).args` emission for every wired
  * `must_cover` run flag: -p (--print), --model, --permission-mode,
- * --prompt-file, --config, --sandbox, --export, --respect-workspace-trust,
- * --agent-config. Every flag traces to `devin --help` in
+ * --prompt-file, --config, --sandbox, --export, --respect-workspace-trust.
+ * Every flag traces to `devin --help` in
  * /tmp/ffci-help/devin_--help.txt. Session continuity (--resume / --continue)
  * is appended by the handler, not by this pure builder.
  *
@@ -62,7 +62,6 @@ describe("devin argv golden (Phase 4 Part B)", () => {
       sandbox: true,
       exportSession: "/tmp/session.json",
       respectWorkspaceTrust: true,
-      agentConfig: "/tmp/agent.toml",
     });
     expect(args[0]).toBe("-p");
     expect(args.slice(-2)).toEqual(["--", "PROMPT"]);
@@ -74,7 +73,9 @@ describe("devin argv golden (Phase 4 Part B)", () => {
     expect(count(args, "--sandbox")).toBe(1);
     expect(valueAfter(args, "--export")).toBe("/tmp/session.json");
     expect(valueAfter(args, "--respect-workspace-trust")).toBe("true");
-    expect(valueAfter(args, "--agent-config")).toBe("/tmp/agent.toml");
+    // devin 3000.4.16 dropped --agent-config, so the builder must never emit it
+    // again, whatever a caller passes.
+    expect(count(args, "--agent-config")).toBe(0);
   });
 
   it("permission modes auto / accept-edits / smart emit verbatim", () => {
@@ -117,6 +118,5 @@ describe("devin argv golden (Phase 4 Part B)", () => {
     expect(count(args, "--sandbox")).toBe(0);
     expect(count(args, "--export")).toBe(0);
     expect(count(args, "--respect-workspace-trust")).toBe(0);
-    expect(count(args, "--agent-config")).toBe(0);
   });
 });
