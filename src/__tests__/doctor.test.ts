@@ -1092,7 +1092,11 @@ describe("LCR phase_3 doctor least_cost block", () => {
           {
             cli: "claude",
             model: "sonnet",
-            prompt: "please summarize the following text about routing economics and cost",
+            // Migration v11: the routing path reads persisted signals, not the
+            // prompt body. Kept equivalent to the previous prose fixture.
+            derived_prompt_chars:
+              "please summarize the following text about routing economics and cost".length,
+            derived_content_class: "prose",
             input_tokens: 120,
             output_tokens: 60,
             cache_read_tokens: 0,

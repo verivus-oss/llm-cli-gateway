@@ -39,7 +39,7 @@
 
 import type { FlightRecorderQuery } from "./flight-recorder.js";
 import type { Confidence } from "./least-cost-types.js";
-import { estimateInputTokens, classifyContent } from "./token-estimator.js";
+import { estimateInputTokensFromDerived } from "./token-estimator.js";
 import type { ContentType } from "./token-estimator.js";
 import { modelIdToFamily } from "./pricing.js";
 
@@ -77,8 +77,20 @@ export interface LcrPriorRow {
   provider: string;
   /** Resolved model id / alias (bucketed to a family via `modelIdToFamily`). */
   model: string;
-  /** Full persisted prompt (drives `base_estimate` and the content classifier). */
-  prompt: string;
+  /**
+   * Persisted prompt signals (`derived_prompt_chars` / `derived_content_class`),
+   * which drive `base_estimate` in place of the prompt body.
+   *
+   * This deliberately does NOT carry the prompt. The routing path used to bulk
+   * read `requests.prompt`, which was the only production query that read a
+   * prompt body in bulk and the blocker for encrypting the body columns (see
+   * docs/plans/postgres-security-hardening.md section 4.2).
+   *
+   * `null` for rows written before migration v11 and not yet backfilled. Such
+   * rows are skipped for calibration rather than treated as zero-length, since
+   * a zero estimate would silently bias the ratios.
+   */
+  derivation: { promptChars: number; contentClass: ContentType } | null;
   /** Reported input tokens. For disjoint families this is FRESH-only. */
   inputTokens: number | null;
   /** Reported output tokens (feeds the output priors). */
@@ -286,11 +298,18 @@ export function computeLcrPriors(rows: LcrPriorRow[], opts: ComputeLcrPriorsOpti
     // Skip rows we cannot calibrate: unknown family (no meaningful bucket),
     // session-continued mistral rows (cumulative counts, caveat b), rows with no
     // reported input tokens, and empty/zero base estimates (no ratio).
-    if (family !== "unknown" && !row.sessionContinued && isFiniteNumber(row.inputTokens)) {
-      const base = estimateInputTokens(row.prompt, { family });
+    if (
+      family !== "unknown" &&
+      !row.sessionContinued &&
+      isFiniteNumber(row.inputTokens) &&
+      // Loose null check on purpose: a missing derivation must be SKIPPED, and
+      // an undefined one (a caller that predates the field) must not throw.
+      row.derivation != null
+    ) {
+      const base = estimateInputTokensFromDerived(row.derivation, { family });
       if (base > 0) {
         const actual = reconstructActualInput(row, family);
-        const contentType = classifyContent(row.prompt);
+        const contentType = row.derivation.contentClass;
         const key = calibrationKey(contentType, family);
         const arr = calibrationRatios.get(key) ?? [];
         arr.push(actual / base);
@@ -367,7 +386,8 @@ export function computeLcrPriors(rows: LcrPriorRow[], opts: ComputeLcrPriorsOpti
 interface LcrPriorRawRow {
   cli: string;
   model: string;
-  prompt: string | null;
+  derived_prompt_chars: number | null;
+  derived_content_class: string | null;
   input_tokens: number | null;
   output_tokens: number | null;
   cache_read_tokens: number | null;
@@ -394,9 +414,24 @@ interface LcrPriorRawRow {
  * cumulative `session_*` counts would poison `k`). Non-mistral rows are never
  * flagged. Rows with no session id are treated as fresh single-turn requests.
  */
+/**
+ * Rebuild the persisted signals, or `null` when the row predates migration v11
+ * and has not been backfilled. An unrecognised content class is treated as
+ * missing rather than coerced, so a future class rename cannot silently
+ * reclassify historical rows as prose.
+ */
+function toDerivation(row: LcrPriorRawRow): LcrPriorRow["derivation"] {
+  const chars = row.derived_prompt_chars;
+  const cls = row.derived_content_class;
+  if (chars === null || chars === undefined || cls === null) return null;
+  if (cls !== "prose" && cls !== "code" && cls !== "cjk") return null;
+  return { promptChars: chars, contentClass: cls };
+}
+
 export function loadLcrPriorRows(db: FlightRecorderQuery): LcrPriorRow[] {
   const raw = db.queryRequests<LcrPriorRawRow>(
-    `SELECT r.cli, r.model, r.prompt,
+    // NOTE: deliberately does not select r.prompt. See LcrPriorRow.derivation.
+    `SELECT r.cli, r.model, r.derived_prompt_chars, r.derived_content_class,
             r.input_tokens, r.output_tokens,
             r.cache_read_tokens, r.cache_creation_tokens,
             r.cost_basis, r.owner_principal, r.session_id, r.datetime_utc,
@@ -420,7 +455,7 @@ export function loadLcrPriorRows(db: FlightRecorderQuery): LcrPriorRow[] {
     return {
       provider: row.cli,
       model: row.model,
-      prompt: row.prompt ?? "",
+      derivation: toDerivation(row),
       inputTokens: row.input_tokens,
       outputTokens: row.output_tokens,
       cacheReadTokens: row.cache_read_tokens,

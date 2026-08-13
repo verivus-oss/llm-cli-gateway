@@ -1,4 +1,5 @@
 import { describe, it, expect } from "vitest";
+import { derivePromptSignals } from "../token-estimator.js";
 import {
   computeLcrPriors,
   computeLcrPriorsFromDb,
@@ -19,7 +20,7 @@ function row(overrides: Partial<LcrPriorRow>): LcrPriorRow {
   return {
     provider: "codex",
     model: "gpt-5.5",
-    prompt: PROSE,
+    derivation: derivePromptSignals(PROSE),
     inputTokens: null,
     outputTokens: null,
     cacheReadTokens: null,
@@ -314,7 +315,8 @@ describe("loadLcrPriorRows (flight-recorder read path)", () => {
       {
         cli: "mistral",
         model: "mistral-medium-3.5",
-        prompt: PROSE,
+        derived_prompt_chars: PROSE.length,
+        derived_content_class: "prose",
         input_tokens: 100,
         output_tokens: 50,
         cache_read_tokens: null,
@@ -329,7 +331,8 @@ describe("loadLcrPriorRows (flight-recorder read path)", () => {
       {
         cli: "mistral",
         model: "mistral-medium-3.5",
-        prompt: PROSE,
+        derived_prompt_chars: PROSE.length,
+        derived_content_class: "prose",
         input_tokens: 300, // cumulative
         output_tokens: 120,
         cache_read_tokens: null,
@@ -355,7 +358,8 @@ describe("loadLcrPriorRows (flight-recorder read path)", () => {
       {
         cli: "codex",
         model: "gpt-5.5",
-        prompt: PROSE,
+        derived_prompt_chars: PROSE.length,
+        derived_content_class: "prose",
         input_tokens: null,
         output_tokens: 30,
         cache_read_tokens: null,

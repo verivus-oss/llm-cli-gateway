@@ -125,3 +125,61 @@ export function estimateInputTokens(
 
   return Math.ceil(base * familyMult * k);
 }
+
+/**
+ * Version of the derivation algorithm below. Bump this whenever
+ * {@link classifyContent} or the layer-1 divisor table changes, because stored
+ * derivations produced by an older algorithm are no longer comparable with new
+ * ones. Family multipliers and calibration k are deliberately NOT covered: they
+ * are applied at read time from live values, so changing them does not
+ * invalidate anything already persisted.
+ */
+export const DERIVATION_VERSION = 1;
+
+/**
+ * The only two facts about a prompt that the routing path needs.
+ *
+ * {@link estimateInputTokens} touches its text in exactly two ways: `text.length`
+ * and `classifyContent(text)`. Persisting those at write time therefore lets the
+ * estimate be reconstructed later without reading the prompt body at all, which
+ * is what allows the body columns to be encrypted (see
+ * docs/plans/postgres-security-hardening.md section 4.2).
+ *
+ * Derive from the SAME text that is persisted, i.e. after redaction, or the
+ * stored signals will disagree with the stored row.
+ */
+export interface PromptDerivation {
+  promptChars: number;
+  contentClass: ContentType;
+  derivationVersion: number;
+}
+
+/** Compute the persistable signals for a prompt. Pure. */
+export function derivePromptSignals(text: string): PromptDerivation {
+  return {
+    promptChars: text ? text.length : 0,
+    contentClass: classifyContent(text ?? ""),
+    derivationVersion: DERIVATION_VERSION,
+  };
+}
+
+/**
+ * Reconstruct {@link estimateInputTokens} from persisted signals instead of from
+ * the prompt text. For any `text`, this is EXACTLY equal to
+ * `estimateInputTokens(text, opts)` when given that text's derivation, because
+ * the original reads the text only through those two signals. That equivalence
+ * is enforced by a property test rather than asserted here.
+ */
+export function estimateInputTokensFromDerived(
+  derived: Pick<PromptDerivation, "promptChars" | "contentClass">,
+  opts?: { family?: string; calibrationK?: number }
+): number {
+  if (!derived.promptChars || derived.promptChars <= 0) return 0;
+
+  const divisor = DIVISOR_BY_TYPE.get(derived.contentClass) ?? 4;
+  const base = derived.promptChars / divisor;
+  const familyMult = familyMultiplier(opts?.family);
+  const k = opts?.calibrationK ?? 1;
+
+  return Math.ceil(base * familyMult * k);
+}
