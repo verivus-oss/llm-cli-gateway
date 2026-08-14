@@ -1,0 +1,240 @@
+# Implementation plan: move the session manager onto Postgres, collapsing three
+# stores to two.
+#
+# Context. The stated goal is a SINGLE store. Today the gateway runs three:
+#
+#   jobs + validation   Postgres          migrated
+#   sessions            ~/.llm-cli-gateway/sessions.json, 3,590 sessions
+#   transcripts         logs.db, SQLite, 1.21 GB
+#
+# Transcripts are blocked behind a deliberate gate (postgres-security-hardening
+# section 6 step 9: bodies do not move until the security sequence completes
+# through http principal granularity). Sessions carry NO such gate, because
+# session state is minimal by construction: id, cli, timestamps, description,
+# and never conversation content. So sessions are the half of the remaining work
+# that can be finished now, and finishing it takes three stores to two.
+#
+# This is step 6 of `storage-unification.md` section 6, executed ahead of steps
+# 1 to 5 (the unified async port). That inversion is deliberate and is recorded
+# in the `sequencing_deviation` decision below.
+
+[meta]
+name = "session manager onto Postgres"
+schema_version = "1.1"
+owner = "verivus-oss"
+target_branch = "fix/pre-3.1.0-workingdir-and-skill-coverage"
+implements = "storage-unification.md#6.6"
+acceptance_resource = """
+The running gateway logs a Postgres session manager rather than "file-based";
+all 3,590 sessions and the active-session pointers are readable through the
+Postgres path; session continuity survives a gateway restart; `npm test` and
+`npm run test:pg` are green.
+"""
+invariant_sources = [
+  "src/config.ts",
+  "src/session-manager.ts",
+  "src/session-manager-pg.ts",
+  "src/migrate-sessions.ts",
+  "src/db.ts",
+  "migrations/001_initial_schema.sql",
+  "/home/werner/.llm-cli-gateway/config.toml",
+  "/home/werner/.llm-cli-gateway/run.sh",
+]
+
+[decision]
+root_cause = """
+The Postgres session manager is NOT missing. `PostgreSQLSessionManager`
+(src/session-manager-pg.ts, 1,521 lines) is complete, `migrate-sessions.ts` is a
+working backfill tool, and `migrations/001_initial_schema.sql:5` already creates
+`sessions` and `active_sessions`.
+
+What is missing is SELECTION. `createSessionManager` (src/session-manager.ts:1794)
+picks Postgres if and only if `config.database` is set, and `config.database` is
+populated from one place: `process.env.DATABASE_URL` (src/config.ts:61). The
+gateway's launcher `/home/werner/.llm-cli-gateway/run.sh` never sets it, so the
+factory takes the file branch every time.
+
+Meanwhile the job store reads `[persistence].dsn` from config.toml and connects
+to that same Postgres instance. Two selection mechanisms, one database, and the
+subsystem nobody wired up silently kept its own file. That is
+`storage-unification.md` section 3.3 exactly.
+"""
+
+selection_model = """
+`[persistence]` becomes the single selector. When `backend = "postgres"`, the
+session manager uses that same `dsn`; no second variable, no second decision.
+
+`DATABASE_URL` is retained as a deprecated override that emits a one-time
+warning, matching how `LLM_GATEWAY_LOGS_DB` / `LLM_GATEWAY_JOBS_DB` were handled.
+It must NOT silently override an explicit `[persistence].backend`: rc.3 fixed
+precisely that class of defect, where a variable named for one subsystem rewrote
+another subsystem's explicit configuration. An explicit backend wins and the
+override is refused with a warning naming the variable.
+"""
+
+sequencing_deviation = """
+`storage-unification.md` sequences the unified async port (steps 1 to 4) BEFORE
+migrating the session manager (step 6). This plan does step 6 first.
+
+Justified because the session manager is the one subsystem where the port is not
+the blocker: `ISessionManager` is ALREADY the hybrid `T | Promise<T>` shape, and
+two conforming implementations already exist and are already exercised by the
+`*-pg` suites. There is no sync/async asymmetry to resolve here, which is the
+whole reason steps 1 to 4 exist.
+
+The cost of the inversion is that this migration does not itself produce the
+shared port; a later slice still has to fold `PostgreSQLSessionManager` behind
+it. Recorded so that is a known follow-up rather than a surprise.
+"""
+
+no_encryption_gate = """
+The transcript hard gate does NOT apply. It exists because prompt and response
+bodies would sit in cleartext under a single superuser role. Session rows carry
+id, cli, created/lastUsed timestamps, an optional description and kit binding
+metadata, and by documented design carry no conversation content. Nothing here
+is a body column, so nothing here waits on envelope encryption.
+
+This is a scope claim and must be VERIFIED against the real 3,590 rows before
+the backfill, not assumed from the documentation. If any description or metadata
+field is carrying transcript-like content, this plan stops and the gate applies.
+"""
+
+[[steps]]
+id = "verify-no-body-content"
+depends_on = []
+actor = "assistant"
+status = "done"
+action = """
+Before moving anything, check the live sessions.json for content the
+`no_encryption_gate` decision claims is absent: oversized `description` values,
+prompt or response text in metadata, or kit-binding fields carrying free text.
+Report the largest field sizes rather than asserting cleanliness.
+"""
+idempotent = true
+validation = """
+No session field exceeds a small bound (descriptions are labels, not
+transcripts). If one does, this DAG stops and the encryption gate is applied.
+"""
+
+[[steps]]
+id = "apply-session-schema"
+depends_on = ["verify-no-body-content"]
+actor = "assistant"
+status = "done"
+action = """
+The target database has NO `_migrations` ledger and no `sessions` /
+`active_sessions` tables: `to_regclass` returns null for both. Its schema was
+created by the job-store path, which builds its own tables, so `npm run migrate`
+has never run here.
+
+Apply the migrations with `DATABASE_URL` set to the persistence DSN. Verify
+FIRST, on a transaction that is rolled back, that the migration set is safe
+against the existing job tables; every object it creates must be guarded by
+IF NOT EXISTS or the run will abort partway and leave a mixed schema.
+"""
+idempotent = true
+validation = """
+`sessions` and `active_sessions` exist; the pre-existing `jobs`, `jobs_archive`,
+`validation_*`, `gateway_instances` and `kit_attempt_fences` tables are
+unchanged, verified by comparing row counts before and after.
+"""
+
+[[steps]]
+id = "unify-selection"
+depends_on = []
+actor = "assistant"
+status = "done"
+action = """
+Make `[persistence]` drive the session manager. `loadConfig` gains the
+persistence DSN as a source for `config.database` when
+`backend = "postgres"`, so `createSessionManager` takes the Postgres branch
+without a second environment variable.
+
+Precedence, per `selection_model`: an explicit `[persistence].backend` wins;
+`DATABASE_URL` is a deprecated override that warns once and is refused when it
+would contradict an explicit backend.
+"""
+idempotent = true
+validation = """
+Unit tests over `loadConfig`: postgres backend yields `config.database`;
+`backend = "sqlite"` does not; `DATABASE_URL` contradicting an explicit backend
+is refused with a warning naming the variable.
+"""
+
+[[steps]]
+id = "backfill-sessions"
+depends_on = ["apply-session-schema", "unify-selection"]
+actor = "assistant"
+status = "done"
+action = """
+Run `migrate-sessions.ts` against the live 3,590 sessions with the gateway
+STOPPED, so no writer races the copy. Keep sessions.json in place; it is the
+rollback, and it is not deleted by this plan.
+"""
+idempotent = true
+validation = """
+Postgres row count equals the file's session count; the `activeSession` and
+`activeKitSession` pointers resolve to rows that exist; a sampled set of ids
+round-trips with identical cli, timestamps and description.
+"""
+defect_found = """
+BLOCKER, caught by this step's own round-trip validation. The first run imported
+all 3,590 sessions with `created_at` and `last_used_at` set to the import
+moment: 31 distinct days of history collapsed into a single 22-second window.
+
+Root cause is structural, not a slip. `FileSessionMigrationRecord` had NO
+timestamp fields, so `importFileSessionMigration` had nothing to write and used
+`new Date()` for both. `migrate-sessions.ts` parsed the source timestamps into
+its `source` object and then did not carry them into `record`; the data was
+dropped at the type boundary.
+
+Consequences had it been cut over: `cleanup_expired_sessions(max_age_days)`
+would see a June session as minutes old and never reap it (exactly one row is
+genuinely past the 30-day TTL and would have been invisible for another month);
+ordering by `last_used_at` and the `idx_sessions_cli_last_used` index would be
+arbitrary; most-recent-session resolution would pick at random.
+
+Fixed by carrying `createdAt`/`lastUsedAt` on the record, writing them in the
+INSERT, and rejecting a source row whose timestamps are not parseable rather
+than silently substituting the clock. Re-run after TRUNCATE: 3,590 rows, zero
+sampled mismatches, 31 distinct days restored.
+
+`session_generation` is still regenerated on import rather than carried over.
+Left deliberately: it is a concurrency fence, and a fresh fence after a store
+change invalidates any stale holder, which fails closed. sessions.json retains
+the original values if that judgement is ever revisited.
+"""
+
+[[steps]]
+id = "cutover-and-verify-continuity"
+depends_on = ["backfill-sessions"]
+actor = "assistant"
+status = "planned"
+action = """
+Restart the gateway and confirm from its own logs that it initialised the
+Postgres session manager, not the file one. Then verify the property the user
+asked for by name: continuity across restarts. Create a session, restart the
+service, and confirm it is still resolvable and still active afterwards.
+
+A log line naming Postgres proves selection, not durability. Both are checked,
+because registration is not reachability.
+"""
+idempotent = false
+validation = """
+Startup log names the Postgres session manager; `session_list` returns the
+migrated sessions; a session created before a restart survives it.
+"""
+
+[[steps]]
+id = "tests-and-changelog"
+depends_on = ["cutover-and-verify-continuity"]
+actor = "assistant"
+status = "planned"
+action = """
+`npm test` and `npm run test:pg`, then a CHANGELOG entry describing the
+selection unification and the store count going three to two. Note explicitly
+that transcripts remain on SQLite behind the security gate, so the entry does
+not read as if the single-store goal were met.
+"""
+idempotent = true
+validation = "Both suites green; CHANGELOG states the remaining gap honestly."

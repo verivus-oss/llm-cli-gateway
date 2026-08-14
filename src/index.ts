@@ -23119,12 +23119,30 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
 //──────────────────────────────────────────────────────────────────────────────
 
 async function initializeSessionManager(): Promise<void> {
-  const config = loadConfig();
+  // Pass the runtime logger so the deprecated-DATABASE_URL warning reaches
+  // stderr rather than being swallowed by the default noop logger.
+  const config = loadConfig(undefined, logger);
 
   if (config.database) {
     logger.info("Initializing PostgreSQL session manager");
     const { createDatabaseConnection } = await import("./db.js");
-    db = await createDatabaseConnection(config, logger);
+    try {
+      db = await createDatabaseConnection(config, logger);
+    } catch (error) {
+      // The session store now shares the durable backend, and it initializes
+      // before the job store's admission check. Without this, an unreachable
+      // Postgres surfaced only as a refused connection, and the operator was
+      // never told which configuration selected that database.
+      const detail = error instanceof Error ? error.message : String(error);
+      const selector =
+        config.databaseSource === "env"
+          ? "DATABASE_URL selected it (deprecated; prefer [persistence])."
+          : "The session store follows [persistence] in ~/.llm-cli-gateway/config.toml.";
+      throw new Error(
+        `Cannot open the configured durable async persistence backend for sessions: ${detail}. ${selector}`,
+        { cause: error }
+      );
+    }
     sessionManager = await createSessionManager(config, db, logger);
     logger.info("PostgreSQL session manager initialized");
   } else {

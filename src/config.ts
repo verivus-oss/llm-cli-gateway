@@ -35,6 +35,12 @@ export const DEFAULT_SESSION_TTL_SECONDS = 2592000; // 30 days
 export interface Config {
   database?: DatabaseConfig;
   sessionTtl: number; // Session expiration in seconds
+  /**
+   * Which selector chose {@link Config.database}, so a startup failure can name
+   * the configuration the operator actually wrote rather than just reporting a
+   * refused connection.
+   */
+  databaseSource?: "persistence" | "env";
 }
 
 const SkillsSchema = z
@@ -52,12 +58,32 @@ export interface SkillsConfig {
   };
 }
 
+let warnedSessionDatabaseUrl = false;
+
 /**
- * Load configuration from environment variables.
- * Always returns a Config object with base fields.
- * Database fields are populated when DATABASE_URL is set.
+ * Load configuration for the session manager.
+ *
+ * The session store follows `[persistence]`, the same selector the job store
+ * and validation runs already use. It previously had a selector of its own,
+ * `DATABASE_URL`, and nothing set it: `createSessionManager` therefore took the
+ * file branch on a host whose `[persistence].backend` was `"postgres"`, and the
+ * sessions quietly stayed in `~/.llm-cli-gateway/sessions.json` while every
+ * other subsystem was on Postgres. One database, two ways to select it, and the
+ * subsystem nobody wired up kept its own file.
+ *
+ * `DATABASE_URL` remains as a deprecated override that warns once, matching the
+ * treatment of `LLM_GATEWAY_LOGS_DB` / `LLM_GATEWAY_JOBS_DB`. It must never
+ * silently rewrite an explicit backend: a variable named for one subsystem
+ * overriding another subsystem's explicit configuration is exactly the defect
+ * fixed in 3.1.0-rc.3.
+ *
+ * @param persistence Resolved persistence config; omitted, it is loaded.
+ * @param logger Logger for the one-time deprecation warning.
  */
-export function loadConfig(): Config {
+export function loadConfig(
+  persistence: PersistenceConfig = loadPersistenceConfig(),
+  logger: Logger = noopLogger
+): Config {
   const databaseUrl = process.env.DATABASE_URL;
 
   const rawSessionTtl = parseInt(
@@ -69,14 +95,42 @@ export function loadConfig(): Config {
       ? rawSessionTtl
       : DEFAULT_SESSION_TTL_SECONDS;
 
-  // If no database config, return base config (file-based storage)
-  if (!databaseUrl) {
+  const persistenceDsn = persistence.backend === "postgres" ? persistence.dsn : null;
+
+  // Precedence. An explicitly configured Postgres backend wins; DATABASE_URL is
+  // refused rather than allowed to point the sessions at a different database
+  // from the jobs, which would recreate the split this change removes.
+  let connectionString: string | null = persistenceDsn;
+  if (databaseUrl && databaseUrl.length > 0) {
+    if (persistenceDsn && databaseUrl !== persistenceDsn) {
+      if (!warnedSessionDatabaseUrl) {
+        warnedSessionDatabaseUrl = true;
+        logger.warn?.(
+          "DATABASE_URL is deprecated for session storage and disagrees with " +
+            "[persistence].dsn; ignoring it. The session store follows [persistence] " +
+            "so sessions and jobs cannot land in different databases."
+        );
+      }
+    } else if (!persistenceDsn) {
+      if (!warnedSessionDatabaseUrl) {
+        warnedSessionDatabaseUrl = true;
+        logger.warn?.(
+          "DATABASE_URL is deprecated for session storage; set [persistence] " +
+            'backend = "postgres" with a dsn in ~/.llm-cli-gateway/config.toml instead.'
+        );
+      }
+      connectionString = databaseUrl;
+    }
+  }
+
+  // No Postgres selected: file-based storage.
+  if (!connectionString) {
     return { sessionTtl };
   }
 
   // Validate URL
   try {
-    DatabaseUrlSchema.parse(databaseUrl);
+    DatabaseUrlSchema.parse(connectionString);
   } catch (error) {
     throw new Error(
       `Invalid database URL: ${error instanceof Error ? error.message : String(error)}`,
@@ -86,7 +140,7 @@ export function loadConfig(): Config {
 
   return {
     database: {
-      connectionString: databaseUrl,
+      connectionString,
       pool: {
         max: 10,
         idleTimeoutMillis: 30000,
@@ -95,7 +149,13 @@ export function loadConfig(): Config {
       },
     },
     sessionTtl,
+    databaseSource: connectionString === persistenceDsn ? "persistence" : "env",
   };
+}
+
+/** Reset the one-time DATABASE_URL warning. Tests only. */
+export function resetSessionDatabaseUrlWarning(): void {
+  warnedSessionDatabaseUrl = false;
 }
 
 //──────────────────────────────────────────────────────────────────────────────
