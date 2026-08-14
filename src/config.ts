@@ -111,7 +111,25 @@ export function loadConfig(
             "so sessions and jobs cannot land in different databases."
         );
       }
+    } else if (!persistenceDsn && persistence.explicitBackend) {
+      // An operator who WROTE DOWN a non-postgres backend has chosen where
+      // durable state lives. Honouring DATABASE_URL here would put sessions in
+      // Postgres while jobs stayed on that backend: the exact split this
+      // selector exists to prevent, and reachable with `backend = "sqlite"`,
+      // `"memory"` or `"none"`. Refused, matching the rule that an explicit
+      // backend wins over a variable named for a different subsystem.
+      if (!warnedSessionDatabaseUrl) {
+        warnedSessionDatabaseUrl = true;
+        logger.warn?.(
+          "DATABASE_URL is set but [persistence].backend is explicitly configured as " +
+            `"${persistence.backend}"; ignoring it. Honouring it would put sessions in ` +
+            "Postgres while jobs stay on the configured backend. Remove the variable, or " +
+            'set [persistence] backend = "postgres" with a dsn.'
+        );
+      }
     } else if (!persistenceDsn) {
+      // No persistence configured at all: the legacy variable is still the
+      // only signal an older deployment has, so it is honoured with a warning.
       if (!warnedSessionDatabaseUrl) {
         warnedSessionDatabaseUrl = true;
         logger.warn?.(
@@ -279,6 +297,16 @@ export interface PersistenceConfig {
   asyncJobsEnabled: boolean;
   /** Audit trail: which inputs (file, env vars) contributed to the resolved config. */
   sources: PersistenceConfigSources;
+  /**
+   * True when `[persistence].backend` was written down, rather than defaulted.
+   *
+   * The distinction is load-bearing for session-store selection: honouring a
+   * legacy `DATABASE_URL` under an EXPLICIT non-postgres backend puts sessions
+   * in Postgres while jobs stay on the selected backend, which is the split
+   * this configuration exists to prevent. "Nobody configured persistence" and
+   * "an operator chose sqlite" are different states and must not be conflated.
+   */
+  explicitBackend: boolean;
 }
 
 export interface PersistenceConfigSources {
@@ -568,6 +596,12 @@ export function loadPersistenceConfig(logger: Logger = noopLogger): PersistenceC
     instanceGcMs: parsed.instanceGcMs,
     asyncJobsEnabled,
     sources,
+    // Read from the FILE, not from `merged`: `applyEnvOverrides` synthesises a
+    // backend from the legacy LLM_GATEWAY_LOGS_DB / _JOBS_DB variables, so
+    // `merged.backend` is a string on any host that sets either, including the
+    // test harness. Explicit means an operator wrote a backend down, which is
+    // the same source the env-override precedence rule above consults.
+    explicitBackend: typeof (raw as Record<string, unknown> | undefined)?.backend === "string",
   };
 }
 
