@@ -4,6 +4,8 @@ All notable changes to the llm-cli-gateway project.
 
 ## [Unreleased]
 
+## [3.1.0-rc.7] - 2026-08-14: the test suite stops eating live sessions
+
 ### Fixed
 
 - **The test suite wrote to, and DELETED rows from, the live session store.**
@@ -28,6 +30,15 @@ All notable changes to the llm-cli-gateway project.
   The variable is not test-only scaffolding. An operator running two gateway
   instances on one host needs the same separation, and the recorder already
   models it.
+
+### Changed
+
+- **`gemini` provider contract rebaselined to agy 1.1.13.** Version target only;
+  no flag additions and no removals. The ACP watchlist tripwire fired as
+  designed, so the "no native ACP surface" claim was re-probed rather than
+  restamped: `agy --help` contains zero occurrences of `acp`, and
+  `agy acp --help` prints output byte-identical to `agy --help`, which is how an
+  unrecognised subcommand presents. Still `absent_watchlist`.
 
 ## [3.1.0-rc.6] - 2026-08-14: worktrees restored, store split closed
 
