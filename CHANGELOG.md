@@ -4,6 +4,8 @@ All notable changes to the llm-cli-gateway project.
 
 ## [Unreleased]
 
+## [3.1.0-rc.6] - 2026-08-14: worktrees restored, store split closed
+
 ### Fixed
 
 - **An explicit non-Postgres backend plus `DATABASE_URL` split the stores.**
@@ -60,6 +62,12 @@ All notable changes to the llm-cli-gateway project.
   restart. The instance id is provenance; the host owns the disk.
 
 ## [3.1.0-rc.5] - 2026-08-14: sessions follow [persistence], three stores become two
+
+> Tagged but never published to npm. This candidate disabled gateway-managed
+> worktrees on Postgres-backed hosts, and left an explicit non-Postgres backend
+> able to split the session and job stores. Both were found after tagging by
+> adversarial cross-LLM review; 3.1.0-rc.6 carries the same changes plus the
+> repairs. The tag is retained unchanged as the record of what was cut.
 
 ### Changed
 
