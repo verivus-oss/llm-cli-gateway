@@ -49,7 +49,6 @@ import { homedir, hostname } from "os";
 import {
   CLI_TYPES,
   PROVIDER_TYPES,
-  FileSessionManager,
   ISessionManager,
   assertKitSessionManagerStorageHealthy,
   createSessionManager,
