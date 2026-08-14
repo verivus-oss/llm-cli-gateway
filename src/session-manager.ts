@@ -393,6 +393,30 @@ export interface SessionRemovalObserverRegistrar {
   addSessionRemovalObserver(observer: SessionCleanupHook): () => void;
 }
 
+/**
+ * Where a `FileSessionManager` stores sessions when the caller passes no path.
+ *
+ * `LLM_GATEWAY_SESSIONS_FILE` exists for the same reason `LLM_GATEWAY_LOGS_DB`
+ * does on the flight recorder: the default is derived from `homedir()`, so any
+ * code that constructs the manager without a path binds to the operator's REAL
+ * session store. That is not hypothetical. Seven test call sites invoked
+ * `createSessionManager(undefined, ...)`, and running one of those test files
+ * against a live host rewrote `~/.llm-cli-gateway/sessions.json` and DELETED 28
+ * real sessions, because the manager evicts expired entries on load: a
+ * read-only-looking test mutates real data.
+ *
+ * Fixing the seven call sites would not close the class; the eighth would
+ * reopen it. An overridable default lets the harness pin it once.
+ *
+ * Not test-only scaffolding: an operator running two gateway instances on one
+ * host needs the same separation, and the recorder already models it.
+ */
+export function resolveDefaultSessionStorePath(): string {
+  const configured = process.env.LLM_GATEWAY_SESSIONS_FILE;
+  if (configured && configured.trim().length > 0) return configured.trim();
+  return join(homedir(), ".llm-cli-gateway", "sessions.json");
+}
+
 export class FileSessionManager
   implements SessionCleanupHookRegistrar, SessionRemovalObserverRegistrar
 {
@@ -418,7 +442,7 @@ export class FileSessionManager
     opts?: { cleanupHook?: SessionCleanupHook; logger?: Logger }
   ) {
     this.sessionTtlMs = sessionTtlMs ?? DEFAULT_SESSION_TTL_SECONDS * 1000;
-    this.storagePath = customPath || join(homedir(), ".llm-cli-gateway", "sessions.json");
+    this.storagePath = customPath || resolveDefaultSessionStorePath();
     if (opts?.cleanupHook) this.cleanupHooks.add(opts.cleanupHook);
     this.logger = opts?.logger ?? noopLogger;
     this.ensureStorageDirectory();

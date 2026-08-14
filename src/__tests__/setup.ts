@@ -25,6 +25,17 @@ if (process.env.LLM_GATEWAY_CONFIG === undefined) {
   process.env.LLM_GATEWAY_CONFIG = testConfigPath;
 }
 
+// The job-store config above does NOT isolate the SESSION store either. A
+// FileSessionManager constructed without a path binds to
+// ~/.llm-cli-gateway/sessions.json, and it evicts expired sessions on LOAD, so
+// a test that merely constructs one deletes real rows. Measured: running
+// codex-fork-unavailable.test.ts against a live host removed 28 sessions.
+// Pinned per process, for the same reason and in the same way as the recorder.
+process.env.LLM_GATEWAY_SESSIONS_FILE = join(
+  tmpdir(),
+  `llm-cli-gateway-test-sessions-${process.pid}.json`
+);
+
 // The job-store config above does NOT isolate the flight recorder: that is a
 // separate subsystem with its own selector (`resolveFlightRecorderDbPath` reads
 // LLM_GATEWAY_LOGS_DB and otherwise defaults to ~/.llm-cli-gateway/logs.db).

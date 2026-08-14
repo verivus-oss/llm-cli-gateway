@@ -7,12 +7,13 @@ import {
   publicSafeSession,
   sessionGenerationIdentity,
   type Session,
+  resolveDefaultSessionStorePath,
 } from "../session-manager.js";
 import { runWithRequestContext } from "../request-context.js";
 import type { KitExecutionRef, KitSessionBinding } from "../personal-config-types.js";
 import { existsSync, mkdirSync, rmSync, readFileSync, statSync, writeFileSync } from "fs";
 import { join } from "path";
-import { tmpdir } from "os";
+import { homedir, tmpdir } from "os";
 
 describe("SessionManager", () => {
   let testDir: string;
@@ -892,5 +893,37 @@ describe("remoteSafeSession + callerIsRemote", () => {
       callerIsRemote()
     );
     expect(httpRemote).toBe(true);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Live-store isolation.
+//
+// A FileSessionManager built without a path used to bind to
+// ~/.llm-cli-gateway/sessions.json, and it evicts expired sessions on LOAD, so
+// constructing one in a test DELETED real rows. Measured against a live host:
+// one test file removed 28 sessions. These pin the isolation itself, not a
+// symptom of it.
+// ---------------------------------------------------------------------------
+describe("default session store path", () => {
+  it("resolves to the harness override, never the operator's home", () => {
+    const resolved = resolveDefaultSessionStorePath();
+    expect(process.env.LLM_GATEWAY_SESSIONS_FILE).toBeTruthy();
+    expect(resolved).toBe(process.env.LLM_GATEWAY_SESSIONS_FILE);
+    expect(resolved).not.toContain(join(homedir(), ".llm-cli-gateway"));
+  });
+
+  it("falls back to the home path only when the override is absent", () => {
+    // The fallback is still the documented production default; this asserts
+    // the override is what diverts it, rather than the default having changed.
+    const saved = process.env.LLM_GATEWAY_SESSIONS_FILE;
+    delete process.env.LLM_GATEWAY_SESSIONS_FILE;
+    try {
+      expect(resolveDefaultSessionStorePath()).toBe(
+        join(homedir(), ".llm-cli-gateway", "sessions.json")
+      );
+    } finally {
+      if (saved !== undefined) process.env.LLM_GATEWAY_SESSIONS_FILE = saved;
+    }
   });
 });
