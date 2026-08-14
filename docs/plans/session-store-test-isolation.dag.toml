@@ -1,0 +1,131 @@
+# Implementation plan: stop the test suite writing to the live session store,
+# and purge the test pollution it has already accumulated.
+#
+# Found by questioning a number, not by a gate. The migrated Postgres store held
+# 3,603 session rows, which looked implausible for real use. It is:
+#
+#   1,576  "test"
+#     762  "Grok Session"        <- real
+#     668  "Codex Session"       <- real
+#     315  "fresh"
+#     148  "Mistral Session"     <- real
+#      85  "scope-write probe"
+#      25  "Cursor Session"      <- real
+#      17  "Devin Session"       <- real
+#       6  genuinely named
+#
+# 1,980 of 3,603 rows (55%) are test artefacts. The session migration copied
+# them wholesale into Postgres, so the new store was seeded majority-junk.
+#
+# PROVEN, not inferred: running `npx vitest run
+# src/__tests__/codex-fork-unavailable.test.ts` against the live host changed
+# ~/.llm-cli-gateway/sessions.json and DELETED 28 sessions (3,478 -> 3,450) via
+# TTL eviction on load. A single test file mutates the user's real data.
+#
+# This is the same defect class as the flight-recorder leak fixed in 3.1.0-rc.3,
+# which pinned LLM_GATEWAY_LOGS_DB in the test harness. Sessions were never
+# given the equivalent treatment, because their default path is derived from
+# homedir() with no env override to pin.
+
+[meta]
+name = "session store test isolation"
+schema_version = "1.1"
+owner = "verivus-oss"
+acceptance_resource = """
+No test run mutates ~/.llm-cli-gateway/sessions.json, proven by mtime and row
+count across a full suite run; the live Postgres session store holds only real
+sessions; a newly added test that forgets to pass a path cannot reach the live
+store.
+"""
+invariant_sources = [
+  "src/session-manager.ts",
+  "src/__tests__/setup.ts",
+  "src/config.ts",
+]
+
+[decision]
+root_cause = """
+`FileSessionManager`'s constructor (src/session-manager.ts:421) resolves
+`customPath || join(homedir(), ".llm-cli-gateway", "sessions.json")`. Seven test
+call sites invoke `createSessionManager(undefined, undefined, noopLogger)`,
+which takes the file branch with no path and therefore binds to the LIVE store.
+
+Worse than writing: `FileSessionManager` evicts expired sessions on load, so a
+read-only-looking test DELETES real rows. That is how sessions.json fell from
+3,590 to 3,450 over this session's test runs.
+"""
+
+fix_shape = """
+Fix the CLASS at the harness level, not the seven call sites. Patching the call
+sites leaves the next test that omits a path free to reopen the leak, which is
+exactly what happened after the flight-recorder fix addressed only its own
+symptom.
+
+`FileSessionManager` gains an env override for its default path
+(`LLM_GATEWAY_SESSIONS_FILE`), symmetric with the flight recorder's
+`LLM_GATEWAY_LOGS_DB`, and `src/__tests__/setup.ts` pins it to a per-process
+temp path. The call sites are then harmless whether or not they pass a path.
+
+The env var is not test-only scaffolding: an operator running two gateway
+instances on one host has the same need, and the recorder already models it.
+"""
+
+purge_scope = """
+The live Postgres store keeps only real sessions. Test-shaped rows are removed
+by description, which is the only reliable discriminator available: the real
+rows use the provider default descriptions (`<Provider> Session`) and the test
+rows use fixture strings ("test", "fresh", "scope-write probe", ...).
+
+Deletion is destructive, so: back up first, delete inside a transaction,
+report the exact count, and verify the survivors are all provider-default or
+genuinely named. sessions.json.premigrate-20260814 remains the pre-migration
+copy of record.
+"""
+
+not_doing = """
+NOT deleting by age. Old is not the same as fake: real June and July sessions
+exist and are legitimate history. NOT deleting the file store; it is retained
+until the Postgres store is confirmed healthy.
+"""
+
+[[steps]]
+id = "env-override-and-harness-pin"
+depends_on = []
+actor = "assistant"
+status = "planned"
+action = """
+Add `LLM_GATEWAY_SESSIONS_FILE` to `FileSessionManager`'s default-path
+resolution, and pin it in `src/__tests__/setup.ts` to a per-process temp file,
+mirroring how `LLM_GATEWAY_LOGS_DB` is pinned there.
+"""
+idempotent = true
+validation = """
+Run the previously-leaking test and assert ~/.llm-cli-gateway/sessions.json
+mtime and row count are UNCHANGED. Then a full `npm test` with the same check.
+"""
+
+[[steps]]
+id = "regression-test"
+depends_on = ["env-override-and-harness-pin"]
+actor = "assistant"
+status = "planned"
+action = """
+A test that asserts `new FileSessionManager()` with no argument, under the
+harness, does NOT resolve to the homedir path. Negative control required: it
+must fail when the override is removed from the resolution.
+"""
+idempotent = true
+validation = "Test dies to a mutation that drops the env override."
+
+[[steps]]
+id = "purge-test-rows"
+depends_on = ["env-override-and-harness-pin"]
+actor = "assistant"
+status = "planned"
+action = """
+Back up the `sessions` table, then delete the test-shaped rows in a transaction
+and report the count. Verify every surviving description is a provider default
+or a genuine name.
+"""
+idempotent = true
+validation = "Survivors ~1,620; no row with a fixture description remains; jobs and validation tables untouched."

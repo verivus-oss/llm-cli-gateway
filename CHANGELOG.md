@@ -4,6 +4,31 @@ All notable changes to the llm-cli-gateway project.
 
 ## [Unreleased]
 
+### Fixed
+
+- **The test suite wrote to, and DELETED rows from, the live session store.**
+  `FileSessionManager` resolved its default path as
+  `~/.llm-cli-gateway/sessions.json`, and seven test call sites construct it
+  through `createSessionManager(undefined, ...)`, which takes the file branch
+  with no path. Because the manager evicts expired sessions on LOAD, a test that
+  merely constructs one deletes real data: running a single test file against a
+  live host removed 28 sessions, and the store fell from 3,590 to 3,450 over one
+  working session.
+
+  This is the same defect class as the flight-recorder leak fixed in
+  3.1.0-rc.3. That fix pinned `LLM_GATEWAY_LOGS_DB`; sessions never received the
+  equivalent because their default is derived from `homedir()` with nothing to
+  pin. `resolveDefaultSessionStorePath()` now honours
+  `LLM_GATEWAY_SESSIONS_FILE`, and the harness pins it per process.
+
+  Fixed at the class level rather than at the seven call sites, because the
+  eighth would reopen it. Verified by measurement: a full 262-file, 4,043-test
+  run leaves the live store's mtime and row count byte-identical.
+
+  The variable is not test-only scaffolding. An operator running two gateway
+  instances on one host needs the same separation, and the recorder already
+  models it.
+
 ## [3.1.0-rc.6] - 2026-08-14: worktrees restored, store split closed
 
 ### Fixed
