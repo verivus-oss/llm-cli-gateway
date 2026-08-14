@@ -602,7 +602,7 @@ ${deferralLine}
 - An unscoped local CLI child uses a fresh private neutral cwd, not the gateway repository. Cwd-scoped resumeLatest requires workingDir, workspace, or a configured default workspace.
 - Codex new and resume prompts use stdin. codex_fork_session remains argv-bound and rejects oversized UTF-8 prompts as non-retryable input_too_large. Prompts are never truncated.
 - Upstream drift detection: After upgrading any provider CLI (especially grok), use upstream_contracts with probeInstalled:true and provider_subcommand_drift for declared subcommand help surfaces. Probes are safe, read-only --help checks.
-- Idle timeout kills stuck processes (default 10min for providers that stream; providers that emit nothing until they exit (gemini, mistral, devin, cursor) instead get a 1h total-runtime bound, since an idle timer never advances for them). Configurable via idleTimeoutMs.
+- Idle timeout kills stuck processes (default 10min for providers that stream). Providers that emit nothing until they exit get a 1h total-runtime bound instead, since an idle timer never advances for them: gemini, mistral, devin, and cursor under its default text output. Cursor with outputFormat stream-json does stream, so there the same 1h value behaves as a real idle window. Configurable via idleTimeoutMs.
 
 Skills (full docs via MCP resources):
 ${loadedSkills.map(s => `- skills://${s.name} — ${s.description}`).join("\n")}`;
@@ -1243,7 +1243,7 @@ export function shouldRegisterGrokApiTools(providers: ProvidersConfig): boolean 
 // Only providers whose registry `outputDiscipline.streaming` is "incremental"
 // belong here. For a "terminal-burst" provider the timer below is not an idle
 // timer at all, because no output ever arrives before exit. See
-// TERMINAL_BURST_RUNTIME_CAP_MS.
+// TERMINAL_BURST_RUNTIME_CAP_MS. The registry classifies each provider's DEFAULT invocation; cursor with outputFormat stream-json does stream, so there the same value behaves as a real idle window.
 const CLI_IDLE_TIMEOUTS: Record<string, number | undefined> = {
   claude: 600_000, // 10 minutes, only used when outputFormat=stream-json
   codex: 600_000, // 10 minutes; Codex streams stderr progress
@@ -1254,11 +1254,17 @@ const CLI_IDLE_TIMEOUTS: Record<string, number | undefined> = {
  * Total-runtime bound for providers that emit nothing until they exit.
  *
  * gemini, mistral, devin and cursor declare `outputDiscipline.streaming:
- * "terminal-burst"`. Their stdout stays at zero bytes for the whole run, so an
+ * "terminal-burst"`. Under that classification, which describes each provider's
+ * DEFAULT invocation, their stdout stays at zero bytes for the whole run, so an
  * "idle" timer never resets and silently degrades into a wall-clock cap. At the
  * previous 600_000ms that killed perfectly healthy work: a real cross-LLM review
  * job was terminated at exactly 600000ms of "inactivity" having produced exactly
  * the zero bytes its own registry entry predicts.
+ *
+ * Cursor is the exception to that default. With `outputFormat: "stream-json"` it
+ * streams incrementally, so output resets the timer and this same value behaves
+ * as a real idle window. resolveIdleTimeout does not distinguish the two modes;
+ * see #259.
  *
  * Removing the bound entirely is not an option, because `checkStalledJobs` only
  * warns and never kills, so this timer is the sole protection against a hung
@@ -1267,7 +1273,15 @@ const CLI_IDLE_TIMEOUTS: Record<string, number | undefined> = {
  */
 const TERMINAL_BURST_RUNTIME_CAP_MS = 3_600_000; // 1 hour, the schema maximum
 
-/** True when the provider's registry entry says it emits nothing before exit. */
+/**
+ * True when the provider's registry entry says it emits nothing before exit.
+ *
+ * NOTE: this reads the registry's DEFAULT-invocation classification and does not
+ * consider outputFormat. Cursor is terminal-burst under its default text argv
+ * but streams under stream-json, so for that combination the returned bound
+ * behaves as a real idle window rather than a total-runtime cap. Mode-aware
+ * classification is tracked in #259.
+ */
 function emitsOnlyOnExit(cli: string): boolean {
   try {
     return getProviderDefinition(cli as CliType).outputDiscipline?.streaming === "terminal-burst";
@@ -5023,7 +5037,7 @@ function resolvePromptOrPartsForPrep(args: {
  * by alias; see `resolveWorkspaceAndWorktreeForRequest`) and `workingDir`/
  * `addDir` are already path-confined against that workspace. But the advanced
  * per-provider path fields (systemPromptFile/appendSystemPromptFile/settings/
- * config/agentConfig/promptFile/images/outputSchema to READ, debugFile/
+ * config/promptFile/images/outputSchema to READ, debugFile/
  * outputLastMessage/exportSession to WRITE, pluginDir/pluginUrl to load code)
  * are pushed to the CLI verbatim, so without this gate a remote principal could
  * read, write, or execute arbitrary host paths outside its workspace. These
@@ -6047,7 +6061,9 @@ function prepareCodexRequestInternal(
     ignoreUserConfig?: boolean;
     ignoreRules?: boolean;
     // Phase 4 slice ζ — Codex working-dir + add-dir parity. Both flags are in
-    // CODEX_RESUME_FILTERED_FLAGS (resume inherits the original session's cwd
+    // CODEX_RESUME_FILTERED_FLAGS (filtered from resume argv; this does NOT pin
+    // the resumed session's cwd, since the child is still spawned with the
+    // gateway-resolved cwd
     // and writable dirs), so we emit them on NEW sessions only.
     workingDir?: string;
     addDir?: string[];
@@ -6191,7 +6207,10 @@ function prepareCodexRequestInternal(
 
   const requestedMcpServers = params.mcpServers ? [...new Set(params.mcpServers)] : [];
 
-  // Resume inherits Codex's native approval and sandbox state. Codex rejects
+  // The gateway emits no sandbox/approval flags on resume, so it cannot select
+  // that posture there. That is NOT inheritance of the original session's state:
+  // `-c`/configOverrides is not filtered and can set sandbox_mode, and Codex
+  // re-resolves configuration on a cold resume (see #258). Codex rejects
   // mcp_managed before this preparation path, so its native controls remain
   // provider-owned on the legacy path.
   let sessionPlan: ReturnType<typeof resolveCodexSessionArgs>;
@@ -6247,8 +6266,10 @@ function prepareCodexRequestInternal(
   }
   if (resolvedModel) args.push("--model", resolvedModel);
   // Codex sandbox / approval: resolve modern flags + legacy fullAuto shorthand.
-  // `codex exec resume` rejects all of these (the original session's policy is
-  // inherited), so we only emit them when starting a NEW session.
+  // `codex exec resume` rejects all of these in the after-subcommand position
+  // the gateway emits, so we only emit them when starting a NEW session. That
+  // rejection does not mean the original session's policy is inherited: see the
+  // CodexSessionMode note in request-helpers.ts.
   const sandboxFlags = resolveCodexSandboxFlags({
     sandboxMode: params.sandboxMode,
     askForApproval: params.askForApproval,
@@ -6290,7 +6311,9 @@ function prepareCodexRequestInternal(
   let highImpactInput: Parameters<typeof prepareCodexHighImpactFlags>[0];
   if (sessionPlan.mode === "new") {
     // Phase 4 slice ζ: emit working-dir and add-dir on new sessions only.
-    // Both flags are listed in CODEX_RESUME_FILTERED_FLAGS — resume inherits
+    // Both flags are listed in CODEX_RESUME_FILTERED_FLAGS. Filtering them does
+    // NOT pin the resumed directory; the child is still spawned with the
+    // gateway-resolved cwd. Formerly documented as: resume inherits
     // the original session's cwd and writable-dir policy, so emitting them
     // on resume would be silently stripped (wasteful + misleading on argv
     // logs). Gating here mirrors `--search` / `--sandbox`.
@@ -10122,6 +10145,7 @@ export interface GeminiRequestParams {
   mcpServers?: ClaudeMcpServerName[];
   allowedTools?: string[];
   includeDirs?: string[];
+  workingDir?: string;
   correlationId?: string;
   optimizePrompt: boolean;
   optimizeResponse?: boolean;
@@ -11705,6 +11729,7 @@ export async function handleGeminiRequest(
           worktree: params.worktree,
           sessionId: effectiveSessionIdHint,
           runtime,
+          workingDir: params.workingDir,
           addDir: params.includeDirs,
           requireStableCwd: sessionPlan.args.includes("--continue"),
           deferWorktree: true,
@@ -11759,6 +11784,7 @@ export async function handleGeminiRequest(
           worktree: params.worktree,
           sessionId: effectiveSessionIdHint,
           runtime,
+          workingDir: params.workingDir,
           addDir: params.includeDirs,
           requireStableCwd: sessionPlan.args.includes("--continue"),
           expectedSession: ledger.sessionAdmission?.admitted,
@@ -11973,6 +11999,7 @@ export async function handleGeminiRequestAsync(
           worktree: params.worktree,
           sessionId: effectiveSessionId,
           runtime,
+          workingDir: params.workingDir,
           addDir: params.includeDirs,
           requireStableCwd: sessionPlan.args.includes("--continue"),
           deferWorktree: true,
@@ -12031,6 +12058,7 @@ export async function handleGeminiRequestAsync(
           worktree: params.worktree,
           sessionId: effectiveSessionId,
           runtime,
+          workingDir: params.workingDir,
           addDir: params.includeDirs,
           requireStableCwd: sessionPlan.args.includes("--continue"),
           expectedSession: ledger.sessionAdmission?.admitted,
@@ -12887,8 +12915,6 @@ export interface DevinRequestParams {
    * interactive mode and false for print (non-interactive) mode.
    */
   respectWorkspaceTrust?: boolean;
-  /** Devin `--agent-config <FILE>`: agent config file path. */
-  agentConfig?: string;
   /**
    * Devin ACP `--agent-type <type>` (summarizer|review). Only applies when
    * transport=acp; threaded into the `devin acp` spawn argv. Ignored for the CLI
@@ -12923,7 +12949,6 @@ export function prepareDevinRequest(
     sandbox?: boolean;
     exportSession?: boolean | string;
     respectWorkspaceTrust?: boolean;
-    agentConfig?: string;
     correlationId?: string;
     optimizePrompt: boolean;
     operation: string;
@@ -12948,7 +12973,6 @@ export function prepareDevinRequest(
   const remoteFieldErr = remoteHostPathFieldError(params.operation, corrId, {
     promptFile: params.promptFile,
     config: params.config,
-    agentConfig: params.agentConfig,
     exportSession: typeof params.exportSession === "string" ? params.exportSession : undefined,
   });
   if (remoteFieldErr) return remoteFieldErr;
@@ -12998,7 +13022,6 @@ export function prepareDevinRequest(
   if (params.respectWorkspaceTrust !== undefined) {
     args.push("--respect-workspace-trust", params.respectWorkspaceTrust ? "true" : "false");
   }
-  if (params.agentConfig) args.push("--agent-config", params.agentConfig);
   try {
     if (resolvedModel) {
       assertCliArgUtf8Size(resolvedModel, { provider: "devin", inputName: "model" });
@@ -13013,12 +13036,6 @@ export function prepareDevinRequest(
       assertCliArgUtf8Size(params.exportSession, {
         provider: "devin",
         inputName: "exportSession",
-      });
-    }
-    if (params.agentConfig) {
-      assertCliArgUtf8Size(params.agentConfig, {
-        provider: "devin",
-        inputName: "agentConfig",
       });
     }
     assertCliArgUtf8Size(prompt, { provider: "devin", inputName: "prompt argv element" });
@@ -13051,7 +13068,6 @@ function rejectUnsupportedDevinAcpParams(
     ["sandbox", params.sandbox === true],
     ["exportSession", params.exportSession !== undefined],
     ["respectWorkspaceTrust", params.respectWorkspaceTrust !== undefined],
-    ["agentConfig", params.agentConfig !== undefined],
     ["resumeLatest", params.resumeLatest === true],
     ["createNewSession", params.createNewSession === true],
     ["optimizePrompt", params.optimizePrompt],
@@ -13111,7 +13127,6 @@ export async function handleDevinRequest(
       sandbox: params.sandbox,
       exportSession: params.exportSession,
       respectWorkspaceTrust: params.respectWorkspaceTrust,
-      agentConfig: params.agentConfig,
       correlationId: params.correlationId,
       optimizePrompt: params.optimizePrompt,
       operation: "devin_request",
@@ -13366,7 +13381,6 @@ export async function handleDevinRequestAsync(
       sandbox: params.sandbox,
       exportSession: params.exportSession,
       respectWorkspaceTrust: params.respectWorkspaceTrust,
-      agentConfig: params.agentConfig,
       correlationId: params.correlationId,
       optimizePrompt: params.optimizePrompt,
       operation: "devin_request_async",
@@ -13574,6 +13588,8 @@ export interface CursorRequestParams {
   trust?: boolean;
   workspace?: string;
   addDir?: string[];
+  /** Process cwd. Distinct from `workspace`, which is Cursor's own selector. */
+  workingDir?: string;
   sessionId?: string;
   resumeLatest?: boolean;
   createNewSession?: boolean;
@@ -13698,6 +13714,11 @@ function rejectUnsupportedCursorAcpParams(
   if (params.sandbox) unsupported.push("sandbox");
   if (params.trust) unsupported.push("trust");
   if ((params.addDir ?? []).length > 0) unsupported.push("addDir");
+  // Same reason as addDir directly above. The ACP route resolves its own scope
+  // and would drop this, and a silently ignored scoping input is precisely the
+  // failure #243 exists to remove: the caller believes it named a directory and
+  // the child runs somewhere else.
+  if (params.workingDir) unsupported.push("workingDir");
   if (params.resumeLatest) unsupported.push("resumeLatest");
   if (params.createNewSession) unsupported.push("createNewSession");
   if (params.optimizePrompt) unsupported.push("optimizePrompt");
@@ -13777,6 +13798,41 @@ function resolveCursorWorkspaceSelection(
 
   const workspace = resolveWorkspaceForProvider(runtime.workspaces, "cursor", requestedWorkspace);
   return { registryAlias: workspace.alias, cliWorkspace: workspace.cwd };
+}
+
+/**
+ * Cursor is the one provider whose `workspace` input can itself carry a local
+ * absolute path, so it can name a process cwd without `workingDir`. That makes
+ * the two inputs genuinely ambiguous when both are present and disagree.
+ *
+ * Reject rather than rank them. A silent precedence rule would run the child
+ * somewhere the caller did not name, and the resulting scope is exactly what
+ * `workingDir` exists to make explicit. Agreement is admitted so a caller that
+ * passes the same directory both ways is not punished for redundancy.
+ *
+ * Only local selection can conflict: the remote branch above returns a registry
+ * alias and no cwd, and a remote `workingDir` is contained by
+ * `validatePathInsideWorkspace` inside the shared resolver.
+ */
+function resolveCursorWorkingDir(
+  requestedWorkingDir: string | undefined,
+  selection: CursorWorkspaceSelection
+): string | undefined {
+  if (!requestedWorkingDir) return selection.cwd;
+  if (!selection.cwd) return requestedWorkingDir;
+  const canonical = (value: string): string => {
+    try {
+      return realpathSync(resolve(value));
+    } catch {
+      return resolve(value);
+    }
+  };
+  if (canonical(requestedWorkingDir) === canonical(selection.cwd)) return requestedWorkingDir;
+  throw new Error(
+    `cursor_request received two different working directories: workspace resolved to "${selection.cwd}" ` +
+      `and workingDir is "${requestedWorkingDir}". Pass only one, or pass the same path for both. ` +
+      `Use workingDir for the process cwd and workspace for a Cursor workspace or saved workspace name.`
+  );
 }
 
 export async function handleCursorRequest(
@@ -13923,7 +13979,7 @@ export async function handleCursorRequest(
           workspace: cursorWorkspace.registryAlias,
           sessionId: sessionResult.effectiveSessionId,
           runtime,
-          workingDir: cursorWorkspace.cwd,
+          workingDir: resolveCursorWorkingDir(params.workingDir, cursorWorkspace),
           addDir: params.addDir,
           suppressImplicitWorkspace: cursorWorkspace.localWorkspaceInput !== undefined,
           requireStableCwd: sessionResult.resumeArgs.includes("--continue"),
@@ -14155,7 +14211,7 @@ export async function handleCursorRequestAsync(
           workspace: cursorWorkspace.registryAlias,
           sessionId: effectiveSessionId,
           runtime,
-          workingDir: cursorWorkspace.cwd,
+          workingDir: resolveCursorWorkingDir(params.workingDir, cursorWorkspace),
           addDir: params.addDir,
           suppressImplicitWorkspace: cursorWorkspace.localWorkspaceInput !== undefined,
           requireStableCwd: sessionResult.resumeArgs.includes("--continue"),
@@ -17563,7 +17619,7 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
         .enum(CODEX_SANDBOX_MODES)
         .optional()
         .describe(
-          "Codex --sandbox. Omit = Codex exec built-in default (read-only; cannot write files). Pass workspace-write to let Codex edit files in the working dir, or danger-full-access for unrestricted access."
+          "Codex --sandbox. NEW SESSIONS ONLY: the gateway filters --sandbox out of a resume argv, so this field has no effect on a resumed request. That is NOT a guarantee that the resumed session keeps its original posture: configOverrides still passes through and can set sandbox_mode, and Codex re-resolves configuration on a cold resume. Establish the posture on the first request and verify it when it matters. On a new session, omitting it does NOT guarantee read-only: the gateway emits no --sandbox flag and Codex resolves the policy from configuration, project trust, and its own fallback, so a trusted project can resolve to workspace-write. Pass read-only explicitly for inspection. Pass workspace-write to let Codex edit files in the working dir, or danger-full-access for unrestricted access."
         ),
       askForApproval: z
         .enum(CODEX_ASK_FOR_APPROVAL_MODES)
@@ -17600,7 +17656,7 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
         .boolean()
         .default(false)
         .describe(
-          "Resume Codex's globally latest session via `codex exec resume --last`; it inherits that session's original cwd, and workingDir/addDir do not retarget it. Ignored if sessionId is set; an explicit real Codex UUID targets that session. A brand-new session returns no resumable sessionId; continue with resumeLatest:true or a real Codex UUID."
+          "Resume a previous Codex session via `codex exec resume --last`. UNDER REVIEW: do not rely on which session this selects or on the resumed working directory. `--last` is filtered by cwd upstream unless `--all` is passed, which the gateway does not emit, and the child is still spawned with the gateway-resolved cwd even though `-C`/`--add-dir` are dropped from the resume argv. Verify the target, or start a fresh session when it must be certain. Ignored if sessionId is set; an explicit real Codex UUID targets that session. A brand-new session returns no resumable sessionId; continue with resumeLatest:true or a real Codex UUID."
         ),
       createNewSession: z.boolean().default(false).describe("Force a fresh session (no resume)"),
       correlationId: z.string().optional().describe("Request trace ID (auto if omitted)"),
@@ -17687,14 +17743,14 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
         .min(1)
         .optional()
         .describe(
-          "Codex -C/--cd <DIR>: working root for this session. Emitted on new sessions only; resume inherits the original session's cwd via CODEX_RESUME_FILTERED_FLAGS. Personal Agent Config Kit mode requires an absolute path." +
+          "Codex -C/--cd <DIR>: working root for this session. Emitted on new sessions only: the flag is filtered from resume argv. That does NOT pin a resumed session's directory, because the child is still spawned with the gateway-resolved cwd; do not rely on a resumed session's working directory. Personal Agent Config Kit mode requires an absolute path." +
             LOCAL_WORKING_DIR_FIELD_SUFFIX
         ),
       addDir: z
         .array(z.string())
         .optional()
         .describe(
-          "Codex --add-dir <DIR>: additional writable workspace directories. Emitted once per entry on new sessions only; resume inherits the original session's writable-dir policy." +
+          "Codex --add-dir <DIR>: additional writable workspace directories. Emitted once per entry on new sessions only: the flag is filtered from resume argv. That does NOT pin a resumed session's writable-dir policy; do not rely on it." +
             LOCAL_ADD_DIR_FIELD_SUFFIX
         ),
       ...CODEX_PART_A_FIELDS,
@@ -17828,7 +17884,7 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
         .enum(CODEX_SANDBOX_MODES)
         .optional()
         .describe(
-          "Codex --sandbox. Omit = Codex exec built-in default (read-only; cannot write files). Pass workspace-write to let Codex edit files in the working dir, or danger-full-access for unrestricted access."
+          "Codex --sandbox. NEW SESSIONS ONLY: the gateway filters --sandbox out of a resume argv, so this field has no effect on a resumed request. That is NOT a guarantee that the resumed session keeps its original posture: configOverrides still passes through and can set sandbox_mode, and Codex re-resolves configuration on a cold resume. Establish the posture on the first request and verify it when it matters. On a new session, omitting it does NOT guarantee read-only: the gateway emits no --sandbox flag and Codex resolves the policy from configuration, project trust, and its own fallback, so a trusted project can resolve to workspace-write. Pass read-only explicitly for inspection. Pass workspace-write to let Codex edit files in the working dir, or danger-full-access for unrestricted access."
         ),
       askForApproval: z
         .enum(CODEX_ASK_FOR_APPROVAL_MODES)
@@ -18179,7 +18235,9 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
         .min(30_000)
         .max(3_600_000)
         .optional()
-        .describe("Idle timeout in ms (min 30s, max 1h, omit=CLI default)"),
+        .describe(
+          "Total-runtime bound, not an idle timer: this provider emits no output until it exits, so the child is killed after this duration even while healthy. Min 30s, max 1h, omit=1h default."
+        ),
       forceRefresh: z
         .boolean()
         .default(false)
@@ -18241,6 +18299,11 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
         .describe(
           "Antigravity --print-timeout <DURATION>: print-mode wait timeout as a Go duration string (e.g. '5m0s', '30s')."
         ),
+      workingDir: z
+        .string()
+        .min(1)
+        .optional()
+        .describe("Local Antigravity process working directory." + LOCAL_WORKING_DIR_FIELD_SUFFIX),
       workspace: providerWorkspaceAliasSchema(),
       worktree: WORKTREE_SCHEMA.optional(),
     },
@@ -18280,6 +18343,7 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
       project,
       newProject,
       printTimeout,
+      workingDir,
       workspace,
       worktree,
     }) => {
@@ -18314,6 +18378,7 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
           project,
           newProject,
           printTimeout,
+          workingDir,
           workspace,
           worktree,
         }
@@ -18648,10 +18713,6 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
         .describe(
           "Respect workspace trust (Devin --respect-workspace-trust <bool>). Devin defaults true for interactive and false for print mode; set explicitly to override."
         ),
-      agentConfig: z
-        .string()
-        .optional()
-        .describe("Agent config file path (Devin --agent-config <FILE>)"),
       agentType: z
         .enum(DEVIN_ACP_AGENT_TYPES)
         .optional()
@@ -18689,7 +18750,9 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
         .min(30_000)
         .max(3_600_000)
         .optional()
-        .describe("Idle timeout in ms (min 30s, max 1h, omit=CLI default)"),
+        .describe(
+          "Total-runtime bound, not an idle timer: this provider emits no output until it exits, so the child is killed after this duration even while healthy. Min 30s, max 1h, omit=1h default."
+        ),
       forceRefresh: z
         .boolean()
         .default(false)
@@ -18723,7 +18786,6 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
       sandbox,
       exportSession,
       respectWorkspaceTrust,
-      agentConfig,
       agentType,
       sessionId,
       resumeLatest,
@@ -18752,7 +18814,6 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
           sandbox,
           exportSession,
           respectWorkspaceTrust,
-          agentConfig,
           agentType,
           sessionId,
           resumeLatest,
@@ -18818,6 +18879,14 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
         .array(z.string())
         .optional()
         .describe("Additional workspace root directories (--add-dir, repeatable)."),
+      workingDir: z
+        .string()
+        .min(1)
+        .optional()
+        .describe(
+          "Local Cursor Agent process working directory. Distinct from --workspace, which selects a Cursor workspace or saved workspace name; this sets the process cwd. Passing both an absolute workspace path and a different workingDir is rejected rather than silently ranked." +
+            LOCAL_WORKING_DIR_FIELD_SUFFIX
+        ),
       sessionId: z
         .string()
         .optional()
@@ -18861,7 +18930,9 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
         .min(30_000)
         .max(3_600_000)
         .optional()
-        .describe("Idle timeout in ms (min 30s, max 1h, omit=CLI default)"),
+        .describe(
+          "Total-runtime bound, not an idle timer: this provider emits no output until it exits, so the child is killed after this duration even while healthy. Min 30s, max 1h, omit=1h default. Cursor only: this holds for the default text invocation; with outputFormat stream-json the CLI streams incrementally, so the same timer behaves as a genuine idle window."
+        ),
       forceRefresh: z
         .boolean()
         .default(false)
@@ -18886,6 +18957,7 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
       autoReview,
       sandbox,
       trust,
+      workingDir,
       workspace,
       addDir,
       sessionId,
@@ -18912,6 +18984,7 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
           autoReview,
           sandbox,
           trust,
+          workingDir,
           workspace,
           addDir,
           sessionId,
@@ -19023,7 +19096,9 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
         .min(30_000)
         .max(3_600_000)
         .optional()
-        .describe("Idle timeout in ms (min 30s, max 1h, omit=CLI default)"),
+        .describe(
+          "Total-runtime bound, not an idle timer: this provider emits no output until it exits, so the child is killed after this duration even while healthy. Min 30s, max 1h, omit=1h default."
+        ),
       forceRefresh: z
         .boolean()
         .default(false)
@@ -19955,7 +20030,7 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
           .enum(CODEX_SANDBOX_MODES)
           .optional()
           .describe(
-            "Codex --sandbox. Omit = Codex exec built-in default (read-only; cannot write files). Pass workspace-write to let Codex edit files in the working dir, or danger-full-access for unrestricted access."
+            "Codex --sandbox. NEW SESSIONS ONLY: the gateway filters --sandbox out of a resume argv, so this field has no effect on a resumed request. That is NOT a guarantee that the resumed session keeps its original posture: configOverrides still passes through and can set sandbox_mode, and Codex re-resolves configuration on a cold resume. Establish the posture on the first request and verify it when it matters. On a new session, omitting it does NOT guarantee read-only: the gateway emits no --sandbox flag and Codex resolves the policy from configuration, project trust, and its own fallback, so a trusted project can resolve to workspace-write. Pass read-only explicitly for inspection. Pass workspace-write to let Codex edit files in the working dir, or danger-full-access for unrestricted access."
           ),
         askForApproval: z
           .enum(CODEX_ASK_FOR_APPROVAL_MODES)
@@ -19992,7 +20067,7 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
           .boolean()
           .default(false)
           .describe(
-            "Resume Codex's globally latest session via `codex exec resume --last`; it inherits that session's original cwd, and workingDir/addDir do not retarget it. Ignored if sessionId is set; an explicit real Codex UUID targets that session. A brand-new session returns no resumable sessionId; continue with resumeLatest:true or a real Codex UUID."
+            "Resume a previous Codex session via `codex exec resume --last`. UNDER REVIEW: do not rely on which session this selects or on the resumed working directory. `--last` is filtered by cwd upstream unless `--all` is passed, which the gateway does not emit, and the child is still spawned with the gateway-resolved cwd even though `-C`/`--add-dir` are dropped from the resume argv. Verify the target, or start a fresh session when it must be certain. Ignored if sessionId is set; an explicit real Codex UUID targets that session. A brand-new session returns no resumable sessionId; continue with resumeLatest:true or a real Codex UUID."
           ),
         createNewSession: z.boolean().default(false).describe("Force a fresh session (no resume)"),
         correlationId: z.string().optional().describe("Request trace ID (auto if omitted)"),
@@ -20049,14 +20124,14 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
           .min(1)
           .optional()
           .describe(
-            "Codex -C/--cd <DIR>: working root for this session. New sessions only; resume inherits the original session's cwd. Personal Agent Config Kit mode requires an absolute path." +
+            "Codex -C/--cd <DIR>: working root for this session. New sessions only: the flag is filtered from resume argv. That does NOT pin a resumed session's directory, because the child is still spawned with the gateway-resolved cwd; do not rely on it. Personal Agent Config Kit mode requires an absolute path." +
               LOCAL_WORKING_DIR_FIELD_SUFFIX
           ),
         addDir: z
           .array(z.string())
           .optional()
           .describe(
-            "Codex --add-dir <DIR>: additional writable workspace directories (repeat per entry). New sessions only." +
+            "Codex --add-dir <DIR>: additional writable workspace directories (repeat per entry). Emitted once per entry on new sessions only: the flag is filtered from resume argv. That does NOT pin a resumed session's writable-dir policy; do not rely on it." +
               LOCAL_ADD_DIR_FIELD_SUFFIX
           ),
         ...CODEX_PART_A_FIELDS,
@@ -20241,7 +20316,9 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
           .min(30_000)
           .max(3_600_000)
           .optional()
-          .describe("Idle timeout in ms (min 30s, max 1h, omit=CLI default)"),
+          .describe(
+            "Total-runtime bound, not an idle timer: this provider emits no output until it exits, so the child is killed after this duration even while healthy. Min 30s, max 1h, omit=1h default."
+          ),
         forceRefresh: z
           .boolean()
           .default(false)
@@ -20301,6 +20378,13 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
           .describe(
             "Antigravity --print-timeout <DURATION>: print-mode wait timeout as a Go duration string (e.g. '5m0s', '30s')."
           ),
+        workingDir: z
+          .string()
+          .min(1)
+          .optional()
+          .describe(
+            "Local Antigravity process working directory." + LOCAL_WORKING_DIR_FIELD_SUFFIX
+          ),
         workspace: providerWorkspaceAliasSchema(),
         worktree: WORKTREE_SCHEMA.optional(),
       },
@@ -20339,6 +20423,7 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
         project,
         newProject,
         printTimeout,
+        workingDir,
         workspace,
         worktree,
       }) => {
@@ -20372,6 +20457,7 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
             project,
             newProject,
             printTimeout,
+            workingDir,
             workspace,
             worktree,
           }
@@ -20798,10 +20884,6 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
           .describe(
             "Respect workspace trust (Devin --respect-workspace-trust <bool>). Devin defaults true for interactive and false for print mode; set explicitly to override."
           ),
-        agentConfig: z
-          .string()
-          .optional()
-          .describe("Agent config file path (Devin --agent-config <FILE>)"),
         sessionId: z
           .string()
           .optional()
@@ -20829,7 +20911,9 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
           .min(30_000)
           .max(3_600_000)
           .optional()
-          .describe("Idle timeout in ms (min 30s, max 1h, omit=CLI default)"),
+          .describe(
+            "Total-runtime bound, not an idle timer: this provider emits no output until it exits, so the child is killed after this duration even while healthy. Min 30s, max 1h, omit=1h default."
+          ),
         forceRefresh: z
           .boolean()
           .default(false)
@@ -20862,7 +20946,6 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
         sandbox,
         exportSession,
         respectWorkspaceTrust,
-        agentConfig,
         sessionId,
         resumeLatest,
         createNewSession,
@@ -20888,7 +20971,6 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
             sandbox,
             exportSession,
             respectWorkspaceTrust,
-            agentConfig,
             sessionId,
             resumeLatest,
             createNewSession,
@@ -20948,6 +21030,14 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
           .array(z.string())
           .optional()
           .describe("Additional workspace root directories (--add-dir, repeatable)."),
+        workingDir: z
+          .string()
+          .min(1)
+          .optional()
+          .describe(
+            "Local Cursor Agent process working directory. Distinct from --workspace, which selects a Cursor workspace or saved workspace name; this sets the process cwd. Passing both an absolute workspace path and a different workingDir is rejected rather than silently ranked." +
+              LOCAL_WORKING_DIR_FIELD_SUFFIX
+          ),
         sessionId: z
           .string()
           .optional()
@@ -20983,7 +21073,9 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
           .min(30_000)
           .max(3_600_000)
           .optional()
-          .describe("Idle timeout in ms (min 30s, max 1h, omit=CLI default)"),
+          .describe(
+            "Total-runtime bound, not an idle timer: this provider emits no output until it exits, so the child is killed after this duration even while healthy. Min 30s, max 1h, omit=1h default. Cursor only: this holds for the default text invocation; with outputFormat stream-json the CLI streams incrementally, so the same timer behaves as a genuine idle window."
+          ),
         forceRefresh: z
           .boolean()
           .default(false)
@@ -21007,6 +21099,7 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
         autoReview,
         sandbox,
         trust,
+        workingDir,
         workspace,
         addDir,
         sessionId,
@@ -21031,6 +21124,7 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
             autoReview,
             sandbox,
             trust,
+            workingDir,
             workspace,
             addDir,
             sessionId,
@@ -21130,7 +21224,9 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
           .min(30_000)
           .max(3_600_000)
           .optional()
-          .describe("Idle timeout in ms (min 30s, max 1h, omit=CLI default)"),
+          .describe(
+            "Total-runtime bound, not an idle timer: this provider emits no output until it exits, so the child is killed after this duration even while healthy. Min 30s, max 1h, omit=1h default."
+          ),
         forceRefresh: z
           .boolean()
           .default(false)
@@ -23023,12 +23119,30 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
 //──────────────────────────────────────────────────────────────────────────────
 
 async function initializeSessionManager(): Promise<void> {
-  const config = loadConfig();
+  // Pass the runtime logger so the deprecated-DATABASE_URL warning reaches
+  // stderr rather than being swallowed by the default noop logger.
+  const config = loadConfig(undefined, logger);
 
   if (config.database) {
     logger.info("Initializing PostgreSQL session manager");
     const { createDatabaseConnection } = await import("./db.js");
-    db = await createDatabaseConnection(config, logger);
+    try {
+      db = await createDatabaseConnection(config, logger);
+    } catch (error) {
+      // The session store now shares the durable backend, and it initializes
+      // before the job store's admission check. Without this, an unreachable
+      // Postgres surfaced only as a refused connection, and the operator was
+      // never told which configuration selected that database.
+      const detail = error instanceof Error ? error.message : String(error);
+      const selector =
+        config.databaseSource === "env"
+          ? "DATABASE_URL selected it (deprecated; prefer [persistence])."
+          : "The session store follows [persistence] in ~/.llm-cli-gateway/config.toml.";
+      throw new Error(
+        `Cannot open the configured durable async persistence backend for sessions: ${detail}. ${selector}`,
+        { cause: error }
+      );
+    }
     sessionManager = await createSessionManager(config, db, logger);
     logger.info("PostgreSQL session manager initialized");
   } else {

@@ -881,8 +881,9 @@ const TOOL_CONTROLS: Record<KnownProviderCapabilityId, ProviderCapabilityStaticD
       },
       workspace: {
         supported: true,
-        requestField: "includeDirs/workspace/worktree",
-        behavior: "Gateway resolves include dirs, workspace aliases, and worktrees.",
+        requestField: "workingDir/includeDirs/workspace/worktree",
+        behavior:
+          "workingDir sets the child process cwd; includeDirs adds read paths via --add-dir and does not select cwd. Gateway resolves workspace aliases and worktrees.",
       },
       session: {
         supported: true,
@@ -1353,10 +1354,10 @@ const TOOL_CONTROLS: Record<KnownProviderCapabilityId, ProviderCapabilityStaticD
       },
       workspace: {
         supported: true,
-        requestField: "workspace/addDir",
+        requestField: "workingDir/workspace/addDir",
         cliFlag: "--workspace/--add-dir",
         behavior:
-          "Sets the Cursor workspace and additional workspace roots; remote HTTP/OAuth callers must use registered workspace aliases/roots rather than raw paths.",
+          "workingDir sets the child process cwd; workspace is Cursor's own selector (saved-workspace name, .code-workspace file, or directory) and addDir adds workspace roots. An absolute workspace path disagreeing with workingDir is rejected rather than ranked. Remote HTTP/OAuth callers must use registered workspace aliases/roots rather than raw paths.",
       },
     },
     features: baseFeatures({
@@ -1381,7 +1382,7 @@ const TOOL_CONTROLS: Record<KnownProviderCapabilityId, ProviderCapabilityStaticD
         input: 'transport:"acp" with CLI-only options',
         behavior: "reject",
         details:
-          "Cursor ACP routing accepts prompt/model/session inputs plus a registered workspace selection. mode, outputFormat, addDir, force, autoReview, sandbox, trust, native-continuation, prompt/response optimization or compression, idleTimeoutMs, and forceRefresh are rejected instead of silently ignored.",
+          "Cursor ACP routing accepts prompt/model/session inputs plus a registered workspace selection. mode, outputFormat, workingDir, addDir, force, autoReview, sandbox, trust, native-continuation, prompt/response optimization or compression, idleTimeoutMs, and forceRefresh are rejected instead of silently ignored.",
       },
     ],
   },

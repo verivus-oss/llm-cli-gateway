@@ -1,7 +1,6 @@
 ---
 description: Manage LLM gateway sessions (list, create, delete, switch)
 argument-hint: '[list|create|delete|set-active] [options]'
-allowed-tools: Bash
 ---
 
 Manage sessions through the llm-gateway MCP server.

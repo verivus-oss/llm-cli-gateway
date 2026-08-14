@@ -46,9 +46,16 @@ metadata is authoritative; the TOML is scanner input only.
    provider_tool_capabilities({cli:"codex"})
    ```
    For a cached read-only resource, use `provider-tools://codex`.
-2. Use `codex_request` for normal implementation/review turns,
-   `codex_request_async` for long-running work, and `codex_fork_session` when a
-   real Codex session needs to branch.
+2. Use `codex_request` for normal implementation/review turns and
+   `codex_request_async` for long-running work. To continue an existing Codex
+   conversation, pass `codex_request` a real Codex session UUID from
+   `~/.codex/sessions/`, or `resumeLatest:true`; both route through
+   `codex exec resume` and work headlessly. `codex_fork_session` is registered
+   but cannot run from the gateway: `codex fork` is interactive and requires a
+   controlling terminal, and Codex exposes no non-interactive equivalent
+   (`codex exec` has only resume/review/help). Re-check that on each Codex
+   release; if a headless fork lands, `codexForkCanRunHeadless` in
+   `src/index.ts` is the single predicate to flip.
 3. Omit `model` unless the caller explicitly asked for a specific variant; the
    gateway resolves the configured Codex default/profile.
 4. Prefer `sandboxMode:"workspace-write"` when Codex needs a writable
@@ -70,21 +77,29 @@ metadata is authoritative; the TOML is scanner input only.
    gateway approval boundary.
 7. Codex continuity is real through `codex exec resume`: pass a real Codex UUID
    from `~/.codex/sessions/`, or `resumeLatest:true`. Gateway `gw-*` IDs are not
-   Codex sessions. Resumed Codex sessions retain their provider-native posture;
-   `sandboxMode` and its deprecated `fullAuto:true` shorthand are dropped on
-   resume. `resumeLatest` selects Codex's globally latest session, inherits that
-   session's original cwd, and is not scoped by `workingDir`.
+   Codex sessions. `sandboxMode` and its deprecated `fullAuto:true` shorthand are
+   dropped on resume, so those fields cannot select a posture there. That is not
+   a guarantee that the original posture is retained: `configOverrides` is not
+   filtered and can set `sandbox_mode`, and Codex re-resolves configuration on a
+   cold resume. `resumeLatest` is under review (#258): `--last` is cwd-filtered
+   upstream unless `--all` is passed, which the gateway does not emit, and the
+   child is still spawned with the gateway-resolved cwd. Do not rely on which
+   session it selects or on the resumed working directory.
    The provider-native `workingDir` and `addDir` flags scope new sessions only;
-   the gateway accepts but omits those fields on resume. A verified `workspace`
+   the gateway accepts but omits those fields on resume. Omitting them does not
+   pin the resumed directory: the child is still spawned with the
+   gateway-resolved cwd. A verified `workspace`
    or gateway `worktree` can still select the child process launch cwd and bind
-   gateway tracking, but it does not retarget the resumed Codex session. Every
-   resume form, including a direct UUID resume, inherits the original native
-   session cwd.
+   gateway tracking. Do not rely on a resumed session's directory in any resume
+   form, including a direct UUID resume: the child is spawned with the
+   gateway-resolved cwd even though the flags are filtered.
 8. Codex new and resume requests send the exact prompt through stdin with the
    native `-` marker. They do not consume the platform's single-argv prompt
    allowance and are never truncated. `codex_fork_session` uses the distinct
    `codex fork` contract, remains argv-bound, and rejects oversized UTF-8 prompts
-   as non-retryable `input_too_large`. An otherwise unscoped child still runs in
+   as non-retryable `input_too_large`. That rejection is deliberately evaluated
+   before the tool's availability check, so argv admission stays observable even
+   though the call cannot ultimately run. An otherwise unscoped child still runs in
    a fresh neutral temporary cwd, not the gateway repository. All other
    caller-controlled argv values are admitted in their final encoded form
    before spawn. Embedded NUL bytes return non-retryable `invalid_input`

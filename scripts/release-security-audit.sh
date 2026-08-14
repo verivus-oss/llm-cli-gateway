@@ -177,14 +177,24 @@ echo "==> hono floor tripwire"
 node --input-type=module <<'NODE'
 import fs from 'node:fs';
 
-// hono ships transitively via @modelcontextprotocol/sdk. 4.12.26 and below carry
-// known advisories (GHSA-hvrm-45r6-mjfj hono/jsx cross-request context,
-// GHSA-w62v-xxxg-mg59 hono/css cx() SSR XSS, GHSA-xgm2-5f3f-mvvc / CVE-2026-59897
-// hono/aws-lambda header dedup; fix line = upgrade to 4.12.27+). A
-// package.json#overrides pin (hono ^4.12.27) raises the floor; this tripwire
-// fails the release if anything regresses below it. Mirrors the blocked-version
-// checks above but as a minimum-version floor rather than a blocklist.
-const FLOOR = [4, 12, 27];
+// hono ships transitively via @modelcontextprotocol/sdk. 4.12.33 and below carry
+// known advisories. The first set (fix line 4.12.27) was GHSA-hvrm-45r6-mjfj
+// hono/jsx cross-request context, GHSA-w62v-xxxg-mg59 hono/css cx() SSR XSS,
+// GHSA-xgm2-5f3f-mvvc / CVE-2026-59897 hono/aws-lambda header dedup. A second
+// set landed on 2026-08-09 with fix line 4.12.34: GHSA-54fx-42gc-7vw4
+// (algorithmic-complexity DoS in the language middleware), GHSA-79qm-7rj5-m7r9
+// (proxy helper does not strip headers named in Connection),
+// GHSA-8j4g-w8fx-2239 (ReDoS in the CORS middleware via
+// Access-Control-Request-Headers), and GHSA-f23p-vx2j-j53r (memo() retains SSR
+// output across requests).
+//
+// The package.json#overrides pin is an EXACT 4.12.34 rather than the previous
+// ^4.12.27 caret: a caret at the new fix line resolves to the 4.13.x head, which
+// turns a patch roll-forward into a minor one for no security gain, and every
+// resolved version has to be individually ledgered under supply-chain-guard
+// anyway. This tripwire reads the lockfile, not the override string, so it
+// guards the floor whichever form the pin takes.
+const FLOOR = [4, 12, 34];
 function below(version) {
   const parts = version.split('.').map(n => parseInt(n, 10));
   for (let i = 0; i < FLOOR.length; i++) {

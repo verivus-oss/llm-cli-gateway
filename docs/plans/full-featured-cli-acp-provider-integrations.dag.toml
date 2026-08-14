@@ -613,7 +613,9 @@ must_cover_cli_flags = [
   "--continue",
   "--resume",
   "--respect-workspace-trust",
-  "--agent-config",
+  # --agent-config removed: devin 3000.4.16 dropped the flag, so the gateway
+  # stopped emitting it and the request field went with it. Tracked in
+  # docs/plans/provider-contract-drift-rc3.dag.toml#devin-flag-removal.
 ]
 must_cover_native_acp = [
   "devin acp initialize/session/new/session/load/session/resume/session/prompt/session/update/session/cancel",
@@ -988,7 +990,7 @@ acceptance = [
   "Antigravity request fields cover print, prompt-interactive, project, conversation, model, sandbox, add-dir, timeout, and permissions flags.",
   "Grok request fields cover all current headless flags and session/worktree/leader/subagent controls.",
   "Mistral request fields cover prompt, limits, output, tools, agent, trust, workdir, add-dir, continue, and resume.",
-  "Devin request fields cover print, prompt-file, permission, sandbox, model, export, continue, resume, workspace trust, and agent-config.",
+  "Devin request fields cover print, prompt-file, permission, sandbox, model, export, continue, resume, and workspace trust. agent-config was dropped upstream in devin 3000.4.16.",
 ]
 commands = [
   "npm test -- --runInBand",

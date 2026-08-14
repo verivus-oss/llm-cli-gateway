@@ -70,6 +70,12 @@ function makeSourceMigrationRecord(
     return null;
   }
 
+  // Timestamps are load-bearing, not decoration: session age drives TTL
+  // cleanup and last-used drives ordering. A record that cannot supply real
+  // ones is rejected rather than silently imported with the clock's value,
+  // matching how a malformed Kit document is handled below.
+  if (!isIsoTimestamp(value.createdAt) || !isIsoTimestamp(value.lastUsedAt)) return null;
+
   const ownerPrincipal =
     typeof value.ownerPrincipal === "string" && value.ownerPrincipal.trim().length > 0
       ? value.ownerPrincipal
@@ -98,8 +104,15 @@ function makeSourceMigrationRecord(
       metadata,
       ownerPrincipal,
       binding,
+      createdAt: source.createdAt,
+      lastUsedAt: source.lastUsedAt,
     },
   };
+}
+
+/** A parseable ISO 8601 instant, as written by the file session store. */
+function isIsoTimestamp(value: unknown): value is string {
+  return typeof value === "string" && value.length > 0 && !Number.isNaN(Date.parse(value));
 }
 
 function invalidSourceError(): string {

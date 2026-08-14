@@ -104,7 +104,6 @@ describe("H1: remote callers may not pass host-path / plugin fields", () => {
   it.each([
     ["promptFile", { promptFile: "/etc/passwd" }],
     ["config", { config: "/root/.config" }],
-    ["agentConfig", { agentConfig: "/root/.agent" }],
     ["exportSession", { exportSession: "/home/u/.ssh/authorized_keys" }],
   ])("rejects Devin %s over the remote surface", (field, extra) => {
     const res = runWithRequestContext(REMOTE, () =>

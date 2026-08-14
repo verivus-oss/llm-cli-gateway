@@ -128,9 +128,13 @@ export function resolveSessionResumeArgs(opts: {
  *   - "resume-by-id"   → `codex exec resume [...resume-safe flags] <SESSION_ID> PROMPT`
  *   - "resume-latest"  → `codex exec resume --last [...resume-safe flags] PROMPT`
  *
- * `codex exec resume` rejects sandbox/working-directory policy flags; the original session's approval
- * policy is inherited. Callers MUST filter those flags out of the flag set
- * when mode is one of the resume forms (see `prepareCodexRequest`).
+ * `codex exec resume` rejects sandbox/working-directory policy flags in the
+ * after-subcommand position the gateway uses, so callers MUST filter them out
+ * when mode is one of the resume forms (see `prepareCodexRequest`). Do NOT read
+ * that as the original session's policy being inherited: those flags are
+ * accepted BEFORE the `resume` subcommand, `-c`/configOverrides is not
+ * filtered and can set `sandbox_mode`, and Codex re-resolves configuration on a
+ * cold resume.
  *
  * `sessionId` MUST be a real Codex session UUID (as recorded under
  * `~/.codex/sessions/`). Gateway-generated `gw-*` IDs are rejected, since
@@ -701,8 +705,10 @@ export function resolveCodexSandboxFlags(input: CodexSandboxFlagsInput): CodexSa
 }
 
 /**
- * Flags that `codex exec resume` rejects (the original session's policy is
- * inherited). Callers must drop these when building resume argv.
+ * Flags that `codex exec resume` rejects in the after-subcommand position the
+ * gateway emits. Callers must drop these when building resume argv. Rejection
+ * here does not mean the original session's policy is inherited; see the note
+ * on CodexSessionMode above.
  *
  * Verified against `codex exec resume --help` (codex-cli 0.135.0):
  * `--sandbox`, `--add-dir`, `-C`, `--cd`, `--profile`, and `--search` are rejected.

@@ -60,6 +60,14 @@ extend-exclude = [
   "DOGFOODING_*.md",
   "RELEASE_NOTES_*.md",
 
+  # supply-chain-guard ledger: per-dependency contracts plus verbatim captured
+  # upstream evidence (OSV records, npm registry documents, SLSA attestation
+  # bundles, upstream patches). Spell-correcting captured evidence would destroy
+  # its value as evidence, and the identifiers in it are opaque by nature: this
+  # exclusion was added after `typos` flagged `mch` inside the OSV advisory id
+  # `CGA-2cm6-q4c4-8mch`. Every future advisory capture would re-trip it.
+  "docs/development/supply-chain-guard/ledger/**",
+
   # CHANGELOG accumulates words verbatim from commit subjects and may
   # legitimately echo whatever the contributor typed; running typos here
   # would force CHANGELOG history rewrites on every false-positive.

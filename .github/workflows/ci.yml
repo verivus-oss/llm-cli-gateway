@@ -35,7 +35,27 @@ jobs:
         with:
           node-version: ${{ matrix.node-version }}
           cache: "npm"
-      - run: npm ci
+      # Supply-chain gate runs BEFORE any dependency code executes. Previously
+      # this only ran inside security:audit, after a script-enabled `npm ci`
+      # had already run whatever the tree contained. --frozen scores the
+      # committed package-lock.json alone: no install, no npm subprocess, no
+      # node_modules, ~0.1s.
+      #
+      # --allow-missing-dist is needed precisely because this now runs first.
+      # The scan's fetch-in-dist invariant fails closed on an absent dist/,
+      # which at this point in the job cannot exist yet. The flag narrows that
+      # one check to "dist may be absent"; a present dist/ is still walked. The
+      # strict form runs later in this same job inside security:audit, after
+      # the build, so the invariant is not weakened.
+      - run: node scripts/supply-chain/dep-drift-scan.mjs --frozen --allow-missing-dist
+      # npm 12 refuses lifecycle scripts unless package.json `allowScripts`
+      # approves them by exact version, so a newly introduced dependency that
+      # wants to run install-time code fails the build instead of executing it.
+      # Only better-sqlite3 and fsevents declare install scripts today and both
+      # are covered; npm12-install-policy below asserts that independently.
+      # --no-audit keeps this step off the advisory endpoint: security:audit is
+      # the real gate and runs below.
+      - run: npx --yes npm@12.0.1 ci --strict-allow-scripts --no-audit --no-fund
       - run: npm run build
       - run: npm run lint
       - run: npm run format:check
@@ -58,8 +78,17 @@ jobs:
         with:
           node-version: 24
           cache: "npm"
-      - run: npm ci
+      # Same ordering as build-and-test: gate the committed lockfile before any
+      # dependency code runs, then install under npm 12's script policy.
+      # --allow-missing-dist for the same reason as above; see build-and-test.
+      - run: node scripts/supply-chain/dep-drift-scan.mjs --frozen --allow-missing-dist
+      - run: npx --yes npm@12.0.1 ci --strict-allow-scripts --no-audit --no-fund
       - run: npm run build
+      # Now that dist/ exists, run the scan in its strict form. This job packs
+      # the tarball, so the fetch-in-dist invariant belongs here rather than
+      # only in build-and-test's security:audit, which never sees this job's
+      # build output.
+      - run: node scripts/supply-chain/dep-drift-scan.mjs --frozen
       # Generate the prod-only shrinkwrap so the packed contents match what
       # an actual publish ships (it is generated, never committed).
       - run: node scripts/make-prod-shrinkwrap.mjs

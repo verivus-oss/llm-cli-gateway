@@ -607,7 +607,7 @@ Execute a Claude Code request with optional session management.
 - `optimizePrompt` (boolean, optional): Optimize prompt for token efficiency (44% reduction), default: false
 - `optimizeResponse` (boolean, optional): Optimize response for token efficiency (37% reduction), default: false
 - `correlationId` (string, optional): Request trace ID (auto-generated if omitted)
-- `idleTimeoutMs` (integer, optional): Kill a stuck process after output inactivity; 30,000 to 3,600,000 ms
+- `idleTimeoutMs` (integer, optional): Kill a stuck process after output inactivity; 30,000 to 3,600,000 ms. Idle enforcement applies only when `outputFormat` is `stream-json`; it is ignored for text/json, which produce no output until the run completes
 - `worktree` (boolean|object, optional): Run inside a gateway-owned git worktree (slice λ). A worktree requires a registered workspace selected explicitly, through caller-owned session metadata, or by the configured default; it never inherits process cwd or combines with `workingDir`, `addDir`, or `includeDirs`. Materialization suppresses repository, system, and global Git hooks and configured clean, smudge, and process checkout filters, so filter-dependent content such as Git LFS remains in its repository representation instead of executing host commands. Requesting a worktree is a high-risk managed input that requires approval and `LLM_GATEWAY_APPROVAL_ALLOW_BYPASS=1`, but remains bounded.
 - `promptParts` (object, optional): Cache-aware structured prompt `{ system?, tools?, context?, task }`; mutually exclusive with `prompt`
 - `forceRefresh` (boolean, optional): Bypass dedup and force a fresh CLI run, default: false
@@ -647,7 +647,7 @@ Execute a Codex request with optional session tracking.
 - `approvalPolicy` (string, optional): Has no effect for Codex because `mcp_managed` is unavailable.
 - `mcpServers` (string[], optional): Metadata only. It does not configure or isolate Codex MCP servers.
 - `sessionId` (string, optional): Session identifier for tracking.
-- `resumeLatest` (boolean, optional): Resume the globally most recent Codex session (`codex exec resume --last`); the resumed session inherits its original cwd and is not selected by `workingDir`. Ignored if `sessionId` is set.
+- `resumeLatest` (boolean, optional): Resume a previous Codex session (`codex exec resume --last`). Do not rely on which session `--last` selects or on the resumed working directory (#258): `--last` is cwd-filtered upstream and the child is still spawned with the gateway-resolved cwd. Verify the target, or start a fresh session when it must be certain. Ignored if `sessionId` is set.
 - `createNewSession` (boolean, optional): Always create a new session
 - `forceRefresh` (boolean, optional): Bypass dedup and force a fresh CLI run, default: false
 - `outputFormat` (string, optional): `text` (default) or `json` (`--json` JSONL events for token usage extraction)
@@ -719,9 +719,12 @@ Execute a Google Antigravity CLI (`agy`) request with session support.
 - `project` (string, optional): Select the Antigravity project for this session (`--project <ID>`); mutually exclusive with `newProject`.
 - `newProject` (boolean, optional): Create a new Antigravity project for this session (`--new-project`); mutually exclusive with `project`.
 - `sandbox` (boolean, optional): Run Antigravity in sandbox mode (`--sandbox`)
+- `workingDir` (string, optional): Local Antigravity process working directory.
+  Stdio/local callers may pass local paths directly; remote HTTP/OAuth callers
+  must use relative paths inside a selected registered workspace. `includeDirs`
+  adds read paths but does not select cwd.
 - `workspace` (string, optional): Registered gateway workspace alias that selects
-  the Antigravity process cwd. `includeDirs` adds read paths but does not select
-  cwd.
+  the Antigravity process cwd for remote HTTP/OAuth callers.
 - `outputFormat` (string, optional): `text` only. Antigravity print mode emits text; `json` and `stream-json` are rejected.
 - `mcpServers` (string[], optional): Metadata only. Antigravity manages its own MCP configuration; this field does not create an allowlist.
 - `allowedTools`, `policyFiles`, `adminPolicyFiles`, `attachments` (string[], optional) and `skipTrust` (boolean, optional): **Unsupported by Antigravity CLI**. Non-empty values, or `skipTrust: true`, are rejected with an explanatory error.
@@ -731,7 +734,7 @@ Execute a Google Antigravity CLI (`agy`) request with session support.
 - `optimizePrompt` (boolean, optional): Optimize prompt for token efficiency, default: false
 - `optimizeResponse` (boolean, optional): Optimize response for token efficiency, default: false
 - `correlationId` (string, optional): Request trace ID (auto-generated if omitted)
-- `idleTimeoutMs` (integer, optional): Kill a stuck process after output inactivity; 30,000 to 3,600,000 ms
+- `idleTimeoutMs` (integer, optional): Total-runtime bound, not an idle timer: this provider emits no output until it exits, so the process is killed after this duration even while healthy. 30,000 to 3,600,000 ms, default 3,600,000 ms
 - `forceRefresh` (boolean, optional): Bypass dedup and force a fresh CLI run, default: false
 
 **Response extras:**
@@ -1155,7 +1158,7 @@ Run a Mistral Vibe agentic coding request. Like `grok_request` in shape, but wit
 - `promptParts` (object, optional): Cache-aware structured prompt `{ system?, tools?, context?, task }`; mutually exclusive with `prompt`
 - `optimizePrompt` / `optimizeResponse` (boolean, optional): Token-efficiency optimisation, default: false
 - `correlationId` (string, optional): Request trace ID (auto-generated if omitted)
-- `idleTimeoutMs` (integer, optional): Kill a stuck process after output inactivity; 30,000 to 3,600,000 ms
+- `idleTimeoutMs` (integer, optional): Total-runtime bound, not an idle timer: this provider emits no output until it exits, so the process is killed after this duration even while healthy. 30,000 to 3,600,000 ms, default 3,600,000 ms
 - `forceRefresh` (boolean, optional): Bypass dedup and force a fresh CLI run, default: false
 
 ##### `devin_request`
@@ -1193,7 +1196,7 @@ Run a Cognition Devin CLI request synchronously (headless print mode, `devin -p`
   in its repository representation instead of executing host commands.
 - `optimizePrompt` / `optimizeResponse` (boolean, optional): Token-efficiency optimisation, default: false
 - `correlationId` (string, optional): Request trace ID (auto-generated if omitted)
-- `idleTimeoutMs` (integer, optional): Kill a stuck process after output inactivity; 30,000 to 3,600,000 ms
+- `idleTimeoutMs` (integer, optional): Total-runtime bound, not an idle timer: this provider emits no output until it exits, so the process is killed after this duration even while healthy. 30,000 to 3,600,000 ms, default 3,600,000 ms
 - `forceRefresh` (boolean, optional): Bypass dedup and force a fresh CLI run, default: false
 
 ##### `cursor_request`
@@ -1206,12 +1209,13 @@ Run a Cursor Agent request synchronously. The default CLI transport uses headles
 - `model` (string, optional): Model name or alias (for example `gpt-5`, `sonnet-4-thinking`, or `latest`)
 - `mode` (string, optional): Cursor mode, `"plan"` or `"ask"` (`--mode`)
 - `outputFormat` (string, optional): `"text"` (default), `"json"`, or `"stream-json"`
-- `transport` (string, optional): `"cli"` (default) or `"acp"`; ACP fails closed unless its global and Cursor provider gates are enabled. ACP accepts only `prompt`, `model`, `sessionId`, and a registered `workspace`; non-default Cursor CLI controls (`mode`, non-text `outputFormat`, non-empty `addDir`, `force`, `autoReview`, `sandbox`, `trust`, `resumeLatest`, `createNewSession`, optimization or compression, `idleTimeoutMs`, and `forceRefresh`) are rejected. Sync-only: `cursor_request_async` always runs the CLI transport and does not accept `transport`
+- `transport` (string, optional): `"cli"` (default) or `"acp"`; ACP fails closed unless its global and Cursor provider gates are enabled. ACP accepts only `prompt`, `model`, `sessionId`, and a registered `workspace`; non-default Cursor CLI controls (`mode`, non-text `outputFormat`, `workingDir`, non-empty `addDir`, `force`, `autoReview`, `sandbox`, `trust`, `resumeLatest`, `createNewSession`, optimization or compression, `idleTimeoutMs`, and `forceRefresh`) are rejected. Sync-only: `cursor_request_async` always runs the CLI transport and does not accept `transport`
 - `force` (boolean, optional): Emit `--force` for non-interactive operation.
 - `autoReview` (boolean, optional): Emit `--auto-review`.
 - `sandbox` (string, optional): `"enabled"` or `"disabled"` (`--sandbox`).
 - `trust` (boolean, optional): Emit `--trust` for this invocation.
 - `workspace` (string, optional): On `transport: "cli"`, a Cursor workspace path or name (`--workspace`); remote HTTP/OAuth callers must pass a registered workspace alias, while local stdio callers may pass paths. An unregistered relative local value is preserved verbatim as a provider-native saved-workspace name and is never resolved against the gateway process cwd; pass an absolute path to select a local directory cwd. On `transport: "acp"`, it must be a registered gateway workspace alias. A fresh remote ACP request uses the supplied alias or `[workspaces].default`; a remote ACP resume stays bound to its recorded canonical alias and cwd
+- `workingDir` (string, optional): Local Cursor Agent process working directory, CLI transport only. Distinct from `workspace`, which is Cursor's own selector; passing an absolute `workspace` path that disagrees with `workingDir` is rejected rather than silently ranked. Rejected on `transport: "acp"`, which resolves its own scope, rather than being accepted and discarded.
 - `addDir` (string[], optional): Additional workspace roots (one `--add-dir` per entry); remote HTTP/OAuth callers must use registered workspace roots.
 - `sessionId` (string, optional): On `transport: "cli"`, a Cursor chat/session ID to resume (`--resume <id>`). The `gw-*` id minted for a brand-new gateway session is not resumable through the CLI transport; continue with `resumeLatest: true`. On `transport: "acp"`, pass the gateway-owned ACP session ID returned by an earlier ACP call; Cursor-native and CLI session IDs are rejected
 - `resumeLatest` (boolean, optional): CLI only: resume the most recent Cursor chat (`--continue`). `true` is rejected on ACP.
@@ -1220,7 +1224,7 @@ Run a Cursor Agent request synchronously. The default CLI transport uses headles
 - `approvalPolicy` (string, optional): Has no effect on CLI because `mcp_managed` is unavailable. ACP rejects it because ACP uses its own permission bridge.
 - `optimizePrompt` / `optimizeResponse` (boolean, optional): Token-efficiency optimisation, default: false
 - `correlationId` (string, optional): Request trace ID (auto-generated if omitted)
-- `idleTimeoutMs` (integer, optional): Kill a stuck process after output inactivity; 30,000 to 3,600,000 ms
+- `idleTimeoutMs` (integer, optional): Total-runtime bound, not an idle timer: this provider emits no output until it exits, so the process is killed after this duration even while healthy. 30,000 to 3,600,000 ms, default 3,600,000 ms. This holds for the default text invocation; with `outputFormat: "stream-json"` Cursor streams incrementally, so the same timer behaves as a genuine idle window
 - `forceRefresh` (boolean, optional): Bypass dedup and force a fresh CLI run, default: false
 
 ##### `claude_request_async` / `codex_request_async` / `gemini_request_async` / `grok_request_async` / `mistral_request_async` / `devin_request_async` / `cursor_request_async`
@@ -1603,7 +1607,7 @@ The resolved API key is excluded from `payloadJson`, the dedup key, logs, and th
 
 1. **Gateway metadata, not transcripts**: Session records track ownership, timestamps, active pointers, and provider metadata. They do not store a conversation transcript.
 2. **Storage backend**: The default file session manager uses `~/.llm-cli-gateway/sessions.json`; setting `DATABASE_URL` selects the PostgreSQL session manager instead.
-3. **Provider-native continuity**: A gateway session ID is tracking metadata, not automatically a provider-native resume ID. Native behavior remains provider-specific: `claude_request` with `continueSession:true` uses Claude's latest conversation in a stable selected working directory and fails closed without `workingDir` or a registered workspace selected explicitly, through caller-owned session metadata, or by the configured default. That workspace may optionally supply a gateway worktree. `codex_request` needs a real Codex UUID for `sessionId` or `resumeLatest:true` for Codex's latest session.
+3. **Provider-native continuity**: A gateway session ID is tracking metadata, not automatically a provider-native resume ID. Native behavior remains provider-specific: `claude_request` with `continueSession:true` uses Claude's latest conversation in a stable selected working directory and fails closed without `workingDir` or a registered workspace selected explicitly, through caller-owned session metadata, or by the configured default. That workspace may optionally supply a gateway worktree. `codex_request` needs a real Codex UUID for `sessionId`, or `resumeLatest:true`, which resumes a previous session. Do not rely on which session `--last` selects or on the resumed working directory (under review).
 4. **Caller isolation**: HTTP/OAuth callers can retrieve or reuse only sessions they own. Their session projection hides local paths and native provider identifiers.
 5. **Personal Kit**: With Personal Agent Config Kit enabled, Claude, Codex, and Mistral use a separate, context-bound active-session pointer and retain a native continuation handle only in the current gateway process. See the [Personal Agent Config Kit guide](docs/guides/PERSONAL_AGENT_CONFIG_KIT.md).
 

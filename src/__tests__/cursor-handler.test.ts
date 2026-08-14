@@ -191,6 +191,25 @@ describe("handleCursorRequest", () => {
     expect(JSON.stringify(res)).toContain("mode");
   });
 
+  it("rejects workingDir on transport=acp rather than silently ignoring the scope", async () => {
+    // #243 added workingDir as a CLI-only scoping input. The ACP route resolves
+    // its own scope, so accepting the field there would drop it and run the
+    // child somewhere the caller did not name, which is the exact failure the
+    // issue was about. addDir is rejected for the same reason.
+    const runtime = fakeRuntime();
+    const res = await handleCursorRequest(
+      { sessionManager: runtime.sessionManager, logger: runtime.logger, runtime } as never,
+      {
+        transport: "acp",
+        prompt: "x",
+        workingDir: "/tmp",
+        optimizePrompt: false,
+      }
+    );
+    expect(JSON.stringify(res)).toContain("transport=acp does not support");
+    expect(JSON.stringify(res)).toContain("workingDir");
+  });
+
   it("rejects managed MCP before reading the Cursor workspace registry", async () => {
     const runtime = fakeRuntime();
     let workspaceRegistryRead = false;

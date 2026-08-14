@@ -37,66 +37,48 @@ jobs:
           fi
           printf 'tag=%s\n' "${RELEASE_TAG}" >> "$GITHUB_OUTPUT"
 
-  publish:
+  # Build, test, audit and pack WITHOUT any publishing identity.
+  #
+  # Why this job exists separately: until 2026-08-08 a single job held
+  # `id-token: write`, checked out the repository, and then executed
+  # repository-controlled build, test, audit and packaging code. That is the
+  # same trust failure as the keyv/cacheable incident this repo reviewed, where
+  # compromised source published a valid-provenance package through a
+  # legitimate workflow. Nothing here can reach npm: the job has no id-token
+  # permission and no registry credentials, so the worst a malicious commit can
+  # do is produce a tarball that the publish job then refuses on digest.
+  build:
     needs: resolve-release-tag
     runs-on: ubuntu-latest
-    environment: npm-publish
     permissions:
       contents: read
-      id-token: write
+    outputs:
+      version: ${{ steps.pack.outputs.version }}
+      dist_tag: ${{ steps.pack.outputs.dist_tag }}
+      tarball: ${{ steps.pack.outputs.tarball }}
+      sha256: ${{ steps.pack.outputs.sha256 }}
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
         with:
-          # A manual dispatch must publish an explicit immutable release tag,
+          # A manual dispatch must build an explicit immutable release tag,
           # never whichever revision happens to be the default branch.
           ref: refs/tags/${{ needs.resolve-release-tag.outputs.tag }}
-          # Publishing uses the job's short-lived GitHub OIDC identity, so
-          # git credentials are unnecessary.
           persist-credentials: false
 
       - uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6 # zizmor: ignore[cache-poisoning]
-        # Why the ignore: zizmor's cache-poisoning audit flags setup-node
-        # on any `release: published` trigger regardless of whether cache
-        # is enabled. Package-manager caching is explicitly disabled, so the
-        # attack vector (a poisoned cache restored during publish) does not
-        # exist. The ignore is targeted and the rationale is documented inline.
+        # Why the ignore: zizmor's cache-poisoning audit flags setup-node on any
+        # `release: published` trigger regardless of whether cache is enabled.
+        # Package-manager caching is explicitly disabled, so the attack vector
+        # (a poisoned cache restored during a release) does not exist.
         with:
           node-version: 24
-          registry-url: "https://registry.npmjs.org"
           package-manager-cache: false
 
-      # The npm trusted-publisher record binds this GitHub-hosted job to this
-      # package, workflow filename, and npm-publish environment. Do not rename
-      # the workflow or environment without updating that npm configuration.
-      # Keep publish-token environment variables absent so npm exchanges the
-      # GitHub OIDC identity for short-lived publish credentials. setup-node
-      # v6 writes its fixed noncredential NODE_AUTH_TOKEN placeholder when a
-      # registry URL is configured; reject any other value.
-      - name: Verify trusted-publishing prerequisites
-        run: |
-          node_auth_token="${NODE_AUTH_TOKEN:-}"
-          if [ -n "$node_auth_token" ] && [ "$node_auth_token" != "XXXXX-XXXXX-XXXXX-XXXXX" ]; then
-            echo "NODE_AUTH_TOKEN must be unset or setup-node's noncredential placeholder"
-            exit 1
-          fi
-          test -z "${NPM_TOKEN:-}"
-          test -n "${ACTIONS_ID_TOKEN_REQUEST_URL:-}"
-          test -n "${ACTIONS_ID_TOKEN_REQUEST_TOKEN:-}"
-          npm_version="$(npm --version)"
-          # shellcheck disable=SC2016
-          node -e '
-            const version = process.argv[1];
-            const [major, minor, patch] = version.split(".").map(Number);
-            if (![major, minor, patch].every(Number.isInteger)) {
-              throw new Error(`Unexpected npm version: ${version}`);
-            }
-            if (major < 11 || (major === 11 && (minor < 5 || (minor === 5 && patch < 1)))) {
-              throw new Error(`npm ${version} is too old for trusted publishing (need >= 11.5.1)`);
-            }
-          ' "$npm_version"
-
-      - name: Verify npm OIDC exchange
-        run: node .github/scripts/verify-npm-oidc.mjs
+      # Gate the committed lockfile before any dependency code executes.
+      # --allow-missing-dist because this runs before the build; the scan's
+      # fetch-in-dist invariant fails closed on an absent dist/. The strict
+      # form runs later in this job via security:audit, after the build.
+      - run: node scripts/supply-chain/dep-drift-scan.mjs --frozen --allow-missing-dist
 
       - run: npm ci --ignore-scripts --no-audit --no-fund
       # The full suite imports the dev-only better-sqlite3 writer in legacy/WAL
@@ -150,12 +132,56 @@ jobs:
       - name: Verify package contents
         run: npm pack --dry-run
 
+      # Produce the exact artefact that will be published, and derive the
+      # dist-tag here rather than in the publish job, so the publish job never
+      # needs the repository. The sha256 is carried as a job output and
+      # re-checked after download: the publish job refuses anything else.
+      - name: Pack release tarball
+        id: pack
+        run: |
+          set -euo pipefail
+          VERSION="$(node -p "require('./package.json').version")"
+          # A prerelease (x.y.z-<id>.<n>) must NOT take the `latest` dist-tag, or a
+          # plain `npm install llm-cli-gateway` would resolve to the release
+          # candidate. Publish it under a side tag derived from the prerelease
+          # identifier (rc/next/beta/alpha/...); a stable x.y.z publishes to
+          # `latest` as before. The `|| TAG=next` guard keeps an unparseable
+          # prerelease off `latest`.
+          if [[ "$VERSION" == *-* ]]; then
+            TAG="$(printf '%s' "$VERSION" | sed -E 's/^[0-9]+\.[0-9]+\.[0-9]+-([0-9A-Za-z]+).*/\1/')"
+            # Fall back to `next` when the derivation is empty, did not match
+            # (TAG still equals VERSION), OR resolves to `latest` in any case: a
+            # prerelease id of literally `latest` (e.g. 2.14.0-latest[.1]) must
+            # never take the `latest` dist-tag and hijack the default install.
+            { [ -n "$TAG" ] && [ "$TAG" != "$VERSION" ] && [ "${TAG,,}" != latest ]; } || TAG=next
+          else
+            TAG=latest
+          fi
+          TARBALL="$(npm pack --ignore-scripts --silent)"
+          SHA="$(sha256sum "$TARBALL" | cut -d' ' -f1)"
+          echo "packed $TARBALL ($SHA) for dist-tag $TAG"
+          {
+            printf 'version=%s\n' "$VERSION"
+            printf 'dist_tag=%s\n' "$TAG"
+            printf 'tarball=%s\n' "$TARBALL"
+            printf 'sha256=%s\n' "$SHA"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Upload release tarball
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: npm-release-tarball
+          path: ${{ steps.pack.outputs.tarball }}
+          if-no-files-found: error
+          retention-days: 7
+
       - name: Verify npm package dry run
         if: ${{ inputs['dry-run'] }}
         run: |
-          # The explicit OIDC exchange step above validates trusted publishing.
-          # This dry-run validates a throwaway prerelease package without a
-          # registry write, avoiding a collision with an already-published version.
+          # Runs here rather than in the publish job because it needs the source
+          # tree and needs no credentials: `npm publish --dry-run` performs no
+          # registry write. It validates a throwaway prerelease version so it
+          # cannot collide with an already-published one.
           tmpdir="$(mktemp -d)"
           trap 'rm -rf "${tmpdir}"' EXIT
           rsync -a --exclude .git ./ "${tmpdir}/"
@@ -181,26 +207,131 @@ jobs:
           NODE
           npm publish --dry-run --ignore-scripts --tag dry-run "${tmpdir}"
 
-      - name: Publish
-        if: ${{ !inputs['dry-run'] }}
+  # The ONLY job holding a publishing identity.
+  #
+  # It does not check out the repository and runs no repository script. Its
+  # entire input is one digest-pinned tarball produced by the credential-free
+  # build job above, so compromised source cannot execute inside the identity
+  # authorised to publish. The npm-publish environment lives here, which is
+  # also where any required-reviewer protection now applies.
+  publish:
+    needs: [resolve-release-tag, build]
+    if: ${{ !inputs['dry-run'] }}
+    runs-on: ubuntu-latest
+    environment: npm-publish
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6 # zizmor: ignore[cache-poisoning]
+        # Why the ignore: zizmor's cache-poisoning audit flags setup-node on any
+        # `release: published` trigger regardless of whether cache is enabled.
+        # Package-manager caching is explicitly disabled, and this job restores
+        # no cache and checks out no source, so the attack vector does not exist.
+        with:
+          node-version: 24
+          registry-url: "https://registry.npmjs.org"
+          package-manager-cache: false
+
+      - name: Download release tarball
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
+        with:
+          name: npm-release-tarball
+          path: release
+
+      # Bind this job to the exact bytes the build job produced. Without this,
+      # splitting the jobs would only move the trust problem to the artifact.
+      - name: Verify tarball digest
+        env:
+          EXPECTED_SHA: ${{ needs.build.outputs.sha256 }}
+          TARBALL: ${{ needs.build.outputs.tarball }}
         run: |
-          VERSION="$(node -p "require('./package.json').version")"
-          # A prerelease (x.y.z-<id>.<n>) must NOT take the `latest` dist-tag, or a
-          # plain `npm install llm-cli-gateway` would resolve to the release
-          # candidate. Publish it under a side tag derived from the prerelease
-          # identifier (rc/next/beta/alpha/...); a stable x.y.z publishes to
-          # `latest` as before. The `|| TAG=next` guard keeps an unparseable
-          # prerelease off `latest`.
-          if [[ "$VERSION" == *-* ]]; then
-            TAG="$(printf '%s' "$VERSION" | sed -E 's/^[0-9]+\.[0-9]+\.[0-9]+-([0-9A-Za-z]+).*/\1/')"
-            # Fall back to `next` when the derivation is empty, did not match
-            # (TAG still equals VERSION), OR resolves to `latest` in any case: a
-            # prerelease id of literally `latest` (e.g. 2.14.0-latest[.1]) must
-            # never take the `latest` dist-tag and hijack the default install.
-            { [ -n "$TAG" ] && [ "$TAG" != "$VERSION" ] && [ "${TAG,,}" != latest ]; } || TAG=next
-            echo "Publishing prerelease $VERSION under dist-tag: $TAG"
-            npm publish --ignore-scripts --tag "$TAG"
-          else
-            echo "Publishing stable $VERSION under dist-tag: latest"
-            npm publish --ignore-scripts
+          set -euo pipefail
+          cd release
+          ACTUAL="$(sha256sum "$TARBALL" | cut -d' ' -f1)"
+          if [ "$ACTUAL" != "$EXPECTED_SHA" ]; then
+            echo "ERROR: tarball digest mismatch"
+            echo "  expected $EXPECTED_SHA"
+            echo "  actual   $ACTUAL"
+            exit 1
           fi
+          echo "tarball digest verified: $ACTUAL"
+
+      # The npm trusted-publisher record binds this GitHub-hosted job to this
+      # package, workflow filename, and npm-publish environment. Do not rename
+      # the workflow or environment without updating that npm configuration.
+      # Keep publish-token environment variables absent so npm exchanges the
+      # GitHub OIDC identity for short-lived publish credentials. setup-node
+      # v6 writes its fixed noncredential NODE_AUTH_TOKEN placeholder when a
+      # registry URL is configured; reject any other value.
+      - name: Verify trusted-publishing prerequisites
+        run: |
+          node_auth_token="${NODE_AUTH_TOKEN:-}"
+          if [ -n "$node_auth_token" ] && [ "$node_auth_token" != "XXXXX-XXXXX-XXXXX-XXXXX" ]; then
+            echo "NODE_AUTH_TOKEN must be unset or setup-node's noncredential placeholder"
+            exit 1
+          fi
+          test -z "${NPM_TOKEN:-}"
+          test -n "${ACTIONS_ID_TOKEN_REQUEST_URL:-}"
+          test -n "${ACTIONS_ID_TOKEN_REQUEST_TOKEN:-}"
+          npm_version="$(npm --version)"
+          # shellcheck disable=SC2016
+          node -e '
+            const version = process.argv[1];
+            const [major, minor, patch] = version.split(".").map(Number);
+            if (![major, minor, patch].every(Number.isInteger)) {
+              throw new Error(`Unexpected npm version: ${version}`);
+            }
+            if (major < 11 || (major === 11 && (minor < 5 || (minor === 5 && patch < 1)))) {
+              throw new Error(`npm ${version} is too old for trusted publishing (need >= 11.5.1)`);
+            }
+          ' "$npm_version"
+
+      # Fail fast if the OIDC exchange is misconfigured, before touching the
+      # registry with a real write. Deliberately inline: this job runs no
+      # repository code, so the package name is pinned here rather than read
+      # from a checked-out package.json. This replaces the former
+      # .github/scripts/verify-npm-oidc.mjs, which is removed with this change.
+      - name: Verify npm OIDC exchange
+        env:
+          PACKAGE_NAME: llm-cli-gateway
+        run: |
+          node -e '
+            const name = process.env.PACKAGE_NAME;
+            const url = new URL(process.env.ACTIONS_ID_TOKEN_REQUEST_URL);
+            url.searchParams.set("audience", "npm:registry.npmjs.org");
+            const idRes = await fetch(url, {
+              headers: {
+                Accept: "application/json",
+                Authorization: `Bearer ${process.env.ACTIONS_ID_TOKEN_REQUEST_TOKEN}`,
+              },
+            });
+            if (!idRes.ok) throw new Error(`GitHub OIDC token request failed: HTTP ${idRes.status}`);
+            const { value: idToken } = await idRes.json();
+            if (!idToken) throw new Error("GitHub OIDC token request returned no token");
+            const exchange = new URL(
+              `/-/npm/v1/oidc/token/exchange/package/${encodeURIComponent(name)}`,
+              "https://registry.npmjs.org",
+            );
+            const exRes = await fetch(exchange, {
+              method: "POST",
+              headers: { Accept: "application/json", Authorization: `Bearer ${idToken}` },
+            });
+            if (!exRes.ok) throw new Error(`npm OIDC token exchange failed: HTTP ${exRes.status}`);
+            const { token } = await exRes.json();
+            if (!token) throw new Error("npm OIDC token exchange returned no token");
+            console.log(`Verified npm OIDC exchange for ${name}.`);
+          ' --input-type=module
+
+      # --ignore-scripts preserves the deliberately stripped release dist that
+      # the build job produced. Publishing a prebuilt tarball means npm runs no
+      # prepack/prepare hook and reads no repository state.
+      - name: Publish
+        env:
+          DIST_TAG: ${{ needs.build.outputs.dist_tag }}
+          TARBALL: ${{ needs.build.outputs.tarball }}
+          VERSION: ${{ needs.build.outputs.version }}
+        run: |
+          set -euo pipefail
+          echo "Publishing $VERSION under dist-tag: $DIST_TAG"
+          npm publish --ignore-scripts --tag "$DIST_TAG" "release/$TARBALL"

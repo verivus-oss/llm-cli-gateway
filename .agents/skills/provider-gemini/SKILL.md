@@ -62,16 +62,16 @@ metadata is authoritative; the TOML is scanner input only.
    `createNewSession`, `project`, and `newProject` are the relevant request
    controls. `workspace` and `worktree` are gateway routing selections, not
    Antigravity-native flags. `includeDirs` is an additional read path and does
-   not select cwd. Use a verified registered `workspace` to select the process
-   cwd. An unscoped child uses a fresh neutral temporary cwd, not the gateway
+   not select cwd. Use `workingDir` to select the process cwd, or a verified
+   registered `workspace` for remote HTTP/OAuth callers. An unscoped child uses a fresh neutral temporary cwd, not the gateway
    repository. JSON or stream-json output, attachments, policy files, admin
    policy files, and `skipTrust` are unsupported or rejected in the current
    Antigravity path.
 7. For continuity, use a verified caller-owned Antigravity conversation ID or
    `resumeLatest:true`. Gateway-generated `gw-*` IDs are bookkeeping IDs and
    are rejected if replayed as Gemini session IDs; check the response
-   `resumable` field. `resumeLatest:true` requires `workspace` or a configured
-   default workspace so `--continue` remains bound to a stable cwd.
+   `resumable` field. `resumeLatest:true` requires `workingDir`, `workspace`, or a
+   configured default workspace so `--continue` remains bound to a stable cwd.
 8. Antigravity's current print contract carries the prompt in argv. Oversized
    UTF-8 input fails before spawn as non-retryable `input_too_large`; the
    gateway never truncates instructions. All other caller-controlled argv

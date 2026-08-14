@@ -14,6 +14,8 @@ import {
   DEFAULT_MAX_JOB_OUTPUT_BYTES,
   DEFAULT_COMPLETED_JOB_MEMORY_TTL_MS,
   diagnoseRemoteOAuthConfig,
+  loadPersistenceConfig,
+  resetSessionDatabaseUrlWarning,
 } from "../config.js";
 import { hashSecret } from "../oauth.js";
 import { noopLogger } from "../logger.js";
@@ -324,5 +326,86 @@ describe("config", () => {
       expect(result.config.clients).toHaveLength(1);
       expect(result.config.registrationPolicy).toBe("static_clients");
     });
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Session-store selection.
+//
+// The session manager used to have a selector of its own, DATABASE_URL, which
+// nothing set. `createSessionManager` therefore took the file branch on a host
+// whose [persistence].backend was "postgres", and 3,590 sessions stayed in
+// sessions.json while every other subsystem was on Postgres. These cases pin
+// the single-selector behaviour so that cannot silently recur.
+// ---------------------------------------------------------------------------
+describe("loadConfig: [persistence] is the single session-store selector", () => {
+  afterEach(() => {
+    vi.unstubAllEnvs();
+    resetSessionDatabaseUrlWarning();
+  });
+
+  const PG = "postgresql://user:pw@127.0.0.1:5432/gw";
+  const pgConfig = (dsn = PG): string =>
+    withConfigToml(`[persistence]\nbackend = "postgres"\ndsn = "${dsn}"\n`);
+
+  it("selects Postgres from [persistence] with no DATABASE_URL set", () => {
+    vi.stubEnv("LLM_GATEWAY_CONFIG", pgConfig());
+    vi.stubEnv("DATABASE_URL", "");
+    const config = loadConfig(loadPersistenceConfig(noopLogger), noopLogger);
+    expect(config.database?.connectionString).toBe(PG);
+    // Records WHICH selector chose it, so a startup failure can name the
+    // configuration the operator wrote instead of only a refused connection.
+    expect(config.databaseSource).toBe("persistence");
+  });
+
+  it("stays file-based when the backend is not postgres", () => {
+    // The sqlite backend governs jobs; it must not drag sessions into a
+    // database that the operator did not select for them.
+    vi.stubEnv("LLM_GATEWAY_CONFIG", withConfigToml('[persistence]\nbackend = "sqlite"\n'));
+    vi.stubEnv("DATABASE_URL", "");
+    expect(loadConfig(loadPersistenceConfig(noopLogger), noopLogger).database).toBeUndefined();
+  });
+
+  it("refuses a DATABASE_URL that disagrees with [persistence].dsn", () => {
+    // Honouring it would put sessions in one database and jobs in another,
+    // recreating the split this change removes. rc.3 fixed the same class of
+    // defect for LLM_GATEWAY_LOGS_DB.
+    vi.stubEnv("LLM_GATEWAY_CONFIG", pgConfig());
+    vi.stubEnv("DATABASE_URL", "postgresql://user:pw@127.0.0.1:5432/somewhere-else");
+    const warn = vi.fn();
+    const config = loadConfig(loadPersistenceConfig(noopLogger), { ...noopLogger, warn });
+    expect(config.database?.connectionString).toBe(PG);
+    expect(warn).toHaveBeenCalledOnce();
+    expect(warn.mock.calls[0][0]).toMatch(/DATABASE_URL/);
+  });
+
+  it("still honours DATABASE_URL when no Postgres persistence is configured", () => {
+    // Deprecated, not removed: an existing deployment that set only the
+    // variable keeps working, and is told what to move to.
+    vi.stubEnv("LLM_GATEWAY_CONFIG", withConfigToml('[persistence]\nbackend = "sqlite"\n'));
+    vi.stubEnv("DATABASE_URL", PG);
+    const warn = vi.fn();
+    const config = loadConfig(loadPersistenceConfig(noopLogger), { ...noopLogger, warn });
+    expect(config.database?.connectionString).toBe(PG);
+    expect(config.databaseSource).toBe("env");
+    expect(warn).toHaveBeenCalledOnce();
+  });
+
+  it("warns once, not on every call", () => {
+    vi.stubEnv("LLM_GATEWAY_CONFIG", withConfigToml('[persistence]\nbackend = "sqlite"\n'));
+    vi.stubEnv("DATABASE_URL", PG);
+    const warn = vi.fn();
+    const logger = { ...noopLogger, warn };
+    loadConfig(loadPersistenceConfig(noopLogger), logger);
+    loadConfig(loadPersistenceConfig(noopLogger), logger);
+    expect(warn).toHaveBeenCalledOnce();
+  });
+
+  it("rejects a malformed persistence dsn rather than passing it to pg", () => {
+    vi.stubEnv("LLM_GATEWAY_CONFIG", pgConfig("mysql://nope/db"));
+    vi.stubEnv("DATABASE_URL", "");
+    expect(() => loadConfig(loadPersistenceConfig(noopLogger), noopLogger)).toThrow(
+      /Invalid database URL/
+    );
   });
 });

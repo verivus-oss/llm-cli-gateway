@@ -154,15 +154,57 @@ describe("MCP tool-surface usability (post-usability-review regressions)", () =>
 
     for (const toolName of ["codex_request", "codex_request_async"]) {
       const description = descriptionFor(toolName, "resumeLatest");
-      expect(description, `${toolName}.resumeLatest must identify the global selector`).toMatch(
-        /globally latest/i
+      // This ratchet previously required the description to claim `--last` is
+      // the GLOBAL selector, that the resumed session inherits its original
+      // cwd, and that workingDir/addDir cannot retarget it. All three are false
+      // against codex-cli 0.145.0 and the current spawn path, so the test was
+      // holding a false contract in place: `--last` is cwd-filtered upstream
+      // unless `--all` is passed (the gateway never emits it), and the child is
+      // spawned with the gateway-resolved cwd even though `-C` is dropped from
+      // the resume argv.
+      //
+      // Whether the code or the documented contract is wrong is #258. Until
+      // that is decided, pin the interim contract instead: the description must
+      // warn rather than promise, so neither outcome of #258 is foreclosed.
+      // Deliberately not keyed on the internal ticket number: these
+      // descriptions ship to npm consumers who cannot see that tracker.
+      expect(description, `${toolName}.resumeLatest must flag the open question`).toMatch(
+        /under review/i
       );
-      expect(description, `${toolName}.resumeLatest must preserve the original cwd`).toMatch(
-        /inherits that session's original cwd/i
+      expect(description, `${toolName}.resumeLatest must not promise a target`).toMatch(
+        /do not rely on/i
       );
-      expect(description, `${toolName}.resumeLatest must reject path retargeting claims`).toMatch(
-        /workingDir\/addDir do not retarget it/i
-      );
+      // "under review" plus a disclaimer is not enough on its own: a
+      // description could warn generically and still assert inheritance in the
+      // next sentence. Pin BOTH uncertainties by name, so a future edit cannot
+      // drop one and keep the reassuring preamble.
+      expect(
+        description,
+        `${toolName}.resumeLatest must name the session-selection uncertainty`
+      ).toMatch(/which session/i);
+      expect(
+        description,
+        `${toolName}.resumeLatest must name the working-directory uncertainty`
+      ).toMatch(/working directory/i);
+      expect(
+        description,
+        `${toolName}.resumeLatest must not reassert the global-selector claim`
+      ).not.toMatch(/globally latest/i);
+      // There is deliberately NO regex here forbidding affirmative inheritance
+      // phrasing. Two attempts failed in both directions, verified by probe:
+      // `/(?<!never |not |n't )inherits[^.]*original/i` let the affirmative
+      // "keeps its original cwd and workingDir cannot retarget it" through
+      // (it never says "inherits"), while wrongly rejecting the safe denials
+      // "Do not assume a resumed session inherits its original cwd" and
+      // "Whether it inherits its original cwd is unresolved".
+      //
+      // Blacklisting natural-language assertions is a losing game. The positive
+      // requirements above are the robust part: a description that names both
+      // uncertainties and says not to rely on them cannot also promise
+      // inheritance without contradicting itself, and a self-contradicting
+      // description is a review problem, not a regex problem. `globally latest`
+      // stays banned below because it is one specific stable phrase that was
+      // the actual prior claim, not an open-ended category.
       expect(description, `${toolName}.resumeLatest must explain explicit UUID targeting`).toMatch(
         /explicit real Codex UUID targets that session/i
       );

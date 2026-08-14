@@ -48,7 +48,7 @@ Apply these rules:
    sandboxMode: "workspace-write" only when red-team verification needs to
    create build or test artifacts. Do not use fullAuto.
 5. Do not set review-round, turn, token, price, cost, or wallclock caps. The
-   configured idle-timeout safeguard only detects a silent process.
+   configured idle-timeout safeguard only detects a silent process on incremental providers. For terminal-burst providers (gemini, mistral, devin, cursor) it is instead a total-runtime bound, since those emit nothing until exit. That classification is each provider's default invocation; cursor with `outputFormat: "stream-json"` streams, so there it is a real idle window.
 6. Continue red-team, blue-team, and reassessment work until every required
    reviewer returns `APPROVED_UNCONDITIONALLY`.
 
@@ -78,12 +78,12 @@ does not authorize review mutation unless the user separately asks for it.
 
 ## Target the Correct Repository
 
-| Provider                     | Local target rule                                                                                                                          |
-| ---------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------ |
-| Claude, Codex, Grok, Mistral | Use workingDir on a new session, or select a registered workspace explicitly or by configured default.                                     |
-| Gemini                       | No workingDir exists. includeDirs is auxiliary and does not choose cwd. Select a registered workspace explicitly or by configured default. |
-| Devin                        | Use workingDir on a new CLI session, or select a registered workspace explicitly or by configured default.                                 |
-| Cursor                       | Pass workspace as the intended local directory or registered alias.                                                                        |
+| Provider                     | Local target rule                                                                                                                                                                                                  |
+| ---------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| Claude, Codex, Grok, Mistral | Use workingDir on a new session, or select a registered workspace explicitly or by configured default.                                                                                                             |
+| Gemini                       | Use workingDir to select the process cwd. includeDirs is auxiliary and does not select cwd.                                                                                                                        |
+| Devin                        | Use workingDir on a new CLI session, or select a registered workspace explicitly or by configured default.                                                                                                         |
+| Cursor                       | Use workingDir for the process cwd. workspace is Cursor's own selector (saved-workspace name, .code-workspace file, or directory); an absolute workspace path disagreeing with workingDir is rejected, not ranked. |
 
 Do not use workspace_* administration tools to repair a local stdio path. Under
 managed Claude, custom workingDir, expanded workspace, custom tool selectors,
@@ -172,7 +172,7 @@ gemini_request_async({
     unresolved finding or verification gap, CHANGES_REQUIRED with
     evidence-backed findings, or BLOCKED_EXTERNAL with a concrete external error.",
   approvalStrategy: "legacy",
-  workspace: "[verified Gemini workspace]",
+  workingDir: "[repo]",
   correlationId: "red-team-gemini"
 })
 
@@ -205,9 +205,9 @@ devin_request_async({
     gap, CHANGES_REQUIRED with evidence-backed findings, or BLOCKED_EXTERNAL
     with a concrete external error.",
   approvalStrategy: "legacy",
+  workingDir: "[repo]",
   correlationId: "red-team-devin"
 })
-// Dispatch Devin only from a gateway process whose confirmed cwd is [repo].
 
 cursor_request_async({
   prompt: "Independently red-team [target] for repository-specific vulnerabilities,
@@ -268,8 +268,9 @@ content.
 Mistral Vibe defaults to accept-edits for programmatic callers and uses legacy
 approval. Current Vibe session logging defaults to enabled; run doctor and
 correct an explicit [session_logging] enabled = false setting before relying on
-resume. Codex native resume requires a real Codex UUID and inherits its
-original target and sandbox posture.
+resume. Codex native resume requires a real Codex UUID. Neither the target nor
+the sandbox posture is guaranteed to carry over: `sandboxMode`, `-C`/`--cd` and
+`--add-dir` are filtered from the resume argv, and Codex resolves both itself.
 
 SQLite and Postgres persistence make async jobs durable. Memory persistence is
 process-lifetime only and needs explicit acknowledgement. With

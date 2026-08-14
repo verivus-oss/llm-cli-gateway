@@ -41,12 +41,12 @@ replacement for a source-inspecting required CLI reviewer.
 
 Use this local stdio targeting map:
 
-| Provider                     | Target the repository                                                                                                                                                |
-| ---------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| Claude, Codex, Grok, Mistral | Pass local workingDir on a new session when supported by the request, or select a registered workspace explicitly or by configured default.                          |
-| Gemini                       | It has no workingDir field. includeDirs adds auxiliary paths and does not select the process cwd. Select a registered workspace explicitly or by configured default. |
-| Devin                        | Pass local workingDir on a new CLI session, or select a registered workspace explicitly or by configured default.                                                    |
-| Cursor                       | Pass workspace as a local directory or registered alias. Cursor uses that selection for its native workspace and child cwd.                                          |
+| Provider                     | Target the repository                                                                                                                                                                                              |
+| ---------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| Claude, Codex, Grok, Mistral | Pass local workingDir on a new session when supported by the request, or select a registered workspace explicitly or by configured default.                                                                        |
+| Gemini                       | Use workingDir to select the process cwd. includeDirs is auxiliary and does not select cwd.                                                                                                                        |
+| Devin                        | Pass local workingDir on a new CLI session, or select a registered workspace explicitly or by configured default.                                                                                                  |
+| Cursor                       | Use workingDir for the process cwd. workspace is Cursor's own selector (saved-workspace name, .code-workspace file, or directory); an absolute workspace path disagreeing with workingDir is rejected, not ranked. |
 
 Do not use workspace_* administration tools to repair a local stdio path
 problem. They are for remote HTTP/OAuth workspace clients.
@@ -75,7 +75,7 @@ Apply these rules:
    sandboxMode: "workspace-write" only if the review must create generated
    build or test output. Do not use fullAuto; it is deprecated shorthand.
 5. Do not set review-round, turn, token, price, cost, or wallclock limits.
-   The configured idle-timeout safeguard detects lack of output, not completion.
+   The configured idle-timeout safeguard detects lack of output on incremental providers, not completion. For terminal-burst providers (gemini, mistral, devin, cursor) it is instead a total-runtime bound, since those emit nothing until exit. That classification is each provider's default invocation; cursor with `outputFormat: "stream-json"` streams, so there it is a real idle window.
 6. Accept only explicit, evidence-backed `APPROVED_UNCONDITIONALLY` results. A
    condition, remaining finding, incomplete evidence, malformed response,
    timeout, cancellation, or provider failure is not approval.
@@ -147,7 +147,7 @@ gemini_request_async({
   prompt: "Review [design path] for security, data flow, operational failure
     modes, and missing requirements. Return terminal JSON verdict APPROVED_UNCONDITIONALLY, CHANGES_REQUIRED, or BLOCKED_EXTERNAL with inspected evidence.",
   approvalStrategy: "legacy",
-  workspace: "[verified Gemini workspace]",
+  workingDir: "[repo]",
   correlationId: "design-review-gemini"
 })
 
@@ -171,9 +171,9 @@ devin_request_async({
   prompt: "Independently review [design path] for implementation risk, security,
     and missing verification. Return terminal JSON verdict APPROVED_UNCONDITIONALLY, CHANGES_REQUIRED, or BLOCKED_EXTERNAL with inspected evidence.",
   approvalStrategy: "legacy",
+  workingDir: "[repo]",
   correlationId: "design-review-devin"
 })
-// Dispatch Devin only from a gateway process whose confirmed cwd is [repo].
 
 cursor_request_async({
   prompt: "Independently review [design path] for usability, implementation
@@ -218,7 +218,11 @@ only when the design inputs are unchanged.
 Mistral Vibe defaults session logging to enabled. Before relying on
 resumeLatest or sessionId continuity, run doctor and correct an explicit
 [session_logging] enabled = false configuration. Codex native resume requires a
-real Codex UUID and inherits its original target and sandbox settings.
+real Codex UUID. Do not rely on the resumed target directory: the gateway
+filters `-C`/`--cd` from resume argv, but the child is still spawned with the
+gateway-resolved cwd. The sandbox posture is not guaranteed to carry over
+either: `sandboxMode` cannot select one on resume and Codex re-resolves
+configuration.
 
 ## Acceptance Record
 

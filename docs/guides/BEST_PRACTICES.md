@@ -347,14 +347,17 @@ registered `workspace`, or gateway-managed `worktree` runs in a fresh private
 provider does not inherit the gateway process repository or its instruction
 files.
 
-Claude, Codex, Grok, Mistral, and Devin accept local `workingDir`; all supported
-CLI request paths can select a registered `workspace`, and their supported
-paths can use gateway worktrees. A gateway worktree requires a registered
-workspace selected explicitly, through caller-owned session metadata, or by the
-configured default; it never falls back to process cwd or combines with
-`workingDir`, `addDir`, or `includeDirs`. Gemini `includeDirs` adds read paths
-but does not select cwd. Cursor's native `.code-workspace` argument is not used as a
-process cwd. A provider-native `resumeLatest` that depends on `--continue`
+All seven CLI providers accept local `workingDir`; all supported CLI request
+paths can select a registered `workspace`, and their supported paths can use
+gateway worktrees. A gateway worktree requires a registered workspace selected
+explicitly, through caller-owned session metadata, or by the configured default;
+it never falls back to process cwd or combines with `workingDir`, `addDir`, or
+`includeDirs`. Gemini `includeDirs` adds read paths but does not select cwd.
+Cursor's `workspace` is its own native selector, and its `.code-workspace`
+argument is not used as a process cwd; an absolute Cursor `workspace` path that
+disagrees with `workingDir` is rejected rather than silently ranked, and
+`workingDir` is CLI-only so `transport: "acp"` rejects it instead of discarding
+it. A provider-native `resumeLatest` that depends on `--continue`
 requires a stable `workingDir`, `workspace`, or configured default workspace;
 an unscoped call fails closed rather than continuing from a random neutral cwd.
 

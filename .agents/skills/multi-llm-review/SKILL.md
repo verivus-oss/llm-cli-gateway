@@ -80,11 +80,11 @@ working directory that each provider will see.
 | -------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | Claude   | Pass local `workingDir:"<repo>"`. With Claude managed approval this is a high-risk posture input and needs an approval decision plus the operator's managed-bypass setting.           |
 | Codex    | Pass local `workingDir:"<repo>"`; start with `sandboxMode:"read-only"` for inspection, or use `workspace-write` only for write-producing checks.                                      |
-| Gemini   | Pass a verified registered `workspace` to select cwd. `includeDirs` is an extra read path, not cwd selection.                                                                         |
+| Gemini   | Pass local `workingDir:"<repo>"`. `includeDirs` is an extra read path, not cwd selection.                                                                                             |
 | Grok     | Pass local `workingDir:"<repo>"`.                                                                                                                                                     |
 | Mistral  | Pass local `workingDir:"<repo>"`.                                                                                                                                                     |
 | Devin    | Pass local `workingDir:"<repo>"` or a verified registered `workspace`. Use gateway `worktree` only with an explicit provider-native `sessionId` not overridden by `createNewSession`. |
-| Cursor   | Pass local `workspace:"<repo>"` or a verified registered workspace alias.                                                                                                             |
+| Cursor   | Pass local `workingDir:"<repo>"`. `workspace` is Cursor's own selector; an absolute workspace path disagreeing with `workingDir` is rejected, not ranked.                             |
 
 Do not request a fresh gateway worktree for Grok, Mistral, or Devin. For these
 providers, gateway worktree admission requires an explicit provider-native
@@ -180,9 +180,11 @@ asks for that work.
 2. Before every iteration, use that fresh process to inspect live provider
    capability and availability. Reapply the full-access control on every new
    provider job. Do not assume a previous job, a resumed session, or a provider
-   configuration reload retained the grant. Codex resume inherits its original
-   sandbox and cannot accept a new sandbox selection, so start a new Codex
-   session when the access posture must be established again.
+   configuration reload retained the grant. The gateway drops `sandboxMode` on
+   a Codex resume, so that field cannot select a posture there, and the
+   resumed posture is not guaranteed to match the original either
+   (`configOverrides` still passes through and Codex re-resolves configuration).
+   Start a new Codex session when the access posture must be known.
 3. Preserve each provider's ambient native MCP configuration. Do not pass an
    `allowedTools`, `disallowedTools`, `tools`, `allow`, `deny`, `mcpServers`,
    or `strictMcpConfig` list as a purported full-access setting. The gateway
@@ -321,8 +323,8 @@ codex_request_async({
 })
 
 gemini_request_async({
-  prompt:"Review <packet> in the verified target workspace. Inspect security, edge cases, and documentation. Return the required terminal JSON verdict: APPROVED_UNCONDITIONALLY, CHANGES_REQUIRED, or BLOCKED_EXTERNAL.",
-  workspace:"<verified-gemini-workspace>",
+  prompt:"Review <packet> in the target checkout. Inspect security, edge cases, and documentation. Return the required terminal JSON verdict: APPROVED_UNCONDITIONALLY, CHANGES_REQUIRED, or BLOCKED_EXTERNAL.",
+  workingDir:"<repo>",
   approvalStrategy:"legacy",
   correlationId:"review-gemini"
 })
@@ -350,7 +352,7 @@ devin_request_async({
 
 cursor_request_async({
   prompt:"Independently review <packet> and <repo>. Verify claims directly and return the required terminal JSON verdict: APPROVED_UNCONDITIONALLY, CHANGES_REQUIRED, or BLOCKED_EXTERNAL.",
-  workspace:"<repo>",
+  workingDir:"<repo>",
   approvalStrategy:"legacy",
   correlationId:"review-cursor"
 })

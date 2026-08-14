@@ -63,8 +63,10 @@ files), and persistent job/test evidence. Require direct code, docs, tests, and
 command inspection. Accept only `APPROVED_UNCONDITIONALLY`; otherwise require
 evidence-backed `CHANGES_REQUIRED` or a concrete `BLOCKED_EXTERNAL` error. Do
 not set caller caps, and when the user requests 90-second progress checks, do
-not poll earlier. Reapply this posture on every new review job because Codex
-resume inherits its prior sandbox.
+not poll earlier. Reapply this posture on every new review job: the gateway
+drops `sandboxMode` on resume, so that field cannot select one there
+(`configOverrides` still can), and the
+resumed posture is not guaranteed to match the original either.
 
 ## Orchestrator Protocol
 
@@ -83,6 +85,7 @@ After implementing:
        APPROVED_UNCONDITIONALLY, CHANGES_REQUIRED, or BLOCKED_EXTERNAL with
        inspected evidence.",
      sandboxMode: "read-only",
+     workingDir: "[repo]",
      approvalStrategy: "legacy"
    })
 
@@ -129,10 +132,16 @@ than a synchronous sleep that freezes the agent.
 ## Target and Evidence Discipline
 
 Codex accepts local workingDir and addDir on a new session. Pass the actual
-target directory or start the stdio gateway in that repository; never allow a
-default workspace to silently redirect the review. Native Codex resume inherits
-the original working directory and sandbox posture, so establish them correctly
-on the first request. A Codex sessionId must be a real Codex UUID; gateway
+target directory. Starting the stdio gateway inside that repository does NOT
+scope the review: an unscoped local child runs in a fresh private neutral cwd,
+not the gateway's own directory. Never allow a default workspace to silently
+redirect the review either. The gateway filters `-C`/`--cd`, `--add-dir` and
+`--sandbox` out of a Codex resume, so a resumed request cannot select either
+through those fields. That does not pin them: the child is still spawned with
+the gateway-resolved cwd, and `configOverrides` can still set `sandbox_mode`.
+Establish both on the first request and verify when it matters. Do
+not assume the resumed session simply keeps the original posture, since
+`configOverrides` still passes through and Codex re-resolves configuration. A Codex sessionId must be a real Codex UUID; gateway
 generated gw- identifiers are not valid native resume identifiers.
 
 Supply command output or focused file content only when Codex cannot access a
@@ -149,6 +158,7 @@ codex_request({
     task: "Re-review after the listed fixes. Return terminal JSON verdict APPROVED_UNCONDITIONALLY, CHANGES_REQUIRED, or BLOCKED_EXTERNAL with inspected evidence."
   },
   sandboxMode: "read-only",
+  workingDir: "[repo]",
   approvalStrategy: "legacy"
 })
 ```

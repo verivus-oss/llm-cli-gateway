@@ -72,7 +72,8 @@ codex_request({
 
 Use `sandboxMode:"workspace-write"` only when testing must write artifacts.
 `fullAuto:true` is deprecated compatibility shorthand, not a modern security
-control. On a Codex resume the sandbox setting is dropped.
+control. On a Codex resume `sandboxMode` and `fullAuto` are dropped, though
+`configOverrides` can still set `sandbox_mode`.
 
 Gemini/Antigravity rejects non-empty `allowedTools`, `skipTrust:true`, JSON and
 stream-JSON output in the current headless path, plus unsupported policy and
@@ -113,7 +114,8 @@ For a mandatory review, use the evidence packet and seven-provider roster in
 - Repaired findings require fresh evidence and re-review. A conditional,
   malformed, timed-out, or unavailable required reviewer means
   `INCOMPLETE`/`BLOCKED`, never approval.
-- An `idleTimeoutMs` is a no-output safeguard, not an acceptance deadline. If
+- An `idleTimeoutMs` is a no-output safeguard on incremental providers and a
+  total-runtime bound on terminal-burst ones, never an acceptance deadline. If
   it terminates a review, repair/retry the dispatch or report the reviewer
   blocked; never accept the partial result as a pass.
 
@@ -126,7 +128,10 @@ repository. Use explicit `workingDir`, registered `workspace`, or gateway
 `worktree` target routing. Cwd-scoped latest-session continuation fails closed
 without a stable target. Argv-bound providers reject an oversized UTF-8 prompt
 as non-retryable `input_too_large`; Codex sends new and resume prompts through
-stdin, while `codex_fork_session` remains argv-bound and applies that rejection.
+stdin, while `codex_fork_session` remains argv-bound and applies that rejection
+ahead of its own availability check. That tool cannot run from the gateway at
+all, because `codex fork` requires a controlling terminal; continue a Codex
+conversation with `codex_request` and a real session UUID or `resumeLatest`.
 Every caller-controlled argv value is admitted in its final encoded form,
 including serialized JSON and joined lists, before spawn. No path truncates
 instructions or other values to make them fit. The resolved command line also
@@ -211,10 +216,38 @@ valid for read-only inspection; execute that Kit work with an already configured
 registered `workspace` alias or the configured default workspace. It never
 inherits the gateway process cwd.
 
+## Verify the installed provider CLIs match their contract
+
+A provider CLI can move underneath the gateway at any time, because these are
+independently installed binaries on a shared workstation. When that happens the
+gateway may emit flags the CLI has removed, or miss a new one, and the failure
+surfaces as a confusing provider error rather than as drift.
+
+```
+provider_version_guard({})
+```
+
+It compares every installed provider binary against the version its contract was
+recorded at, and reports which drifted. The bare call is local and cheap. Add
+`checkUpgrades:true` to also ask each provider's release source for a newer
+version; that costs network and a subprocess, and only four of the seven can be
+checked, so the rest report `unknown` with a reason. `devin update` installs
+rather than reports, so it is deliberately never probed. Pass `cli` to narrow to
+one provider. `doctor` reports the same comparison, and a scheduled check runs
+daily where the gateway is installed as a service.
+
+Run it before an evidence-bearing security review, and first whenever a provider
+starts failing in a way its own error message does not explain. A version
+mismatch invalidates capability assumptions the rest of this skill depends on:
+`provider_tool_capabilities` describes the contract, not necessarily the binary
+on disk.
+
 ## Security checklist
 
 - Confirm the actual provider, target checkout, session/native handle, and
   capability surface before dispatch.
+- Confirm installed provider CLIs still match their recorded contract
+  (`provider_version_guard`) before relying on capability claims.
 - Use Claude managed approval only where its narrow boundary is sufficient.
 - Keep secrets and credentials out of prompts, evidence packets, approval logs,
   and retained artifacts.

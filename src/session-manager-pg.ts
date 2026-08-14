@@ -35,6 +35,21 @@ export interface FileSessionMigrationRecord {
   metadata: Record<string, unknown>;
   ownerPrincipal: string;
   binding: KitSessionBinding | null;
+  /**
+   * The SOURCE timestamps, carried across the store boundary.
+   *
+   * These fields did not exist, so the importer had nothing to write and
+   * stamped `new Date()` for both. A 3,590-session import then landed with
+   * every row created and last-used inside the same 22-second window, which
+   * silently destroys three things: `cleanup_expired_sessions(max_age_days)`
+   * sees a June session as minutes old and never reaps it, ordering by
+   * `last_used_at` (and `idx_sessions_cli_last_used`) becomes arbitrary, and
+   * any most-recent-session resolution picks effectively at random.
+   *
+   * ISO 8601 strings, validated by the caller before the record is built.
+   */
+  createdAt: string;
+  lastUsedAt: string;
 }
 
 /** An already validated file-session migration, including explicit pointers. */
@@ -640,7 +655,9 @@ export class PostgreSQLSessionManager
           continue;
         }
 
-        const now = new Date().toISOString();
+        // The SOURCE timestamps, not `now`. A migration is a copy; stamping the
+        // import time makes every row look freshly created and destroys age,
+        // ordering and TTL semantics in one pass.
         await client.query(
           `INSERT INTO sessions
              (id, cli, description, metadata, created_at, last_used_at, owner_principal)
@@ -650,8 +667,8 @@ export class PostgreSQLSessionManager
             record.cli,
             record.description ?? defaultSessionDescription(record.cli),
             JSON.stringify(metadata),
-            now,
-            now,
+            record.createdAt,
+            record.lastUsedAt,
             record.ownerPrincipal,
           ]
         );

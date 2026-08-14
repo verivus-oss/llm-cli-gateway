@@ -31,6 +31,13 @@
 //                   instance array) for offline tests.
 //   --seed          write baseline + ledger from the committed lock (bootstrap).
 //   --out DIR       output directory (default: .supply-chain/scan-<n>).
+//
+// Flags:
+//   --allow-missing-dist
+//                   tolerate an absent dist/ instead of failing closed on it.
+//                   Only for the pre-install lockfile gate, which runs before
+//                   npm ci and so before any build. A present dist/ is still
+//                   walked, so this cannot hide a violation in a built tree.
 
 import {
   readFileSync,
@@ -505,10 +512,20 @@ function seedFromCommittedLock() {
  * files for a literal `fetch` token, except the exact reviewed Kit Git
  * operation lines. The release contract requires dist/ to exist, so a missing
  * build directory fails closed instead of silently skipping this invariant.
+ *
+ * `allowMissingDist` is the one exception, and it exists for a single caller:
+ * the pre-install lockfile gate, which by construction runs before `npm ci`
+ * and therefore before any build. Asking that gate to assert something about
+ * a directory that cannot exist yet makes it fail every run. It narrows the
+ * check rather than disabling it: when dist/ IS present the walk still
+ * happens, so passing the flag can never hide a violation in a built tree.
+ * The strict form stays the default and is what release-security-audit.sh and
+ * `npm run supply-chain:scan:check` use, both of which run after a build.
  */
-export function fetchInDistFindings(repoRoot) {
+export function fetchInDistFindings(repoRoot, { allowMissingDist = false } = {}) {
   const distDir = join(repoRoot, "dist");
   if (!existsSync(distDir)) {
+    if (allowMissingDist) return [];
     return [
       {
         path: "dist",
@@ -657,7 +674,11 @@ function main(argv) {
         REQUIRED_SOCKET_POLICY
       )
     );
-    extraFindings.push(...fetchInDistFindings(REPO_ROOT));
+    extraFindings.push(
+      ...fetchInDistFindings(REPO_ROOT, {
+        allowMissingDist: args.has("--allow-missing-dist"),
+      })
+    );
   }
 
   const result = classifyClosure(freshList, ledger, baseline, {

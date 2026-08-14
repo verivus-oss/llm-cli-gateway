@@ -35,7 +35,7 @@ Apply these on every dispatch unless the caller has explicitly overridden a rule
    Devin, and Cursor. They reject `mcp_managed` before launch because their
    ambient MCP configuration cannot be isolated. `approvalPolicy` is valid only
    for Claude managed requests and has no effect with legacy.
-3. **No wallclock timeout; poll every 60 s by default:** see [Polling Strategy](#polling-strategy) below. When the user requests a 90-second progress cadence, do not poll earlier. Do **not** cancel jobs for taking too long; cancel only on explicit instruction or hard failure. `idleTimeoutMs` (no-output safeguard) is separate.
+3. **No caller-imposed wallclock timeout; poll every 60 s by default:** see [Polling Strategy](#polling-strategy) below. When the user requests a 90-second progress cadence, do not poll earlier. Do **not** cancel jobs for taking too long; cancel only on explicit instruction or hard failure. `idleTimeoutMs` is separate: a no-output safeguard for incremental providers, and a total-runtime bound for terminal-burst ones (see [Idle Timeout and Runtime Cap](#idle-timeout-and-runtime-cap)).
 4. **Complete mandatory reviews without a cap.** Dispatch review work only through
    the current local stdio gateway MCP surface. Require the terminal JSON verdict
    `APPROVED_UNCONDITIONALLY`, `CHANGES_REQUIRED`, or `BLOCKED_EXTERNAL`. On
@@ -142,13 +142,14 @@ Use `*_request_async` when:
 | `llm_job_result`        | Retrieve job output (in-memory + durable store fallback) |
 | `llm_job_cancel`        | Cancel running job                                       |
 | `llm_process_health`    | Inspect in-memory job/process health                     |
+| `llm_request_result`    | Read back any persisted request by `correlationId`       |
 
 ## Single Job
 
 ### Start
 
 ```
-claude_request_async({prompt:"Analyze src/ for type safety...",approvalStrategy:"mcp_managed",optimizePrompt:true})
+claude_request_async({prompt:"Analyze src/ for type safety...",workingDir:"<repo>",approvalStrategy:"mcp_managed",optimizePrompt:true})
 ```
 
 Response:
@@ -243,6 +244,25 @@ stderr streams. Remote callers use the same offset protocol but receive
 provider-session-ID-redacted, sanitized pages, not byte-for-byte provider
 output.
 
+### Read a request back instead of re-running it
+
+`llm_request_result({correlationId})` returns any persisted request, sync or
+async, from the flight recorder. Reach for it whenever a response was lost:
+a wrapper timed out, a client disconnected, or the transcript was truncated.
+Re-issuing the request instead burns the provider call again and produces a
+different answer.
+
+```
+llm_request_result({correlationId:"corr-abc123"})
+```
+
+Prefer it over `llm_job_result` when you want the provider's complete final
+response. For Codex in particular, `llm_job_result` surfaces `codexDisplayText`,
+which can be a truncated interim line rather than the finished answer, while the
+flight recorder holds the whole thing. Every request carries a `correlationId`
+in its response envelope, including the deferral payload shown above, so capture
+it before you need it.
+
 ### Cancel
 
 ```
@@ -251,23 +271,38 @@ llm_job_cancel({jobId:"job-abc123"})
 
 Sends SIGTERM, then SIGKILL after 5s.
 
-## Idle Timeout
+## Idle Timeout and Runtime Cap
 
-Kills process if no stdout/stderr for configurable duration. Detects stuck processes.
+The default is derived from each provider's registry `outputDiscipline.streaming`
+value, and it means two different things.
 
-| CLI          | Default   | Notes                                                                                    |
-| ------------ | --------- | ---------------------------------------------------------------------------------------- |
-| Claude       | 600,000ms | **stream-json mode only.** text/json produce no output until done (would false-positive) |
-| Codex        | 600,000ms | Streams stderr progress: works all modes                                                 |
-| Gemini       | 600,000ms | Streams stdout: works all modes                                                          |
-| Grok         | 600,000ms | Streams stdout: works all modes                                                          |
-| Mistral Vibe | 600,000ms | Streams stdout/stderr: works all modes                                                   |
-| Devin        | none      | No gateway default; set an explicit no-output safeguard only when warranted              |
-| Cursor Agent | 600,000ms | Can stream stdout in print mode                                                          |
+For **incremental** providers the default is a genuine idle timeout: the process
+is killed if it produces no stdout/stderr for the duration, which detects a stuck
+process.
+
+For **terminal-burst** providers it is not an idle timeout at all. Those
+providers emit zero bytes until they exit, so an idle timer would kill healthy
+work; they instead get a total-runtime bound. The classification describes each
+provider's default invocation: cursor with `outputFormat: "stream-json"` does
+stream, and there the same value behaves as a real idle window.
+
+| CLI          | Discipline     | Default     | Meaning                                                                                                                                              |
+| ------------ | -------------- | ----------- | ---------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Claude       | incremental    | 600,000ms   | Idle. **stream-json mode only.** text/json produce no output until done (would false-positive)                                                       |
+| Codex        | incremental    | 600,000ms   | Idle. Streams stderr progress: works all modes                                                                                                       |
+| Grok         | incremental    | 600,000ms   | Idle. Streams stdout: works all modes                                                                                                                |
+| Gemini       | terminal-burst | 3,600,000ms | Total runtime, not idle. Emits nothing until exit                                                                                                    |
+| Mistral Vibe | terminal-burst | 3,600,000ms | Total runtime, not idle. Emits nothing until exit                                                                                                    |
+| Devin        | terminal-burst | 3,600,000ms | Total runtime, not idle. Emits nothing until exit                                                                                                    |
+| Cursor Agent | terminal-burst | 3,600,000ms | Total runtime, not idle, under the default text invocation. With `outputFormat: "stream-json"` Cursor streams, so the timer is a genuine idle window |
+
+The bound on terminal-burst providers is kept rather than removed because the
+stall checker only warns and never kills, so nothing else would bound a hung
+process.
 
 Override: `idleTimeoutMs:int (30,000 to 3,600,000)`
 
-When idle timeout fires: exit code **125** (non-transient, no retry).
+When the idle timeout fires, or the total-runtime bound on a terminal-burst provider: exit code **125** (non-transient, no retry).
 
 ## Parallel Jobs
 
@@ -276,32 +311,35 @@ Start all, then collect:
 ```
 claude_request_async({prompt:"Review architecture in <repo>. Return terminal JSON verdict APPROVED_UNCONDITIONALLY, CHANGES_REQUIRED, or BLOCKED_EXTERNAL with inspected evidence.",workingDir:"<repo>",approvalStrategy:"legacy",correlationId:"review-arch"})
 codex_request_async({prompt:"Check <repo> for bugs. Return terminal JSON verdict APPROVED_UNCONDITIONALLY, CHANGES_REQUIRED, or BLOCKED_EXTERNAL with inspected evidence.",workingDir:"<repo>",sandboxMode:"read-only",approvalStrategy:"legacy",correlationId:"review-impl"})
-gemini_request_async({prompt:"Security audit the configured target checkout. Return terminal JSON verdict APPROVED_UNCONDITIONALLY, CHANGES_REQUIRED, or BLOCKED_EXTERNAL with inspected evidence.",workspace:"<verified-gemini-workspace>",approvalStrategy:"legacy",correlationId:"review-sec"})
+gemini_request_async({prompt:"Security audit <repo>. Return terminal JSON verdict APPROVED_UNCONDITIONALLY, CHANGES_REQUIRED, or BLOCKED_EXTERNAL with inspected evidence.",workingDir:"<repo>",approvalStrategy:"legacy",correlationId:"review-sec"})
 grok_request_async({prompt:"Independently review <repo>. Return terminal JSON verdict APPROVED_UNCONDITIONALLY, CHANGES_REQUIRED, or BLOCKED_EXTERNAL with inspected evidence.",workingDir:"<repo>",approvalStrategy:"legacy",correlationId:"review-grok"})
 mistral_request_async({prompt:"Independently review <repo>. Return terminal JSON verdict APPROVED_UNCONDITIONALLY, CHANGES_REQUIRED, or BLOCKED_EXTERNAL with inspected evidence.",workingDir:"<repo>",approvalStrategy:"legacy",correlationId:"review-mistral"})
 devin_request_async({prompt:"Independently review <repo>. Return terminal JSON verdict APPROVED_UNCONDITIONALLY, CHANGES_REQUIRED, or BLOCKED_EXTERNAL with inspected evidence.",workingDir:"<repo>",approvalStrategy:"legacy",correlationId:"review-devin"})
-cursor_request_async({prompt:"Independently review <repo>. Return terminal JSON verdict APPROVED_UNCONDITIONALLY, CHANGES_REQUIRED, or BLOCKED_EXTERNAL with inspected evidence.",workspace:"<repo>",approvalStrategy:"legacy",correlationId:"review-cursor"})
+cursor_request_async({prompt:"Independently review <repo>. Return terminal JSON verdict APPROVED_UNCONDITIONALLY, CHANGES_REQUIRED, or BLOCKED_EXTERNAL with inspected evidence.",workingDir:"<repo>",approvalStrategy:"legacy",correlationId:"review-cursor"})
 ```
 
 Poll each with `llm_job_status` every 60s by default, or every 90s when the user
 explicitly requires that cadence. Retrieve with `llm_job_result` when terminal.
 
 Before a review fan-out, verify the target checkout. `workingDir` selects the
-local checkout for Claude, Codex, Grok, Mistral, and Devin. Gemini has no
-`workingDir`; `includeDirs` is an extra read path, not a cwd selector, so use a
-correctly configured registered `workspace`. Cursor's local `workspace` selects
-its checkout. Never let a reviewer silently inspect an unrelated configured
-default workspace. An unscoped local child runs in a fresh neutral temporary
-directory, not the gateway process repository.
+local checkout for all seven providers. For Gemini, `includeDirs` is an extra
+read path and not a cwd selector, so `workingDir` is the scoping input. For
+Cursor, `workspace` is its own native selector (a saved-workspace name, a
+`.code-workspace` file, or a directory); an absolute workspace path that
+disagrees with `workingDir` is rejected rather than silently ranked.
+
+Never let a reviewer silently inspect an unrelated configured default workspace.
+An unscoped local child runs in a fresh neutral temporary directory, not the
+gateway process repository.
 
 ## Polling Strategy
 
 - Poll `llm_job_status` **every 60 seconds by default**. When the user requires
   a 90-second cadence, do not check earlier than 90 seconds after the prior
   status call.
-- No wallclock timeout: good reviews take minutes to tens of minutes
+- No caller-imposed wallclock timeout: good reviews take minutes to tens of minutes
 - Do **not** cancel jobs for "taking too long"; cancel only on explicit user instruction or hard failure (process dead, non-transient error such as exit 125/126)
-- `idleTimeoutMs` remains a no-output safeguard where configured (10 minutes for the listed CLIs except Devin, which has no gateway default). It is separate from wallclock timeout and does not need tightening for normal reviews.
+- `idleTimeoutMs` carries two meanings and neither needs tightening for normal reviews. For incremental providers (claude, codex, grok) it is a 10-minute no-output safeguard. For terminal-burst providers (gemini, mistral, devin, and cursor under its default text output) it is a one-hour total-runtime bound, because those emit nothing until exit and an idle timer would kill healthy work. Devin is included; it has no separate exemption. Cursor with `outputFormat: "stream-json"` does stream, so there the same value behaves as a real idle window. See [Idle Timeout and Runtime Cap](#idle-timeout-and-runtime-cap).
 - When using `ScheduleWakeup` or sleep loops, use the requested cadence. The
   default is 60 s; a user-required 90 s cadence wins. The 5-minute prompt-cache
   window also favors intervals ≤ 270 s or ≥ 20 min.
@@ -324,15 +362,15 @@ Treat the wait as "yield control for ~60 s, then poll once," not "block the shel
 
 ## Error Handling
 
-| Status      | Exit Code | Meaning             | Action                                     |
-| ----------- | --------- | ------------------- | ------------------------------------------ |
-| `completed` | 0         | Success             | Retrieve result                            |
-| `failed`    | 124       | CLI timeout         | Check stderr                               |
-| `failed`    | 125       | Idle timeout        | Increase `idleTimeoutMs` or check CLI      |
-| `failed`    | 126       | Bounded I/O failure | Inspect `error`; reduce input/output scope |
-| `failed`    | non-zero  | CLI error           | Check stderr                               |
-| `failed`    | null      | Process error       | Check `job.error`                          |
-| `canceled`  | any       | Canceled            | Result still retrievable                   |
+| Status      | Exit Code | Meaning                                                               | Action                                     |
+| ----------- | --------- | --------------------------------------------------------------------- | ------------------------------------------ |
+| `completed` | 0         | Success                                                               | Retrieve result                            |
+| `failed`    | 124       | CLI timeout                                                           | Check stderr                               |
+| `failed`    | 125       | Idle timeout, or the total-runtime bound on a terminal-burst provider | Increase `idleTimeoutMs` or check CLI      |
+| `failed`    | 126       | Bounded I/O failure                                                   | Inspect `error`; reduce input/output scope |
+| `failed`    | non-zero  | CLI error                                                             | Check stderr                               |
+| `failed`    | null      | Process error                                                         | Check `job.error`                          |
+| `canceled`  | any       | Canceled                                                              | Result still retrievable                   |
 
 Only `exitCode===0` → `completed`. All non-zero → `failed`. Results retrievable for ALL terminal states.
 
@@ -340,8 +378,13 @@ Exit codes 125/126 are non-transient; the retry engine skips them. An
 argv-bound prompt that exceeds the platform-safe UTF-8 byte ceiling returns
 `errorCategory:"input_too_large"` and is never truncated. Codex new and resume
 prompts use stdin and do not consume the single-argv prompt allowance.
-`codex_fork_session` remains argv-bound and applies the size rejection. Adjust
-the scope or choose a verified stdin, ACP, or HTTP transport. All other
+`codex_fork_session` remains argv-bound and still applies the size rejection
+ahead of its own availability check, so an oversized prompt returns
+`input_too_large` there rather than the unavailability message. The tool itself
+cannot run from the gateway: `codex fork` requires a controlling terminal. To
+continue a Codex conversation, call `codex_request` with a real Codex session
+UUID or `resumeLatest:true`. Adjust the scope or choose a verified stdin, ACP,
+or HTTP transport. All other
 caller-controlled argv values are admitted in their final encoded form before
 spawn, including serialized JSON and joined lists. The resolved command line
 also has a conservative platform-specific aggregate byte budget and a
@@ -394,7 +437,7 @@ Identical `*_request` / `*_request_async` calls within the dedup window (default
 - Pass `forceRefresh: true` on a single call to bypass dedup for that request:
 
 ```
-codex_request_async({prompt:"...",sandboxMode:"workspace-write",approvalStrategy:"legacy",forceRefresh:true})
+codex_request_async({prompt:"...",workingDir:"<repo>",sandboxMode:"workspace-write",approvalStrategy:"legacy",forceRefresh:true})
 ```
 
 Use `forceRefresh` when you genuinely need a fresh CLI run (e.g., file contents changed since the last dispatch, retry after manual fix). For normal "I crashed and restarted, let me re-issue" recovery, **omit `forceRefresh`**; dedup is exactly what you want.
@@ -410,8 +453,10 @@ Use `forceRefresh` when you genuinely need a fresh CLI run (e.g., file contents 
 ```
 // 1. Wrapper agent died after dispatching; you have no jobId in memory.
 // 2. Re-issue the identical *_request_async call. The gateway dedups onto
-//    the existing in-flight or completed job and returns its jobId.
-result = codex_request_async({prompt:"<same prompt as before>",sandboxMode:"workspace-write",approvalStrategy:"legacy",correlationId:"<same correlationId>"})
+//    the existing in-flight or completed job and returns its jobId. Dedup is
+//    cwd-aware, so the scope must match the original call too, not just the
+//    prompt and correlationId.
+result = codex_request_async({prompt:"<same prompt as before>",workingDir:"<same workingDir as before>",sandboxMode:"workspace-write",approvalStrategy:"legacy",correlationId:"<same correlationId>"})
 // result.job.id is the original job
 // 3. Poll/fetch as normal; works whether the job is running, completed, or completed days ago.
 ```
@@ -435,6 +480,7 @@ codex_request_async({
     task:    "Implement X per the above."
   },
   sandboxMode: "workspace-write",
+  workingDir: "<repo>",
   approvalStrategy: "legacy",
   correlationId: "impl-r1"
 })
@@ -488,7 +534,7 @@ For long-running async loops on a Claude session, treat the warning as a hint to
 - **When durable async jobs are enabled, sync tools can auto-defer at the 45 s deadline:** check for `status:"deferred"` in sync responses, then poll every 60 s by default or at a user-required 90-second cadence. With `persistence.backend = "none"`, async and job tools are absent and sync requests run to completion.
 - `SYNC_DEADLINE_MS=0` disables auto-deferral
 - For Gemini, check `resumable`: only `true` for a user-provided `sessionId`
-- Set higher `idleTimeoutMs` for tasks with long silent periods
+- Raise `idleTimeoutMs` for tasks with long silent periods on an incremental provider. On a terminal-burst provider in its default mode silence is normal for the whole run, so raising it raises the total-runtime bound rather than an idle window
 - Review jobs: every required healthy reviewer must return an evidence-backed
   `APPROVED_UNCONDITIONALLY`. Do not downgrade, skip, vote around, or impose a
   budget/round/turn/wallclock cap. A provider failure is incomplete review work,

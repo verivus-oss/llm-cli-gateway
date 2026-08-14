@@ -1,7 +1,7 @@
 {
   "schemaVersion": "upstream-scan-snapshot.v2",
   "cli": "cursor",
-  "fetchedAt": "2026-07-28T01:53:09.558Z",
+  "fetchedAt": "2026-08-13T12:25:05.087Z",
   "sources": [
     {
       "url": "https://cursor.com/cli",
@@ -29,10 +29,10 @@
     }
   ],
   "helpSurface": {
-    "probedAt": "2026-07-28T01:53:09.224Z",
+    "probedAt": "2026-08-13T12:25:04.753Z",
     "available": true,
-    "version": "2026.07.23-e383d2b",
-    "targetVersion": "cursor-agent 2026.07.23-e383d2b",
+    "version": "2026.08.11-e8db854",
+    "targetVersion": "cursor-agent 2026.08.11-e8db854",
     "versionMatchesTarget": true,
     "discoveredFlags": [
       "--add-dir",
@@ -61,7 +61,7 @@
       "--worktree-base",
       "--yolo"
     ],
-    "helpHash": "f51f3768730d625338ea02d8fc2a83fc1be32c57e9761a92fc50a978df9324de",
+    "helpHash": "e05e93810c059427e4c84296de0d88a6d7506aa1fd1f0a08b5f1e00446baf81a",
     "extraVsContract": [],
     "missingFromBinary": [],
     "arityMismatches": [],
@@ -70,6 +70,7 @@
   "rootCommands": [
     "about",
     "agent",
+    "bedrock",
     "create-chat",
     "generate-rule",
     "help",
@@ -93,7 +94,7 @@
       "commandPath": [
         "about"
       ],
-      "probedAt": "2026-07-28T01:53:04.197Z",
+      "probedAt": "2026-08-13T12:24:58.718Z",
       "available": true,
       "existence": "present",
       "discoveredFlags": [
@@ -113,7 +114,7 @@
       "commandPath": [
         "agent"
       ],
-      "probedAt": "2026-07-28T01:53:04.527Z",
+      "probedAt": "2026-08-13T12:24:59.052Z",
       "available": true,
       "existence": "present",
       "discoveredFlags": [],
@@ -127,11 +128,29 @@
       "tier": "catalog",
       "summary": "Start an interactive Cursor Agent session."
     },
+    "bedrock": {
+      "commandPath": [
+        "bedrock"
+      ],
+      "probedAt": "2026-08-13T12:25:00.097Z",
+      "available": true,
+      "existence": "present",
+      "discoveredFlags": [],
+      "helpHash": "8d9fdbfb36726a51787799e5f38863de02d08d81d762e1d05f83f1a3d6138da3",
+      "extraVsContract": [],
+      "missingFromBinary": [],
+      "arityMismatches": [],
+      "enumMismatches": [],
+      "risk": "writes_local_config",
+      "exposure": "tracked_only",
+      "tier": "catalog",
+      "summary": "Upstream-declared cursor command (auto-catalogued, unverified)."
+    },
     "create-chat": {
       "commandPath": [
         "create-chat"
       ],
-      "probedAt": "2026-07-28T01:53:04.869Z",
+      "probedAt": "2026-08-13T12:25:00.426Z",
       "available": true,
       "existence": "present",
       "discoveredFlags": [],
@@ -149,7 +168,7 @@
       "commandPath": [
         "generate-rule"
       ],
-      "probedAt": "2026-07-28T01:53:05.207Z",
+      "probedAt": "2026-08-13T12:25:00.759Z",
       "available": true,
       "existence": "present",
       "discoveredFlags": [],
@@ -167,7 +186,7 @@
       "commandPath": [
         "install-shell-integration"
       ],
-      "probedAt": "2026-07-28T01:53:05.540Z",
+      "probedAt": "2026-08-13T12:25:01.095Z",
       "available": true,
       "existence": "present",
       "discoveredFlags": [],
@@ -185,7 +204,7 @@
       "commandPath": [
         "login"
       ],
-      "probedAt": "2026-07-28T01:53:05.880Z",
+      "probedAt": "2026-08-13T12:25:01.425Z",
       "available": true,
       "existence": "present",
       "discoveredFlags": [],
@@ -203,7 +222,7 @@
       "commandPath": [
         "logout"
       ],
-      "probedAt": "2026-07-28T01:53:06.212Z",
+      "probedAt": "2026-08-13T12:25:01.756Z",
       "available": true,
       "existence": "present",
       "discoveredFlags": [],
@@ -221,7 +240,7 @@
       "commandPath": [
         "ls"
       ],
-      "probedAt": "2026-07-28T01:53:06.546Z",
+      "probedAt": "2026-08-13T12:25:02.100Z",
       "available": true,
       "existence": "present",
       "discoveredFlags": [],
@@ -239,7 +258,7 @@
       "commandPath": [
         "mcp"
       ],
-      "probedAt": "2026-07-28T01:53:06.881Z",
+      "probedAt": "2026-08-13T12:25:02.428Z",
       "available": true,
       "existence": "present",
       "discoveredFlags": [],
@@ -257,7 +276,7 @@
       "commandPath": [
         "models"
       ],
-      "probedAt": "2026-07-28T01:53:07.211Z",
+      "probedAt": "2026-08-13T12:25:02.773Z",
       "available": true,
       "existence": "present",
       "discoveredFlags": [],
@@ -275,7 +294,7 @@
       "commandPath": [
         "plugin"
       ],
-      "probedAt": "2026-07-28T01:53:07.546Z",
+      "probedAt": "2026-08-13T12:25:03.105Z",
       "available": true,
       "existence": "present",
       "discoveredFlags": [],
@@ -293,7 +312,7 @@
       "commandPath": [
         "resume"
       ],
-      "probedAt": "2026-07-28T01:53:07.873Z",
+      "probedAt": "2026-08-13T12:25:03.435Z",
       "available": true,
       "existence": "present",
       "discoveredFlags": [],
@@ -311,7 +330,7 @@
       "commandPath": [
         "status"
       ],
-      "probedAt": "2026-07-28T01:53:08.218Z",
+      "probedAt": "2026-08-13T12:25:03.769Z",
       "available": true,
       "existence": "present",
       "discoveredFlags": [
@@ -331,7 +350,7 @@
       "commandPath": [
         "uninstall-shell-integration"
       ],
-      "probedAt": "2026-07-28T01:53:08.553Z",
+      "probedAt": "2026-08-13T12:25:04.104Z",
       "available": true,
       "existence": "present",
       "discoveredFlags": [],
@@ -349,7 +368,7 @@
       "commandPath": [
         "update"
       ],
-      "probedAt": "2026-07-28T01:53:08.891Z",
+      "probedAt": "2026-08-13T12:25:04.430Z",
       "available": true,
       "existence": "present",
       "discoveredFlags": [],
@@ -367,24 +386,29 @@
       "commandPath": [
         "worker"
       ],
-      "probedAt": "2026-07-28T01:53:09.224Z",
+      "probedAt": "2026-08-13T12:25:04.753Z",
       "available": true,
       "existence": "present",
       "discoveredFlags": [
         "--auth-token-file",
+        "--computer-use",
         "--data-dir",
         "--debug",
+        "--identity-socket",
         "--idle-release-timeout",
         "--label",
         "--labels-file",
         "--management-addr",
+        "--mint-github-token",
         "--name",
         "--pool",
         "--pool-name",
         "--single-use",
+        "--sync-dashboard-secrets",
+        "--wait",
         "--worker-dir"
       ],
-      "helpHash": "6ece6d6e74cec5017afa031e3fee6cee14fcfcef85f911f5adf36216c5b2baf0",
+      "helpHash": "e0ca5d19bca14e8f43b62efbe12f412a1ed6e066fe7e0898f3922673509ea03f",
       "extraVsContract": [],
       "missingFromBinary": [],
       "arityMismatches": [],

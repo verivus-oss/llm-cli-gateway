@@ -4,6 +4,7 @@ import os from "os";
 import path from "path";
 import { FlightRecorder } from "../flight-recorder.js";
 import { loadLcrPriorRows, computeLcrPriors } from "../lcr-priors.js";
+import { estimateInputTokens, estimateInputTokensFromDerived } from "../token-estimator.js";
 
 // Phase_2: the lcr-priors loader is otherwise tested only against a STUB
 // FlightRecorderQuery, which cannot catch a wrong column name. This exercises
@@ -61,7 +62,13 @@ describe("loadLcrPriorRows against a real flight-recorder DB", () => {
     const row = rows[0];
     expect(row.provider).toBe("gemini");
     expect(row.model).toBe("gemini-2.5-flash");
-    expect(row.prompt).toBe("hello world");
+    // End-to-end proof of migration v11: the recorder persisted the prompt
+    // signals on write, and the routing query read them back WITHOUT selecting
+    // the prompt body. `derivation` replaces the old `prompt` assertion.
+    expect(row.derivation).toEqual({ promptChars: "hello world".length, contentClass: "prose" });
+    expect(estimateInputTokensFromDerived(row.derivation!, { family: "gemini" })).toBe(
+      estimateInputTokens("hello world", { family: "gemini" })
+    );
     expect(row.inputTokens).toBe(100);
     expect(row.outputTokens).toBe(40);
     expect(row.costBasis).toBe("derived-from-tokens");

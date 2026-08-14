@@ -4,6 +4,274 @@ All notable changes to the llm-cli-gateway project.
 
 ## [Unreleased]
 
+## [3.1.0-rc.5] - 2026-08-14: sessions follow [persistence], three stores become two
+
+### Changed
+
+- **The session store now follows `[persistence]`, the same selector the job
+  store and validation runs already use.** It previously had a selector of its
+  own, `DATABASE_URL`, and nothing set it, so `createSessionManager` took the
+  file branch on hosts whose `[persistence].backend` was `"postgres"` and the
+  sessions stayed in `~/.llm-cli-gateway/sessions.json` while every other
+  subsystem was on Postgres. One database, two ways to select it, and the
+  subsystem nobody wired up kept its own file.
+
+  `DATABASE_URL` remains as a deprecated override that warns once. It is refused
+  when it disagrees with `[persistence].dsn`, because honouring it would put
+  sessions in one database and jobs in another, which is the split this change
+  removes. That refusal follows the precedent set in 3.1.0-rc.3, where a
+  variable named for one subsystem could rewrite another's explicit backend.
+
+  This does not complete the single-store goal. Transcripts remain in SQLite
+  behind a deliberate gate: prompt and response bodies do not move into Postgres
+  until the sequence in `docs/plans/postgres-security-hardening.md` section 6 is
+  complete through its http principal-granularity step. Three stores become two,
+  not one.
+
+### Fixed
+
+- **`migrate-sessions.ts` discarded every source timestamp.**
+  `FileSessionMigrationRecord` carried no `createdAt` / `lastUsedAt` fields, so
+  `importFileSessionMigration` had nothing to write and stamped
+  `new Date()` for both. A real 3,590-session import collapsed 31 distinct days
+  of history into a single 22-second window.
+
+  The damage was silent and downstream: `cleanup_expired_sessions(max_age_days)`
+  sees a two-month-old session as minutes old and never reaps it, ordering by
+  `last_used_at` (and the `idx_sessions_cli_last_used` index) becomes arbitrary,
+  and most-recent-session resolution picks effectively at random. The source
+  timestamps are now carried on the record and written by the INSERT, and a row
+  whose timestamps are not parseable is rejected rather than imported with the
+  clock's value.
+
+  `session_generation` is still regenerated on import rather than carried over.
+  That is deliberate: it is a concurrency fence, and a fresh fence after a store
+  change invalidates any stale holder, which fails closed.
+
+## [3.1.0-rc.4] - 2026-08-14: upstream deprecations are applied, not reviewed
+
+### Changed
+
+- **`npm run providers:rebaseline` now applies flag removals instead of
+  reporting them.** The gateway passes through what the upstream binary
+  supports and nothing else, so a provider's deprecation cycle is not something
+  it tracks by hand. When an installed CLI stops advertising a flag the contract
+  declares, `--apply` deletes it from `src/upstream-contracts.ts` and from the
+  contract-derived generation tables in `src/provider-codegen.ts` in the same
+  run, together with the comments that described it. Stale
+  `acknowledgedUpstreamFlags` entries, previously reported only as a warning
+  string that nothing consumed, are dropped on the same pass.
+
+  This supersedes the behaviour documented under 3.0.0, where additive drift and
+  removals were both reported rather than applied. The reason given there was
+  that a removal has to be made in lock-step across the contract, the generator
+  and the request path. That coupling is real and is why the first two now land
+  together; it was not a reason to make every vendor deprecation a review item.
+
+  `hiddenFromHelp` on a flag contract remains the way to declare "real but
+  deliberately undocumented", and the writer refuses to remove such a flag, so a
+  contrary belief is recorded in the contract rather than defended by hand.
+
+  The hand-written argv emission in `src/index.ts` is reported with file:line
+  rather than rewritten, because it is not derivable from a flag string: the
+  devin `--agent-config` removal touched 22 references, none of which spell the
+  flag. Exit code 3 changes meaning accordingly, from "a human must judge an
+  upstream change" to "the gateway still references a flag the binary dropped",
+  which is a defect in code this project owns. The JSON result drops
+  `manualActionRequired` in favour of `residualReferences` and
+  `staleAcknowledgements`.
+
+## [3.1.0-rc.3] - 2026-08-13: test isolation, and prompt bodies off the routing path
+
+### Changed
+
+- **Least-cost routing no longer reads prompt bodies.** `loadLcrPriorRows` bulk
+  read `requests.prompt` on every load. It was the only production query that
+  read a prompt body in bulk, and it was the blocker for encrypting the body
+  columns at rest. `estimateInputTokens` touches its text in exactly two ways,
+  `text.length` and `classifyContent(text)`, so those two signals are now
+  persisted at write time and the estimate is reconstructed from them.
+  Persisting the signals rather than a finished estimate is deliberate: the
+  tokenizer-family multiplier and the calibration factor are applied at read
+  time from live values, so a change to either does not invalidate anything
+  already stored. A property test over 2000 random inputs asserts the
+  reconstruction is exactly equal to the original estimator, with a negative
+  control showing that a mislabelled content class diverges.
+
+  Flight-recorder migration v11 adds `derived_prompt_chars`,
+  `derived_content_class` and `derivation_version` to the `requests` table.
+  Signals are derived after redaction, so they describe the text actually
+  persisted. Rows written before v11 keep NULL and are skipped for calibration
+  rather than treated as zero, which would bias the ratios;
+  `scripts/backfill-prompt-derivations.mjs` fills them in and is idempotent.
+  That script must be run before any body encryption, because it is the last
+  point at which prompt text can be read in bulk.
+
+  `LcrPriorRow.prompt` is replaced by `LcrPriorRow.derivation`. The row no
+  longer carries a prompt, because the routing path no longer needs one.
+
+### Fixed
+
+- **The test suite wrote into the user's live flight recorder.**
+  `src/__tests__/setup.ts` deleted `LLM_GATEWAY_LOGS_DB`, with a comment
+  claiming that kept tests off `~/.llm-cli-gateway/logs.db`. It did the
+  opposite: `resolveFlightRecorderDbPath` reads that variable and falls back to
+  the real file when it is unset, so every test that constructed a recorder
+  wrote into live data. The `[persistence] backend = "memory"` config above it
+  only governs the job store, and the flight recorder is a separate subsystem
+  with its own selector, so isolating one left the other pointed at the user's
+  database. The variable is now pinned to a per-process temp path. Verified by
+  three full suite runs that write nothing to the live database.
+
+- **A path in `LLM_GATEWAY_LOGS_DB` or `LLM_GATEWAY_JOBS_DB` silently rewrote an
+  explicit `[persistence].backend`.** Setting either variable forced the backend
+  to `sqlite`, so an operator with `backend = "postgres"` in `config.toml` could
+  be moved off Postgres by a variable named for a different subsystem, with only
+  a deprecation warning. An explicitly configured backend now wins and the
+  override is refused with a warning naming the variable. `= "none"` is
+  deliberately exempt and still overrides, because it is a documented kill
+  switch for disabling persistence entirely.
+
+- **`cursor_request` and `gemini_request` exposed no `workingDir`, so the
+  scoping advice in the server instructions could not be followed for two of the
+  seven providers.** The instructions tell stdio/local callers to pass
+  `workingDir`/`addDir`/`includeDirs` directly and not to reach for workspace
+  aliases, but neither tool had the property at all. Neither provider emits a
+  cwd flag of its own, so the child cwd is the entire scoping contract for them:
+  an unscoped call ran in the neutral private cwd rather than the caller's
+  repository, with no local input capable of changing that. Both tools, sync and
+  async, now accept `workingDir` and thread it through the same shared resolver
+  every other provider uses, so remote containment
+  (`validatePathInsideWorkspace`) and local canonicalization behave identically.
+  All 14 request tools now expose the field.
+
+  Cursor needed one extra decision. Its `workspace` input is overloaded: besides
+  a registered alias it accepts a Cursor saved-workspace name or a local
+  absolute path, so it can already name a process cwd. When that path and an
+  explicit `workingDir` disagree, the request is now rejected rather than
+  silently ranked, because either precedence rule would run the child somewhere
+  the caller never named. Identical values are admitted, so passing the same
+  directory both ways is not an error.
+
+  `cursor_request` with `transport: "acp"` rejects `workingDir` rather than
+  accepting and discarding it. The ACP route resolves its own scope and has no
+  `workingDir` parameter, so a caller could otherwise name a directory and have
+  the child run somewhere else, which is the failure this change exists to
+  remove. `addDir` was already rejected there for the same reason. Found by two
+  independent reviewers; the `provider_tool_capabilities` discovery text for
+  Gemini and Cursor was corrected to match.
+
+- **The documented Codex `sandboxMode` default was wrong, on every surface that
+  stated it.** Three schema descriptions in `src/index.ts` (and the generated
+  tool fixture), the `codex-request` plugin command, `docs/launch/devto-tutorial.md`,
+  and `docs/development/supply-chain-guard/RUNBOOK.md` all said that omitting
+  `sandboxMode` yields read-only. It does not. The gateway emits no `--sandbox`
+  flag when the field is omitted, and Codex then resolves the policy from its
+  own configuration, project trust, and an internal fallback: the fallback is
+  read-only, but a **trusted project can resolve to `workspace-write`**. Callers
+  who omitted the field believing it was safe were not guaranteed a read-only
+  child.
+
+  The correction also has a resume half, and the obvious reading of that is
+  wrong too. The gateway filters `--sandbox` out of a resume argv
+  (`CODEX_RESUME_FILTERED_FLAGS`), so `sandboxMode` has no effect on a resumed
+  request. That is **not** the same as the resumed session inheriting its
+  original posture, which is what several skills asserted: `configOverrides`
+  is not filtered and can set `sandbox_mode`, Codex re-resolves configuration
+  on a cold resume, and `--sandbox` is in fact accepted before the `resume`
+  subcommand (only the gateway's after-subcommand placement is rejected). So
+  the schemas, the plugin command, the tutorial, and six skill sites now say
+  the narrow true thing: `sandboxMode` cannot select a posture on resume, and the
+  resulting posture is not guaranteed either way, so establish it on the first
+  request and verify it when it matters. Inspection should pass
+  `sandboxMode: "read-only"` explicitly rather than relying on omission.
+
+  The RUNBOOK instance mattered most: it is the supply-chain-guard skill's
+  source of truth, so the false claim was steering release reviewers.
+
+- **Agent-facing guidance across every surface contradicted the fix above.**
+  Adding `workingDir` falsified claims wherever the old capability was written
+  down, and those claims were scattered across four distinct surfaces that no
+  single search covered:
+
+  - **npm-packaged skills**: `session-workflow` asserted "Gemini has no
+    `workingDir`", and the `multi-llm-review` local target matrix routed Gemini
+    and Cursor through a registered `workspace`. Also `async-job-orchestration`
+    and `implement-review-fix`, plus the maintainer `provider-gemini` and
+    `provider-cursor`, including the worked examples rather than only the prose.
+  - **`README.md`**, the primary user-facing reference: `gemini_request`
+    documented `workspace` as the cwd selector with no `workingDir` at all, and
+    `cursor_request` had no entry for it.
+  - **`provider_tool_capabilities`**, which agents are explicitly told to
+    trust: Gemini advertised `includeDirs/workspace/worktree` and Cursor
+    `workspace/addDir`, and Cursor's ACP rejection list omitted the field.
+  - **The Claude plugin skills** under `skills/`, declared by
+    `.claude-plugin/plugin.json`. This is a second distribution channel,
+    separate from `package.json#files`: `design-review-cycle`, `model-routing`,
+    `multi-llm-consensus`, `multi-llm-orchestration`, and
+    `red-team-assessment` all told readers Gemini has no `workingDir`.
+    `docs/guides/BEST_PRACTICES.md` enumerated only five providers as accepting
+    it.
+
+  All corrected. The enumeration form is worth noting: a positive list of five
+  providers is invisible to any search for a negative claim, which is how it
+  survived several sweeps.
+
+- **The documented Codex resume contract was wrong about the working directory
+  and about which session `--last` selects.** Every surface that described it,
+  including both `codex_request` schemas and the generated fixture, `README.md`,
+  and ten agent skills, said a resumed session keeps its original cwd and that
+  `workingDir`/`addDir` cannot retarget it. Neither holds against
+  `codex-cli 0.145.0` and the current spawn path. `codex exec resume --last` is
+  filtered by cwd upstream unless `--all` is passed, which the gateway never
+  emits, so `workingDir` also determines _which_ session `resumeLatest` picks.
+  And although `-C`/`--cd`/`--add-dir` are filtered out of the resume argv, the
+  child is still spawned with the gateway-resolved cwd, so the flag filtering
+  pins nothing.
+
+  Whether the code or the documented contract is the defect is a live design
+  question, tracked internally: silently relocating a resumed session to another
+  repository may itself be the bug, in which case the original contract was
+  right. Rather than prejudge that, every surface now carries neutral interim
+  guidance: do not rely on the resumed working directory or on which session
+  `--last` selects; verify, or start a fresh session when the target must be
+  certain.
+
+  `src/__tests__/mcp-surface-usability.test.ts` previously **required** the
+  false claims, so it would have failed any honest correction. It is inverted
+  rather than deleted: it now requires the interim warning to name both
+  uncertainties, and bans the one specific prior phrase `globally latest`.
+
+  Its coverage stops there, deliberately. An attempt to also forbid affirmative
+  inheritance by pattern was removed after it proved wrong in both directions:
+  it missed `keeps its original cwd and workingDir cannot retarget it`, which
+  never says "inherits", while rejecting the legitimate denials
+  `Do not assume a resumed session inherits its original cwd` and
+  `Whether it inherits its original cwd is unresolved`. Blacklisting
+  natural-language assertions is not workable, so a description that satisfies
+  the positive requirements and then contradicts itself will pass this test and
+  has to be caught in review.
+
+- **Three agent skills still pointed at `codex_fork_session`**, which
+  `3.1.0-rc.2` made explicitly unavailable, so the shipped guidance told callers
+  to use a tool that now refuses by design. `async-job-orchestration` and
+  `secure-orchestration` (both shipped) and `provider-codex` (maintainer) now
+  route Codex continuation through `codex_request` with a real session UUID or
+  `resumeLatest`. Their statements that `codex_fork_session` still applies the
+  argv size rejection are retained and clarified rather than removed: the
+  availability guard is deliberately evaluated _after_ argv admission, so
+  `input_too_large` really does surface there first.
+
+### Added
+
+- **Skill coverage for `llm_request_result` and `provider_version_guard`**,
+  neither of which any skill mentioned. `async-job-orchestration` now documents
+  reading a persisted request back by `correlationId` instead of re-running it,
+  including why it is preferable to `llm_job_result` for Codex, whose
+  `codexDisplayText` can be a truncated interim line. `secure-orchestration`
+  documents verifying that installed provider CLIs still match their recorded
+  contract before relying on capability claims.
+
 ## [3.1.0-rc.2] - 2026-07-28: defects found by cross-LLM review of rc.1
 
 Release candidate. Same feature set as rc.1; this cut exists because an
@@ -23,8 +291,9 @@ that candidate. Anyone testing rc.1 should move to rc.2.
   observability surface exactly as it withholds the routing tools.
 - **The idle timeout was a hard wall-clock cap for providers that never
   stream.** gemini, mistral, devin and cursor declare
-  `outputDiscipline.streaming: "terminal-burst"`, meaning zero bytes until exit,
-  yet a hand-maintained table gave three of them a 600000ms *idle* timeout with
+  `outputDiscipline.streaming: "terminal-burst"`, meaning zero bytes until exit
+  under their default invocation (cursor streams under `outputFormat: "stream-json"`),
+  yet a hand-maintained table gave three of them a 600000ms _idle_ timeout with
   comments asserting they "stream in real-time". The timer never reset, so
   healthy work was killed at ten minutes: a real cross-LLM review job died at
   exactly 600000ms of "inactivity" having produced precisely the zero bytes its
@@ -33,8 +302,9 @@ that candidate. Anyone testing rc.1 should move to rc.2.
   rather than removed because the stall checker only warns and never kills.
 - **`codex_fork_session` leaked an opaque terminal error.** `codex fork` is an
   interactive subcommand requiring a controlling terminal, and provider children
-  are spawned with pipes, so every call failed with `exit code 1: Error: stdin is
-  not a terminal`, which reads like a broken environment. Codex exposes no
+  are spawned with pipes, so every call failed with
+  `exit code 1: Error: stdin is not a terminal`, which reads like a broken
+  environment. Codex exposes no
   non-interactive equivalent. The tool now returns the reason and the route that
   works (`codex_request` with a session UUID or `resumeLatest`), without spawning
   a child that cannot succeed, and without writing session workspace scope for a
@@ -189,7 +459,7 @@ Personal Agent Config Kit.
   parent declares always reads as `invalid` to consumers; treating that as a
   blanket failure gave no way to distinguish it from real tree corruption. The
   check is bidirectional: an unreviewed out-of-range package fails the release,
-  and so does the *disappearance* of a reviewed pin, which is what silently
+  and so does the _disappearance_ of a reviewed pin, which is what silently
   shipping an unpatched transitive would look like. The one current entry is the
   `@hono/node-server` pin for GHSA-frvp-7c67-39w9, whose exit condition is
   recorded with it.
@@ -800,7 +1070,9 @@ the shared generation and is maintenance-only.
 - **Upstream contracts refreshed to the installed provider versions.** Live `--probe-installed` probes were re-run across all six provider CLIs; ACP `targetVersion` pins bumped to claude 2.1.195, codex-cli 0.142.4, agy 1.0.13, grok 0.2.73, and devin 2026.8.18 (mistral vibe 2.17.1 unchanged), kept in sync across `upstream-contracts`, `provider-tool-capabilities`, and the ACP `provider-registry`. Acknowledged newly-advertised flags (claude `--bg`/`--background`); dropped stale acknowledgements (claude `--mcp-debug`, agy `-i`/`--version`); and acknowledged grok's `ssh` subcommand inheriting the global agent flag surface.
 - **`agy update` help-probe drift silenced.** `agy update --help` uses Go's `flag` package (prints "Usage of update:" and exits 2). A new `helpProbeExitTolerant` subcommand-contract marker treats that legitimate non-zero help exit as clean rather than reporting it as drift.
 - **Devin is now visible across discovery.** Devin was a fully registered request tool but omitted from the server instructions and rejected by the `list_models`, `cli_versions`, `cli_upgrade`, and `provider_tool_capabilities` enums; those now include devin (pure widening), and the stale "five providers" describe/description text was refreshed.
-- **Request tool and parameter descriptions sharpened for usability.** Clarified Codex `sandboxMode` (omit = read-only), Gemini `approvalMode`/`outputFormat` (only default/yolo and text work on the agy headless path), `approvalStrategy`/`approvalPolicy` semantics, `idleTimeoutMs` (gateway 10-min idle kill; Claude stream-json only), `jsonSchema` (set `outputFormat:json`), session-resume rules (gw-* fresh-session ids are not resumable; use `resumeLatest`), the generic API params, and the mistral/devin permission defaults.
+- **Request tool and parameter descriptions sharpened for usability.** Clarified Codex `sandboxMode` (omit = read-only; that clarification was itself
+  wrong and is corrected under [Unreleased] above: omitting does not guarantee
+  read-only), Gemini `approvalMode`/`outputFormat` (only default/yolo and text work on the agy headless path), `approvalStrategy`/`approvalPolicy` semantics, `idleTimeoutMs` (gateway 10-min idle kill; Claude stream-json only), `jsonSchema` (set `outputFormat:json`), session-resume rules (gw-* fresh-session ids are not resumable; use `resumeLatest`), the generic API params, and the mistral/devin permission defaults.
 
 ### Reliability and error guidance
 
@@ -2332,7 +2604,7 @@ regressions) plus this release commit.
   and writable-dir policy are inherited on resume), so `prepareCodexRequest`
   gates emission on `sessionPlan.mode === "new"` — resume argv stays clean
   rather than emitting then stripping. Emits `-C <DIR>` (one) and
-  `--add-dir <DIR>` (one instance per entry).
+  `--add-dir <DIR>` (one instance per entry). (This entry's claim that resume inherits the original session's cwd and writable-dir policy was later found to be wrong; see the Codex resume-contract correction under [Unreleased].)
 - **Grok** — `grok_request` and `grok_request_async` accept a new
   `workingDir: string` (min 1) field. `prepareGrokRequest` emits
   `--cwd <DIR>`. Grok has no `--add-dir` analogue.
@@ -3301,7 +3573,7 @@ Lands DAG layers 6-12 — the personal-MCP MVP terminal plus all of Phase 0-3 pr
   Other surfaces extended: `SESSION_PROVIDER_VALUES` now includes `"mistral"`; `list_models`, `cli_versions`, `cli_upgrade`, `approval_list`, `session_create`, `session_list`, and `session_clear_all` accept the fifth provider; new MCP resources `sessions://mistral` and `models://mistral` are registered; `validate_with_models` / `consensus_check` / `red_team_review` can route to Mistral.
 
 - **U23 — JSON output + token/cost parity across providers.** New `src/codex-json-parser.ts` parses the Codex `--json` JSONL event stream (`thread.started`, `turn.started`/`completed`/`failed`, `item.*`, `error`); lenient against partial streams and garbage preamble. New `src/gemini-json-parser.ts` parses `gemini -o json` output and maps `usageMetadata.{promptTokenCount, candidatesTokenCount, cachedContentTokenCount}`. `extractUsageAndCost` is now a thin per-provider dispatcher returning `{inputTokens, outputTokens, cacheReadTokens?, cacheCreationTokens?, costUsd?}` for every provider that supports JSON; Claude `cache_read_input_tokens` / `cache_creation_input_tokens` are now plumbed through instead of being discarded. `codex_request`, `codex_request_async`, `gemini_request`, and `gemini_request_async` now expose `outputFormat: enum("text","json")` — set to `"json"` and the gateway emits `--json` (Codex) or `-o json` (Gemini) and forwards parsed usage/cost into the flight recorder. Flight-recorder schema gains `cache_read_tokens` and `cache_creation_tokens` columns via idempotent migration (`PRAGMA table_info` → `ALTER TABLE ADD COLUMN`); existing `logs.db` files are upgraded in place. 15 new tests.
-- **U24 — Permission/approval-mode parity across providers.** Claude `permissionMode` enum (`default | acceptEdits | plan | auto | dontAsk | bypassPermissions`) replaces the boolean `dangerouslySkipPermissions` (the boolean still works and now maps to `permissionMode: "bypassPermissions"`; setting both logs a warning, `permissionMode` wins). Gemini `approvalMode` gains `plan`. Codex splits `--full-auto` into `sandboxMode: enum("read-only","workspace-write","danger-full-access")` and `askForApproval: enum("untrusted","on-request","never")`, emitting `--sandbox <mode>` and `--ask-for-approval <mode>` independently; legacy `fullAuto: true` still works and expands to `--sandbox workspace-write --ask-for-approval never` by default, with `useLegacyFullAutoFlag: true` as an explicit escape hatch to emit `--full-auto` directly. Codex resume mode filters all three flags (`--full-auto`, `--sandbox`, `--ask-for-approval`) since `codex exec resume` inherits the session's policy. 26 new tests.
+- **U24 — Permission/approval-mode parity across providers.** Claude `permissionMode` enum (`default | acceptEdits | plan | auto | dontAsk | bypassPermissions`) replaces the boolean `dangerouslySkipPermissions` (the boolean still works and now maps to `permissionMode: "bypassPermissions"`; setting both logs a warning, `permissionMode` wins). Gemini `approvalMode` gains `plan`. Codex splits `--full-auto` into `sandboxMode: enum("read-only","workspace-write","danger-full-access")` and `askForApproval: enum("untrusted","on-request","never")`, emitting `--sandbox <mode>` and `--ask-for-approval <mode>` independently; legacy `fullAuto: true` still works and expands to `--sandbox workspace-write --ask-for-approval never` by default, with `useLegacyFullAutoFlag: true` as an explicit escape hatch to emit `--full-auto` directly. Codex resume mode filters all three flags (`--full-auto`, `--sandbox`, `--ask-for-approval`) since `codex exec resume` inherits the session's policy. 26 new tests. (This entry's claim that resume inherits the original session's approval/sandbox policy was later found to be wrong; see the Codex sandboxMode correction under [Unreleased].)
 - **U25 — Claude high-impact features.** `claude_request` / `claude_request_async` schemas gain `agent?: string` (single sub-agent dispatch), `agents?: Record<string, object>` (multi-agent JSON, validated against `CLAUDE_AGENT_DEFINITION_SCHEMA` before emit), `forkSession?: boolean`, `systemPrompt?: string`, `appendSystemPrompt?: string` (mutually exclusive at the schema + tool-callback boundary), `maxBudgetUsd?: number`, `maxTurns?: number`, `effort?: enum("low","medium","high","xhigh","max")`, and `excludeDynamicSystemPromptSections?: boolean`. Each emits the documented `--<flag>` form. 25 new tests in `src/__tests__/claude-handler.test.ts`.
 - **U26 — Codex high-impact features.** `codex_request` / `codex_request_async` gain `outputSchema?: string | object` (object form is materialised to an `0o600` temp file under `os.tmpdir()` and cleaned via the AsyncJobManager `onComplete` contract — see post-review fixes below), `search?: boolean`, `profile?: string`, `configOverrides?: Record<string,string>` (keys validated against `/^[a-zA-Z0-9._]+$/`, values reject `\r`/`\n` via Zod refinement; emitted as repeated `-c key=value`), `ephemeral?: boolean`, `images?: string[]` (each path existence-validated; missing paths fail fast), `ignoreUserConfig?: boolean`, `ignoreRules?: boolean`. New top-level tool `codex_fork_session` wraps `codex fork <UUID> <prompt>` and `codex fork --last <prompt>` (sessionId XOR forkLast via Zod refinement). Codex default model alias is now `gpt-5.5` (the prior `gpt-5.3-codex` alias still resolves). Codex resume filter list extended with `--add-dir`, `-C`, `--output-schema`, and `--search`. 28 new tests across `codex-handler.test.ts` and `codex-fork.test.ts`.
 - **U27 — Gemini high-impact features.** `gemini_request` / `gemini_request_async` gain `sandbox?: boolean` (emits `-s`), `policyFiles?: string[]` and `adminPolicyFiles?: string[]` (each path existence-validated; missing paths fail fast), and `attachments?: string[]` (absolute paths only, validated and prepended to the prompt as `@<abs-path>` tokens before the `-p` pair — U21 ordering invariant preserved). For fresh sessions (`createNewSession: true` or no sessionId), the gateway now emits `--session-id <uuid-v4>` instead of `--resume`, mapping the gateway session 1:1 to Gemini's authoritative store; `gw-*` prefixed IDs are rejected via strict UUID-v4 regex. `doctor --json` probes `./GEMINI.md`, `~/.gemini/GEMINI.md`, and `~/.gemini/settings.json` (parses `mcpServers` and reconciles against the gateway's `--allowed-mcp-server-names` whitelist; surfaces `next_actions` for missing registrations). `provider-status.ts` `geminiAuthStatus()` recognises four auth methods: OAuth file, `GEMINI_API_KEY`, `GOOGLE_API_KEY`, and `GOOGLE_CLOUD_PROJECT` + `GOOGLE_GENAI_USE_VERTEXAI=true`. 41 new tests across `gemini-handler.test.ts`, `provider-status.test.ts`, and the extended `doctor.test.ts`.
@@ -3324,7 +3596,7 @@ Round-1 Codex review found 5 blockers across U22, U23, and U26; round-2 uncondit
 
 ### Added
 
-- **Codex `exec resume` wired through the gateway** — `codex_request` and `codex_request_async` now accept `sessionId` (real Codex session UUID from `~/.codex/sessions/` or the `codex resume` picker) and `resumeLatest:true`, emitting `codex exec resume <UUID>` and `codex exec resume --last` respectively. Codex sessions are no longer bookkeeping-only at the gateway layer; multi-turn workflows carry real CLI continuity, matching Claude/Gemini/Grok. Gateway-generated `gw-*` IDs are rejected for Codex (as for Gemini/Grok). `--full-auto` is silently dropped on resume because `codex exec resume` does not accept it — the original session's approval policy is inherited.
+- **Codex `exec resume` wired through the gateway** — `codex_request` and `codex_request_async` now accept `sessionId` (real Codex session UUID from `~/.codex/sessions/` or the `codex resume` picker) and `resumeLatest:true`, emitting `codex exec resume <UUID>` and `codex exec resume --last` respectively. Codex sessions are no longer bookkeeping-only at the gateway layer; multi-turn workflows carry real CLI continuity, matching Claude/Gemini/Grok. Gateway-generated `gw-*` IDs are rejected for Codex (as for Gemini/Grok). `--full-auto` is silently dropped on resume because `codex exec resume` does not accept it — the original session's approval policy is inherited. (This entry's claim that resume inherits the original session's approval/sandbox policy was later found to be wrong; see the Codex sandboxMode correction under [Unreleased].)
 - **Durable job results + automatic dedup** — Async jobs are now persisted to a `jobs` table in `~/.llm-cli-gateway/logs.db` on every state transition (start, output flush, completion). `llm_job_status` and `llm_job_result` fall back to the database when the job is no longer in memory, so callers can collect a result regardless of how long ago the work completed (default retention: **30 days**, configurable via `LLM_GATEWAY_JOB_RETENTION_DAYS`). Identical `*_request` / `*_request_async` calls within a dedup window (default **1 hour**, configurable via `LLM_GATEWAY_DEDUP_WINDOW_MS`) short-circuit onto the existing running or completed job instead of spawning a duplicate run — directly fixing the "agent re-issues and the whole job starts over" loop. Each tool now accepts `forceRefresh: true` to bypass dedup. Jobs that were running when the gateway last stopped are flipped to `orphaned` on startup so callers can still read their partial output.
 - **Grok CLI provider (xAI Grok Build TUI)** — New `grok_request` and `grok_request_async` MCP tools mirror the existing Claude/Codex/Gemini surface (sync + async, session management via `--resume`/`--continue`, idle-timeout, approval policy, review-integrity, flight recorder, metrics). Auth assumes a prior `grok login` (OAuth) or `GROK_CODE_XAI_API_KEY`. Default model: `grok-build`. `GROK_DEFAULT_MODEL`, `GROK_MODELS`, and `GROK_MODEL_ALIASES` env vars are honored by the model registry. `cli_upgrade` treats Grok as self-updating (`grok update` / `grok update --version <target>`).
 - **Source-aware model registry** — `list_models` now reports model source/confidence metadata, aliases, default model source, and non-fatal discovery warnings

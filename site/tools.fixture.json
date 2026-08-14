@@ -1,7 +1,7 @@
 {
   "generatedAt": "deterministic build output",
   "packageName": "llm-cli-gateway",
-  "packageVersion": "3.1.0-rc.2",
+  "packageVersion": "3.1.0-rc.5",
   "siteVersion": "3.0.0",
   "captureCommand": "node scripts/generate-site-discovery.mjs",
   "source": "runtime MCP tools/list from dist/index.js over in-memory MCP transport",
@@ -924,7 +924,7 @@
               "workspace-write",
               "danger-full-access"
             ],
-            "description": "Codex --sandbox. Omit = Codex exec built-in default (read-only; cannot write files). Pass workspace-write to let Codex edit files in the working dir, or danger-full-access for unrestricted access."
+            "description": "Codex --sandbox. NEW SESSIONS ONLY: the gateway filters --sandbox out of a resume argv, so this field has no effect on a resumed request. That is NOT a guarantee that the resumed session keeps its original posture: configOverrides still passes through and can set sandbox_mode, and Codex re-resolves configuration on a cold resume. Establish the posture on the first request and verify it when it matters. On a new session, omitting it does NOT guarantee read-only: the gateway emits no --sandbox flag and Codex resolves the policy from configuration, project trust, and its own fallback, so a trusted project can resolve to workspace-write. Pass read-only explicitly for inspection. Pass workspace-write to let Codex edit files in the working dir, or danger-full-access for unrestricted access."
           },
           "askForApproval": {
             "type": "string",
@@ -1048,7 +1048,7 @@
               "workspace-write",
               "danger-full-access"
             ],
-            "description": "Codex --sandbox. Omit = Codex exec built-in default (read-only; cannot write files). Pass workspace-write to let Codex edit files in the working dir, or danger-full-access for unrestricted access."
+            "description": "Codex --sandbox. NEW SESSIONS ONLY: the gateway filters --sandbox out of a resume argv, so this field has no effect on a resumed request. That is NOT a guarantee that the resumed session keeps its original posture: configOverrides still passes through and can set sandbox_mode, and Codex re-resolves configuration on a cold resume. Establish the posture on the first request and verify it when it matters. On a new session, omitting it does NOT guarantee read-only: the gateway emits no --sandbox flag and Codex resolves the policy from configuration, project trust, and its own fallback, so a trusted project can resolve to workspace-write. Pass read-only explicitly for inspection. Pass workspace-write to let Codex edit files in the working dir, or danger-full-access for unrestricted access."
           },
           "askForApproval": {
             "type": "string",
@@ -1103,7 +1103,7 @@
           "resumeLatest": {
             "type": "boolean",
             "default": false,
-            "description": "Resume Codex's globally latest session via `codex exec resume --last`; it inherits that session's original cwd, and workingDir/addDir do not retarget it. Ignored if sessionId is set; an explicit real Codex UUID targets that session. A brand-new session returns no resumable sessionId; continue with resumeLatest:true or a real Codex UUID."
+            "description": "Resume a previous Codex session via `codex exec resume --last`. UNDER REVIEW: do not rely on which session this selects or on the resumed working directory. `--last` is filtered by cwd upstream unless `--all` is passed, which the gateway does not emit, and the child is still spawned with the gateway-resolved cwd even though `-C`/`--add-dir` are dropped from the resume argv. Verify the target, or start a fresh session when it must be certain. Ignored if sessionId is set; an explicit real Codex UUID targets that session. A brand-new session returns no resumable sessionId; continue with resumeLatest:true or a real Codex UUID."
           },
           "createNewSession": {
             "type": "boolean",
@@ -1199,14 +1199,14 @@
           "workingDir": {
             "type": "string",
             "minLength": 1,
-            "description": "Codex -C/--cd <DIR>: working root for this session. Emitted on new sessions only; resume inherits the original session's cwd via CODEX_RESUME_FILTERED_FLAGS. Personal Agent Config Kit mode requires an absolute path. Stdio/local callers may pass local paths directly. Remote HTTP/OAuth callers must use relative paths inside a selected registered workspace. Do not call workspace_* tools to fix stdio/local provider path access."
+            "description": "Codex -C/--cd <DIR>: working root for this session. Emitted on new sessions only: the flag is filtered from resume argv. That does NOT pin a resumed session's directory, because the child is still spawned with the gateway-resolved cwd; do not rely on a resumed session's working directory. Personal Agent Config Kit mode requires an absolute path. Stdio/local callers may pass local paths directly. Remote HTTP/OAuth callers must use relative paths inside a selected registered workspace. Do not call workspace_* tools to fix stdio/local provider path access."
           },
           "addDir": {
             "type": "array",
             "items": {
               "type": "string"
             },
-            "description": "Codex --add-dir <DIR>: additional writable workspace directories. Emitted once per entry on new sessions only; resume inherits the original session's writable-dir policy. Stdio/local callers may pass local paths directly. Remote HTTP/OAuth callers must use relative paths inside a selected registered workspace. Do not call workspace_* tools to fix stdio/local provider path access."
+            "description": "Codex --add-dir <DIR>: additional writable workspace directories. Emitted once per entry on new sessions only: the flag is filtered from resume argv. That does NOT pin a resumed session's writable-dir policy; do not rely on it. Stdio/local callers may pass local paths directly. Remote HTTP/OAuth callers must use relative paths inside a selected registered workspace. Do not call workspace_* tools to fix stdio/local provider path access."
           },
           "enable": {
             "type": "array",
@@ -1362,7 +1362,7 @@
               "workspace-write",
               "danger-full-access"
             ],
-            "description": "Codex --sandbox. Omit = Codex exec built-in default (read-only; cannot write files). Pass workspace-write to let Codex edit files in the working dir, or danger-full-access for unrestricted access."
+            "description": "Codex --sandbox. NEW SESSIONS ONLY: the gateway filters --sandbox out of a resume argv, so this field has no effect on a resumed request. That is NOT a guarantee that the resumed session keeps its original posture: configOverrides still passes through and can set sandbox_mode, and Codex re-resolves configuration on a cold resume. Establish the posture on the first request and verify it when it matters. On a new session, omitting it does NOT guarantee read-only: the gateway emits no --sandbox flag and Codex resolves the policy from configuration, project trust, and its own fallback, so a trusted project can resolve to workspace-write. Pass read-only explicitly for inspection. Pass workspace-write to let Codex edit files in the working dir, or danger-full-access for unrestricted access."
           },
           "askForApproval": {
             "type": "string",
@@ -1417,7 +1417,7 @@
           "resumeLatest": {
             "type": "boolean",
             "default": false,
-            "description": "Resume Codex's globally latest session via `codex exec resume --last`; it inherits that session's original cwd, and workingDir/addDir do not retarget it. Ignored if sessionId is set; an explicit real Codex UUID targets that session. A brand-new session returns no resumable sessionId; continue with resumeLatest:true or a real Codex UUID."
+            "description": "Resume a previous Codex session via `codex exec resume --last`. UNDER REVIEW: do not rely on which session this selects or on the resumed working directory. `--last` is filtered by cwd upstream unless `--all` is passed, which the gateway does not emit, and the child is still spawned with the gateway-resolved cwd even though `-C`/`--add-dir` are dropped from the resume argv. Verify the target, or start a fresh session when it must be certain. Ignored if sessionId is set; an explicit real Codex UUID targets that session. A brand-new session returns no resumable sessionId; continue with resumeLatest:true or a real Codex UUID."
           },
           "createNewSession": {
             "type": "boolean",
@@ -1503,14 +1503,14 @@
           "workingDir": {
             "type": "string",
             "minLength": 1,
-            "description": "Codex -C/--cd <DIR>: working root for this session. New sessions only; resume inherits the original session's cwd. Personal Agent Config Kit mode requires an absolute path. Stdio/local callers may pass local paths directly. Remote HTTP/OAuth callers must use relative paths inside a selected registered workspace. Do not call workspace_* tools to fix stdio/local provider path access."
+            "description": "Codex -C/--cd <DIR>: working root for this session. New sessions only: the flag is filtered from resume argv. That does NOT pin a resumed session's directory, because the child is still spawned with the gateway-resolved cwd; do not rely on it. Personal Agent Config Kit mode requires an absolute path. Stdio/local callers may pass local paths directly. Remote HTTP/OAuth callers must use relative paths inside a selected registered workspace. Do not call workspace_* tools to fix stdio/local provider path access."
           },
           "addDir": {
             "type": "array",
             "items": {
               "type": "string"
             },
-            "description": "Codex --add-dir <DIR>: additional writable workspace directories (repeat per entry). New sessions only. Stdio/local callers may pass local paths directly. Remote HTTP/OAuth callers must use relative paths inside a selected registered workspace. Do not call workspace_* tools to fix stdio/local provider path access."
+            "description": "Codex --add-dir <DIR>: additional writable workspace directories (repeat per entry). Emitted once per entry on new sessions only: the flag is filtered from resume argv. That does NOT pin a resumed session's writable-dir policy; do not rely on it. Stdio/local callers may pass local paths directly. Remote HTTP/OAuth callers must use relative paths inside a selected registered workspace. Do not call workspace_* tools to fix stdio/local provider path access."
           },
           "enable": {
             "type": "array",
@@ -1916,6 +1916,11 @@
             },
             "description": "Additional workspace root directories (--add-dir, repeatable)."
           },
+          "workingDir": {
+            "type": "string",
+            "minLength": 1,
+            "description": "Local Cursor Agent process working directory. Distinct from --workspace, which selects a Cursor workspace or saved workspace name; this sets the process cwd. Passing both an absolute workspace path and a different workingDir is rejected rather than silently ranked. Stdio/local callers may pass local paths directly. Remote HTTP/OAuth callers must use relative paths inside a selected registered workspace. Do not call workspace_* tools to fix stdio/local provider path access."
+          },
           "sessionId": {
             "type": "string",
             "description": "On transport=cli, Cursor chat/session ID to resume (emits --resume <id>); gateway gw-* tracking ids are not CLI session ids. On transport=acp, gateway-owned ACP session ID returned by an earlier ACP call; Cursor-native and CLI session ids are rejected."
@@ -1970,7 +1975,7 @@
             "type": "integer",
             "minimum": 30000,
             "maximum": 3600000,
-            "description": "Idle timeout in ms (min 30s, max 1h, omit=CLI default)"
+            "description": "Total-runtime bound, not an idle timer: this provider emits no output until it exits, so the child is killed after this duration even while healthy. Min 30s, max 1h, omit=1h default. Cursor only: this holds for the default text invocation; with outputFormat stream-json the CLI streams incrementally, so the same timer behaves as a genuine idle window."
           },
           "forceRefresh": {
             "type": "boolean",
@@ -2053,6 +2058,11 @@
             },
             "description": "Additional workspace root directories (--add-dir, repeatable)."
           },
+          "workingDir": {
+            "type": "string",
+            "minLength": 1,
+            "description": "Local Cursor Agent process working directory. Distinct from --workspace, which selects a Cursor workspace or saved workspace name; this sets the process cwd. Passing both an absolute workspace path and a different workingDir is rejected rather than silently ranked. Stdio/local callers may pass local paths directly. Remote HTTP/OAuth callers must use relative paths inside a selected registered workspace. Do not call workspace_* tools to fix stdio/local provider path access."
+          },
           "sessionId": {
             "type": "string",
             "description": "Cursor chat/session ID to resume (emits --resume <id>). Note: the gw-* id minted for a brand-new gateway session is not resumable via sessionId; continue with resumeLatest:true."
@@ -2102,7 +2112,7 @@
             "type": "integer",
             "minimum": 30000,
             "maximum": 3600000,
-            "description": "Idle timeout in ms (min 30s, max 1h, omit=CLI default)"
+            "description": "Total-runtime bound, not an idle timer: this provider emits no output until it exits, so the child is killed after this duration even while healthy. Min 30s, max 1h, omit=1h default. Cursor only: this holds for the default text invocation; with outputFormat stream-json the CLI streams incrementally, so the same timer behaves as a genuine idle window."
           },
           "forceRefresh": {
             "type": "boolean",
@@ -2197,10 +2207,6 @@
             "type": "boolean",
             "description": "Respect workspace trust (Devin --respect-workspace-trust <bool>). Devin defaults true for interactive and false for print mode; set explicitly to override."
           },
-          "agentConfig": {
-            "type": "string",
-            "description": "Agent config file path (Devin --agent-config <FILE>)"
-          },
           "agentType": {
             "type": "string",
             "enum": [
@@ -2245,7 +2251,7 @@
             "type": "integer",
             "minimum": 30000,
             "maximum": 3600000,
-            "description": "Idle timeout in ms (min 30s, max 1h, omit=CLI default)"
+            "description": "Total-runtime bound, not an idle timer: this provider emits no output until it exits, so the child is killed after this duration even while healthy. Min 30s, max 1h, omit=1h default."
           },
           "forceRefresh": {
             "type": "boolean",
@@ -2364,10 +2370,6 @@
             "type": "boolean",
             "description": "Respect workspace trust (Devin --respect-workspace-trust <bool>). Devin defaults true for interactive and false for print mode; set explicitly to override."
           },
-          "agentConfig": {
-            "type": "string",
-            "description": "Agent config file path (Devin --agent-config <FILE>)"
-          },
           "sessionId": {
             "type": "string",
             "description": "Devin session ID to resume (--resume <id>; use resumeLatest for --continue). Note: the gw-* id minted for a brand-new session is not resumable via sessionId; continue with resumeLatest:true."
@@ -2399,7 +2401,7 @@
             "type": "integer",
             "minimum": 30000,
             "maximum": 3600000,
-            "description": "Idle timeout in ms (min 30s, max 1h, omit=CLI default)"
+            "description": "Total-runtime bound, not an idle timer: this provider emits no output until it exits, so the child is killed after this duration even while healthy. Min 30s, max 1h, omit=1h default."
           },
           "forceRefresh": {
             "type": "boolean",
@@ -2619,7 +2621,7 @@
             "type": "integer",
             "minimum": 30000,
             "maximum": 3600000,
-            "description": "Idle timeout in ms (min 30s, max 1h, omit=CLI default)"
+            "description": "Total-runtime bound, not an idle timer: this provider emits no output until it exits, so the child is killed after this duration even while healthy. Min 30s, max 1h, omit=1h default."
           },
           "forceRefresh": {
             "type": "boolean",
@@ -2683,6 +2685,11 @@
             "type": "string",
             "minLength": 1,
             "description": "Antigravity --print-timeout <DURATION>: print-mode wait timeout as a Go duration string (e.g. '5m0s', '30s')."
+          },
+          "workingDir": {
+            "type": "string",
+            "minLength": 1,
+            "description": "Local Antigravity process working directory. Stdio/local callers may pass local paths directly. Remote HTTP/OAuth callers must use relative paths inside a selected registered workspace. Do not call workspace_* tools to fix stdio/local provider path access."
           },
           "workspace": {
             "type": "string",
@@ -2860,7 +2867,7 @@
             "type": "integer",
             "minimum": 30000,
             "maximum": 3600000,
-            "description": "Idle timeout in ms (min 30s, max 1h, omit=CLI default)"
+            "description": "Total-runtime bound, not an idle timer: this provider emits no output until it exits, so the child is killed after this duration even while healthy. Min 30s, max 1h, omit=1h default."
           },
           "forceRefresh": {
             "type": "boolean",
@@ -2924,6 +2931,11 @@
             "type": "string",
             "minLength": 1,
             "description": "Antigravity --print-timeout <DURATION>: print-mode wait timeout as a Go duration string (e.g. '5m0s', '30s')."
+          },
+          "workingDir": {
+            "type": "string",
+            "minLength": 1,
+            "description": "Local Antigravity process working directory. Stdio/local callers may pass local paths directly. Remote HTTP/OAuth callers must use relative paths inside a selected registered workspace. Do not call workspace_* tools to fix stdio/local provider path access."
           },
           "workspace": {
             "type": "string",
@@ -4172,7 +4184,7 @@
             "type": "integer",
             "minimum": 30000,
             "maximum": 3600000,
-            "description": "Idle timeout in ms (min 30s, max 1h, omit=CLI default)"
+            "description": "Total-runtime bound, not an idle timer: this provider emits no output until it exits, so the child is killed after this duration even while healthy. Min 30s, max 1h, omit=1h default."
           },
           "forceRefresh": {
             "type": "boolean",
@@ -4397,7 +4409,7 @@
             "type": "integer",
             "minimum": 30000,
             "maximum": 3600000,
-            "description": "Idle timeout in ms (min 30s, max 1h, omit=CLI default)"
+            "description": "Total-runtime bound, not an idle timer: this provider emits no output until it exits, so the child is killed after this duration even while healthy. Min 30s, max 1h, omit=1h default."
           },
           "forceRefresh": {
             "type": "boolean",

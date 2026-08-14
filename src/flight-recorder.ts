@@ -25,6 +25,7 @@ import { openDatabase, openReadOnly } from "./sqlite-driver.js";
 import type { GatewayDatabase } from "./sqlite-driver.js";
 import { redactSecrets, isRedactionEnabled } from "./secret-redaction.js";
 import { getRequestContext, resolveOwnerPrincipal } from "./request-context.js";
+import { derivePromptSignals } from "./token-estimator.js";
 import type { ProviderType } from "./session-manager.js";
 
 export interface FlightLogStart {
@@ -144,6 +145,36 @@ function ensureRequestsOwnerColumn(db: GatewayDatabase): void {
   );
   if (!names.has("owner_principal")) {
     db.exec("ALTER TABLE requests ADD COLUMN owner_principal TEXT");
+  }
+}
+
+/**
+ * Idempotent v11 migration: persist the two prompt signals the least-cost
+ * routing path needs (`derived_prompt_chars`, `derived_content_class`) plus the
+ * algorithm version that produced them.
+ *
+ * Purpose: `lcr-priors` currently bulk-reads `requests.prompt` to recompute
+ * these on every load, which is the only production query that reads a prompt
+ * body in bulk. Persisting the signals removes that reader, which is the
+ * prerequisite for encrypting the body columns (docs/plans/
+ * postgres-security-hardening.md section 4.2).
+ *
+ * Legacy rows keep NULL and are backfilled separately; a NULL derivation must
+ * be skipped by readers rather than treated as zero.
+ */
+function ensureRequestsDerivationColumns(db: GatewayDatabase): void {
+  const rows = db.prepare("PRAGMA table_info(requests)").all();
+  const names = new Set<string>(
+    rows.map((row: any) => (row && typeof row.name === "string" ? row.name : ""))
+  );
+  if (!names.has("derived_prompt_chars")) {
+    db.exec("ALTER TABLE requests ADD COLUMN derived_prompt_chars INTEGER");
+  }
+  if (!names.has("derived_content_class")) {
+    db.exec("ALTER TABLE requests ADD COLUMN derived_content_class TEXT");
+  }
+  if (!names.has("derivation_version")) {
+    db.exec("ALTER TABLE requests ADD COLUMN derivation_version INTEGER");
   }
 }
 
@@ -442,7 +473,10 @@ export class FlightRecorder {
         cache_read_tokens INTEGER,
         cache_creation_tokens INTEGER,
         owner_principal TEXT,
-        cost_basis TEXT
+        cost_basis TEXT,
+        derived_prompt_chars INTEGER,
+        derived_content_class TEXT,
+        derivation_version INTEGER
       );
 
       CREATE TABLE IF NOT EXISTS gateway_metadata (
@@ -555,6 +589,14 @@ export class FlightRecorder {
       .prepare("INSERT OR IGNORE INTO _migrations(version, applied_at) VALUES(10, ?)")
       .run(new Date().toISOString());
 
+    // Migration v11 (LCR body-read removal): persisted prompt signals so the
+    // routing path stops bulk-reading prompt bodies. Prerequisite for body
+    // encryption. Legacy rows keep NULL until backfilled.
+    ensureRequestsDerivationColumns(this.db);
+    this.db
+      .prepare("INSERT OR IGNORE INTO _migrations(version, applied_at) VALUES(11, ?)")
+      .run(new Date().toISOString());
+
     if (process.platform !== "win32") {
       try {
         chmodSync(dbPath, 0o600);
@@ -566,10 +608,12 @@ export class FlightRecorder {
     const insertRequest = this.db.prepare(`
       INSERT INTO requests (id, cli, model, prompt, system, session_id, datetime_utc,
                             stable_prefix_hash, stable_prefix_tokens,
-                            cache_control_blocks, cache_control_ttl_seconds, owner_principal)
+                            cache_control_blocks, cache_control_ttl_seconds, owner_principal,
+                            derived_prompt_chars, derived_content_class, derivation_version)
       VALUES (@id, @cli, @model, @prompt, @system, @session_id, @datetime_utc,
               @stable_prefix_hash, @stable_prefix_tokens,
-              @cache_control_blocks, @cache_control_ttl_seconds, @owner_principal)
+              @cache_control_blocks, @cache_control_ttl_seconds, @owner_principal,
+              @derived_prompt_chars, @derived_content_class, @derivation_version)
     `);
 
     const insertMetadata = this.db.prepare(`
@@ -578,11 +622,20 @@ export class FlightRecorder {
     `);
 
     this.insertStartTxn = this.db.withTransaction((entry: FlightLogStart) => {
+      // Derive from the entry as it is about to be PERSISTED. logStart applies
+      // redaction before calling this, so the signals describe the stored text
+      // rather than the original; deriving from the pre-redaction prompt would
+      // make routing statistics disagree with the stored row.
+      const derived = derivePromptSignals(entry.prompt ?? "");
+
       insertRequest.run({
         id: entry.correlationId,
         cli: entry.cli,
         model: entry.model,
         prompt: entry.prompt,
+        derived_prompt_chars: derived.promptChars,
+        derived_content_class: derived.contentClass,
+        derivation_version: derived.derivationVersion,
         system: entry.system || null,
         session_id: entry.sessionId || null,
         datetime_utc: new Date().toISOString(),

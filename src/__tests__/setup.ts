@@ -24,8 +24,21 @@ if (process.env.LLM_GATEWAY_CONFIG === undefined) {
   );
   process.env.LLM_GATEWAY_CONFIG = testConfigPath;
 }
-// Clear the legacy env vars so they don't override the test config.
-delete process.env.LLM_GATEWAY_LOGS_DB;
+
+// The job-store config above does NOT isolate the flight recorder: that is a
+// separate subsystem with its own selector (`resolveFlightRecorderDbPath` reads
+// LLM_GATEWAY_LOGS_DB and otherwise defaults to ~/.llm-cli-gateway/logs.db).
+//
+// This block previously DELETED that variable, with a comment claiming it kept
+// tests off the user's database. Deleting it did the exact opposite: it sent
+// every test that constructs a recorder through the default path and wrote into
+// the real flight recorder. By the time it was found, ~21,700 fixture rows had
+// accumulated there over three weeks, and least-cost routing had been
+// calibrating its priors on prompts like "inspect".
+//
+// Pin it to a per-process temp file instead. Vitest runs each worker in its own
+// process, so process.pid keeps workers from sharing one database.
+process.env.LLM_GATEWAY_LOGS_DB = join(tmpdir(), `llm-cli-gateway-test-logs-${process.pid}.db`);
 delete process.env.LLM_GATEWAY_JOBS_DB;
 
 let testPool: Pool | null = null;

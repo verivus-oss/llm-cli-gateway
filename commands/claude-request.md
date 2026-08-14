@@ -1,7 +1,6 @@
 ---
 description: Send a prompt to Claude Code via the LLM gateway with session tracking
 argument-hint: '<prompt>'
-allowed-tools: Bash
 ---
 
 Send a request through the llm-gateway MCP server's claude_request tool.

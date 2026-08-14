@@ -38,15 +38,15 @@ Cursor, and must never be replayed to Gemini either.
 
 ## Native continuity matrix
 
-| Provider | Native resume                                                                                                                 | Important boundary                                                                                                                                                                      |
-| -------- | ----------------------------------------------------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| Claude   | `sessionId` maps to `--session-id`; continuation maps to `--continue`.                                                        | Managed native continuation is a high-risk posture input requiring an approval decision and `LLM_GATEWAY_APPROVAL_ALLOW_BYPASS=1`.                                                      |
-| Codex    | Real Codex UUID maps to `codex exec resume <UUID>`; `resumeLatest:true` selects the globally latest session through `--last`. | The selected session inherits its original cwd; `workingDir` cannot target `--last`. Use a real UUID for a specific Codex session. Resume drops sandbox settings, including `fullAuto`. |
-| Gemini   | A caller-owned Antigravity conversation ID maps to `--conversation`; `resumeLatest:true` maps to `--continue`.                | Fresh launches do not produce a reusable native ID. Check `resumable:true`; never replay `gw-*`.                                                                                        |
-| Grok     | Native ID maps to `--resume`; `resumeLatest:true` maps to `--continue`.                                                       | A fresh `gw-*` ID is bookkeeping only. Cwd affects `--continue` context.                                                                                                                |
-| Mistral  | Native ID maps to `--resume`; `resumeLatest:true` maps to `--continue`.                                                       | A fresh `gw-*` ID is bookkeeping only. Vibe session logging defaults on; `doctor --json` flags only explicit `[session_logging] enabled = false`.                                       |
-| Devin    | Native ID maps to `--resume`; `resumeLatest:true` maps to `--continue`.                                                       | A fresh `gw-*` ID is bookkeeping only. Use `workingDir` or `workspace` to bind the selected cwd.                                                                                        |
-| Cursor   | Native chat/session ID maps to `--resume`; `resumeLatest:true` maps to `--continue`.                                          | A fresh `gw-*` ID is bookkeeping only. Use a verified `workspace` for its checkout.                                                                                                     |
+| Provider | Native resume                                                                                                        | Important boundary                                                                                                                                                                                                          |
+| -------- | -------------------------------------------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Claude   | `sessionId` maps to `--session-id`; continuation maps to `--continue`.                                               | Managed native continuation is a high-risk posture input requiring an approval decision and `LLM_GATEWAY_APPROVAL_ALLOW_BYPASS=1`.                                                                                          |
+| Codex    | Real Codex UUID maps to `codex exec resume <UUID>`; `resumeLatest:true` resumes a previous session through `--last`. | Do not rely on the resumed cwd or on which session `--last` selects (#258). Use a real UUID for a specific Codex session. Resume drops `sandboxMode` and `fullAuto`, though `configOverrides` can still set `sandbox_mode`. |
+| Gemini   | A caller-owned Antigravity conversation ID maps to `--conversation`; `resumeLatest:true` maps to `--continue`.       | Fresh launches do not produce a reusable native ID. Check `resumable:true`; never replay `gw-*`.                                                                                                                            |
+| Grok     | Native ID maps to `--resume`; `resumeLatest:true` maps to `--continue`.                                              | A fresh `gw-*` ID is bookkeeping only. Cwd affects `--continue` context.                                                                                                                                                    |
+| Mistral  | Native ID maps to `--resume`; `resumeLatest:true` maps to `--continue`.                                              | A fresh `gw-*` ID is bookkeeping only. Vibe session logging defaults on; `doctor --json` flags only explicit `[session_logging] enabled = false`.                                                                           |
+| Devin    | Native ID maps to `--resume`; `resumeLatest:true` maps to `--continue`.                                              | A fresh `gw-*` ID is bookkeeping only. Use `workingDir` or `workspace` to bind the selected cwd.                                                                                                                            |
+| Cursor   | Native chat/session ID maps to `--resume`; `resumeLatest:true` maps to `--continue`.                                 | A fresh `gw-*` ID is bookkeeping only. Use `workingDir` for its checkout, or a verified `workspace`.                                                                                                                        |
 
 All non-Claude providers use `approvalStrategy:"legacy"`; they reject
 Claude-only `mcp_managed` and ignore `approvalPolicy`. `mcp_managed` is usable
@@ -61,9 +61,11 @@ with `node dist/index.js --transport=stdio`; do not use a globally installed
 gateway whose revision is unknown. Reapply the provider-native full-access
 mapping on every new job and verify it through the live capability surface.
 
-Do not rely on continuity for the grant. In particular, Codex resume inherits
-its old sandbox and cannot take a new one, so a full-access Codex review needs
-a fresh native session. Keep ambient provider MCP configuration available, do
+Do not rely on continuity for the grant. In particular, the gateway drops
+`sandboxMode` on a Codex resume, so you cannot select a posture that way, and
+the resumed posture is not guaranteed to match the original either:
+`configOverrides` still passes through and Codex re-resolves configuration on a
+cold resume. A full-access Codex review therefore needs a fresh native session. Keep ambient provider MCP configuration available, do
 not turn request tool/MCP lists into an asserted allowlist, and record the
 exact base, diff or changed-file list, verification report, and durable job
 evidence with every review iteration. If the user requests 90-second progress
@@ -106,24 +108,28 @@ codex_request({
 gemini_request({
   prompt:"Continue the approved task.",
   sessionId:"<caller-owned-antigravity-conversation>",
-  workspace:"<registered-repo>",
+  workingDir:"<repo>",
   approvalStrategy:"legacy"
 })
 
 grok_request({prompt:"Continue.",resumeLatest:true,workingDir:"<repo>",approvalStrategy:"legacy"})
 mistral_request({prompt:"Continue.",resumeLatest:true,workingDir:"<repo>",approvalStrategy:"legacy"})
 devin_request({prompt:"Continue.",resumeLatest:true,workingDir:"<repo>",approvalStrategy:"legacy"})
-cursor_request({prompt:"Continue.",resumeLatest:true,workspace:"<repo>",approvalStrategy:"legacy"})
+cursor_request({prompt:"Continue.",resumeLatest:true,workingDir:"<repo>",approvalStrategy:"legacy"})
 ```
 
-Codex `resumeLatest` is global, not cwd-scoped. It inherits the selected
-session's original cwd. To target a specific native session, pass its verified
-real Codex UUID as `sessionId`; `workingDir` cannot select that session.
+Codex `resumeLatest` is UNDER REVIEW (#258): `--last` is cwd-filtered upstream
+unless `--all` is passed, which the gateway does not emit, and the child is
+still spawned with the gateway-resolved cwd. Do not rely on which session it
+selects or on the resumed working directory. To target a specific native
+session, pass its verified real Codex UUID as `sessionId`.
 
 For Codex, start source inspection with `sandboxMode:"read-only"`; use
 `workspace-write` only if the work needs write-producing commands. Do not use
-new `fullAuto:true` examples. On a Codex resume, sandbox selection is not
-emitted, so start a fresh native session if you must alter it.
+new `fullAuto:true` examples. On a Codex resume, `sandboxMode` and `fullAuto`
+are not emitted, so neither can select a posture there; `configOverrides` can
+still set `sandbox_mode`. Start a fresh native session when the posture must be
+known.
 
 ## Target and concurrency discipline
 
@@ -132,18 +138,25 @@ before every resume, especially when multiple workstations or repositories run
 simultaneously:
 
 - Use explicit `workingDir` for Claude, Grok, Mistral, and Devin.
-- Use `workingDir` for a fresh Codex session. It does not scope Codex
-  `resumeLatest`; use a verified real Codex UUID to target a specific session.
-- Gemini has no `workingDir`; `includeDirs` does not select cwd. Use a verified
-  configured/registered target workspace.
-- Use Cursor `workspace` for its target checkout.
+- Use `workingDir` for a fresh Codex session. Do not assume it leaves
+  `resumeLatest` unaffected: `--last` is cwd-filtered upstream and the child is
+  still spawned with the gateway-resolved cwd, so it can influence which session
+  is selected. Use a verified real Codex UUID to target a specific session.
+- Use `workingDir` for Gemini's target checkout. `includeDirs` remains an extra
+  read path and still does not select cwd.
+- Use `workingDir` for Cursor's process cwd. Its `workspace` is a separate
+  Cursor-native selector (a saved-workspace name, a `.code-workspace` file, or a
+  directory), so passing both an absolute workspace path and a different
+  `workingDir` is rejected rather than silently ranked.
 
 For providers whose latest-session selection is cwd-scoped, an unscoped local
 CLI child runs in a fresh neutral temporary directory, not the gateway
 repository. Their cwd-scoped `resumeLatest` therefore fails closed unless
 `workingDir`, `workspace`, or a configured default workspace supplies a stable
-target. Codex is the exception: `resumeLatest` selects its globally latest
-session and inherits that session's original cwd.
+target. Codex was documented as the exception, on the basis that `resumeLatest`
+selects a globally latest session. Do not rely on that either (#258): `--last` is
+cwd-filtered upstream and the child is still spawned with the gateway-resolved
+cwd. Verify it, or start a fresh session when the target must be certain.
 
 The gateway's cache/session metadata does not prove that a provider resumed the
 intended repository. Record the native handle, selected target, provider, and

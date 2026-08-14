@@ -21,6 +21,14 @@ exclude_path = [
   "docs/archive",
   "docs/reviews",
   "DOGFOODING_RESULTS.md",
+  # supply-chain-guard ledger: per-dependency contracts plus verbatim captured
+  # upstream evidence (OSV records, npm registry documents, SLSA attestation
+  # bundles). Same reasoning as docs/reviews above, and stronger: these files
+  # are a point-in-time record of what an advisory said on the day a version
+  # was accepted. If one of those URLs later moves or dies, that is a fact
+  # about the upstream, not a defect in the record, and rewriting the record
+  # to chase it would destroy the thing it exists to preserve.
+  "docs/development/supply-chain-guard/ledger",
 ]
 
 # URL patterns to skip. Each entry is a regex over the full URL.
@@ -56,6 +64,14 @@ exclude = [
   # cannot auth into it from public CI. Re-evaluate when it's published.
   # No trailing slash in the pattern so we match the bare repo URL too.
   "^https://github\\.com/verivus-oss/agent-assurance(/|$)",
+  # gopenai.com serves 403 to non-browser clients. The link is a citation in
+  # docs/plans/native-compressor.research-annex.md and it resolves fine in a
+  # browser, so this is bot blocking rather than link rot. It has been dead to
+  # CI since it was added on 2026-07-08 and nobody saw it, because the
+  # self-hosted runners were failing 203/EXEC and this workflow had not
+  # completed a run since. Worth remembering that a green history can mean a
+  # gate that never ran.
+  "^https://blog\\.gopenai\\.com/",
   # The Personal Agent Config Kit guide is linked from the site at its
   # canonical location on the public mirror, but the mirror's main only
   # receives repository content when a release is published, so it 404s
