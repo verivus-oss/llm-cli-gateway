@@ -1,21 +1,35 @@
 # Public-mirror release: merge the release commit on main, then run this
 # workflow with tag vX.Y.Z. It verifies npm run check and creates the GitHub
-# release. The published event starts npm publishing and installer artifacts;
-# a stable public-mirror release also starts the separate Pages deployment.
+# release.
+#
+# WARNING, and the reason this is not the documented release path. The release
+# created here is authored by github-actions[bot] using GITHUB_TOKEN, and
+# GitHub deliberately does NOT start new workflow runs from events raised with
+# GITHUB_TOKEN. So the `release: published` event this emits does NOT start
+# npm-publish.yml. A previous version of this comment claimed it did; that was
+# wrong, and 3.1.0-rc.5 was created by this workflow and silently never
+# published (every release that did publish, v3.0.0 / rc.1 / rc.2, was authored
+# by the verivusOSS-releases account).
+#
+# AGENTS.md is the runbook: "a GitHub release on the mirror fires
+# npm-publish.yml". That holds only for a release created by a real account.
+# Prefer `gh release create` as verivusOSS-releases. If you use this workflow
+# instead, you MUST afterwards dispatch npm-publish.yml manually with the same
+# tag, or nothing reaches npm.
 name: Create release from tag ref
 
 on:
   workflow_dispatch:
     inputs:
       tag:
-        description: "Release tag (e.g. v1.17.7) — must match package.json on that ref"
+        description: "Release tag (e.g. v1.17.7); must match package.json on that ref"
         required: true
         type: string
 
 # Least-privilege default: the workflow floor is read-only; the one job that
 # creates the release escalates to contents:write at the job level. A top-level
 # write would grant write to every step (checkout, npm ci, the build) that only
-# needs to read — the pattern OpenSSF Scorecard's Token-Permissions check flags.
+# needs to read, the pattern OpenSSF Scorecard's Token-Permissions check flags.
 permissions:
   contents: read
 
@@ -207,3 +221,19 @@ jobs:
             --title "llm-cli-gateway v${VER}" \
             --notes "${NOTES}" \
             "${RELEASE_ARGS[@]}"
+
+          # This release is bot-authored, so it raises no downstream workflow.
+          # Say so where the operator will actually see it, rather than leaving
+          # a green run that looks like a completed publish.
+          {
+            echo "### Release created, npm publish NOT started"
+            echo
+            echo "This release is authored by github-actions[bot], and GitHub does not"
+            echo "start workflows from GITHUB_TOKEN events. \`npm-publish.yml\` has NOT run."
+            echo
+            echo "Dispatch it manually with the same tag:"
+            echo
+            echo '```'
+            echo "gh workflow run npm-publish.yml --repo verivus-oss/llm-cli-gateway -f tag=${TAG}"
+            echo '```'
+          } >> "${GITHUB_STEP_SUMMARY}"

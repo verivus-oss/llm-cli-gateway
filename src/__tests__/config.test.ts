@@ -401,6 +401,32 @@ describe("loadConfig: [persistence] is the single session-store selector", () =>
     expect(warn).toHaveBeenCalledOnce();
   });
 
+  it("ignores a dsn carried by a NON-postgres backend", () => {
+    // Every other case reaches loadConfig through loadPersistenceConfig, which
+    // already nulls `dsn` for non-postgres backends. That makes the
+    // `backend === "postgres"` guard unreachable in tests, so deleting it
+    // survived mutation: `persistence.dsn ?? null` passed all 29. Constructing
+    // the config directly is the only way to exercise the guard itself.
+    const persistence = {
+      ...loadPersistenceConfig(noopLogger),
+      backend: "sqlite" as const,
+      dsn: PG,
+    };
+    vi.stubEnv("DATABASE_URL", "");
+    expect(loadConfig(persistence, noopLogger).database).toBeUndefined();
+  });
+
+  it("warns on the FIRST call, so the latch cannot ship pre-set", () => {
+    // `afterEach` resets the latch, which means a mutant initialising it to
+    // `true` also passed all 29: production would then never warn. Reloading
+    // the module gives a genuinely fresh flag.
+    vi.stubEnv("LLM_GATEWAY_CONFIG", withConfigToml('[persistence]\nbackend = "sqlite"\n'));
+    vi.stubEnv("DATABASE_URL", PG);
+    const warn = vi.fn();
+    loadConfig(loadPersistenceConfig(noopLogger), { ...noopLogger, warn });
+    expect(warn).toHaveBeenCalledOnce();
+  });
+
   it("rejects a malformed persistence dsn rather than passing it to pg", () => {
     vi.stubEnv("LLM_GATEWAY_CONFIG", pgConfig("mysql://nope/db"));
     vi.stubEnv("DATABASE_URL", "");

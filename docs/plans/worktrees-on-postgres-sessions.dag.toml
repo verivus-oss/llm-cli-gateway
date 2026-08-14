@@ -1,0 +1,177 @@
+# Implementation plan: restore gateway-managed worktrees under Postgres-backed
+# sessions, scoped by instance ownership rather than by storage engine.
+#
+# Regression. Moving the session store onto [persistence] (3.1.0-rc.5,
+# b902ccf) silently disabled gateway-managed worktrees on every host that
+# selects Postgres. `resolveWorktreeForRequest` (src/index.ts:3037) throws
+# unless `runtime.sessionManager instanceof FileSessionManager`. Nothing in the
+# rc.5 CHANGELOG said so; it was surfaced by an adversarial cross-LLM review,
+# not by the change's own verification. That is the defect being repaired here,
+# and the omission from the CHANGELOG is repaired with it.
+#
+# This is a capability regression, not a cosmetic one: `worktree: true` on any
+# provider request now fails closed on this host.
+
+[meta]
+name = "worktrees under Postgres sessions"
+schema_version = "1.1"
+owner = "verivus-oss"
+target_branch = "fix/npm-publish-tarball-path"
+repairs = "docs/plans/session-manager-postgres-migration.dag.toml"
+acceptance_resource = """
+`worktree: true` succeeds against a Postgres-backed session manager; reuse is
+refused for a foreign host; cleanup removes only worktrees this host owns; a
+mutation that drops the ownership scoping is caught by the shipped suite.
+"""
+invariant_sources = [
+  "src/index.ts",
+  "src/worktree-manager.ts",
+  "src/session-manager.ts",
+  "src/session-manager-pg.ts",
+]
+
+[decision]
+root_cause = """
+The gate is a proxy for the wrong property. The real constraint is NOT the
+storage engine: a git worktree is a LOCAL FILESYSTEM artifact owned by exactly
+one host, and a shared Postgres session store can be read by instances on other
+hosts. The hazard is an instance on host B deleting, or adopting as its cwd, a
+directory that only exists on host A.
+
+`instanceof FileSessionManager` was used as a stand-in for "this session's
+worktree belongs to me". That property is already recorded and already checked:
+
+  - `src/index.ts:2962` stamps `worktreeOwnerHostname` and
+    `worktreeOwnerInstanceId` (from `asyncJobManager.getInstanceId()`) at
+    creation.
+  - `src/index.ts:3061-3072` already refuses reuse unless
+    `ownerHostname === hostname()`, an owner instance id is present, AND
+    `validateManagedWorktreeIdentity` confirms a live gateway-owned Git
+    worktree at that path.
+  - `cleanupSessionWorktree` is already called with
+    `expectedOwnerHostname: hostname()` and `requireOwnerMetadata: true`.
+
+So the safety property is enforced by host ownership plus live Git validation,
+and the engine check adds nothing that those do not already cover. Removing it
+does not weaken the guarantee; it stops a correct guarantee being expressed as
+the wrong predicate.
+"""
+
+instance_vs_host = """
+Reuse is scoped to the HOST, not to the process instance, and that is
+deliberate and preserved. The existing check requires `ownerInstanceId` to be
+PRESENT but does not require it to equal the current instance, because
+`AsyncJobManager.instanceId` is a fresh `randomUUID()` per process
+(src/async-job-manager.ts:1291). Requiring equality would break worktree reuse
+across an ordinary gateway restart on the same host.
+
+The instance id is therefore provenance, not a lease. The host owns the
+filesystem; the instance records who made it. This mirrors the job store, where
+orphan recovery is instance-scoped precisely because a shared store serves
+multiple instances (issue #139).
+"""
+
+pg_tombstones = """
+`PostgreSQLSessionManager.listPendingWorktreeCleanupSessions` and
+`finalizePendingWorktreeCleanup` are stubs returning `[]` and `false`
+(src/session-manager-pg.ts:1529-1536), justified by "worktrees are rejected with
+PostgreSQL persistence". Once worktrees are allowed, those stubs become the new
+failure mode: a tombstoned worktree would never be retried and never finalized.
+
+They must be implemented with a host filter in the QUERY, so an instance can
+only ever see tombstones for worktrees on its own filesystem. A filter applied
+after the fetch would still let a bug act on another host's rows.
+"""
+
+not_doing = """
+NOT reintroducing a blanket startup sweep. Postgres is shared, so a sweep would
+attack other live instances' worktrees; that is the same defect already fixed
+for jobs in issue #139. Recovery stays instance-scoped and lazy.
+"""
+
+[[steps]]
+id = "replace-engine-gate-with-ownership"
+depends_on = []
+actor = "assistant"
+status = "planned"
+action = """
+Delete the `instanceof FileSessionManager` throw in `resolveWorktreeForRequest`
+(src/index.ts:3037). Reuse safety is already carried by the
+`ownerHostname === hostname()` + `validateManagedWorktreeIdentity` check below
+it; assert that path is reached for BOTH managers rather than trusting it.
+
+The narrowed `sessionManager` local currently gets its type from the
+`instanceof`; re-type it against `ISessionManager` so both implementations flow
+through.
+"""
+idempotent = true
+validation = """
+A worktree request against a Postgres-backed runtime creates a worktree; a
+session whose `worktreeOwnerHostname` is another host is still refused with the
+existing same-host error.
+"""
+
+[[steps]]
+id = "implement-pg-tombstones"
+depends_on = ["replace-engine-gate-with-ownership"]
+actor = "assistant"
+status = "planned"
+action = """
+Implement the two stubs on `PostgreSQLSessionManager` against the real
+`sessions` rows, filtering on `metadata->>'worktreeOwnerHostname' = $1` INSIDE
+the SQL so a foreign host's tombstones are never returned to this process.
+`finalizePendingWorktreeCleanup` clears the tombstone keys with a fence on the
+row still being the tombstoned one, matching how the job store fences status
+transitions.
+"""
+idempotent = true
+validation = """
+`*-pg` tests: a tombstone written with this host's name is listed and can be
+finalized; one written with a foreign hostname is invisible to both calls.
+"""
+
+[[steps]]
+id = "register-cleanup-observer-for-both"
+depends_on = ["implement-pg-tombstones"]
+actor = "assistant"
+status = "planned"
+action = """
+`ensureWorktreeSessionCleanup` (src/index.ts:8237) returns early for non-file
+managers. Register the observer for both, keeping `requireOwnerMetadata: true`
+and `expectedOwnerHostname: hostname()` so a foreign-owned worktree is SKIPPED
+rather than removed. Update the doc comment, which currently states the
+restriction as a design rule rather than as the limitation it was.
+"""
+idempotent = true
+validation = "Deleting a Postgres-backed session with an owned worktree removes it; a foreign-owned one is left alone."
+
+[[steps]]
+id = "tests-including-negative-control"
+depends_on = ["register-cleanup-observer-for-both"]
+actor = "assistant"
+status = "planned"
+action = """
+Cover: worktree creation under a Postgres session manager; reuse refused when
+the recorded hostname is foreign; cleanup skipped for a foreign-owned worktree;
+tombstone listing filtered by host.
+
+MANDATORY negative control, per the standing review rule: each test must be
+shown to FAIL against a mutant that removes the scoping it claims to enforce.
+Removing an entry the code already lists proves only self-consistency. Mutate
+the host comparison and confirm the suite goes red.
+"""
+idempotent = true
+validation = "Every added test dies to a mutation of the guard it covers; results recorded in this file."
+
+[[steps]]
+id = "changelog-the-regression"
+depends_on = ["tests-including-negative-control"]
+actor = "assistant"
+status = "planned"
+action = """
+The rc.5 entry claims the session migration's cost is only that transcripts
+stay in SQLite. It omits that the cutover disabled worktrees. Record the
+regression and its repair honestly, rather than only announcing the fix.
+"""
+idempotent = true
+validation = "CHANGELOG names the regression, its blast radius, and the release that carried it."

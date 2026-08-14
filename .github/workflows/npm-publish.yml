@@ -326,6 +326,17 @@ jobs:
       # --ignore-scripts preserves the deliberately stripped release dist that
       # the build job produced. Publishing a prebuilt tarball means npm runs no
       # prepack/prepare hook and reads no repository state.
+      #
+      # The "./" on the tarball path is load-bearing, not style. npm-package-arg
+      # classifies a bare "release/<file>.tgz" as a hosted-git shorthand,
+      # because its file-spec test requires the string to start with "./",
+      # "../", "/", "~/" or a drive letter, and "owner/repo" matches first. The
+      # 3.1.0-rc.5 publish failed exactly here: npm ran
+      #   git ls-remote ssh://git@github.com/release/llm-cli-gateway-3.1.0-rc.5.tgz.git
+      # and exited 128 on a publickey denial, with the tarball sitting correctly
+      # in release/ and its digest already verified. Confirmed against npm
+      # 11.12.1: npa("release/x.tgz").type === "git" while
+      # npa("./release/x.tgz").type === "file".
       - name: Publish
         env:
           DIST_TAG: ${{ needs.build.outputs.dist_tag }}
@@ -334,4 +345,4 @@ jobs:
         run: |
           set -euo pipefail
           echo "Publishing $VERSION under dist-tag: $DIST_TAG"
-          npm publish --ignore-scripts --tag "$DIST_TAG" "release/$TARBALL"
+          npm publish --ignore-scripts --tag "$DIST_TAG" "./release/$TARBALL"

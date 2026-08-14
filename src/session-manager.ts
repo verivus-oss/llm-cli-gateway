@@ -509,13 +509,21 @@ export class FileSessionManager
     delete this.storage.sessions[session.id];
   }
 
-  /** Hidden durable worktree-cleanup tombstones awaiting origin-host retry. */
-  listPendingWorktreeCleanupSessions(): Session[] {
+  /**
+   * Hidden durable worktree-cleanup tombstones awaiting origin-host retry.
+   *
+   * `ownerHostname` is honoured rather than ignored even though this store is
+   * local: a sessions.json restored from a backup taken on another machine
+   * would otherwise offer that machine's worktree paths for deletion here.
+   */
+  listPendingWorktreeCleanupSessions(ownerHostname?: string): Session[] {
     if (this.storageLockDepth === 0) {
-      return this.withStorageLock(() => this.listPendingWorktreeCleanupSessions());
+      return this.withStorageLock(() => this.listPendingWorktreeCleanupSessions(ownerHostname));
     }
-    return Object.values(this.storage.sessions).filter(session =>
-      this.isPendingWorktreeDeletion(session)
+    return Object.values(this.storage.sessions).filter(
+      session =>
+        this.isPendingWorktreeDeletion(session) &&
+        (ownerHostname === undefined || session.metadata?.worktreeOwnerHostname === ownerHostname)
     );
   }
 
@@ -1681,7 +1689,7 @@ export interface ISessionManager {
     identity: SessionGenerationIdentity,
     mutation: SessionCompareAndSetMutation
   ): boolean | Promise<boolean>;
-  listPendingWorktreeCleanupSessions(): Session[] | Promise<Session[]>;
+  listPendingWorktreeCleanupSessions(ownerHostname?: string): Session[] | Promise<Session[]>;
   finalizePendingWorktreeCleanup(session: Session): boolean | Promise<boolean>;
   clearAllSessions(cli?: ProviderType): number | Promise<number>;
 }

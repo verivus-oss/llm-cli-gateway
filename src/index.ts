@@ -49,7 +49,6 @@ import { homedir, hostname } from "os";
 import {
   CLI_TYPES,
   PROVIDER_TYPES,
-  FileSessionManager,
   ISessionManager,
   assertKitSessionManagerStorageHealthy,
   createSessionManager,
@@ -3034,11 +3033,22 @@ export async function resolveWorktreeForRequest(
   } = {}
 ): Promise<ResolvedWorktree> {
   if (!worktreeOpt) return {};
-  if (!(runtime.sessionManager instanceof FileSessionManager)) {
-    throw new Error(
-      "Gateway-managed worktrees require file-backed session persistence on the local filesystem; PostgreSQL-backed sessions fail closed"
-    );
-  }
+  // Deliberately NOT gated on the session storage engine. A git worktree is a
+  // local filesystem artifact owned by exactly one HOST, and that is the
+  // property worth enforcing: a shared Postgres session store is readable by
+  // instances on other hosts, and the hazard is one of them adopting or
+  // deleting a directory that only exists here.
+  //
+  // That hazard is already covered below, and by construction rather than by
+  // engine: reuse requires `ownerHostname === hostname()` plus a live
+  // `validateManagedWorktreeIdentity` against the on-disk Git worktree, and
+  // cleanup runs with `expectedOwnerHostname` / `requireOwnerMetadata`. An
+  // `instanceof FileSessionManager` check added nothing those do not cover, and
+  // it silently disabled worktrees for every Postgres-backed host in 3.1.0-rc.5.
+  //
+  // Host, not instance: `AsyncJobManager.instanceId` is a fresh UUID per
+  // process, so requiring instance equality would break reuse across an
+  // ordinary restart. The instance id is provenance; the host owns the disk.
   const repoRoot = options.repoRoot;
   if (!repoRoot) {
     throw new Error(
@@ -8226,17 +8236,26 @@ function ensureLiveKitSessionCleanup(runtime: GatewayServerRuntime): void {
 }
 
 /**
- * Remove a durable session's gateway-created worktree after the file manager
- * has hidden it behind a durable deletion tombstone. Worktrees are restricted
- * to the local file manager because a shared PostgreSQL deletion observer
- * cannot guarantee that the filesystem-owning instance is alive. Host and
- * instance provenance remain mandatory for file-session cleanup. The manager
- * acknowledges and deletes the tombstone only after verified Git removal.
+ * Remove a durable session's gateway-created worktree after the manager has
+ * hidden it behind a durable deletion tombstone.
+ *
+ * Registered for BOTH session managers. The earlier restriction to the file
+ * manager was a proxy for the property that actually matters, which is that a
+ * worktree lives on exactly one HOST's filesystem. That property is enforced
+ * directly: `cleanupSessionWorktree` runs with `expectedOwnerHostname` and
+ * `requireOwnerMetadata`, so a session owned by another host is SKIPPED rather
+ * than removed, and the Postgres tombstone query filters by hostname in SQL so
+ * a foreign row is never even returned here.
+ *
+ * Expressing it as an engine check instead silently disabled worktrees for
+ * every Postgres-backed host in 3.1.0-rc.5.
+ *
+ * The manager acknowledges and deletes the tombstone only after verified Git
+ * removal.
  */
 function ensureWorktreeSessionCleanup(runtime: GatewayServerRuntime): void {
-  if (!(runtime.sessionManager instanceof FileSessionManager)) return;
-  const fileSessionManager = runtime.sessionManager;
-  const registrar = asSessionRemovalObserverRegistrar(fileSessionManager);
+  const sessionManager = runtime.sessionManager;
+  const registrar = asSessionRemovalObserverRegistrar(sessionManager);
   if (!registrar || worktreeSessionCleanupRegistrations.has(registrar)) return;
   const cleanupAndAcknowledge = async (session: Session): Promise<void> => {
     const removed = await cleanupSessionWorktree(session, runtime.logger, {
@@ -8244,7 +8263,7 @@ function ensureWorktreeSessionCleanup(runtime: GatewayServerRuntime): void {
       requireOwnerMetadata: true,
     });
     if (removed && session.metadata?.worktreeCleanupPendingDeletion === true) {
-      const finalized = fileSessionManager.finalizePendingWorktreeCleanup(session);
+      const finalized = await sessionManager.finalizePendingWorktreeCleanup(session);
       if (!finalized) {
         runtime.logger.warn(
           `Worktree cleanup completed, but session tombstone ${session.id} changed before acknowledgement`
@@ -8254,11 +8273,19 @@ function ensureWorktreeSessionCleanup(runtime: GatewayServerRuntime): void {
   };
   registrar.addSessionRemovalObserver(cleanupAndAcknowledge);
   worktreeSessionCleanupRegistrations.add(registrar);
-  for (const pending of fileSessionManager.listPendingWorktreeCleanupSessions()) {
-    void cleanupAndAcknowledge(pending).catch(error => {
-      runtime.logger.error(`Pending worktree cleanup retry failed for ${pending.id}`, error);
-    });
-  }
+  // Scoped to this host, never a blanket sweep: with a shared Postgres store
+  // other live instances own worktrees in the same table, and a sweep would
+  // attack them. That is the defect already fixed for jobs in issue #139.
+  void (async () => {
+    const pendingSessions = await sessionManager.listPendingWorktreeCleanupSessions(hostname());
+    for (const pending of pendingSessions) {
+      void cleanupAndAcknowledge(pending).catch(error => {
+        runtime.logger.error(`Pending worktree cleanup retry failed for ${pending.id}`, error);
+      });
+    }
+  })().catch(error => {
+    runtime.logger.error("Pending worktree cleanup enumeration failed", error);
+  });
 }
 
 function forgetLiveKitNativeHandle(jobManager: AsyncJobManager, gatewaySessionId: string): void {

@@ -281,14 +281,66 @@ describe("PostgreSQLSessionManager", () => {
     });
   });
 
-  it("fails closed before creating a worktree for PostgreSQL-backed sessions", async () => {
-    const session = await manager.createSession("claude", "PG worktree rejection");
+  // Worktrees used to fail closed for ANY Postgres-backed session. That gate
+  // was an engine check standing in for a host-ownership check, and it silently
+  // removed the capability from every Postgres host in 3.1.0-rc.5. The property
+  // that actually matters is enforced below: a worktree recorded as belonging
+  // to a different host is refused, whatever the storage engine.
+  it("refuses to reuse a worktree recorded as owned by another host", async () => {
+    const session = await manager.createSession("claude", "foreign worktree");
+    await manager.updateSessionMetadata(session.id, {
+      worktreePath: "/tmp/not-this-host/wt",
+      worktreeName: "wt",
+      worktreeOwnerHostname: "some-other-host.invalid",
+      worktreeOwnerInstanceId: "11111111-2222-3333-4444-555555555555",
+    });
     const runtime = resolveGatewayServerRuntime({ sessionManager: manager });
 
     await expect(
       resolveWorktreeForRequest(true, session.id, runtime, { repoRoot: process.cwd() })
-    ).rejects.toThrow(/require file-backed session persistence/);
-    expect((await manager.getSession(session.id))?.metadata?.worktreePath).toBeUndefined();
+    ).rejects.toThrow(/same-host gateway-owned Git worktree/);
+  });
+
+  it("scopes pending worktree tombstones to this host, in the query", async () => {
+    // A shared store holds other instances' rows. A foreign tombstone must
+    // never be returned into this process at all, so the filter is asserted
+    // through the public surface rather than by reading the SQL.
+    const mine = await manager.createSession("claude", "mine");
+    const theirs = await manager.createSession("claude", "theirs");
+    await manager.updateSessionMetadata(mine.id, {
+      worktreeCleanupPendingDeletion: true,
+      worktreeOwnerHostname: "host-a.invalid",
+    });
+    await manager.updateSessionMetadata(theirs.id, {
+      worktreeCleanupPendingDeletion: true,
+      worktreeOwnerHostname: "host-b.invalid",
+    });
+
+    const listed = await manager.listPendingWorktreeCleanupSessions("host-a.invalid");
+    expect(listed.map(s => s.id)).toEqual([mine.id]);
+    expect(await manager.listPendingWorktreeCleanupSessions(undefined)).toEqual([]);
+  });
+
+  it("refuses to finalize a tombstone owned by another host", async () => {
+    const session = await manager.createSession("claude", "foreign tombstone");
+    await manager.updateSessionMetadata(session.id, {
+      worktreeCleanupPendingDeletion: true,
+      worktreeOwnerHostname: "host-b.invalid",
+    });
+    const current = (await manager.getSession(session.id))!;
+
+    // Same row, but presented as if this host owned it: the DELETE is fenced on
+    // the stored hostname, so it must not match.
+    const spoofed = {
+      ...current,
+      metadata: { ...current.metadata, worktreeOwnerHostname: "host-a.invalid" },
+    };
+    expect(await manager.finalizePendingWorktreeCleanup(spoofed)).toBe(false);
+    expect(await manager.getSession(session.id)).not.toBeNull();
+
+    // The true owner can finalize it.
+    expect(await manager.finalizePendingWorktreeCleanup(current)).toBe(true);
+    expect(await manager.getSession(session.id)).toBeNull();
   });
 
   //──────────────────────────────────────────────────────────────────────────

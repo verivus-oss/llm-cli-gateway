@@ -2034,6 +2034,69 @@ describe("Session Migration", () => {
     expect(migrated?.lastUsedAt).toBeDefined();
   });
 
+  // `toBeDefined()` above cannot fail on the defect that motivated this test:
+  // the importer stamped `new Date()` for both columns, so a real 3,590-session
+  // import collapsed 31 distinct days of history into a 22-second window and
+  // every row was still "defined". These assert EXACT equality against
+  // timestamps old enough that the import clock could never produce them.
+  it("writes the SOURCE timestamps, not the import clock", async () => {
+    const id = randomUUID();
+    const createdAt = "2026-06-12T05:26:40.564Z";
+    const lastUsedAt = "2026-07-17T10:39:19.952Z";
+    writeFileSync(
+      testFilePath,
+      JSON.stringify({
+        sessions: {
+          [id]: { id, cli: "claude", createdAt, lastUsedAt, description: "historical" },
+        },
+        activeSession: {},
+      }),
+      "utf8"
+    );
+
+    const result = await migrateFromFile(testFilePath, pgManager);
+    expect(result.migrated).toBe(1);
+    expect(result.failed).toBe(0);
+
+    const migrated = await pgManager.getSession(id);
+    expect(new Date(migrated!.createdAt).toISOString()).toBe(createdAt);
+    expect(new Date(migrated!.lastUsedAt).toISOString()).toBe(lastUsedAt);
+  });
+
+  // The reject path had no coverage at all, so deleting the validation stayed
+  // green. Session age drives TTL cleanup and last-used drives ordering, so a
+  // row imported with a substituted clock value is silently wrong forever.
+  it("rejects a record whose timestamps are unparseable rather than substituting the clock", async () => {
+    const id = randomUUID();
+    writeFileSync(
+      testFilePath,
+      JSON.stringify({
+        sessions: {
+          [id]: {
+            id,
+            cli: "claude",
+            createdAt: "not-a-timestamp",
+            lastUsedAt: "2026-07-17T10:39:19.952Z",
+            description: "malformed",
+          },
+        },
+        activeSession: {},
+      }),
+      "utf8"
+    );
+
+    const result = await migrateFromFile(testFilePath, pgManager);
+    expect(result.migrated).toBe(0);
+    expect(result.failed).toBeGreaterThan(0);
+    expect(await pgManager.getSession(id)).toBeNull();
+    // Assert the PLAN rejected it, not that Postgres happened to choke on the
+    // value. Without this line the case passes either way, which is how the
+    // first version of this test let the deleted validation survive mutation:
+    // "no bad row" is the same observable outcome for a pre-flight reject and
+    // for a database error, and only one of them is the behaviour under test.
+    expect(result.errors).toContain("Skipped invalid session record");
+  });
+
   it("should handle sessions for all provider types", async () => {
     const fileManager = new FileSessionManager(testFilePath);
     const claudeSession = fileManager.createSession("claude", "Claude");
