@@ -4,6 +4,50 @@ All notable changes to the llm-cli-gateway project.
 
 ## [Unreleased]
 
+## [3.1.0-rc.5] - 2026-08-14: sessions follow [persistence], three stores become two
+
+### Changed
+
+- **The session store now follows `[persistence]`, the same selector the job
+  store and validation runs already use.** It previously had a selector of its
+  own, `DATABASE_URL`, and nothing set it, so `createSessionManager` took the
+  file branch on hosts whose `[persistence].backend` was `"postgres"` and the
+  sessions stayed in `~/.llm-cli-gateway/sessions.json` while every other
+  subsystem was on Postgres. One database, two ways to select it, and the
+  subsystem nobody wired up kept its own file.
+
+  `DATABASE_URL` remains as a deprecated override that warns once. It is refused
+  when it disagrees with `[persistence].dsn`, because honouring it would put
+  sessions in one database and jobs in another, which is the split this change
+  removes. That refusal follows the precedent set in 3.1.0-rc.3, where a
+  variable named for one subsystem could rewrite another's explicit backend.
+
+  This does not complete the single-store goal. Transcripts remain in SQLite
+  behind a deliberate gate: prompt and response bodies do not move into Postgres
+  until the sequence in `docs/plans/postgres-security-hardening.md` section 6 is
+  complete through its http principal-granularity step. Three stores become two,
+  not one.
+
+### Fixed
+
+- **`migrate-sessions.ts` discarded every source timestamp.**
+  `FileSessionMigrationRecord` carried no `createdAt` / `lastUsedAt` fields, so
+  `importFileSessionMigration` had nothing to write and stamped
+  `new Date()` for both. A real 3,590-session import collapsed 31 distinct days
+  of history into a single 22-second window.
+
+  The damage was silent and downstream: `cleanup_expired_sessions(max_age_days)`
+  sees a two-month-old session as minutes old and never reaps it, ordering by
+  `last_used_at` (and the `idx_sessions_cli_last_used` index) becomes arbitrary,
+  and most-recent-session resolution picks effectively at random. The source
+  timestamps are now carried on the record and written by the INSERT, and a row
+  whose timestamps are not parseable is rejected rather than imported with the
+  clock's value.
+
+  `session_generation` is still regenerated on import rather than carried over.
+  That is deliberate: it is a concurrency fence, and a fresh fence after a store
+  change invalidates any stale holder, which fails closed.
+
 ## [3.1.0-rc.4] - 2026-08-14: upstream deprecations are applied, not reviewed
 
 ### Changed
