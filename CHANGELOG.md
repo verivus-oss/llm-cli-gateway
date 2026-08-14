@@ -6,6 +6,29 @@ All notable changes to the llm-cli-gateway project.
 
 ### Fixed
 
+- **An explicit non-Postgres backend plus `DATABASE_URL` split the stores.**
+  `loadConfig` honoured `DATABASE_URL` whenever `[persistence].backend` was not
+  `"postgres"`, so an operator who wrote down `backend = "sqlite"`, `"memory"`
+  or `"none"` and still had the variable set got **sessions in Postgres while
+  jobs stayed on the configured backend**: precisely the split the selector
+  exists to prevent, and the inverse of the rule recorded in the migration
+  plan, that an explicit backend wins and the override is refused. All three
+  cases were reproduced with a runtime probe. Found by adversarial cross-LLM
+  review of 3.1.0-rc.5, not by that change's own verification.
+
+  `PersistenceConfig` now carries `explicitBackend`, read from the config FILE
+  rather than the merged result, because the legacy `LLM_GATEWAY_LOGS_DB` /
+  `LLM_GATEWAY_JOBS_DB` variables synthesise a backend and would otherwise make
+  every host look explicit. An explicit non-Postgres backend refuses
+  `DATABASE_URL` with a warning naming the conflict.
+
+  `DATABASE_URL` is still honoured when **no** persistence is configured at
+  all, which is the one case where sessions and jobs can still differ (sessions
+  on Postgres, jobs on the sqlite default). That is the pre-`[persistence]`
+  behaviour of deployments that never adopted the config file, and refusing it
+  would silently move their sessions from Postgres to an empty file store. It
+  warns, and adopting `[persistence]` resolves it.
+
 - **Gateway-managed worktrees stopped working on every Postgres-backed host in
   3.1.0-rc.5, and the release notes did not say so.** `resolveWorktreeForRequest`
   refused unless the session manager was `FileSessionManager`, so moving the

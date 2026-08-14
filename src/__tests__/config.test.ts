@@ -76,7 +76,13 @@ describe("config", () => {
       expect(config.sessionTtl).toBe(DEFAULT_SESSION_TTL_SECONDS);
     });
 
-    it("should include database config when DATABASE_URL is set", () => {
+    it("should include database config when DATABASE_URL is set and no backend is declared", () => {
+      // The shared test harness pins an explicit [persistence] backend for
+      // isolation, and an explicit backend now refuses DATABASE_URL rather than
+      // letting sessions and jobs land in different stores. Point at a config
+      // that declares no backend, which is the legacy-compatibility case this
+      // test is actually about.
+      vi.stubEnv("LLM_GATEWAY_CONFIG", withConfigToml("# no persistence section\n"));
       vi.stubEnv("DATABASE_URL", "postgresql://localhost:5432/test");
       const config = loadConfig();
       expect(config.database).toBeDefined();
@@ -379,16 +385,36 @@ describe("loadConfig: [persistence] is the single session-store selector", () =>
     expect(warn.mock.calls[0][0]).toMatch(/DATABASE_URL/);
   });
 
-  it("still honours DATABASE_URL when no Postgres persistence is configured", () => {
-    // Deprecated, not removed: an existing deployment that set only the
-    // variable keeps working, and is told what to move to.
-    vi.stubEnv("LLM_GATEWAY_CONFIG", withConfigToml('[persistence]\nbackend = "sqlite"\n'));
+  it("still honours DATABASE_URL when NO persistence is configured at all", () => {
+    // Deprecated, not removed: a deployment that predates [persistence] has
+    // only this variable, so it keeps working and is told what to move to.
+    // "Nothing configured" is the ONLY case where it is honoured.
+    vi.stubEnv("LLM_GATEWAY_CONFIG", withConfigToml("# no persistence section\n"));
     vi.stubEnv("DATABASE_URL", PG);
     const warn = vi.fn();
-    const config = loadConfig(loadPersistenceConfig(noopLogger), { ...noopLogger, warn });
+    const persistence = loadPersistenceConfig(noopLogger);
+    expect(persistence.explicitBackend).toBe(false);
+    const config = loadConfig(persistence, { ...noopLogger, warn });
     expect(config.database?.connectionString).toBe(PG);
     expect(config.databaseSource).toBe("env");
     expect(warn).toHaveBeenCalledOnce();
+  });
+
+  // Found by adversarial review (Codex) and reproduced with a runtime probe:
+  // an EXPLICIT non-postgres backend plus DATABASE_URL put sessions in Postgres
+  // while jobs stayed on the configured backend. That is precisely the split
+  // this selector exists to prevent, and the previous version of the test above
+  // actively required it. Reachable with sqlite, memory and none.
+  it.each(["sqlite", "none"])('refuses DATABASE_URL under an explicit backend = "%s"', backend => {
+    vi.stubEnv("LLM_GATEWAY_CONFIG", withConfigToml(`[persistence]\nbackend = "${backend}"\n`));
+    vi.stubEnv("DATABASE_URL", PG);
+    const warn = vi.fn();
+    const persistence = loadPersistenceConfig(noopLogger);
+    expect(persistence.explicitBackend).toBe(true);
+    const config = loadConfig(persistence, { ...noopLogger, warn });
+    expect(config.database).toBeUndefined();
+    expect(warn).toHaveBeenCalledOnce();
+    expect(warn.mock.calls[0][0]).toMatch(/explicitly configured/);
   });
 
   it("warns once, not on every call", () => {
