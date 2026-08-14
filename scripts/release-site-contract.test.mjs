@@ -168,8 +168,17 @@ describe("release to public Pages contract", () => {
     expect(publishJob).toContain("actions/download-artifact");
     expect(publishJob).toContain("Verify tarball digest");
     expect(publishJob).toContain('if [ "$ACTUAL" != "$EXPECTED_SHA" ]');
+    // The "./" is load-bearing and is asserted deliberately. npm-package-arg
+    // classifies a bare "release/<file>.tgz" as a hosted-git shorthand, because
+    // its file-spec test requires a leading "./", "../", "/", "~/" or drive
+    // letter and "owner/repo" matches first. The 3.1.0-rc.5 publish failed
+    // exactly there: npm ran `git ls-remote ssh://git@github.com/release/
+    // llm-cli-gateway-3.1.0-rc.5.tgz.git` and exited 128 on a publickey denial,
+    // with the tarball present and its digest already verified. Verified
+    // against npm 11.12.1: npa("release/x.tgz").type === "git" while
+    // npa("./release/x.tgz").type === "file".
     expect(publishJob).toContain(
-      'npm publish --ignore-scripts --tag "$DIST_TAG" "release/$TARBALL"'
+      'npm publish --ignore-scripts --tag "$DIST_TAG" "./release/$TARBALL"'
     );
   });
 
