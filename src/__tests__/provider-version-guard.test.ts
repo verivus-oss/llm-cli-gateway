@@ -24,7 +24,7 @@ const REAL_INSTALLED: Record<string, string> = {
   claude: "2.1.229 (Claude Code)",
   codex: "codex-cli 0.147.0",
   // agy reports a bare version with no product prefix, unlike codex and mistral.
-  gemini: "1.1.12",
+  gemini: "1.1.13",
   grok: "grok 1.0.3 (1a29d5bc12)",
   mistral: "vibe 2.24.1",
   devin: "devin 3000.4.16 (355c3c9e)",
