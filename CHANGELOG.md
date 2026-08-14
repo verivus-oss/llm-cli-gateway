@@ -4,6 +4,38 @@ All notable changes to the llm-cli-gateway project.
 
 ## [Unreleased]
 
+### Fixed
+
+- **Gateway-managed worktrees stopped working on every Postgres-backed host in
+  3.1.0-rc.5, and the release notes did not say so.** `resolveWorktreeForRequest`
+  refused unless the session manager was `FileSessionManager`, so moving the
+  session store onto `[persistence]` silently removed the capability:
+  `worktree: true` on any provider request failed closed. It was found by an
+  adversarial cross-LLM review, not by the change's own verification.
+
+  The gate was an engine check standing in for the property that actually
+  matters. A git worktree is a local filesystem artifact owned by exactly one
+  HOST, and the hazard with a shared store is an instance on another host
+  adopting or deleting a directory that only exists here. That hazard was
+  already covered independently of the storage engine: reuse requires
+  `worktreeOwnerHostname === hostname()` plus a live Git validation of the
+  on-disk worktree, and cleanup runs with `expectedOwnerHostname` and
+  `requireOwnerMetadata`, so a foreign-owned worktree is skipped rather than
+  removed.
+
+  Worktrees now work under both session managers, scoped by host ownership.
+  `PostgreSQLSessionManager` implements the cleanup-tombstone surface for real
+  rather than returning `[]` / `false`, with the hostname filter applied **in
+  the SQL** so another host's rows are never returned into this process at all.
+  Recovery stays lazy and instance-scoped; no blanket startup sweep, which on a
+  shared store would attack other live instances (the defect already fixed for
+  jobs in issue #139).
+
+  Scoping is by host and not by process instance, deliberately:
+  `AsyncJobManager.instanceId` is a fresh UUID per process, so requiring
+  instance equality would break worktree reuse across an ordinary gateway
+  restart. The instance id is provenance; the host owns the disk.
+
 ## [3.1.0-rc.5] - 2026-08-14: sessions follow [persistence], three stores become two
 
 ### Changed

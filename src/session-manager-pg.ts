@@ -1526,13 +1526,51 @@ export class PostgreSQLSessionManager
     return result.rowCount || 0;
   }
 
-  /** Gateway-managed worktrees are rejected with PostgreSQL persistence. */
-  async listPendingWorktreeCleanupSessions(): Promise<Session[]> {
-    return [];
+  /**
+   * Hidden durable worktree-cleanup tombstones awaiting origin-host retry.
+   *
+   * A git worktree is a local filesystem artifact, and this store is shared:
+   * instances on other hosts read the same `sessions` rows. The hostname filter
+   * therefore lives in the SQL, not in a post-fetch `.filter()`. Applied after
+   * the fetch, a foreign host's tombstones would already be in this process's
+   * memory, one bug away from being acted on; applied in the query, they are
+   * never returned at all.
+   *
+   * @param ownerHostname This instance's hostname; only its own rows are listed.
+   */
+  async listPendingWorktreeCleanupSessions(ownerHostname?: string): Promise<Session[]> {
+    if (!ownerHostname) return [];
+    await this.ensureSessionSchema();
+    const result = await this.pool.query<Session>(
+      `SELECT id, cli, description, metadata, created_at AS "createdAt", last_used_at AS "lastUsedAt", owner_principal AS "ownerPrincipal", session_generation AS generation
+       FROM sessions
+       WHERE metadata->>'worktreeCleanupPendingDeletion' = 'true'
+         AND metadata->>'worktreeOwnerHostname' = $1`,
+      [ownerHostname]
+    );
+    return result.rows;
   }
 
-  /** PostgreSQL never owns filesystem-local worktree cleanup tombstones. */
-  async finalizePendingWorktreeCleanup(_session: Session): Promise<boolean> {
-    return false;
+  /**
+   * Finalize an exact tombstone only after verified worktree removal.
+   *
+   * Fenced on the generation AND on the row still being a tombstone owned by
+   * the same host, so a concurrent instance that re-created or adopted the
+   * session cannot have its row deleted by a late acknowledgement from here.
+   * This mirrors the status fencing the job store uses for the same reason.
+   */
+  async finalizePendingWorktreeCleanup(session: Session): Promise<boolean> {
+    await this.ensureSessionSchema();
+    const ownerHostname = session.metadata?.worktreeOwnerHostname;
+    if (typeof ownerHostname !== "string" || ownerHostname.length === 0) return false;
+    const result = await this.pool.query(
+      `DELETE FROM sessions
+       WHERE id = $1
+         AND session_generation IS NOT DISTINCT FROM $2
+         AND metadata->>'worktreeCleanupPendingDeletion' = 'true'
+         AND metadata->>'worktreeOwnerHostname' = $3`,
+      [session.id, session.generation ?? null, ownerHostname]
+    );
+    return (result.rowCount ?? 0) === 1;
   }
 }
