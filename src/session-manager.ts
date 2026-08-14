@@ -523,8 +523,7 @@ export class FileSessionManager
     return Object.values(this.storage.sessions).filter(
       session =>
         this.isPendingWorktreeDeletion(session) &&
-        (ownerHostname === undefined ||
-          session.metadata?.worktreeOwnerHostname === ownerHostname)
+        (ownerHostname === undefined || session.metadata?.worktreeOwnerHostname === ownerHostname)
     );
   }
 
