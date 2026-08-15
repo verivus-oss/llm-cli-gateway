@@ -17,7 +17,11 @@ vi.mock("node:child_process", async importOriginal => {
 import type { AsyncJobSnapshot } from "../async-job-manager.js";
 import type { ProviderRuntimeStatus } from "../provider-status.js";
 import type { ValidationProvider } from "../validation-normalizer.js";
-import { startReviewRun, startValidationRun } from "../validation-orchestrator.js";
+import {
+  startJudgeSynthesis,
+  startReviewRun,
+  startValidationRun,
+} from "../validation-orchestrator.js";
 import { assertUpstreamCliArgs } from "../upstream-contracts.js";
 
 // Issue #270: cursor and devin failed on every review seat.
@@ -422,5 +426,89 @@ describe("issue #270: devin sandbox preflight", () => {
     // not fail in the direction that matters. Pin it to exactly one: the default
     // probe must run, and must run only once across three review runs.
     expect(bwrapProbes.length).toBe(1);
+  });
+});
+
+describe("issue #270 round 3: the judge is a second dispatch site", () => {
+  // Found independently by both reviewers. startJudgeSynthesis calls
+  // dispatchProviderJob directly, so it bypassed BOTH launch gates: a cursor
+  // review judge never received --trust and died with Workspace Trust Required
+  // even on a registered workspace, and a devin judge on a bwrap-less Linux host
+  // failed at spawn. Same missed-caller shape as the two rounds before it, which
+  // is why the preflight is now a required argument of dispatchProviderJob
+  // rather than something each caller remembers.
+
+  const judge = (
+    provider: ValidationProvider,
+    deps: Record<string, unknown>,
+    extra: Record<string, unknown> = {}
+  ) => {
+    const fake = makeManager();
+    const synthesis = startJudgeSynthesis(
+      {
+        asyncJobManager: fake.manager as never,
+        getProviderRuntimeStatus: runtime,
+        validationRunStore: fake.validationRunStore as never,
+        ...deps,
+      } as never,
+      {
+        question: "review this",
+        providerResults: [
+          {
+            provider: "codex",
+            model: "c",
+            status: "completed",
+            verdict: "approve",
+            rationale: "ok",
+            risks: [],
+            rawJobReference: {
+              jobId: "j1",
+              correlationId: "c1",
+              statusTool: "job_status",
+              resultTool: "job_result",
+            },
+            error: null,
+          },
+        ],
+        judgeProvider: provider,
+        validationId: "validation-270",
+        cwd: "/authorized/repository",
+        review: true,
+        reviewEvidence: [{ schemaVersion: "review-judge-evidence.v1" }],
+        ...extra,
+      } as never
+    );
+    return { synthesis, calls: fake.calls };
+  };
+
+  it("emits --trust for a cursor judge on a registered repository", () => {
+    const { calls } = judge("cursor", { isProviderWorkspacePath: () => true });
+    expect(calls[0].cli).toBe("cursor");
+    expect(calls[0].args).toContain("--trust");
+  });
+
+  it("SKIPS a cursor judge on an unregistered repository instead of launching it", () => {
+    const { synthesis, calls } = judge("cursor", { isProviderWorkspacePath: () => false });
+    expect(synthesis.status).toBe("skipped");
+    expect(synthesis.note).toMatch(/not a workspace registered for cursor/i);
+    expect(calls).toHaveLength(0);
+  });
+
+  it("honours trustCursorWorkspace for the judge, so the opt-in reaches synthesis", () => {
+    const { calls } = judge(
+      "cursor",
+      { isProviderWorkspacePath: () => false },
+      { trustCursorWorkspace: true }
+    );
+    expect(calls[0].args).toContain("--trust");
+  });
+
+  it("skips a devin judge when bubblewrap is missing rather than failing at spawn", () => {
+    withPlatform("linux", () => {
+      const { synthesis, calls } = judge("devin", { hasBubblewrap: () => false });
+      expect(synthesis.status).toBe("skipped");
+      expect(synthesis.note).toMatch(/bubblewrap/i);
+      expect(calls).toHaveLength(0);
+    });
   });
 });

@@ -134,6 +134,24 @@ function resolveReviewerStatus(
  * `ApiRequest` built by the SAME `prepareApiRequest` the direct api_<name>_request
  * tools use; CLI providers keep the argv `startJob` path.
  */
+/**
+ * The result of every gate that must be cleared before a provider seat is
+ * allowed to launch. See providerPreflight.
+ *
+ * dispatchProviderJob takes this as a REQUIRED argument rather than reading it
+ * from options, so a new dispatch site cannot silently inherit a default and
+ * skip the gates. Round 3 of review found exactly that: the review judge had
+ * its own dispatch call and therefore bypassed both preflights, which is the
+ * third time in this series that a fix landed on one caller and missed another.
+ * The type is the guard now, not vigilance.
+ */
+interface ProviderPreflight {
+  /** Whether cursor may be told to trust the review cwd. */
+  trusted: boolean;
+  /** Present when this seat must be skipped instead of launched. */
+  skipReason?: string;
+}
+
 function dispatchProviderJob(
   deps: ValidationOrchestratorDeps,
   provider: ValidationProvider,
@@ -145,9 +163,15 @@ function dispatchProviderJob(
     forceRefresh?: boolean;
     deferLaunch?: boolean;
     validationAdmission?: ValidationJobAdmission;
-    trustWorkspace?: boolean;
-  } = {}
+  },
+  preflight: ProviderPreflight
 ): StartJobOutcome {
+  if (preflight.skipReason) {
+    // Defence in depth. Callers are expected to return a skipped result before
+    // reaching here; if one forgets, refuse rather than launch a seat that the
+    // gates just rejected.
+    throw new Error(`Provider preflight not cleared for ${provider}: ${preflight.skipReason}`);
+  }
   const api = findApiReviewer(deps, provider);
   if (api) {
     const apiProvider = createApiProvider(api.name, api.kind);
@@ -174,7 +198,7 @@ function dispatchProviderJob(
     provider,
     prompt,
     options.review ?? false,
-    options.trustWorkspace ?? false
+    preflight.trusted
   );
   assertUpstreamCliArgs(cli, invocation.args);
   const cwd = options.cwd ?? deps.resolveProviderCwd?.(cli);
@@ -494,6 +518,13 @@ export function startJudgeSynthesis(
     review?: boolean;
     /** Exact terminal durable output, populated only by owned review-run binding. */
     reviewEvidence?: DurableReviewJudgeEvidence[];
+    /**
+     * Issue #270: accept cursor trusting an unregistered repository for this
+     * judge. Same decision, and same consequence, as the roster field on
+     * StartReviewInput; see cursorTrustGap. Without it a cursor judge on an
+     * unregistered repository is skipped rather than launched untrusted.
+     */
+    trustCursorWorkspace?: boolean;
   }
 ): ValidationRunReport["synthesis"] {
   if (input.review && !input.validationId) {
@@ -536,6 +567,26 @@ export function startJudgeSynthesis(
       judgeModel: input.judgeProvider,
       rawJobReference: null,
       note: `${runtime.displayName} was selected as judge but is not installed.`,
+    };
+  }
+
+  // Round 3 of review, found independently by two reviewers: the judge is a
+  // SECOND dispatch site, so it bypassed both launch gates entirely. A cursor
+  // review judge never received --trust and died with Workspace Trust Required
+  // even on a registered workspace, and a devin judge on a bwrap-less Linux
+  // host failed at spawn. The gates belong to every seat, not to the roster.
+  const judgePreflight = providerPreflight(deps, input.judgeProvider, {
+    review: input.review,
+    cwd: input.cwd,
+    trustWorkspaceOverride: input.trustCursorWorkspace,
+  });
+  if (judgePreflight.skipReason) {
+    if (input.review) markReviewJudgeSkipped(deps, input.validationId!, input.judgeProvider);
+    return {
+      status: "skipped",
+      judgeModel: input.judgeProvider,
+      rawJobReference: null,
+      note: `${runtime.displayName} was selected as judge but cannot run: ${judgePreflight.skipReason}`,
     };
   }
 
@@ -584,7 +635,8 @@ export function startJudgeSynthesis(
               },
             }
           : {}),
-      }
+      },
+      judgePreflight
     );
     snapshot = outcome.snapshot;
     deferredLaunch = outcome.deferredLaunch;
@@ -658,21 +710,15 @@ function startProviderJob(
   // Same shape as the not-installed skip above, and for the same reason: a seat
   // the gateway already knows cannot run is skipped before a job exists, rather
   // than launched and left to fail at spawn.
-  const sandboxGap = reviewSandboxGap(deps, provider, options.review === true);
-  if (sandboxGap) {
-    return normalizeSkippedProvider(provider, sandboxGap);
-  }
-
-  // Same shape again: a cursor review seat on a directory the operator has not
-  // registered for cursor is skipped rather than launched without --trust,
-  // which cursor would refuse anyway. See cursorTrustGap.
-  const cursorTrust = cursorTrustGap(deps, provider, {
+  // Every launch gate, in one call. Skipping happens BEFORE the try below, so a
+  // gate can never be turned into a call-level abort by the deferLaunch rethrow.
+  const preflight = providerPreflight(deps, provider, {
     review: options.review,
     cwd: options.cwd,
     trustWorkspaceOverride: options.trustWorkspace,
   });
-  if (cursorTrust.skipReason) {
-    return normalizeSkippedProvider(provider, cursorTrust.skipReason);
+  if (preflight.skipReason) {
+    return normalizeSkippedProvider(provider, preflight.skipReason);
   }
 
   const warning =
@@ -686,7 +732,8 @@ function startProviderJob(
       provider,
       prompt,
       `validation-${validationId}-${provider}`,
-      { ...options, trustWorkspace: cursorTrust.trusted }
+      options,
+      preflight
     );
     if (options.deferLaunch) {
       if (!outcome.deferredLaunch) {
@@ -1047,6 +1094,24 @@ function cursorTrustGap(
   };
 }
 
+/**
+ * Every gate a provider seat must clear before launch, in one place because
+ * there is more than one dispatch site and there will be more.
+ *
+ * Returns a skipReason when the seat cannot run at all, so the caller can
+ * degrade it to `skipped` rather than aborting the whole run, and `trusted`
+ * when cursor may be told to trust the review cwd.
+ */
+function providerPreflight(
+  deps: ValidationOrchestratorDeps,
+  provider: ValidationProvider,
+  options: { review?: boolean; cwd?: string; trustWorkspaceOverride?: boolean }
+): ProviderPreflight {
+  const sandboxGap = reviewSandboxGap(deps, provider, options.review === true);
+  if (sandboxGap) return { trusted: false, skipReason: sandboxGap };
+  return cursorTrustGap(deps, provider, options);
+}
+
 function buildProviderInvocation(
   provider: ValidationProvider,
   prompt: string,
@@ -1081,23 +1146,11 @@ function buildProviderInvocation(
     // "Workspace Trust Required" whenever the reviewed repository was not
     // already in that host's trusted_folders.toml.
     //
-    // What the grant actually covers, stated precisely because an earlier
-    // version of this comment claimed a boundary the code does not enforce:
-    // the review path always passes a cwd (startReviewRun, and the judge in
-    // validation-tools.ts), so the neutral temp directory in src/executor.ts is
-    // never the cwd here; that applies to the ask path, which gets no --trust.
-    // The cwd is the repository the caller selected for review. That is a
-    // registered workspace only when the caller named one. A local caller
-    // passing workingDir gets any git root it can reach, with no check that
-    // cursor appears in a workspace providers list, so the boundary is operator
-    // intent, not registration.
-    //
-    // Residual risk accepted here: a trusted folder is also where cursor picks
-    // up project rules, AGENTS.md/CLAUDE.md and project MCP config, so reviewing
-    // a repository whose contents are not trusted grants that repository some
-    // influence over the reviewer. It stays paired with --mode plan and
-    // --sandbox enabled, and ordinary cursor_request still demands an explicit
-    // trust flag from the caller rather than inheriting this one.
+    // `trustWorkspace` is decided by cursorTrustGap, NOT here. This arm only
+    // emits what it was given. Do not restate the boundary in this comment: two
+    // earlier versions of it described a rule the code did not implement, and
+    // the second survived a round of review because the wording sounded
+    // careful. The rule lives in cursorTrustGap and isProviderWorkspacePath.
     const args = [
       "--print",
       "--mode",

@@ -317,6 +317,7 @@ import {
   describeWorkspace,
   describeWorkspaceRemote,
   getWorkspace,
+  isProviderWorkspacePath,
   loadWorkspaceRegistry,
   registerExistingWorkspace,
   resolveWorkspaceForProvider,
@@ -16985,30 +16986,11 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
         return resolveWorkspaceForProvider(runtime.workspaces, provider).cwd;
       },
       // Issue #270: the ONLY place cursor review trust is granted automatically.
-      // True when cwd is a registered [[workspaces.repos]] path whose providers
-      // include this provider, or a gateway worktree beneath one. Path
-      // containment covers the worktree case, because a gateway worktree lives
-      // at <repoRoot>/.worktrees/<uuid>. Anything else needs an explicit
-      // trustCursorWorkspace, because trust also lets the reviewed repository
-      // instruct the reviewer.
-      isProviderWorkspacePath: (provider, cwd) => {
-        let candidate: string;
-        try {
-          candidate = realpathSync(resolve(cwd));
-        } catch {
-          return false;
-        }
-        return runtime.workspaces.repos.some(repo => {
-          if (!repo.providers.includes(provider)) return false;
-          let root: string;
-          try {
-            root = realpathSync(resolve(repo.path));
-          } catch {
-            return false;
-          }
-          return candidate === root || candidate.startsWith(`${root}${sep}`);
-        });
-      },
+      // The rule itself lives in workspace-registry.ts so it can be tested
+      // directly; an earlier version was inline here and every test injected a
+      // fake, so nothing exercised the real predicate.
+      isProviderWorkspacePath: (provider, cwd) =>
+        isProviderWorkspacePath(runtime.workspaces, provider, cwd),
       resolveReviewRepository: ({
         workingDir,
         workspace,
