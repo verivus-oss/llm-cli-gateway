@@ -80,13 +80,17 @@ describe("issue #272: the inert workspace key warns instead of misleading", () =
     // Round 1 (codex) refuted the first wording, which said workingDir is
     // constrained by "workspace registration and neutral-workspace handling in
     // the executor". Neither holds for the common local case: with no workspace
-    // and an explicit workingDir, index.ts resolves it with realpathSync and
-    // uses it as given. That replaced one misleading statement with another, so
-    // the split by transport is asserted here rather than the keywords.
+    // and an explicit workingDir, index.ts resolves it with realpathSync.
+    //
+    // Round 2 (codex) refuted the REPLACEMENT too. "The local caller gets that
+    // directory as given" is false for review_changes, which sends an absolute
+    // workingDir through resolveLocalReviewRepositoryRoot (index.ts) and
+    // promotes a nested directory to the containing Git worktree root
+    // (review-scope.ts). Two wrong sentences in a row is why the exception is
+    // now asserted explicitly rather than trusted to stay true.
     expect(msg).toMatch(/remote HTTP caller always requires a registered workspace/i);
-    expect(msg).toMatch(
-      /local caller passing an explicit workingDir gets that directory as given/i
-    );
+    expect(msg).toMatch(/local caller's explicit path is accepted directly/i);
+    expect(msg).toMatch(/review_changes promotes it to the containing Git repository root/i);
   });
 
   it("the config still LOADS with the key present", () => {
