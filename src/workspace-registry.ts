@@ -304,9 +304,12 @@ export function loadWorkspaceRegistry(
       logWarn(
         logger,
         "[workspaces].allow_unregistered_working_dir has NO EFFECT and is ignored. " +
-          "It constrains nothing and grants nothing. workingDir is constrained by " +
-          "workspace registration and by the neutral-workspace handling in the " +
-          "executor. Remove the key to avoid implying a control that does not exist.",
+          "It constrains nothing and grants nothing, at either value. What actually " +
+          "decides workingDir is the transport: a remote HTTP caller always requires " +
+          "a registered workspace and its paths are validated inside that workspace, " +
+          "while a local caller passing an explicit workingDir gets that directory as " +
+          "given. Neither behaviour consults this key. Remove it to avoid implying a " +
+          "control that does not exist.",
         { configFile: sourcePath }
       );
     }

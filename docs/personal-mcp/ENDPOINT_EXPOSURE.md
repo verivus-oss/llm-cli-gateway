@@ -15,7 +15,7 @@ The gateway has two different endpoint stories:
 
 Local success is not enough for ChatGPT, Claude web, or Grok custom connectors. Those clients connect from provider infrastructure, so `doctor --json` must show an HTTPS public URL before setup docs claim web-client readiness.
 
-Remote clients pass relative `workingDir`, `addDir`, and include-directory values inside the selected workspace. Disabling HTTP auth, using a generated no-auth connector path, or setting `[workspaces].allow_unregistered_working_dir` does not permit arbitrary HTTP/tunnel filesystem paths.
+Remote clients pass relative `workingDir`, `addDir`, and include-directory values inside the selected workspace. Disabling HTTP auth or using a generated no-auth connector path does not permit arbitrary HTTP/tunnel filesystem paths. `[workspaces].allow_unregistered_working_dir` is inert and is read nowhere, so it grants nothing either.
 
 ## Modes
 
