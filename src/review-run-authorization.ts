@@ -11,6 +11,17 @@ const reviewRunAuthorizationSchema = z.object({
   repositoryRoot: z.string().min(1),
   judgeProvider: z.string().min(1).nullable(),
   allowApiUpload: z.boolean(),
+  /**
+   * Issue #270: the caller accepted cursor trusting a repository that is not a
+   * registered workspace for cursor. It lives HERE, on the durable
+   * authorization, rather than as a separate argument, because the roster and
+   * the judge both need it and they run in different tool calls. Round 4 of
+   * review found it was roster-only: the judge is started later by
+   * synthesize_validation, which had no way to learn the operator had consented.
+   *
+   * Defaulted so runs authorized before this field existed still parse.
+   */
+  trustCursorWorkspace: z.boolean().default(false),
 });
 
 export type ReviewRunAuthorization = z.infer<typeof reviewRunAuthorizationSchema>;

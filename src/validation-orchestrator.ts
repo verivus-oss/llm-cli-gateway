@@ -265,14 +265,13 @@ export interface StartReviewInput {
   artifactByteLength: number;
   scope: string;
   judgeProvider?: ValidationProvider;
-  /** Explicit repository-upload policy bound durably to this review run. */
-  reviewAuthorization: ReviewRunAuthorization;
   /**
-   * Issue #270: accept cursor trusting an unregistered repository for this call.
-   * Trust also lets the reviewed repository's rules and AGENTS.md instruct the
-   * reviewer, so it is the caller's decision, not a default. See cursorTrustGap.
+   * Explicit repository-upload policy bound durably to this review run, and
+   * (issue #270) the caller's cursor-trust decision. The trust flag lives on the
+   * authorization rather than beside it because the roster and the judge run in
+   * different tool calls and must not be able to disagree about it.
    */
-  trustCursorWorkspace?: boolean;
+  reviewAuthorization: ReviewRunAuthorization;
 }
 
 export class ValidationRunPersistenceError extends Error {
@@ -447,7 +446,7 @@ export function startReviewRun(
           review: true,
           forceRefresh: true,
           deferLaunch: true,
-          trustWorkspace: input.trustCursorWorkspace === true,
+          trustWorkspace: input.reviewAuthorization.trustCursorWorkspace === true,
           validationAdmission: { validationId, provider },
           deferredLaunches,
         })
@@ -1115,8 +1114,9 @@ function cursorTrustGap(
       "is not a workspace registered for cursor. Granting trust would also let the " +
       "reviewed repository's own rules and AGENTS.md instruct the reviewer, which " +
       "the review prompt otherwise forbids. Register it under [[workspaces.repos]] " +
-      "with cursor in its providers list, or pass trustCursorWorkspace: true to " +
-      "accept that for this call.",
+      "with cursor in its providers list, or start the review with " +
+      "trustCursorWorkspace: true on review_changes, which binds that consent to " +
+      "the run so the judge inherits it too.",
   };
 }
 

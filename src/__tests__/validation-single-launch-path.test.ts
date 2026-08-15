@@ -69,6 +69,12 @@ describe("the orchestrator has exactly one provider launch path", () => {
     expect(callSites(orchestrator(), "cursorTrustGap")).toHaveLength(1);
   });
 
+  it("buildProviderInvocation is called from exactly one place", () => {
+    // Round 4 (codex): the argv builder is the thing that actually emits
+    // --trust, so a direct call to it would bypass the launch path entirely.
+    expect(callSites(orchestrator(), "buildProviderInvocation")).toHaveLength(1);
+  });
+
   it("the roster and the judge both launch through launchProviderSeat", () => {
     // The positive half: one path, and both real seats use it.
     const sites = callSites(orchestrator(), "launchProviderSeat");

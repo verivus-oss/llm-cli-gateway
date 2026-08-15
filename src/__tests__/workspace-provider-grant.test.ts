@@ -131,6 +131,37 @@ describe("issue #270: the real cursor workspace-grant predicate", () => {
     expect(isProviderWorkspacePath(reg, "cursor", parent)).toBe(false);
   });
 
+  it("fails closed when the SAME directory is registered twice and one withholds", () => {
+    // Round 4 (codex and grok). loadWorkspaceRegistry uniques aliases, not
+    // paths, so one directory can carry two registrations. Nearest-match scored
+    // them by root length, which is equal here, so whichever came first in the
+    // config silently won and the answer depended on file order.
+    const root = join(dir, "repo");
+    mkdirSync(root);
+    const permissiveFirst = registry([repo(root, ["cursor"]), repo(root, ["claude"])]);
+    const restrictiveFirst = registry([repo(root, ["claude"]), repo(root, ["cursor"])]);
+    expect(isProviderWorkspacePath(permissiveFirst, "cursor", root)).toBe(false);
+    expect(isProviderWorkspacePath(restrictiveFirst, "cursor", root)).toBe(false);
+    // ...and two registrations that BOTH allow it still grant, so failing
+    // closed on a tie does not mean failing closed on agreement.
+    const bothAllow = registry([repo(root, ["cursor"]), repo(root, ["cursor", "claude"])]);
+    expect(isProviderWorkspacePath(bothAllow, "cursor", root)).toBe(true);
+  });
+
+  it("contains descendants of a filesystem-root registration", () => {
+    // Round 4 (grok): the previous prefix compare appended a separator, so a
+    // registered "/" produced "//" and matched nothing beneath it. This asserts
+    // containment through path.relative rather than string prefixes. It uses
+    // the temp dir's own root so it stays portable.
+    const { parse } = require("node:path") as typeof import("node:path");
+    const fsRoot = parse(dir).root;
+    const nested = join(dir, "repo");
+    mkdirSync(nested);
+    expect(isProviderWorkspacePath(registry([repo(fsRoot, ["cursor"])]), "cursor", nested)).toBe(
+      true
+    );
+  });
+
   it("refuses everything when no workspace is registered", () => {
     const root = join(dir, "repo");
     mkdirSync(root);

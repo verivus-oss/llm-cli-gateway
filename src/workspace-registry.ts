@@ -659,7 +659,7 @@ export function isProviderWorkspacePath(
   } catch {
     return false;
   }
-  let nearest: { root: string; providers: readonly CliType[] } | undefined;
+  let nearest: { root: string; providers: readonly CliType[]; withheld: boolean } | undefined;
   for (const repo of registry.repos) {
     let root: string;
     try {
@@ -667,10 +667,26 @@ export function isProviderWorkspacePath(
     } catch {
       continue;
     }
-    if (candidate !== root && !candidate.startsWith(`${root}${path.sep}`)) continue;
+    // isUnder, not a manual prefix compare. Round 4 of review: appending a
+    // separator makes a filesystem root "/" produce the prefix "//", which
+    // matches nothing, so registering "/" silently granted nothing beneath it.
+    // path.relative gets that right and is already the containment rule used
+    // elsewhere in this file.
+    if (!isUnder(root, candidate)) continue;
+    const allows = repo.providers.includes(provider);
     if (!nearest || root.length > nearest.root.length) {
-      nearest = { root, providers: repo.providers };
+      nearest = { root, providers: repo.providers, withheld: !allows };
+      continue;
+    }
+    // Same canonical root registered twice under different aliases. The loader
+    // uniques aliases, not paths, so this is reachable, and taking whichever
+    // came first made the answer depend on config order. Fail closed instead:
+    // if any registration of this exact directory withholds the provider, the
+    // directory does not grant it.
+    if (root === nearest.root && !allows) {
+      nearest = { root, providers: repo.providers, withheld: true };
     }
   }
-  return nearest !== undefined && nearest.providers.includes(provider);
+  if (nearest === undefined) return false;
+  return !nearest.withheld && nearest.providers.includes(provider);
 }

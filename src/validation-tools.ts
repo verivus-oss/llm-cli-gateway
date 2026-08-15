@@ -569,13 +569,13 @@ export function registerValidationTools(server: McpServer, deps: ValidationToolD
             artifactByteLength: resolved.artifact.byteLength,
             scope: resolved.resolvedMode,
             judgeProvider: judgeModel,
-            trustCursorWorkspace,
             reviewAuthorization: {
               schemaVersion: REVIEW_RUN_AUTHORIZATION_SCHEMA_VERSION,
               repositoryPath,
               repositoryRoot: resolved.repositoryRoot,
               judgeProvider: judgeModel ?? null,
               allowApiUpload,
+              trustCursorWorkspace,
             },
           });
           return textResponse({
@@ -1057,6 +1057,11 @@ export function registerValidationTools(server: McpServer, deps: ValidationToolD
         cwd,
         review,
         reviewEvidence: synthesisReviewEvidence,
+        // Issue #270 round 4: replay the consent the operator gave at
+        // review_changes. The judge runs in a LATER tool call, so without this
+        // the opt-in was roster-only and a cursor judge on an unregistered
+        // repository was always skipped, however the run was authorized.
+        trustCursorWorkspace: reviewAuthorization?.trustCursorWorkspace ?? false,
       });
       // Phase 2: auto-mint convenience. If the run is already terminal (e.g. the
       // judge was skipped, or it had already completed), mint the receipt now

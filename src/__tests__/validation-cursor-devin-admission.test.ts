@@ -177,7 +177,6 @@ function review(
     {
       prompt,
       providers,
-      trustCursorWorkspace: opts.trustCursorWorkspace === true,
       cwd: "/authorized/repository",
       artifactSha256: "a".repeat(64),
       artifactByteLength: Buffer.byteLength(prompt),
@@ -188,6 +187,9 @@ function review(
         repositoryRoot: "/authorized/repository",
         judgeProvider: null,
         allowApiUpload: false,
+        // Round 4: the consent lives on the durable authorization, not beside
+        // it, so the roster and the judge cannot disagree about it.
+        trustCursorWorkspace: opts.trustCursorWorkspace === true,
       },
     }
   );
