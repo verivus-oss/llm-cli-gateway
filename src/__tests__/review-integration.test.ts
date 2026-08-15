@@ -228,6 +228,9 @@ describe("repository review integration", () => {
         // Without this the seat is skipped on a bwrap-less Linux host and the
         // devin assertion below fails for an unrelated reason.
         hasBubblewrap: () => true,
+        // Issue #270: cursor review trust is granted only for a directory
+        // registered for cursor. This case asserts the trusted-path argv.
+        isProviderWorkspacePath: () => true,
       },
       {
         prompt,

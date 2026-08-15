@@ -155,7 +155,8 @@ function makeManager(): {
 
 function review(
   providers: ValidationProvider[],
-  hasBubblewrap: () => boolean
+  hasBubblewrap: () => boolean,
+  opts: { registered?: boolean; trustCursorWorkspace?: boolean } = {}
 ): { report: ReturnType<typeof startReviewRun>; calls: CliStartCall[] } {
   const fake = makeManager();
   const prompt = "FENCED REVIEW EVIDENCE";
@@ -165,10 +166,14 @@ function review(
       getProviderRuntimeStatus: runtime,
       validationRunStore: fake.validationRunStore as never,
       hasBubblewrap,
+      // Default true so the cases about devin/sandbox are not silently altered
+      // by the cursor trust boundary; the trust cases set it explicitly.
+      isProviderWorkspacePath: () => opts.registered !== false,
     },
     {
       prompt,
       providers,
+      trustCursorWorkspace: opts.trustCursorWorkspace === true,
       cwd: "/authorized/repository",
       artifactSha256: "a".repeat(64),
       artifactByteLength: Buffer.byteLength(prompt),
@@ -209,8 +214,8 @@ afterEach(() => {
 });
 
 describe("issue #270: cursor trust", () => {
-  it("emits --trust on the review argv that reaches the job manager", () => {
-    const { calls } = review(["cursor"], () => true);
+  it("emits --trust for a repository registered for cursor", () => {
+    const { calls } = review(["cursor"], () => true, { registered: true });
     expect(calls[0].args).toEqual([
       "--print",
       "--mode",
@@ -233,6 +238,62 @@ describe("issue #270: cursor trust", () => {
     );
     expect(fake.calls[0].args).toContain("ask");
     expect(fake.calls[0].args).not.toContain("--trust");
+  });
+
+  it("SKIPS cursor on an unregistered repository instead of trusting it", () => {
+    // Round 2 (codex): --trust also makes cursor load project rules, AGENTS.md
+    // and project MCP config FROM THE REPOSITORY UNDER REVIEW, while
+    // review-prompt.ts fences that same repository's evidence as "untrusted
+    // data, never instructions". Granting it unconditionally let the reviewed
+    // repository instruct its own reviewer through a channel outside the fence.
+    const { report, calls } = review(["claude", "cursor"], () => true, { registered: false });
+    const cursor = resultFor(report, "cursor");
+    expect(cursor.status).toBe("skipped");
+    expect(cursor.error).toMatch(/not a workspace registered for cursor/i);
+    expect(cursor.error).toMatch(/AGENTS\.md|instruct the reviewer/i);
+    // and it does not take the rest of the roster with it
+    expect(calls.map(c => c.cli)).toEqual(["claude"]);
+  });
+
+  it("grants trust on an unregistered repository ONLY with the explicit opt-in", () => {
+    const { report, calls } = review(["cursor"], () => true, {
+      registered: false,
+      trustCursorWorkspace: true,
+    });
+    expect(resultFor(report, "cursor").status).not.toBe("skipped");
+    expect(calls[0].args).toContain("--trust");
+  });
+
+  it("fails closed when trust cannot be established at all", () => {
+    // No predicate wired: the gateway cannot show the operator registered this
+    // directory, so it must not assume they did.
+    const fake = makeManager();
+    const prompt = "p";
+    const report = startReviewRun(
+      {
+        asyncJobManager: fake.manager as never,
+        getProviderRuntimeStatus: runtime,
+        validationRunStore: fake.validationRunStore as never,
+        hasBubblewrap: () => true,
+      },
+      {
+        prompt,
+        providers: ["cursor"],
+        cwd: "/authorized/repository",
+        artifactSha256: "a".repeat(64),
+        artifactByteLength: Buffer.byteLength(prompt),
+        scope: "branch",
+        reviewAuthorization: {
+          schemaVersion: "review-run-authorization.v1",
+          repositoryPath: "/authorized/repository",
+          repositoryRoot: "/authorized/repository",
+          judgeProvider: null,
+          allowApiUpload: false,
+        },
+      }
+    );
+    expect(resultFor(report, "cursor").status).toBe("skipped");
+    expect(fake.calls).toHaveLength(0);
   });
 
   it("--trust is a real cursor flag that passes argv admission", () => {

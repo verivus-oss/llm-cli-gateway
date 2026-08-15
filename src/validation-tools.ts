@@ -431,6 +431,12 @@ export function registerValidationTools(server: McpServer, deps: ValidationToolD
           .regex(/^[A-Za-z][A-Za-z0-9._-]{0,63}$/)
           .optional()
           .describe("Authorized workspace alias, required for remote HTTP/OAuth callers."),
+        trustCursorWorkspace: z
+          .boolean()
+          .default(false)
+          .describe(
+            "Let cursor trust this repository even though it is not a workspace registered for cursor. Cursor refuses to review an untrusted directory, so without this a cursor seat on an unregistered path is skipped. Trust also lets the reviewed repository's own rules and AGENTS.md instruct the reviewer, which the review prompt otherwise forbids, so enable it only for a repository whose contents you trust."
+          ),
         scope: z
           .enum(["auto", "uncommitted", "branch", "commit"])
           .default("auto")
@@ -503,6 +509,7 @@ export function registerValidationTools(server: McpServer, deps: ValidationToolD
         allowApiUpload,
         maxArtifactBytes,
         maxPromptBytes,
+        trustCursorWorkspace,
       }) => {
         try {
           const providers = Array.from(new Set(models)) as ValidationProvider[];
@@ -562,6 +569,7 @@ export function registerValidationTools(server: McpServer, deps: ValidationToolD
             artifactByteLength: resolved.artifact.byteLength,
             scope: resolved.resolvedMode,
             judgeProvider: judgeModel,
+            trustCursorWorkspace,
             reviewAuthorization: {
               schemaVersion: REVIEW_RUN_AUTHORIZATION_SCHEMA_VERSION,
               repositoryPath,

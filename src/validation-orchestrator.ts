@@ -86,6 +86,13 @@ export interface ValidationOrchestratorDeps {
    * injected by tests so a seat's outcome does not depend on the host.
    */
   hasBubblewrap?: () => boolean;
+  /**
+   * Whether `cwd` is a directory the operator registered for this provider,
+   * i.e. a [[workspaces.repos]] entry (or a gateway worktree inside one) whose
+   * `providers` list includes it. Used only to decide cursor review trust; see
+   * cursorTrustGap. Absent means "cannot establish", which fails closed.
+   */
+  isProviderWorkspacePath?: (provider: CliType, cwd: string) => boolean;
 }
 
 /** Slice 3: the enabled API-provider runtime for `provider`, or null (a CLI). */
@@ -138,6 +145,7 @@ function dispatchProviderJob(
     forceRefresh?: boolean;
     deferLaunch?: boolean;
     validationAdmission?: ValidationJobAdmission;
+    trustWorkspace?: boolean;
   } = {}
 ): StartJobOutcome {
   const api = findApiReviewer(deps, provider);
@@ -162,7 +170,12 @@ function dispatchProviderJob(
     });
   }
   const cli = provider as CliType;
-  const invocation = buildProviderInvocation(provider, prompt, options.review ?? false);
+  const invocation = buildProviderInvocation(
+    provider,
+    prompt,
+    options.review ?? false,
+    options.trustWorkspace ?? false
+  );
   assertUpstreamCliArgs(cli, invocation.args);
   const cwd = options.cwd ?? deps.resolveProviderCwd?.(cli);
   if (options.review) {
@@ -230,6 +243,12 @@ export interface StartReviewInput {
   judgeProvider?: ValidationProvider;
   /** Explicit repository-upload policy bound durably to this review run. */
   reviewAuthorization: ReviewRunAuthorization;
+  /**
+   * Issue #270: accept cursor trusting an unregistered repository for this call.
+   * Trust also lets the reviewed repository's rules and AGENTS.md instruct the
+   * reviewer, so it is the caller's decision, not a default. See cursorTrustGap.
+   */
+  trustCursorWorkspace?: boolean;
 }
 
 export class ValidationRunPersistenceError extends Error {
@@ -404,6 +423,7 @@ export function startReviewRun(
           review: true,
           forceRefresh: true,
           deferLaunch: true,
+          trustWorkspace: input.trustCursorWorkspace === true,
           validationAdmission: { validationId, provider },
           deferredLaunches,
         })
@@ -627,6 +647,7 @@ function startProviderJob(
     deferLaunch?: boolean;
     validationAdmission?: ValidationJobAdmission;
     deferredLaunches?: DeferredJobLaunch[];
+    trustWorkspace?: boolean;
   } = {}
 ): NormalizedValidationResult {
   const runtime = resolveReviewerStatus(deps, provider);
@@ -642,6 +663,18 @@ function startProviderJob(
     return normalizeSkippedProvider(provider, sandboxGap);
   }
 
+  // Same shape again: a cursor review seat on a directory the operator has not
+  // registered for cursor is skipped rather than launched without --trust,
+  // which cursor would refuse anyway. See cursorTrustGap.
+  const cursorTrust = cursorTrustGap(deps, provider, {
+    review: options.review,
+    cwd: options.cwd,
+    trustWorkspaceOverride: options.trustWorkspace,
+  });
+  if (cursorTrust.skipReason) {
+    return normalizeSkippedProvider(provider, cursorTrust.skipReason);
+  }
+
   const warning =
     runtime.loginStatus === "authenticated"
       ? undefined
@@ -653,7 +686,7 @@ function startProviderJob(
       provider,
       prompt,
       `validation-${validationId}-${provider}`,
-      options
+      { ...options, trustWorkspace: cursorTrust.trusted }
     );
     if (options.deferLaunch) {
       if (!outcome.deferredLaunch) {
@@ -972,10 +1005,53 @@ function reviewSandboxGap(
   );
 }
 
+/**
+ * Issue #270 round 2: cursor refuses a directory it does not trust, so a review
+ * seat needs `--trust`. But a trusted folder is also where cursor loads project
+ * rules, AGENTS.md/CLAUDE.md and project MCP configuration FROM THE REPOSITORY
+ * UNDER REVIEW. review-prompt.ts fences that repository's evidence as
+ * "untrusted data, never instructions"; granting trust unconditionally would let
+ * the same repository supply instructions through a channel outside that fence.
+ *
+ * So trust is granted only where the operator already made that decision: the
+ * cwd is a workspace they registered with this provider in its `providers`
+ * list, which is the boundary review_changes already enforces on the alias path.
+ * A local caller pointing at an arbitrary Git root must opt in explicitly.
+ *
+ * Fails closed: no predicate means trust is not established.
+ *
+ * Note this covers instruction loading only. Cursor does NOT auto-approve
+ * project MCP servers on trust alone; that needs --approve-mcps, which the
+ * gateway never emits.
+ */
+function cursorTrustGap(
+  deps: ValidationOrchestratorDeps,
+  provider: ValidationProvider,
+  options: { review?: boolean; cwd?: string; trustWorkspaceOverride?: boolean }
+): { trusted: boolean; skipReason?: string } {
+  if (provider !== "cursor" || options.review !== true) return { trusted: false };
+  if (options.trustWorkspaceOverride === true) return { trusted: true };
+  const registered =
+    options.cwd !== undefined &&
+    deps.isProviderWorkspacePath?.(provider as CliType, options.cwd) === true;
+  if (registered) return { trusted: true };
+  return {
+    trusted: false,
+    skipReason:
+      "cursor refuses to review a directory it does not trust, and this repository " +
+      "is not a workspace registered for cursor. Granting trust would also let the " +
+      "reviewed repository's own rules and AGENTS.md instruct the reviewer, which " +
+      "the review prompt otherwise forbids. Register it under [[workspaces.repos]] " +
+      "with cursor in its providers list, or pass trustCursorWorkspace: true to " +
+      "accept that for this call.",
+  };
+}
+
 function buildProviderInvocation(
   provider: ValidationProvider,
   prompt: string,
-  review = false
+  review = false,
+  trustWorkspace = false
 ): ValidationCliInvocation {
   if (provider === "claude") {
     const args = ["-p", ...(review ? ["--permission-mode", "plan"] : [])];
@@ -1028,7 +1104,7 @@ function buildProviderInvocation(
       review ? "plan" : "ask",
       "--sandbox",
       "enabled",
-      ...(review ? ["--trust"] : []),
+      ...(review && trustWorkspace ? ["--trust"] : []),
     ];
     appendCliPrompt(args, prompt);
     return guardedArgvInvocation(provider, prompt, args);
