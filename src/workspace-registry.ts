@@ -62,6 +62,13 @@ const WorkspaceAllowedRootSchema = z
 const WorkspacesSchema = z
   .object({
     default: z.string().optional(),
+    // INERT. Issue #272: this key is parsed and never read. It constrains
+    // nothing, and its name reads as a security control, so an operator
+    // setting it to false believes they have restricted where providers
+    // may be pointed. They have not. What actually constrains workingDir
+    // is workspace registration plus the neutral-workspace handling in
+    // src/executor.ts. It is still ACCEPTED so existing configs keep
+    // loading, and its presence is warned about at load time below.
     allow_unregistered_working_dir: z.boolean().default(false),
     repos: z.array(WorkspaceRepoSchema).default([]),
     allowed_roots: z.array(WorkspaceAllowedRootSchema).default([]),
@@ -284,6 +291,23 @@ export function loadWorkspaceRegistry(
     if (result.data.default && !repos.some(repo => repo.alias === result.data.default)) {
       throw new WorkspaceRegistryError(
         `[workspaces].default references unknown alias "${result.data.default}"`
+      );
+    }
+    // Issue #272: warn if the operator actually SET this, rather than
+    // inheriting the default. Silence here is what produces the false
+    // confidence: the key looks like it did something.
+    if (
+      raw !== null &&
+      typeof raw === "object" &&
+      Object.prototype.hasOwnProperty.call(raw, "allow_unregistered_working_dir")
+    ) {
+      logWarn(
+        logger,
+        "[workspaces].allow_unregistered_working_dir has NO EFFECT and is ignored. " +
+          "It constrains nothing and grants nothing. workingDir is constrained by " +
+          "workspace registration and by the neutral-workspace handling in the " +
+          "executor. Remove the key to avoid implying a control that does not exist.",
+        { configFile: sourcePath }
       );
     }
     return {
