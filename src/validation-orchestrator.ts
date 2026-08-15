@@ -654,10 +654,18 @@ function startProviderJob(
     // exactly as an admission error is, so the others still report.
     if (error instanceof WorkspaceRegistryError) {
       if (options.deferLaunch) throw error;
+      // Three different conditions reach here: no workspace selected, unknown
+      // alias, and provider not in the workspace's list. Only the last is fixed
+      // by editing a providers list, so the remedy is attached only to it. A
+      // suffix appended to all three sends the reader to the wrong setting for
+      // two of them.
+      const notAllowed = error.message.includes("does not allow provider");
       return normalizeSkippedProvider(
         provider,
-        `${error.message} Add "${provider}" to that workspace's ` +
-          `providers list, or select a workspace that allows it.`
+        notAllowed
+          ? `${error.message}. Add "${provider}" to that workspace's ` +
+              `providers list, or select a workspace that allows it.`
+          : error.message
       );
     }
     throw error;
