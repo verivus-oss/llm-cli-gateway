@@ -559,39 +559,11 @@ export function startJudgeSynthesis(
     };
   }
 
-  const runtime = resolveReviewerStatus(deps, input.judgeProvider);
-  if (!runtime.installed) {
-    if (input.review) markReviewJudgeSkipped(deps, input.validationId!, input.judgeProvider);
-    return {
-      status: "skipped",
-      judgeModel: input.judgeProvider,
-      rawJobReference: null,
-      note: `${runtime.displayName} was selected as judge but is not installed.`,
-    };
-  }
-
-  // Round 3 of review, found independently by two reviewers: the judge is a
-  // SECOND dispatch site, so it bypassed both launch gates entirely. A cursor
-  // review judge never received --trust and died with Workspace Trust Required
-  // even on a registered workspace, and a devin judge on a bwrap-less Linux
-  // host failed at spawn. The gates belong to every seat, not to the roster.
-  const judgePreflight = providerPreflight(deps, input.judgeProvider, {
-    review: input.review,
-    cwd: input.cwd,
-    trustWorkspaceOverride: input.trustCursorWorkspace,
-  });
-  if (judgePreflight.skipReason) {
-    if (input.review) markReviewJudgeSkipped(deps, input.validationId!, input.judgeProvider);
-    return {
-      status: "skipped",
-      judgeModel: input.judgeProvider,
-      rawJobReference: null,
-      note: `${runtime.displayName} was selected as judge but cannot run: ${judgePreflight.skipReason}`,
-    };
-  }
-
-  let snapshot: AsyncJobSnapshot;
-  let deferredLaunch: DeferredJobLaunch | undefined;
+  // The judge goes through launchProviderSeat like every other seat. It used to
+  // resolve the runtime and dispatch on its own, which is how it missed both
+  // launch gates in round 3. It no longer decides anything about launching; it
+  // only decides how to REPRESENT a refusal as a synthesis result.
+  let launch: SeatLaunch;
   try {
     if (input.review && (!input.reviewEvidence || input.reviewEvidence.length === 0)) {
       throw new Error("Review judge synthesis requires complete durable provider evidence");
@@ -616,7 +588,7 @@ export function startJudgeSynthesis(
           question: input.question,
           providerResults: completedResults,
         });
-    const outcome = dispatchProviderJob(
+    launch = launchProviderSeat(
       deps,
       input.judgeProvider,
       judgePrompt,
@@ -624,6 +596,7 @@ export function startJudgeSynthesis(
       {
         cwd: input.cwd,
         review: input.review,
+        trustWorkspace: input.trustCursorWorkspace,
         ...(input.review
           ? {
               forceRefresh: true,
@@ -635,15 +608,8 @@ export function startJudgeSynthesis(
               },
             }
           : {}),
-      },
-      judgePreflight
+      }
     );
-    snapshot = outcome.snapshot;
-    deferredLaunch = outcome.deferredLaunch;
-    if (input.review && !deferredLaunch) {
-      deps.asyncJobManager.cancelJob(snapshot.id);
-      throw new ValidationRunPersistenceError();
-    }
   } catch (error) {
     if (error instanceof DurableJobAdmissionError) {
       throw new ValidationRunPersistenceError();
@@ -657,7 +623,20 @@ export function startJudgeSynthesis(
       note: error.message,
     };
   }
-  if (input.review) deferredLaunch!.release();
+  if (!launch.launched) {
+    // A gate refused this seat. Represent it as a skipped judge rather than an
+    // error, matching how the roster represents the same refusal, and keep the
+    // gate's own reason so the caller learns what to change.
+    if (input.review) markReviewJudgeSkipped(deps, input.validationId!, input.judgeProvider);
+    return {
+      status: "skipped",
+      judgeModel: input.judgeProvider,
+      rawJobReference: null,
+      note: `${launch.runtime.displayName} was selected as judge but cannot run: ${launch.reason}`,
+    };
+  }
+  const { snapshot, runtime } = launch;
+  if (input.review) launch.deferredLaunch!.release();
   else linkJudgeJob(deps, input.validationId, input.judgeProvider, snapshot);
   return {
     status: "running",
@@ -687,6 +666,110 @@ export function collectValidationJobResult(
   return normalizeJobResult(provider, model, result);
 }
 
+/** The outcome of the one launch path. See launchProviderSeat. */
+type SeatLaunch =
+  | { launched: false; runtime: ReviewerStatus; reason: string }
+  | {
+      launched: true;
+      runtime: ReviewerStatus;
+      snapshot: AsyncJobSnapshot;
+      deferredLaunch?: DeferredJobLaunch;
+      warning?: string;
+    };
+
+/**
+ * THE launch path. Every provider seat this orchestrator starts, roster or
+ * judge, goes through here, and this is the only function that calls
+ * dispatchProviderJob.
+ *
+ * There were two launch paths before, and three consecutive rounds of review
+ * found the same defect because of it: a gate was added to the roster path and
+ * the judge path silently kept its old behaviour. Round 2 was the empty-reviewer
+ * filter, round 3 was cursor trust and the bubblewrap preflight. Making the
+ * preflight a required ARGUMENT was still a rule a caller had to follow, and a
+ * caller could satisfy it with a hand-built object. Now no caller supplies one
+ * at all: the gates are computed in here, where they cannot be forgotten or
+ * forged, and callers only choose how to REPRESENT a refusal.
+ *
+ * If a fourth gate is ever needed, it goes in providerPreflight and every seat
+ * gets it. Do not add a second launch path.
+ */
+function launchProviderSeat(
+  deps: ValidationOrchestratorDeps,
+  provider: ValidationProvider,
+  prompt: string,
+  correlationId: string,
+  options: {
+    cwd?: string;
+    review?: boolean;
+    forceRefresh?: boolean;
+    deferLaunch?: boolean;
+    validationAdmission?: ValidationJobAdmission;
+    trustWorkspace?: boolean;
+  } = {}
+): SeatLaunch {
+  const runtime = resolveReviewerStatus(deps, provider);
+  if (!runtime.installed) {
+    return { launched: false, runtime, reason: `${runtime.displayName} runtime is not installed.` };
+  }
+
+  // Every launch gate, in one call, before any job exists. A seat the gateway
+  // already knows cannot run is refused here rather than launched and left to
+  // fail at spawn, and refusing before the try below means a gate can never be
+  // turned into a call-level abort by the deferLaunch rethrow.
+  const preflight = providerPreflight(deps, provider, {
+    review: options.review,
+    cwd: options.cwd,
+    trustWorkspaceOverride: options.trustWorkspace,
+  });
+  if (preflight.skipReason) {
+    return { launched: false, runtime, reason: preflight.skipReason };
+  }
+
+  const warning =
+    runtime.loginStatus === "authenticated"
+      ? undefined
+      : `${runtime.displayName} login status is ${runtime.loginStatus}; the job may fail until login is complete.`;
+  try {
+    const outcome = dispatchProviderJob(deps, provider, prompt, correlationId, options, preflight);
+    if (options.deferLaunch && !outcome.deferredLaunch) {
+      // Asked for a deferred launch and did not get one: the run cannot be bound
+      // durably, so cancel rather than leave an unreleasable job behind.
+      deps.asyncJobManager.cancelJob(outcome.snapshot.id);
+      throw new ValidationRunPersistenceError();
+    }
+    return {
+      launched: true,
+      runtime,
+      snapshot: outcome.snapshot,
+      deferredLaunch: outcome.deferredLaunch,
+      warning,
+    };
+  } catch (error) {
+    if (isCliInputAdmissionError(error)) {
+      if (options.deferLaunch) throw error;
+      return { launched: false, runtime, reason: error.message };
+    }
+    // Issue #271: a provider absent from the selected workspace's
+    // `providers` list is a configuration fact about that provider, not a
+    // failure of the call. Keep the policy conversion at this sole launch
+    // boundary so roster and judge seats cannot diverge.
+    if (error instanceof WorkspaceRegistryError) {
+      if (options.deferLaunch) throw error;
+      const notAllowed = error.message.includes("does not allow provider");
+      return {
+        launched: false,
+        runtime,
+        reason: notAllowed
+          ? `${error.message}. Add "${provider}" to that workspace's ` +
+            `providers list, or select a workspace that allows it.`
+          : error.message,
+      };
+    }
+    throw error;
+  }
+}
+
 function startProviderJob(
   deps: ValidationOrchestratorDeps,
   provider: ValidationProvider,
@@ -702,77 +785,20 @@ function startProviderJob(
     trustWorkspace?: boolean;
   } = {}
 ): NormalizedValidationResult {
-  const runtime = resolveReviewerStatus(deps, provider);
-  if (!runtime.installed) {
-    return normalizeSkippedProvider(provider, `${runtime.displayName} runtime is not installed.`);
+  const launch = launchProviderSeat(
+    deps,
+    provider,
+    prompt,
+    `validation-${validationId}-${provider}`,
+    options
+  );
+  if (!launch.launched) {
+    return normalizeSkippedProvider(provider, launch.reason);
   }
-
-  // Same shape as the not-installed skip above, and for the same reason: a seat
-  // the gateway already knows cannot run is skipped before a job exists, rather
-  // than launched and left to fail at spawn.
-  // Every launch gate, in one call. Skipping happens BEFORE the try below, so a
-  // gate can never be turned into a call-level abort by the deferLaunch rethrow.
-  const preflight = providerPreflight(deps, provider, {
-    review: options.review,
-    cwd: options.cwd,
-    trustWorkspaceOverride: options.trustWorkspace,
-  });
-  if (preflight.skipReason) {
-    return normalizeSkippedProvider(provider, preflight.skipReason);
+  if (options.deferLaunch && launch.deferredLaunch) {
+    options.deferredLaunches?.push(launch.deferredLaunch);
   }
-
-  const warning =
-    runtime.loginStatus === "authenticated"
-      ? undefined
-      : `${runtime.displayName} login status is ${runtime.loginStatus}; the job may fail until login is complete.`;
-  let snapshot: AsyncJobSnapshot;
-  try {
-    const outcome = dispatchProviderJob(
-      deps,
-      provider,
-      prompt,
-      `validation-${validationId}-${provider}`,
-      options,
-      preflight
-    );
-    if (options.deferLaunch) {
-      if (!outcome.deferredLaunch) {
-        deps.asyncJobManager.cancelJob(outcome.snapshot.id);
-        throw new ValidationRunPersistenceError();
-      }
-      options.deferredLaunches?.push(outcome.deferredLaunch);
-    }
-    snapshot = outcome.snapshot;
-  } catch (error) {
-    if (isCliInputAdmissionError(error)) {
-      if (options.deferLaunch) throw error;
-      return normalizeSkippedProvider(provider, error.message);
-    }
-    // Issue #271: a provider absent from the selected workspace's
-    // `providers` list is a configuration fact ABOUT THAT PROVIDER, not
-    // a failure of the call. resolveWorkspaceForProvider throws for it
-    // and this catch used to rethrow, so ONE unlisted reviewer aborted
-    // the ENTIRE multi-provider validation. Degrade it to `skipped`,
-    // exactly as an admission error is, so the others still report.
-    if (error instanceof WorkspaceRegistryError) {
-      if (options.deferLaunch) throw error;
-      // Three different conditions reach here: no workspace selected, unknown
-      // alias, and provider not in the workspace's list. Only the last is fixed
-      // by editing a providers list, so the remedy is attached only to it. A
-      // suffix appended to all three sends the reader to the wrong setting for
-      // two of them.
-      const notAllowed = error.message.includes("does not allow provider");
-      return normalizeSkippedProvider(
-        provider,
-        notAllowed
-          ? `${error.message}. Add "${provider}" to that workspace's ` +
-              `providers list, or select a workspace that allows it.`
-          : error.message
-      );
-    }
-    throw error;
-  }
-  return normalizeStartedJob(provider, runtime.version, snapshot, warning);
+  return normalizeStartedJob(provider, launch.runtime.version, launch.snapshot, launch.warning);
 }
 
 function plannedJudgeSynthesis(input: StartValidationInput): ValidationRunReport["synthesis"] {
