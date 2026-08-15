@@ -6,6 +6,7 @@ import type {
   StartJobOutcome,
 } from "./async-job-manager.js";
 import { DurableJobAdmissionError } from "./async-job-manager.js";
+import { WorkspaceRegistryError } from "./workspace-registry.js";
 import { getProviderRuntimeStatus, type ProviderRuntimeStatus } from "./provider-status.js";
 import type { CliType } from "./provider-types.js";
 import { createApiProvider } from "./api-provider.js";
@@ -644,6 +645,20 @@ function startProviderJob(
     if (isCliInputAdmissionError(error)) {
       if (options.deferLaunch) throw error;
       return normalizeSkippedProvider(provider, error.message);
+    }
+    // Issue #271: a provider absent from the selected workspace's
+    // `providers` list is a configuration fact ABOUT THAT PROVIDER, not
+    // a failure of the call. resolveWorkspaceForProvider throws for it
+    // and this catch used to rethrow, so ONE unlisted reviewer aborted
+    // the ENTIRE multi-provider validation. Degrade it to `skipped`,
+    // exactly as an admission error is, so the others still report.
+    if (error instanceof WorkspaceRegistryError) {
+      if (options.deferLaunch) throw error;
+      return normalizeSkippedProvider(
+        provider,
+        `${error.message} Add "${provider}" to that workspace's ` +
+          `providers list, or select a workspace that allows it.`
+      );
     }
     throw error;
   }
