@@ -28,6 +28,16 @@ export interface NormalizedValidationResult {
   rawJobReference: RawJobReference | null;
   error: string | null;
   warning?: string;
+  /**
+   * The provider exited successfully and produced no assistant output.
+   *
+   * This is NOT the same as having no opinion. A reviewer that says nothing and
+   * a reviewer that agrees are different things, and collapsing them let an
+   * empty review count as consensus (issue #269). The sync path already
+   * surfaces this as `extraStructured.emptyOutput` (src/index.ts:7549); this
+   * carries the same fact through the validation path, where it matters more.
+   */
+  emptyOutput?: boolean;
 }
 
 export function normalizeStartedJob(
@@ -81,6 +91,10 @@ export function normalizeJobResult(
 ): NormalizedValidationResult {
   const output = result.stdout.trim();
   const error = result.error || (result.status === "failed" ? result.stderr.trim() : null);
+  // A job that reached "completed" with nothing on stdout produced no usable
+  // review. Record it explicitly rather than leaving it as an indistinguishable
+  // `verdict: null`, which the disagreement summary silently discards.
+  const emptyOutput = result.status === "completed" && output.length === 0;
   return {
     provider,
     model,
@@ -97,6 +111,7 @@ export function normalizeJobResult(
       resultTool: "job_result",
     },
     error,
+    ...(emptyOutput ? { emptyOutput: true } : {}),
   };
 }
 
