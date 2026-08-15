@@ -198,6 +198,10 @@ export function buildValidationSchemas(deps: ValidationToolDeps) {
       .nullable(),
     error: z.string().nullable(),
     warning: z.string().optional(),
+    // Issue #269: a reviewer that exited 0 with no output. Zod strips unknown
+    // keys, so without this the flag is silently dropped on the way into
+    // synthesize_validation and the judge sees an ordinary completed result.
+    emptyOutput: z.boolean().optional(),
   });
   return { providerSchema, providerListSchema, normalizedProviderResultSchema };
 }

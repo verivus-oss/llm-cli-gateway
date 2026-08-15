@@ -482,15 +482,21 @@ export function startJudgeSynthesis(
       note: `Provider result for ${pending.provider} is still pending; collect terminal provider results before judge synthesis.`,
     };
   }
-  const completedResults = input.providerResults.filter(result => result.status === "completed");
-  const omittedResults = input.providerResults.filter(result => result.status !== "completed");
+  // Issue #269: a reviewer that exits 0 with no output is `completed`, but it
+  // reviewed nothing. Counting it as judge evidence is the same mistake the
+  // report used to make, one layer down: the judge would be told a provider
+  // participated and see an empty contribution from it.
+  const isJudgeEvidence = (result: NormalizedValidationResult): boolean =>
+    result.status === "completed" && result.emptyOutput !== true;
+  const completedResults = input.providerResults.filter(isJudgeEvidence);
+  const omittedResults = input.providerResults.filter(result => !isJudgeEvidence(result));
   if (completedResults.length === 0) {
     if (input.review) markReviewJudgeSkipped(deps, input.validationId!, input.judgeProvider);
     return {
       status: "skipped",
       judgeModel: input.judgeProvider,
       rawJobReference: null,
-      note: "Judge synthesis requires at least one completed provider result; skipped, failed, canceled, or orphaned results are preserved in the report but are not judge evidence.",
+      note: "Judge synthesis requires at least one completed provider result with output; skipped, failed, canceled, orphaned, and empty results are preserved in the report but are not judge evidence.",
     };
   }
 

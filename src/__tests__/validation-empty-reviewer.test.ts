@@ -1,8 +1,10 @@
 import { describe, expect, it } from "vitest";
 import { buildValidationReport } from "../validation-report.js";
 import { normalizeJobResult } from "../validation-normalizer.js";
+import { startJudgeSynthesis } from "../validation-orchestrator.js";
+import { buildValidationSchemas } from "../validation-tools.js";
 import type { NormalizedValidationResult, ValidationProvider } from "../validation-normalizer.js";
-import type { AsyncJobResult } from "../job-store.js";
+import type { AsyncJobResult } from "../async-job-manager.js";
 
 // Issue #269: a reviewer that completes with zero bytes of output must not be
 // counted as agreement.
@@ -93,16 +95,16 @@ describe("issue #269: an empty completed reviewer is not agreement", () => {
     // THE REGRESSION TEST. Before the fix this returned false, and the summary
     // read "Completed providers do not show material verdict disagreement".
     const report = report_of([
-        result({ provider: "codex", verdict: "approve" }),
-        result({ provider: "mistral", verdict: null, rationale: null, emptyOutput: true }),
+      result({ provider: "codex", verdict: "approve" }),
+      result({ provider: "mistral", verdict: null, rationale: null, emptyOutput: true }),
     ]);
     expect(report.structuredContent.disagreements.hasMaterialDisagreement).toBe(true);
   });
 
   it("names the silent provider in the signals, so the reader knows WHICH", () => {
     const report = report_of([
-        result({ provider: "codex", verdict: "approve" }),
-        result({ provider: "mistral", verdict: null, rationale: null, emptyOutput: true }),
+      result({ provider: "codex", verdict: "approve" }),
+      result({ provider: "mistral", verdict: null, rationale: null, emptyOutput: true }),
     ]);
     const signals = report.structuredContent.disagreements.signals.join(" ");
     expect(signals).toContain("mistral");
@@ -112,9 +114,50 @@ describe("issue #269: an empty completed reviewer is not agreement", () => {
   it("two genuinely approving reviewers still report no disagreement", () => {
     // Negative control: the fix must not make every report noisy.
     const report = report_of([
-        result({ provider: "codex", verdict: "approve" }),
-        result({ provider: "grok", verdict: "approve" }),
+      result({ provider: "codex", verdict: "approve" }),
+      result({ provider: "grok", verdict: "approve" }),
     ]);
     expect(report.structuredContent.disagreements.hasMaterialDisagreement).toBe(false);
+  });
+
+  it("carries the flag end to end, from the normaliser into the report", () => {
+    // Round 1 (grok): every disagreement case above INJECTS emptyOutput rather
+    // than piping the normaliser's own output in, so a rename on one side only
+    // would leave them all green while the pipeline was broken.
+    const normalized = [
+      normalizeJobResult("codex", "c", job({ cli: "codex", stdout: "APPROVE" })),
+      normalizeJobResult("mistral", "m", job({ cli: "mistral", stdout: "" })),
+    ];
+    const report = report_of(normalized);
+    expect(report.structuredContent.disagreements.hasMaterialDisagreement).toBe(true);
+    expect(report.structuredContent.disagreements.signals.join(" ")).toContain("mistral");
+  });
+
+  it("survives the synthesize_validation input schema instead of being stripped", () => {
+    // Round 1 (codex): Zod strips unknown keys, so an omitted field in
+    // normalizedProviderResultSchema silently discards the flag at the
+    // synthesize_validation boundary and the judge sees a plain completed
+    // result. The report was fixed; this is the layer under it.
+    const { normalizedProviderResultSchema } = buildValidationSchemas({});
+    const parsed = normalizedProviderResultSchema.parse(
+      result({ provider: "mistral", verdict: null, rationale: null, emptyOutput: true })
+    );
+    expect(parsed.emptyOutput).toBe(true);
+  });
+
+  it("does not feed an empty reviewer to the judge as evidence", () => {
+    // Round 1 (codex and grok, independently): startJudgeSynthesis filtered on
+    // status === "completed", so the reviewer just declared unusable was still
+    // handed to the judge as a participant.
+    const synthesis = startJudgeSynthesis({ asyncJobManager: {} as never }, {
+      judgeProvider: "claude",
+      providerResults: [
+        result({ provider: "mistral", verdict: null, rationale: null, emptyOutput: true }),
+      ],
+      intent: "validate",
+      question: "?",
+    } as never);
+    expect(synthesis.status).toBe("skipped");
+    expect(synthesis.note).toMatch(/empty/i);
   });
 });
