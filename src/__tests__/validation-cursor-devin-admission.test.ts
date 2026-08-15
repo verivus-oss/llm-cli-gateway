@@ -296,12 +296,31 @@ describe("issue #270: devin sandbox preflight", () => {
     });
   });
 
-  it("does not consult the probe for a non-devin provider or for an ask", () => {
+  it("does not consult the probe for a non-devin provider, nor for a devin ask", () => {
+    // Round 2 (grok): the previous version claimed "or for an ask" in its name
+    // but never ran an ask, so half the assertion was decorative. The ask path
+    // is now actually exercised, with devin, which is the only case where the
+    // gate could wrongly fire.
     const probe = vi.fn(() => true);
     withPlatform("linux", () => {
       review(["claude", "cursor"], probe);
     });
     expect(probe).not.toHaveBeenCalled();
+
+    const fake = makeManager();
+    withPlatform("linux", () => {
+      startValidationRun(
+        {
+          asyncJobManager: fake.manager as never,
+          getProviderRuntimeStatus: runtime,
+          hasBubblewrap: probe,
+        },
+        { intent: "second_opinion", question: "is this right?", providers: ["devin"] }
+      );
+    });
+    expect(probe).not.toHaveBeenCalled();
+    expect(fake.calls[0].cli).toBe("devin");
+    expect(fake.calls[0].args).not.toContain("--sandbox");
   });
 
   it("probes bwrap at most once per process, not once per review seat", () => {
@@ -337,6 +356,10 @@ describe("issue #270: devin sandbox preflight", () => {
       runOnce();
       runOnce();
     });
-    expect(bwrapProbes.length).toBeLessThanOrEqual(1);
+    // Round 2 (grok): `<= 1` also passes when the probe NEVER runs, so it could
+    // not distinguish "cached" from "never called" and was a control that could
+    // not fail in the direction that matters. Pin it to exactly one: the default
+    // probe must run, and must run only once across three review runs.
+    expect(bwrapProbes.length).toBe(1);
   });
 });
