@@ -285,7 +285,11 @@ describe("Layer 4 validation orchestration", () => {
     );
 
     expect(synthesis.status).toBe("running");
-    expect(synthesis.note).toContain("1 non-completed result(s) were preserved but omitted");
+    // Issue #269 reworded this: the omitted set now also holds COMPLETED results
+    // that returned no output, so "non-completed" was inaccurate for them.
+    expect(synthesis.note).toContain(
+      "1 result(s) without usable output were preserved but omitted as evidence"
+    );
     const judgePrompt = fake.startCalls.at(-1)?.args.join("\n") ?? "";
     expect(judgePrompt).toContain('"provider": "claude"');
     expect(judgePrompt).not.toContain('"provider": "grok"');

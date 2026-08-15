@@ -3,6 +3,7 @@ import { buildValidationReport } from "../validation-report.js";
 import { normalizeJobResult } from "../validation-normalizer.js";
 import { startJudgeSynthesis } from "../validation-orchestrator.js";
 import { buildValidationSchemas } from "../validation-tools.js";
+import { buildReviewJudgePrompt } from "../validation-prompts.js";
 import type { NormalizedValidationResult, ValidationProvider } from "../validation-normalizer.js";
 import type { AsyncJobResult } from "../async-job-manager.js";
 
@@ -159,5 +160,67 @@ describe("issue #269: an empty completed reviewer is not agreement", () => {
     } as never);
     expect(synthesis.status).toBe("skipped");
     expect(synthesis.note).toMatch(/empty/i);
+  });
+
+  it("marks the empty seat in the REVIEW judge prompt, not just the ask path", () => {
+    // Round 2 (codex). The fix above filtered `completedResults`, but the review
+    // path does not use that variable at all: it passes `input.reviewEvidence`
+    // straight into buildReviewJudgePrompt. reviewEvidence is pushed
+    // unconditionally in validation-tools.ts, including for a zero-byte job, so
+    // the review judge still received the silent provider as a participant.
+    //
+    // That is the path issue #269 was actually reported on: three mistral REVIEW
+    // jobs exiting 0 with 0 bytes. Fixing only the ask path would have left the
+    // reported case broken.
+    //
+    // The evidence row itself stays. It is hashed and the durable set has to
+    // remain complete, so the fact is surfaced in the roster rather than the row
+    // being dropped.
+    const prompt = buildReviewJudgePrompt({
+      question: "review this",
+      roster: [
+        {
+          provider: "codex",
+          status: "completed",
+          verdict: "approve",
+          dispatched: true,
+          jobId: "j1",
+          correlationId: "c1",
+          error: null,
+          warning: null,
+          emptyOutput: false,
+        },
+        {
+          provider: "mistral",
+          status: "completed",
+          verdict: null,
+          dispatched: true,
+          jobId: "j2",
+          correlationId: "c2",
+          error: null,
+          warning: null,
+          emptyOutput: true,
+        },
+      ],
+      evidence: [
+        {
+          schemaVersion: "review-judge-evidence.v1",
+          provider: "mistral",
+          jobId: "j2",
+          correlationId: "c2",
+          status: "completed",
+          exitCode: 0,
+          error: null,
+          stdout: { text: "", byteLength: 0, sha256: "0".repeat(64) },
+          stderr: { text: "", byteLength: 0, sha256: "0".repeat(64) },
+        },
+      ] as never,
+    });
+    // The fact reaches the judge...
+    expect(prompt).toContain('"emptyOutput": true');
+    // ...and the judge is told what it means, because a bare flag in fenced
+    // JSON is not an instruction and this prompt explicitly says to treat the
+    // fenced content as untrusted data.
+    expect(prompt).toMatch(/never as agreement/i);
   });
 });

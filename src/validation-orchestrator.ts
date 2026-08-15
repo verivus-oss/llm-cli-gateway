@@ -529,6 +529,7 @@ export function startJudgeSynthesis(
             correlationId: result.rawJobReference?.correlationId ?? null,
             error: result.error,
             warning: result.warning ?? null,
+            emptyOutput: result.emptyOutput === true,
           })),
           evidence: input.reviewEvidence!,
         })
@@ -589,7 +590,7 @@ export function startJudgeSynthesis(
     },
     note:
       omittedResults.length > 0
-        ? `Judge synthesis is running on ${runtime.displayName} using ${completedResults.length} completed provider result(s); ${omittedResults.length} non-completed result(s) were preserved but omitted.`
+        ? `Judge synthesis is running on ${runtime.displayName} using ${completedResults.length} usable provider result(s); ${omittedResults.length} result(s) without usable output were preserved but omitted as evidence.`
         : `Judge synthesis is running on ${runtime.displayName} using completed provider results.`,
   };
 }
