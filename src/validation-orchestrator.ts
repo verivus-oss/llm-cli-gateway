@@ -1,4 +1,5 @@
 import { createHash, randomUUID } from "node:crypto";
+import { spawnSync } from "node:child_process";
 import type {
   AsyncJobManager,
   AsyncJobSnapshot,
@@ -7,6 +8,7 @@ import type {
 } from "./async-job-manager.js";
 import { DurableJobAdmissionError } from "./async-job-manager.js";
 import { WorkspaceRegistryError } from "./workspace-registry.js";
+import { CliInvalidInputError } from "./cli-input-limits.js";
 import { getProviderRuntimeStatus, type ProviderRuntimeStatus } from "./provider-status.js";
 import type { CliType } from "./provider-types.js";
 import { createApiProvider } from "./api-provider.js";
@@ -910,6 +912,20 @@ function guardedArgvInvocation(
   return { args };
 }
 
+/**
+ * Whether bubblewrap is available for a provider that resolves --sandbox
+ * through it. Cached: consulted per review job, and the answer cannot change
+ * within a process without the operator installing a package.
+ */
+let bubblewrapAvailable: boolean | null = null;
+function hasBubblewrap(): boolean {
+  if (bubblewrapAvailable === null) {
+    const probe = spawnSync("bwrap", ["--version"], { stdio: "ignore" });
+    bubblewrapAvailable = !probe.error && probe.status === 0;
+  }
+  return bubblewrapAvailable;
+}
+
 function buildProviderInvocation(
   provider: ValidationProvider,
   prompt: string,
@@ -931,12 +947,43 @@ function buildProviderInvocation(
     return guardedArgvInvocation(provider, promptArg, [promptArg, ...(review ? reviewArgs : [])]);
   }
   if (provider === "devin") {
+    // Issue #270: --sandbox is emitted unconditionally for review, and devin
+    // resolves it through bubblewrap. On a host without bwrap every devin review
+    // seat failed at spawn with "sandbox resolution failed", which the gateway
+    // could not predict because nothing probed for it.
+    //
+    // Refuse up front instead. Dropping --sandbox to make it run would be worse:
+    // the review asked for isolation, and silently running unsandboxed is not a
+    // smaller failure than not running at all.
+    if (review && !hasBubblewrap()) {
+      throw new CliInvalidInputError("devin", "sandbox (bubblewrap is not installed)");
+    }
     const args = ["-p", ...(review ? ["--permission-mode", "auto", "--sandbox"] : [])];
     appendCliPrompt(args, prompt);
     return guardedArgvInvocation(provider, prompt, args);
   }
   if (provider === "cursor") {
-    const args = ["--print", "--mode", review ? "plan" : "ask", "--sandbox", "enabled"];
+    // Issue #270: cursor refuses to run in a directory it does not trust, and
+    // the review path never emitted --trust, so EVERY cursor review seat failed
+    // with "Workspace Trust Required".
+    //
+    // That became deterministic rather than incidental when unscoped children
+    // started getting a fresh neutral temp directory (src/executor.ts), which
+    // by construction can never appear in cursor's trusted_folders.toml.
+    //
+    // Trust is granted here, and only here, because the operator has already
+    // opted in either way: the cwd is either a workspace they registered with
+    // cursor in its providers list, or a scratch directory this gateway created
+    // itself. It stays paired with --sandbox enabled, so this grants directory
+    // access inside a sandbox rather than unrestricted execution.
+    const args = [
+      "--print",
+      "--mode",
+      review ? "plan" : "ask",
+      "--sandbox",
+      "enabled",
+      ...(review ? ["--trust"] : []),
+    ];
     appendCliPrompt(args, prompt);
     return guardedArgvInvocation(provider, prompt, args);
   }
