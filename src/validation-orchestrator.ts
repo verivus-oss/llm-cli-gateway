@@ -8,7 +8,6 @@ import type {
 } from "./async-job-manager.js";
 import { DurableJobAdmissionError } from "./async-job-manager.js";
 import { WorkspaceRegistryError } from "./workspace-registry.js";
-import { CliInvalidInputError } from "./cli-input-limits.js";
 import { getProviderRuntimeStatus, type ProviderRuntimeStatus } from "./provider-status.js";
 import type { CliType } from "./provider-types.js";
 import { createApiProvider } from "./api-provider.js";
@@ -81,6 +80,12 @@ export interface ValidationOrchestratorDeps {
   validationRunStore?: ValidationRunStore | null;
   /** Resolve a concrete CLI cwd under the caller's local or remote workspace policy. */
   resolveProviderCwd?: (provider: CliType) => string | undefined;
+  /**
+   * Whether bubblewrap is present, for the devin review sandbox preflight
+   * (see reviewSandboxGap). Defaults to a cached `bwrap --version` probe;
+   * injected by tests so a seat's outcome does not depend on the host.
+   */
+  hasBubblewrap?: () => boolean;
 }
 
 /** Slice 3: the enabled API-provider runtime for `provider`, or null (a CLI). */
@@ -629,6 +634,14 @@ function startProviderJob(
     return normalizeSkippedProvider(provider, `${runtime.displayName} runtime is not installed.`);
   }
 
+  // Same shape as the not-installed skip above, and for the same reason: a seat
+  // the gateway already knows cannot run is skipped before a job exists, rather
+  // than launched and left to fail at spawn.
+  const sandboxGap = reviewSandboxGap(deps, provider, options.review === true);
+  if (sandboxGap) {
+    return normalizeSkippedProvider(provider, sandboxGap);
+  }
+
   const warning =
     runtime.loginStatus === "authenticated"
       ? undefined
@@ -913,9 +926,10 @@ function guardedArgvInvocation(
 }
 
 /**
- * Whether bubblewrap is available for a provider that resolves --sandbox
- * through it. Cached: consulted per review job, and the answer cannot change
- * within a process without the operator installing a package.
+ * Whether bubblewrap is present. Cached: consulted per review job, and the
+ * answer cannot change within a process without the operator installing a
+ * package. Overridable through `deps.hasBubblewrap` so tests do not depend on
+ * whether the host running them happens to have bwrap.
  */
 let bubblewrapAvailable: boolean | null = null;
 function hasBubblewrap(): boolean {
@@ -924,6 +938,38 @@ function hasBubblewrap(): boolean {
     bubblewrapAvailable = !probe.error && probe.status === 0;
   }
   return bubblewrapAvailable;
+}
+
+/**
+ * Issue #270: review always emits devin's `--sandbox`, which devin resolves
+ * through a platform-native mechanism: "macOS seatbelt / Linux bwrap+seccomp"
+ * (`devin --help`). On a Linux host without bwrap every devin review seat
+ * failed at spawn with a sandbox resolution error the gateway never predicted.
+ *
+ * Probe only where a probe means something. A missing bwrap on Linux is a
+ * positive reading that the mechanism is absent. On macOS seatbelt ships with
+ * the OS, and on any other platform the gateway has no probe at all, so absence
+ * of a reading is not treated as evidence of absence and the seat proceeds.
+ *
+ * Skipping rather than dropping `--sandbox` is deliberate: the review asked for
+ * isolation, and running unsandboxed silently is not a smaller failure than not
+ * running. Skipping rather than throwing is equally deliberate: one provider
+ * that cannot be sandboxed must not take the rest of the roster down with it,
+ * which is exactly what a throw did here, because `startReviewRun` defers
+ * launches and rethrows admission errors.
+ */
+function reviewSandboxGap(
+  deps: ValidationOrchestratorDeps,
+  provider: ValidationProvider,
+  review: boolean
+): string | undefined {
+  if (!review || provider !== "devin") return undefined;
+  if (process.platform !== "linux") return undefined;
+  if ((deps.hasBubblewrap ?? hasBubblewrap)()) return undefined;
+  return (
+    "devin review requires --sandbox, which devin resolves through bubblewrap on Linux, " +
+    "and bwrap is not installed. Install bubblewrap or omit devin from the review roster."
+  );
 }
 
 function buildProviderInvocation(
@@ -947,35 +993,35 @@ function buildProviderInvocation(
     return guardedArgvInvocation(provider, promptArg, [promptArg, ...(review ? reviewArgs : [])]);
   }
   if (provider === "devin") {
-    // Issue #270: --sandbox is emitted unconditionally for review, and devin
-    // resolves it through bubblewrap. On a host without bwrap every devin review
-    // seat failed at spawn with "sandbox resolution failed", which the gateway
-    // could not predict because nothing probed for it.
-    //
-    // Refuse up front instead. Dropping --sandbox to make it run would be worse:
-    // the review asked for isolation, and silently running unsandboxed is not a
-    // smaller failure than not running at all.
-    if (review && !hasBubblewrap()) {
-      throw new CliInvalidInputError("devin", "sandbox (bubblewrap is not installed)");
-    }
+    // The sandbox mechanism itself is checked in startProviderJob, which can
+    // skip this one seat. See reviewSandboxGap.
     const args = ["-p", ...(review ? ["--permission-mode", "auto", "--sandbox"] : [])];
     appendCliPrompt(args, prompt);
     return guardedArgvInvocation(provider, prompt, args);
   }
   if (provider === "cursor") {
     // Issue #270: cursor refuses to run in a directory it does not trust, and
-    // the review path never emitted --trust, so EVERY cursor review seat failed
-    // with "Workspace Trust Required".
+    // the review path never emitted --trust, so a cursor review seat failed with
+    // "Workspace Trust Required" whenever the reviewed repository was not
+    // already in that host's trusted_folders.toml.
     //
-    // That became deterministic rather than incidental when unscoped children
-    // started getting a fresh neutral temp directory (src/executor.ts), which
-    // by construction can never appear in cursor's trusted_folders.toml.
+    // What the grant actually covers, stated precisely because an earlier
+    // version of this comment claimed a boundary the code does not enforce:
+    // the review path always passes a cwd (startReviewRun, and the judge in
+    // validation-tools.ts), so the neutral temp directory in src/executor.ts is
+    // never the cwd here; that applies to the ask path, which gets no --trust.
+    // The cwd is the repository the caller selected for review. That is a
+    // registered workspace only when the caller named one. A local caller
+    // passing workingDir gets any git root it can reach, with no check that
+    // cursor appears in a workspace providers list, so the boundary is operator
+    // intent, not registration.
     //
-    // Trust is granted here, and only here, because the operator has already
-    // opted in either way: the cwd is either a workspace they registered with
-    // cursor in its providers list, or a scratch directory this gateway created
-    // itself. It stays paired with --sandbox enabled, so this grants directory
-    // access inside a sandbox rather than unrestricted execution.
+    // Residual risk accepted here: a trusted folder is also where cursor picks
+    // up project rules, AGENTS.md/CLAUDE.md and project MCP config, so reviewing
+    // a repository whose contents are not trusted grants that repository some
+    // influence over the reviewer. It stays paired with --mode plan and
+    // --sandbox enabled, and ordinary cursor_request still demands an explicit
+    // trust flag from the caller rather than inheriting this one.
     const args = [
       "--print",
       "--mode",
