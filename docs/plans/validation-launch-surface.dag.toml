@@ -1,0 +1,284 @@
+# Validation provider-launch surface: mechanical implication map
+#
+# WHY THIS EXISTS
+# Four consecutive cross-model review rounds found the SAME defect: a rule was
+# added to one caller and a second caller silently kept the old behaviour.
+#
+#   round 1  empty reviewer counted as agreement       (report path only)
+#   round 2  the REVIEW judge still got empty seats    (second judge path)
+#   round 3  the judge bypassed both launch gates      (second dispatch site)
+#   round 4  the trust consent never reached the judge (second TOOL CALL)
+#
+# Every one was found by a reviewer, not by me, because I grepped what was in
+# front of me instead of traversing the graph. Each instance sat one layer
+# further out than the last: report -> judge -> dispatch -> tool boundary.
+#
+# HOW TO USE IT
+# Before changing anything in this surface, find the node, then follow
+# `affects` transitively to the leaves. Every node on that path is a place the
+# change must be considered. `invariants` below are machine-checked; if one
+# fails, the fix is to route the new caller through the existing path, NOT to
+# copy the rule into the new site.
+#
+# Regenerate the edges with, from a checkout at this branch:
+#   sqry index . && sqry graph callers <symbol>
+# The counts in `invariants` are exactly what `sqry graph callers` reports.
+
+[meta]
+surface = "validation provider launch + cursor trust"
+branch = "fix/270-cursor-trust-devin-sandbox"
+last_reviewed_head = "7b03fd2"
+generated_from = "TypeScript AST caller inspection plus checked source coordinates"
+node_count = 17
+invariant_count = 6
+flow_count = 9
+
+# ---------------------------------------------------------------------------
+# ENTRY POINTS. Everything below is reachable only from these.
+# ---------------------------------------------------------------------------
+
+[[node]]
+id = "tool.review_changes"
+kind = "mcp_tool"
+file = "src/validation-tools.ts"
+line = 417
+role = "Captures the Git artifact and starts the reviewer roster. Owns the trust CONSENT input."
+affects = ["fn.startReviewRun", "state.reviewRunAuthorization"]
+
+[[node]]
+id = "tool.synthesize_validation"
+kind = "mcp_tool"
+file = "src/validation-tools.ts"
+line = 870
+role = "Starts the judge in a LATER tool call than review_changes. This separation is what hid round 4: it cannot see the kickoff arguments, only durable state."
+affects = ["fn.startJudgeSynthesis", "state.reviewRunAuthorization"]
+
+[[node]]
+id = "tool.validate_with_models"
+kind = "mcp_tool"
+file = "src/validation-tools.ts"
+line = 636
+role = "Ask-path roster. review=false, so no trust is ever granted."
+affects = ["fn.startValidationRun"]
+
+# ---------------------------------------------------------------------------
+# THE SINGLE LAUNCH PATH. This is the invariant that round 3 established.
+# ---------------------------------------------------------------------------
+
+[[node]]
+id = "fn.startValidationRun"
+kind = "function"
+file = "src/validation-orchestrator.ts"
+line = 317
+role = "Ask roster. Maps a refusal to normalizeSkippedProvider."
+affects = ["fn.startProviderJob"]
+
+[[node]]
+id = "fn.startReviewRun"
+kind = "function"
+file = "src/validation-orchestrator.ts"
+line = 392
+role = "Review roster. Reads the trust consent from the DURABLE authorization, not from its own argument."
+affects = ["fn.startProviderJob"]
+reads = ["state.reviewRunAuthorization"]
+
+[[node]]
+id = "fn.startJudgeSynthesis"
+kind = "function"
+file = "src/validation-orchestrator.ts"
+line = 500
+role = "Judge seat. Maps a refusal to a skipped synthesis. Historically the SECOND path; it now decides representation only, never launching."
+affects = ["fn.launchProviderSeat"]
+reads = ["state.reviewRunAuthorization"]
+
+[[node]]
+id = "fn.startProviderJob"
+kind = "function"
+file = "src/validation-orchestrator.ts"
+line = 772
+role = "Roster seat. Maps a refusal to normalizeSkippedProvider."
+affects = ["fn.launchProviderSeat"]
+
+[[node]]
+id = "fn.launchProviderSeat"
+kind = "function"
+file = "src/validation-orchestrator.ts"
+line = 696
+role = "THE launch path. Computes the gates itself and is the only caller of dispatchProviderJob. A new seat MUST call this, never dispatch directly."
+affects = ["fn.providerPreflight", "fn.dispatchProviderJob"]
+critical = true
+
+[[node]]
+id = "fn.dispatchProviderJob"
+kind = "function"
+file = "src/validation-orchestrator.ts"
+line = 155
+role = "Builds argv and starts the job. Private to launchProviderSeat."
+affects = ["fn.buildProviderInvocation", "ext.startJobWithDedup", "ext.startHttpJob"]
+
+[[node]]
+id = "fn.buildProviderInvocation"
+kind = "function"
+file = "src/validation-orchestrator.ts"
+line = 1141
+role = "Emits provider argv, INCLUDING --trust. Only ever reflects the verdict it is handed; it must not decide trust."
+affects = ["argv.cursor_trust", "argv.devin_sandbox"]
+
+# ---------------------------------------------------------------------------
+# THE GATES. Add a fourth gate HERE, and every seat inherits it.
+# ---------------------------------------------------------------------------
+
+[[node]]
+id = "fn.providerPreflight"
+kind = "function"
+file = "src/validation-orchestrator.ts"
+line = 1131
+role = "Every launch gate in one call. THE extension point: a new gate goes here."
+affects = ["fn.reviewSandboxGap", "fn.cursorTrustGap"]
+critical = true
+
+[[node]]
+id = "fn.reviewSandboxGap"
+kind = "function"
+file = "src/validation-orchestrator.ts"
+line = 1066
+role = "devin --sandbox needs bubblewrap on Linux. macOS uses seatbelt, so it does not gate there; other platforms have no probe, and absence of a reading is not evidence of absence."
+affects = ["outcome.skipped"]
+
+[[node]]
+id = "fn.cursorTrustGap"
+kind = "function"
+file = "src/validation-orchestrator.ts"
+line = 1099
+role = "Decides cursor review trust. The ONLY producer of a trust verdict."
+affects = ["outcome.skipped", "argv.cursor_trust"]
+reads = ["fn.isProviderWorkspacePath", "state.reviewRunAuthorization"]
+critical = true
+
+[[node]]
+id = "fn.isProviderWorkspacePath"
+kind = "function"
+file = "src/workspace-registry.ts"
+line = 651
+role = "The entire automatic-trust boundary. Nearest enclosing registration decides; ties fail closed; containment via isUnder (path.relative)."
+affects = ["fn.cursorTrustGap"]
+critical = true
+
+[[node]]
+id = "fn.isUnder"
+kind = "function"
+file = "src/workspace-registry.ts"
+line = 201
+role = "Containment via path.relative. Used instead of a manual separator prefix, which mishandled a filesystem root."
+affects = ["fn.isProviderWorkspacePath"]
+
+# ---------------------------------------------------------------------------
+# DURABLE STATE. This is what crosses the tool-call boundary, which is the
+# boundary round 4 proved arguments cannot cross.
+# ---------------------------------------------------------------------------
+
+[[node]]
+id = "state.reviewRunAuthorization"
+kind = "durable_schema"
+file = "src/review-run-authorization.ts"
+line = 6
+role = "Persisted into validation_runs.requestJson at kickoff and reloaded at synthesis. Holds trustCursorWorkspace so the roster and the judge read ONE field and cannot disagree."
+affects = ["fn.startReviewRun", "fn.startJudgeSynthesis"]
+critical = true
+note = "Any consent or policy that both the roster and the judge need MUST live here, not in a tool argument. A tool argument is visible to exactly one tool call."
+
+[[node]]
+id = "field.trustCursorWorkspace"
+kind = "durable_field"
+file = "src/review-run-authorization.ts"
+line = 24
+role = "Operator consent to trust an unregistered repository. Defaulted false so pre-existing runs still parse."
+affects = ["fn.startReviewRun", "fn.startJudgeSynthesis"]
+flow = [
+  { file = "src/validation-tools.ts", line = 434, token = "trustCursorWorkspace", role = "tool input schema" },
+  { file = "src/validation-tools.ts", line = 512, token = "trustCursorWorkspace", role = "handler destructure" },
+  { file = "src/validation-tools.ts", line = 578, token = "trustCursorWorkspace", role = "written into reviewAuthorization" },
+  { file = "src/review-run-authorization.ts", line = 24, token = "trustCursorWorkspace", role = "durable schema field" },
+  { file = "src/validation-orchestrator.ts", line = 905, token = "reviewAuthorization", role = "persisted into validation_runs.requestJson" },
+  { file = "src/validation-tools.ts", line = 935, token = "parseReviewRunAuthorization", role = "rehydrated for synthesis" },
+  { file = "src/validation-tools.ts", line = 1064, token = "trustCursorWorkspace", role = "passed to startJudgeSynthesis" },
+  { file = "src/validation-orchestrator.ts", line = 598, token = "trustWorkspace", role = "judge seat launch option" },
+  { file = "src/validation-orchestrator.ts", line = 449, token = "trustWorkspace", role = "roster seat launch option" },
+]
+
+# ---------------------------------------------------------------------------
+# MACHINE-CHECKED INVARIANTS. Counts are what `sqry graph callers` reports.
+# src/__tests__/validation-single-launch-path.test.ts pins these.
+# ---------------------------------------------------------------------------
+
+[[invariant]]
+symbol = "dispatchProviderJob"
+callers = 1
+expect = ["launchProviderSeat"]
+why = "A second dispatch site is the exact defect of rounds 2, 3 and 4."
+pinned_by = "validation-single-launch-path.test.ts"
+
+[[invariant]]
+symbol = "providerPreflight"
+callers = 1
+expect = ["launchProviderSeat"]
+why = "A caller computing its own preflight can compute a permissive one."
+pinned_by = "validation-single-launch-path.test.ts"
+
+[[invariant]]
+symbol = "reviewSandboxGap"
+callers = 1
+expect = ["providerPreflight"]
+why = "Calling one gate directly means skipping the other."
+pinned_by = "validation-single-launch-path.test.ts"
+
+[[invariant]]
+symbol = "cursorTrustGap"
+callers = 1
+expect = ["providerPreflight"]
+why = "Same, and this one decides a security boundary."
+pinned_by = "validation-single-launch-path.test.ts"
+
+[[invariant]]
+symbol = "buildProviderInvocation"
+callers = 1
+expect = ["dispatchProviderJob"]
+why = "It is the function that actually emits --trust."
+pinned_by = "validation-single-launch-path.test.ts"
+
+[[invariant]]
+symbol = "launchProviderSeat"
+callers = 2
+expect = ["startProviderJob", "startJudgeSynthesis"]
+why = "Roster and judge. A third caller is fine; a caller that BYPASSES it is not."
+
+# ---------------------------------------------------------------------------
+# CHANGE PROTOCOL. What to traverse before editing.
+# ---------------------------------------------------------------------------
+
+[protocol]
+before_changing_a_gate = """
+Edit providerPreflight or a *Gap function only. Then run
+`sqry graph callers providerPreflight` and confirm it is still 1. Every seat
+inherits the change automatically; that is the point.
+"""
+
+before_adding_a_seat = """
+Call launchProviderSeat. Do NOT call dispatchProviderJob. If the new seat
+returns a different shape, map the SeatLaunch refusal in the caller, exactly as
+startProviderJob and startJudgeSynthesis do.
+"""
+
+before_adding_caller_visible_policy = """
+Ask: does the judge need it too? The judge runs in a LATER tool call
+(synthesize_validation) and cannot see review_changes arguments. If both need
+it, it belongs on ReviewRunAuthorization, which is durable, not on a tool
+argument. This is the round-4 lesson.
+"""
+
+before_changing_the_trust_predicate = """
+isProviderWorkspacePath is the whole automatic-trust boundary. Run
+workspace-provider-grant.test.ts, which drives the REAL predicate with real
+directories and symlinks. Injected fakes in the admission tests CANNOT catch a
+grant-logic hole; that is how the nested-repo over-grant survived round 3.
+"""

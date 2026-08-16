@@ -431,6 +431,12 @@ export function registerValidationTools(server: McpServer, deps: ValidationToolD
           .regex(/^[A-Za-z][A-Za-z0-9._-]{0,63}$/)
           .optional()
           .describe("Authorized workspace alias, required for remote HTTP/OAuth callers."),
+        trustCursorWorkspace: z
+          .boolean()
+          .default(false)
+          .describe(
+            "Let cursor trust this repository even though it is not a workspace registered for cursor. Cursor refuses to review an untrusted directory, so without this a cursor seat on an unregistered path is skipped. Trust also lets the reviewed repository's own rules and AGENTS.md instruct the reviewer, which the review prompt otherwise forbids, so enable it only for a repository whose contents you trust."
+          ),
         scope: z
           .enum(["auto", "uncommitted", "branch", "commit"])
           .default("auto")
@@ -503,6 +509,7 @@ export function registerValidationTools(server: McpServer, deps: ValidationToolD
         allowApiUpload,
         maxArtifactBytes,
         maxPromptBytes,
+        trustCursorWorkspace,
       }) => {
         try {
           const providers = Array.from(new Set(models)) as ValidationProvider[];
@@ -568,6 +575,7 @@ export function registerValidationTools(server: McpServer, deps: ValidationToolD
               repositoryRoot: resolved.repositoryRoot,
               judgeProvider: judgeModel ?? null,
               allowApiUpload,
+              trustCursorWorkspace,
             },
           });
           return textResponse({
@@ -1049,6 +1057,11 @@ export function registerValidationTools(server: McpServer, deps: ValidationToolD
         cwd,
         review,
         reviewEvidence: synthesisReviewEvidence,
+        // Issue #270 round 4: replay the consent the operator gave at
+        // review_changes. The judge runs in a LATER tool call, so without this
+        // the opt-in was roster-only and a cursor judge on an unregistered
+        // repository was always skipped, however the run was authorized.
+        trustCursorWorkspace: reviewAuthorization?.trustCursorWorkspace ?? false,
       });
       // Phase 2: auto-mint convenience. If the run is already terminal (e.g. the
       // judge was skipped, or it had already completed), mint the receipt now

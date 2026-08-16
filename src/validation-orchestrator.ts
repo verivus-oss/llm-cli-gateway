@@ -1,4 +1,5 @@
 import { createHash, randomUUID } from "node:crypto";
+import { spawnSync } from "node:child_process";
 import type {
   AsyncJobManager,
   AsyncJobSnapshot,
@@ -79,6 +80,19 @@ export interface ValidationOrchestratorDeps {
   validationRunStore?: ValidationRunStore | null;
   /** Resolve a concrete CLI cwd under the caller's local or remote workspace policy. */
   resolveProviderCwd?: (provider: CliType) => string | undefined;
+  /**
+   * Whether bubblewrap is present, for the devin review sandbox preflight
+   * (see reviewSandboxGap). Defaults to a cached `bwrap --version` probe;
+   * injected by tests so a seat's outcome does not depend on the host.
+   */
+  hasBubblewrap?: () => boolean;
+  /**
+   * Whether `cwd` is a directory the operator registered for this provider,
+   * i.e. a [[workspaces.repos]] entry (or a gateway worktree inside one) whose
+   * `providers` list includes it. Used only to decide cursor review trust; see
+   * cursorTrustGap. Absent means "cannot establish", which fails closed.
+   */
+  isProviderWorkspacePath?: (provider: CliType, cwd: string) => boolean;
 }
 
 /** Slice 3: the enabled API-provider runtime for `provider`, or null (a CLI). */
@@ -120,6 +134,24 @@ function resolveReviewerStatus(
  * `ApiRequest` built by the SAME `prepareApiRequest` the direct api_<name>_request
  * tools use; CLI providers keep the argv `startJob` path.
  */
+/**
+ * The result of every gate that must be cleared before a provider seat is
+ * allowed to launch. See providerPreflight.
+ *
+ * dispatchProviderJob takes this as a REQUIRED argument rather than reading it
+ * from options, so a new dispatch site cannot silently inherit a default and
+ * skip the gates. Round 3 of review found exactly that: the review judge had
+ * its own dispatch call and therefore bypassed both preflights, which is the
+ * third time in this series that a fix landed on one caller and missed another.
+ * The type is the guard now, not vigilance.
+ */
+interface ProviderPreflight {
+  /** Whether cursor may be told to trust the review cwd. */
+  trusted: boolean;
+  /** Present when this seat must be skipped instead of launched. */
+  skipReason?: string;
+}
+
 function dispatchProviderJob(
   deps: ValidationOrchestratorDeps,
   provider: ValidationProvider,
@@ -131,8 +163,15 @@ function dispatchProviderJob(
     forceRefresh?: boolean;
     deferLaunch?: boolean;
     validationAdmission?: ValidationJobAdmission;
-  } = {}
+  },
+  preflight: ProviderPreflight
 ): StartJobOutcome {
+  if (preflight.skipReason) {
+    // Defence in depth. Callers are expected to return a skipped result before
+    // reaching here; if one forgets, refuse rather than launch a seat that the
+    // gates just rejected.
+    throw new Error(`Provider preflight not cleared for ${provider}: ${preflight.skipReason}`);
+  }
   const api = findApiReviewer(deps, provider);
   if (api) {
     const apiProvider = createApiProvider(api.name, api.kind);
@@ -155,7 +194,12 @@ function dispatchProviderJob(
     });
   }
   const cli = provider as CliType;
-  const invocation = buildProviderInvocation(provider, prompt, options.review ?? false);
+  const invocation = buildProviderInvocation(
+    provider,
+    prompt,
+    options.review ?? false,
+    preflight.trusted
+  );
   assertUpstreamCliArgs(cli, invocation.args);
   const cwd = options.cwd ?? deps.resolveProviderCwd?.(cli);
   if (options.review) {
@@ -221,7 +265,12 @@ export interface StartReviewInput {
   artifactByteLength: number;
   scope: string;
   judgeProvider?: ValidationProvider;
-  /** Explicit repository-upload policy bound durably to this review run. */
+  /**
+   * Explicit repository-upload policy bound durably to this review run, and
+   * (issue #270) the caller's cursor-trust decision. The trust flag lives on the
+   * authorization rather than beside it because the roster and the judge run in
+   * different tool calls and must not be able to disagree about it.
+   */
   reviewAuthorization: ReviewRunAuthorization;
 }
 
@@ -397,6 +446,7 @@ export function startReviewRun(
           review: true,
           forceRefresh: true,
           deferLaunch: true,
+          trustWorkspace: input.reviewAuthorization.trustCursorWorkspace === true,
           validationAdmission: { validationId, provider },
           deferredLaunches,
         })
@@ -467,6 +517,13 @@ export function startJudgeSynthesis(
     review?: boolean;
     /** Exact terminal durable output, populated only by owned review-run binding. */
     reviewEvidence?: DurableReviewJudgeEvidence[];
+    /**
+     * Issue #270: accept cursor trusting an unregistered repository for this
+     * judge. Same decision, and same consequence, as the roster field on
+     * StartReviewInput; see cursorTrustGap. Without it a cursor judge on an
+     * unregistered repository is skipped rather than launched untrusted.
+     */
+    trustCursorWorkspace?: boolean;
   }
 ): ValidationRunReport["synthesis"] {
   if (input.review && !input.validationId) {
@@ -501,19 +558,11 @@ export function startJudgeSynthesis(
     };
   }
 
-  const runtime = resolveReviewerStatus(deps, input.judgeProvider);
-  if (!runtime.installed) {
-    if (input.review) markReviewJudgeSkipped(deps, input.validationId!, input.judgeProvider);
-    return {
-      status: "skipped",
-      judgeModel: input.judgeProvider,
-      rawJobReference: null,
-      note: `${runtime.displayName} was selected as judge but is not installed.`,
-    };
-  }
-
-  let snapshot: AsyncJobSnapshot;
-  let deferredLaunch: DeferredJobLaunch | undefined;
+  // The judge goes through launchProviderSeat like every other seat. It used to
+  // resolve the runtime and dispatch on its own, which is how it missed both
+  // launch gates in round 3. It no longer decides anything about launching; it
+  // only decides how to REPRESENT a refusal as a synthesis result.
+  let launch: SeatLaunch;
   try {
     if (input.review && (!input.reviewEvidence || input.reviewEvidence.length === 0)) {
       throw new Error("Review judge synthesis requires complete durable provider evidence");
@@ -538,7 +587,7 @@ export function startJudgeSynthesis(
           question: input.question,
           providerResults: completedResults,
         });
-    const outcome = dispatchProviderJob(
+    launch = launchProviderSeat(
       deps,
       input.judgeProvider,
       judgePrompt,
@@ -546,6 +595,7 @@ export function startJudgeSynthesis(
       {
         cwd: input.cwd,
         review: input.review,
+        trustWorkspace: input.trustCursorWorkspace,
         ...(input.review
           ? {
               forceRefresh: true,
@@ -559,12 +609,6 @@ export function startJudgeSynthesis(
           : {}),
       }
     );
-    snapshot = outcome.snapshot;
-    deferredLaunch = outcome.deferredLaunch;
-    if (input.review && !deferredLaunch) {
-      deps.asyncJobManager.cancelJob(snapshot.id);
-      throw new ValidationRunPersistenceError();
-    }
   } catch (error) {
     if (error instanceof DurableJobAdmissionError) {
       throw new ValidationRunPersistenceError();
@@ -578,7 +622,20 @@ export function startJudgeSynthesis(
       note: error.message,
     };
   }
-  if (input.review) deferredLaunch!.release();
+  if (!launch.launched) {
+    // A gate refused this seat. Represent it as a skipped judge rather than an
+    // error, matching how the roster represents the same refusal, and keep the
+    // gate's own reason so the caller learns what to change.
+    if (input.review) markReviewJudgeSkipped(deps, input.validationId!, input.judgeProvider);
+    return {
+      status: "skipped",
+      judgeModel: input.judgeProvider,
+      rawJobReference: null,
+      note: `${launch.runtime.displayName} was selected as judge but cannot run: ${launch.reason}`,
+    };
+  }
+  const { snapshot, runtime } = launch;
+  if (input.review) launch.deferredLaunch!.release();
   else linkJudgeJob(deps, input.validationId, input.judgeProvider, snapshot);
   return {
     status: "running",
@@ -608,6 +665,110 @@ export function collectValidationJobResult(
   return normalizeJobResult(provider, model, result);
 }
 
+/** The outcome of the one launch path. See launchProviderSeat. */
+type SeatLaunch =
+  | { launched: false; runtime: ReviewerStatus; reason: string }
+  | {
+      launched: true;
+      runtime: ReviewerStatus;
+      snapshot: AsyncJobSnapshot;
+      deferredLaunch?: DeferredJobLaunch;
+      warning?: string;
+    };
+
+/**
+ * THE launch path. Every provider seat this orchestrator starts, roster or
+ * judge, goes through here, and this is the only function that calls
+ * dispatchProviderJob.
+ *
+ * There were two launch paths before, and three consecutive rounds of review
+ * found the same defect because of it: a gate was added to the roster path and
+ * the judge path silently kept its old behaviour. Round 2 was the empty-reviewer
+ * filter, round 3 was cursor trust and the bubblewrap preflight. Making the
+ * preflight a required ARGUMENT was still a rule a caller had to follow, and a
+ * caller could satisfy it with a hand-built object. Now no caller supplies one
+ * at all: the gates are computed in here, where they cannot be forgotten or
+ * forged, and callers only choose how to REPRESENT a refusal.
+ *
+ * If a fourth gate is ever needed, it goes in providerPreflight and every seat
+ * gets it. Do not add a second launch path.
+ */
+function launchProviderSeat(
+  deps: ValidationOrchestratorDeps,
+  provider: ValidationProvider,
+  prompt: string,
+  correlationId: string,
+  options: {
+    cwd?: string;
+    review?: boolean;
+    forceRefresh?: boolean;
+    deferLaunch?: boolean;
+    validationAdmission?: ValidationJobAdmission;
+    trustWorkspace?: boolean;
+  } = {}
+): SeatLaunch {
+  const runtime = resolveReviewerStatus(deps, provider);
+  if (!runtime.installed) {
+    return { launched: false, runtime, reason: `${runtime.displayName} runtime is not installed.` };
+  }
+
+  // Every launch gate, in one call, before any job exists. A seat the gateway
+  // already knows cannot run is refused here rather than launched and left to
+  // fail at spawn, and refusing before the try below means a gate can never be
+  // turned into a call-level abort by the deferLaunch rethrow.
+  const preflight = providerPreflight(deps, provider, {
+    review: options.review,
+    cwd: options.cwd,
+    trustWorkspaceOverride: options.trustWorkspace,
+  });
+  if (preflight.skipReason) {
+    return { launched: false, runtime, reason: preflight.skipReason };
+  }
+
+  const warning =
+    runtime.loginStatus === "authenticated"
+      ? undefined
+      : `${runtime.displayName} login status is ${runtime.loginStatus}; the job may fail until login is complete.`;
+  try {
+    const outcome = dispatchProviderJob(deps, provider, prompt, correlationId, options, preflight);
+    if (options.deferLaunch && !outcome.deferredLaunch) {
+      // Asked for a deferred launch and did not get one: the run cannot be bound
+      // durably, so cancel rather than leave an unreleasable job behind.
+      deps.asyncJobManager.cancelJob(outcome.snapshot.id);
+      throw new ValidationRunPersistenceError();
+    }
+    return {
+      launched: true,
+      runtime,
+      snapshot: outcome.snapshot,
+      deferredLaunch: outcome.deferredLaunch,
+      warning,
+    };
+  } catch (error) {
+    if (isCliInputAdmissionError(error)) {
+      if (options.deferLaunch) throw error;
+      return { launched: false, runtime, reason: error.message };
+    }
+    // Issue #271: a provider absent from the selected workspace's
+    // `providers` list is a configuration fact about that provider, not a
+    // failure of the call. Keep the policy conversion at this sole launch
+    // boundary so roster and judge seats cannot diverge.
+    if (error instanceof WorkspaceRegistryError) {
+      if (options.deferLaunch) throw error;
+      const notAllowed = error.message.includes("does not allow provider");
+      return {
+        launched: false,
+        runtime,
+        reason: notAllowed
+          ? `${error.message}. Add "${provider}" to that workspace's ` +
+            `providers list, or select a workspace that allows it.`
+          : error.message,
+      };
+    }
+    throw error;
+  }
+}
+
 function startProviderJob(
   deps: ValidationOrchestratorDeps,
   provider: ValidationProvider,
@@ -620,64 +781,23 @@ function startProviderJob(
     deferLaunch?: boolean;
     validationAdmission?: ValidationJobAdmission;
     deferredLaunches?: DeferredJobLaunch[];
+    trustWorkspace?: boolean;
   } = {}
 ): NormalizedValidationResult {
-  const runtime = resolveReviewerStatus(deps, provider);
-  if (!runtime.installed) {
-    return normalizeSkippedProvider(provider, `${runtime.displayName} runtime is not installed.`);
+  const launch = launchProviderSeat(
+    deps,
+    provider,
+    prompt,
+    `validation-${validationId}-${provider}`,
+    options
+  );
+  if (!launch.launched) {
+    return normalizeSkippedProvider(provider, launch.reason);
   }
-
-  const warning =
-    runtime.loginStatus === "authenticated"
-      ? undefined
-      : `${runtime.displayName} login status is ${runtime.loginStatus}; the job may fail until login is complete.`;
-  let snapshot: AsyncJobSnapshot;
-  try {
-    const outcome = dispatchProviderJob(
-      deps,
-      provider,
-      prompt,
-      `validation-${validationId}-${provider}`,
-      options
-    );
-    if (options.deferLaunch) {
-      if (!outcome.deferredLaunch) {
-        deps.asyncJobManager.cancelJob(outcome.snapshot.id);
-        throw new ValidationRunPersistenceError();
-      }
-      options.deferredLaunches?.push(outcome.deferredLaunch);
-    }
-    snapshot = outcome.snapshot;
-  } catch (error) {
-    if (isCliInputAdmissionError(error)) {
-      if (options.deferLaunch) throw error;
-      return normalizeSkippedProvider(provider, error.message);
-    }
-    // Issue #271: a provider absent from the selected workspace's
-    // `providers` list is a configuration fact ABOUT THAT PROVIDER, not
-    // a failure of the call. resolveWorkspaceForProvider throws for it
-    // and this catch used to rethrow, so ONE unlisted reviewer aborted
-    // the ENTIRE multi-provider validation. Degrade it to `skipped`,
-    // exactly as an admission error is, so the others still report.
-    if (error instanceof WorkspaceRegistryError) {
-      if (options.deferLaunch) throw error;
-      // Three different conditions reach here: no workspace selected, unknown
-      // alias, and provider not in the workspace's list. Only the last is fixed
-      // by editing a providers list, so the remedy is attached only to it. A
-      // suffix appended to all three sends the reader to the wrong setting for
-      // two of them.
-      const notAllowed = error.message.includes("does not allow provider");
-      return normalizeSkippedProvider(
-        provider,
-        notAllowed
-          ? `${error.message}. Add "${provider}" to that workspace's ` +
-              `providers list, or select a workspace that allows it.`
-          : error.message
-      );
-    }
-    throw error;
+  if (options.deferLaunch && launch.deferredLaunch) {
+    options.deferredLaunches?.push(launch.deferredLaunch);
   }
-  return normalizeStartedJob(provider, runtime.version, snapshot, warning);
+  return normalizeStartedJob(provider, launch.runtime.version, launch.snapshot, launch.warning);
 }
 
 function plannedJudgeSynthesis(input: StartValidationInput): ValidationRunReport["synthesis"] {
@@ -910,10 +1030,119 @@ function guardedArgvInvocation(
   return { args };
 }
 
+/**
+ * Whether bubblewrap is present. Cached: consulted per review job, and the
+ * answer cannot change within a process without the operator installing a
+ * package. Overridable through `deps.hasBubblewrap` so tests do not depend on
+ * whether the host running them happens to have bwrap.
+ */
+let bubblewrapAvailable: boolean | null = null;
+function hasBubblewrap(): boolean {
+  if (bubblewrapAvailable === null) {
+    const probe = spawnSync("bwrap", ["--version"], { stdio: "ignore" });
+    bubblewrapAvailable = !probe.error && probe.status === 0;
+  }
+  return bubblewrapAvailable;
+}
+
+/**
+ * Issue #270: review always emits devin's `--sandbox`, which devin resolves
+ * through a platform-native mechanism: "macOS seatbelt / Linux bwrap+seccomp"
+ * (`devin --help`). On a Linux host without bwrap every devin review seat
+ * failed at spawn with a sandbox resolution error the gateway never predicted.
+ *
+ * Probe only where a probe means something. A missing bwrap on Linux is a
+ * positive reading that the mechanism is absent. On macOS seatbelt ships with
+ * the OS, and on any other platform the gateway has no probe at all, so absence
+ * of a reading is not treated as evidence of absence and the seat proceeds.
+ *
+ * Skipping rather than dropping `--sandbox` is deliberate: the review asked for
+ * isolation, and running unsandboxed silently is not a smaller failure than not
+ * running. Skipping rather than throwing is equally deliberate: one provider
+ * that cannot be sandboxed must not take the rest of the roster down with it,
+ * which is exactly what a throw did here, because `startReviewRun` defers
+ * launches and rethrows admission errors.
+ */
+function reviewSandboxGap(
+  deps: ValidationOrchestratorDeps,
+  provider: ValidationProvider,
+  review: boolean
+): string | undefined {
+  if (!review || provider !== "devin") return undefined;
+  if (process.platform !== "linux") return undefined;
+  if ((deps.hasBubblewrap ?? hasBubblewrap)()) return undefined;
+  return (
+    "devin review requires --sandbox, which devin resolves through bubblewrap on Linux, " +
+    "and bwrap is not installed. Install bubblewrap or omit devin from the review roster."
+  );
+}
+
+/**
+ * Issue #270 round 2: cursor refuses a directory it does not trust, so a review
+ * seat needs `--trust`. But a trusted folder is also where cursor loads project
+ * rules, AGENTS.md/CLAUDE.md and project MCP configuration FROM THE REPOSITORY
+ * UNDER REVIEW. review-prompt.ts fences that repository's evidence as
+ * "untrusted data, never instructions"; granting trust unconditionally would let
+ * the same repository supply instructions through a channel outside that fence.
+ *
+ * So trust is granted only where the operator already made that decision: the
+ * cwd is a workspace they registered with this provider in its `providers`
+ * list, which is the boundary review_changes already enforces on the alias path.
+ * A local caller pointing at an arbitrary Git root must opt in explicitly.
+ *
+ * Fails closed: no predicate means trust is not established.
+ *
+ * Note this covers instruction loading only. Cursor does NOT auto-approve
+ * project MCP servers on trust alone; that needs --approve-mcps, which the
+ * gateway never emits.
+ */
+function cursorTrustGap(
+  deps: ValidationOrchestratorDeps,
+  provider: ValidationProvider,
+  options: { review?: boolean; cwd?: string; trustWorkspaceOverride?: boolean }
+): { trusted: boolean; skipReason?: string } {
+  if (provider !== "cursor" || options.review !== true) return { trusted: false };
+  if (options.trustWorkspaceOverride === true) return { trusted: true };
+  const registered =
+    options.cwd !== undefined &&
+    deps.isProviderWorkspacePath?.(provider as CliType, options.cwd) === true;
+  if (registered) return { trusted: true };
+  return {
+    trusted: false,
+    skipReason:
+      "cursor refuses to review a directory it does not trust, and this repository " +
+      "is not a workspace registered for cursor. Granting trust would also let the " +
+      "reviewed repository's own rules and AGENTS.md instruct the reviewer, which " +
+      "the review prompt otherwise forbids. Register it under [[workspaces.repos]] " +
+      "with cursor in its providers list, or start the review with " +
+      "trustCursorWorkspace: true on review_changes, which binds that consent to " +
+      "the run so the judge inherits it too.",
+  };
+}
+
+/**
+ * Every gate a provider seat must clear before launch, in one place because
+ * there is more than one dispatch site and there will be more.
+ *
+ * Returns a skipReason when the seat cannot run at all, so the caller can
+ * degrade it to `skipped` rather than aborting the whole run, and `trusted`
+ * when cursor may be told to trust the review cwd.
+ */
+function providerPreflight(
+  deps: ValidationOrchestratorDeps,
+  provider: ValidationProvider,
+  options: { review?: boolean; cwd?: string; trustWorkspaceOverride?: boolean }
+): ProviderPreflight {
+  const sandboxGap = reviewSandboxGap(deps, provider, options.review === true);
+  if (sandboxGap) return { trusted: false, skipReason: sandboxGap };
+  return cursorTrustGap(deps, provider, options);
+}
+
 function buildProviderInvocation(
   provider: ValidationProvider,
   prompt: string,
-  review = false
+  review = false,
+  trustWorkspace = false
 ): ValidationCliInvocation {
   if (provider === "claude") {
     const args = ["-p", ...(review ? ["--permission-mode", "plan"] : [])];
@@ -931,12 +1160,31 @@ function buildProviderInvocation(
     return guardedArgvInvocation(provider, promptArg, [promptArg, ...(review ? reviewArgs : [])]);
   }
   if (provider === "devin") {
+    // The sandbox mechanism itself is checked in startProviderJob, which can
+    // skip this one seat. See reviewSandboxGap.
     const args = ["-p", ...(review ? ["--permission-mode", "auto", "--sandbox"] : [])];
     appendCliPrompt(args, prompt);
     return guardedArgvInvocation(provider, prompt, args);
   }
   if (provider === "cursor") {
-    const args = ["--print", "--mode", review ? "plan" : "ask", "--sandbox", "enabled"];
+    // Issue #270: cursor refuses to run in a directory it does not trust, and
+    // the review path never emitted --trust, so a cursor review seat failed with
+    // "Workspace Trust Required" whenever the reviewed repository was not
+    // already in that host's trusted_folders.toml.
+    //
+    // `trustWorkspace` is decided by cursorTrustGap, NOT here. This arm only
+    // emits what it was given. Do not restate the boundary in this comment: two
+    // earlier versions of it described a rule the code did not implement, and
+    // the second survived a round of review because the wording sounded
+    // careful. The rule lives in cursorTrustGap and isProviderWorkspacePath.
+    const args = [
+      "--print",
+      "--mode",
+      review ? "plan" : "ask",
+      "--sandbox",
+      "enabled",
+      ...(review && trustWorkspace ? ["--trust"] : []),
+    ];
     appendCliPrompt(args, prompt);
     return guardedArgvInvocation(provider, prompt, args);
   }

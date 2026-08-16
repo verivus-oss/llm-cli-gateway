@@ -628,3 +628,65 @@ export function describeWorkspace(repo: WorkspaceRepo): Record<string, unknown> 
     dirty,
   };
 }
+
+/**
+ * Issue #270: whether the operator registered `cwd` for `provider`, which is the
+ * ONLY condition under which cursor review trust is granted automatically.
+ *
+ * Containment is deliberate and covers a gateway worktree, which lives at
+ * `<repoRoot>/.worktrees/<uuid>` and is therefore not itself a registered path.
+ *
+ * Containment is also NEAREST-MATCH, not any-match. Round 3 of review found
+ * that an any-match containment check let a nested repository inherit a parent's
+ * grant: registering `/monorepo` (whose providers default to every CLI) and then
+ * separately registering `/monorepo/secret` with `providers = ["claude"]` still
+ * returned true for cursor under `/monorepo/secret`, because the parent matched.
+ * The closest enclosing registration is the one the operator meant to apply, so
+ * it decides, and a narrower registration can withhold a provider the parent
+ * allows.
+ *
+ * Both sides are realpath-resolved, so a symlink cannot present an unregistered
+ * tree as a registered one, and an unreadable path is never a match.
+ */
+export function isProviderWorkspacePath(
+  registry: WorkspaceRegistry,
+  provider: CliType,
+  cwd: string
+): boolean {
+  let candidate: string;
+  try {
+    candidate = realpathSync(path.resolve(cwd));
+  } catch {
+    return false;
+  }
+  let nearest: { root: string; providers: readonly CliType[]; withheld: boolean } | undefined;
+  for (const repo of registry.repos) {
+    let root: string;
+    try {
+      root = realpathSync(path.resolve(repo.path));
+    } catch {
+      continue;
+    }
+    // isUnder, not a manual prefix compare. Round 4 of review: appending a
+    // separator makes a filesystem root "/" produce the prefix "//", which
+    // matches nothing, so registering "/" silently granted nothing beneath it.
+    // path.relative gets that right and is already the containment rule used
+    // elsewhere in this file.
+    if (!isUnder(root, candidate)) continue;
+    const allows = repo.providers.includes(provider);
+    if (!nearest || root.length > nearest.root.length) {
+      nearest = { root, providers: repo.providers, withheld: !allows };
+      continue;
+    }
+    // Same canonical root registered twice under different aliases. The loader
+    // uniques aliases, not paths, so this is reachable, and taking whichever
+    // came first made the answer depend on config order. Fail closed instead:
+    // if any registration of this exact directory withholds the provider, the
+    // directory does not grant it.
+    if (root === nearest.root && !allows) {
+      nearest = { root, providers: repo.providers, withheld: true };
+    }
+  }
+  if (nearest === undefined) return false;
+  return !nearest.withheld && nearest.providers.includes(provider);
+}

@@ -223,6 +223,14 @@ describe("repository review integration", () => {
         asyncJobManager: fake.manager as never,
         getProviderRuntimeStatus: runtime,
         validationRunStore: fake.validationRunStore as never,
+        // This case asserts the argv of every provider including devin, so it
+        // must not depend on whether the host running the suite has bwrap.
+        // Without this the seat is skipped on a bwrap-less Linux host and the
+        // devin assertion below fails for an unrelated reason.
+        hasBubblewrap: () => true,
+        // Issue #270: cursor review trust is granted only for a directory
+        // registered for cursor. This case asserts the trusted-path argv.
+        isProviderWorkspacePath: () => true,
       },
       {
         prompt,
@@ -278,6 +286,8 @@ describe("repository review integration", () => {
       "plan",
       "--sandbox",
       "enabled",
+      // Issue #270: cursor refuses an untrusted directory outright.
+      "--trust",
       "--",
       prompt,
     ]);

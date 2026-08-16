@@ -317,6 +317,7 @@ import {
   describeWorkspace,
   describeWorkspaceRemote,
   getWorkspace,
+  isProviderWorkspacePath,
   loadWorkspaceRegistry,
   registerExistingWorkspace,
   resolveWorkspaceForProvider,
@@ -16984,6 +16985,12 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
         if (!remote && !runtime.workspaces.defaultAlias) return undefined;
         return resolveWorkspaceForProvider(runtime.workspaces, provider).cwd;
       },
+      // Issue #270: the ONLY place cursor review trust is granted automatically.
+      // The rule itself lives in workspace-registry.ts so it can be tested
+      // directly; an earlier version was inline here and every test injected a
+      // fake, so nothing exercised the real predicate.
+      isProviderWorkspacePath: (provider, cwd) =>
+        isProviderWorkspacePath(runtime.workspaces, provider, cwd),
       resolveReviewRepository: ({
         workingDir,
         workspace,
