@@ -4875,6 +4875,11 @@
             "pattern": "^[A-Za-z][A-Za-z0-9._-]{0,63}$",
             "description": "Authorized workspace alias, required for remote HTTP/OAuth callers."
           },
+          "trustCursorWorkspace": {
+            "type": "boolean",
+            "default": false,
+            "description": "Let cursor trust this repository even though it is not a workspace registered for cursor. Cursor refuses to review an untrusted directory, so without this a cursor seat on an unregistered path is skipped. Trust also lets the reviewed repository's own rules and AGENTS.md instruct the reviewer, which the review prompt otherwise forbids, so enable it only for a repository whose contents you trust."
+          },
           "scope": {
             "type": "string",
             "enum": [
@@ -5273,6 +5278,9 @@
                 },
                 "warning": {
                   "type": "string"
+                },
+                "emptyOutput": {
+                  "type": "boolean"
                 }
               },
               "required": [
