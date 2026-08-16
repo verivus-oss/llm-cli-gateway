@@ -45,7 +45,9 @@ for (const block of nodeBlocks) {
   // spread over a few lines, but it must be findable near the coordinate.
   const window = lines.slice(Math.max(0, n - 3), n + 2).join("\n");
   if (!window.includes(symbol)) {
-    problems.push(`${id}: ${file}:${n} no longer declares "${symbol}" (found: ${lines[n - 1].trim().slice(0, 60)})`);
+    problems.push(
+      `${id}: ${file}:${n} no longer declares "${symbol}" (found: ${lines[n - 1].trim().slice(0, 60)})`
+    );
   }
 }
 
