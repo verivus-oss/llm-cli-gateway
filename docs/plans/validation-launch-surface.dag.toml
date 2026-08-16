@@ -27,10 +27,11 @@
 [meta]
 surface = "validation provider launch + cursor trust"
 branch = "fix/270-cursor-trust-devin-sandbox"
-commit = "8809125"
-base = "5d87ef4"
-sqry_index_commit = "8809125"
-generated_from = "sqry graph callers, verified against git show"
+last_reviewed_head = "7b03fd2"
+generated_from = "TypeScript AST caller inspection plus checked source coordinates"
+node_count = 17
+invariant_count = 6
+flow_count = 9
 
 # ---------------------------------------------------------------------------
 # ENTRY POINTS. Everything below is reachable only from these.
@@ -192,16 +193,17 @@ kind = "durable_field"
 file = "src/review-run-authorization.ts"
 line = 24
 role = "Operator consent to trust an unregistered repository. Defaulted false so pre-existing runs still parse."
+affects = ["fn.startReviewRun", "fn.startJudgeSynthesis"]
 flow = [
-  "src/validation-tools.ts:434  tool input schema",
-  "src/validation-tools.ts:512  handler destructure",
-  "src/validation-tools.ts:578  written into reviewAuthorization",
-  "src/review-run-authorization.ts:24  durable schema field",
-  "persistValidationRun -> validation_runs.requestJson",
-  "parseReviewRunAuthorization rehydrates the authorization (validation-tools.ts)",
-  "src/validation-tools.ts:1064 passed to startJudgeSynthesis",
-  "src/validation-orchestrator.ts:598 judge -> launchProviderSeat",
-  "src/validation-orchestrator.ts:449 roster -> launchProviderSeat",
+  { file = "src/validation-tools.ts", line = 434, token = "trustCursorWorkspace", role = "tool input schema" },
+  { file = "src/validation-tools.ts", line = 512, token = "trustCursorWorkspace", role = "handler destructure" },
+  { file = "src/validation-tools.ts", line = 578, token = "trustCursorWorkspace", role = "written into reviewAuthorization" },
+  { file = "src/review-run-authorization.ts", line = 24, token = "trustCursorWorkspace", role = "durable schema field" },
+  { file = "src/validation-orchestrator.ts", line = 905, token = "reviewAuthorization", role = "persisted into validation_runs.requestJson" },
+  { file = "src/validation-tools.ts", line = 935, token = "parseReviewRunAuthorization", role = "rehydrated for synthesis" },
+  { file = "src/validation-tools.ts", line = 1064, token = "trustCursorWorkspace", role = "passed to startJudgeSynthesis" },
+  { file = "src/validation-orchestrator.ts", line = 598, token = "trustWorkspace", role = "judge seat launch option" },
+  { file = "src/validation-orchestrator.ts", line = 449, token = "trustWorkspace", role = "roster seat launch option" },
 ]
 
 # ---------------------------------------------------------------------------

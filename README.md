@@ -530,10 +530,13 @@ granted `--trust` only when the reviewed directory is a registered
 beneath one counts, and the nearest enclosing registration decides). On any
 other directory the cursor seat is skipped with an actionable reason, and the
 rest of the roster still runs. `trustCursorWorkspace: true` accepts the grant
-for a single call. That is a real decision rather than a formality: a trusted
-folder is also where cursor loads project rules and `AGENTS.md`, so the
-repository under review gains some influence over its own reviewer, which the
-fenced review prompt otherwise forbids. The artifact keeps
+for one durable review run. The consent applies to Cursor seats in that run's
+reviewer roster and to its planned Cursor judge when `synthesize_validation`
+launches it later. It is bound to the run owner, repository, and planned judge,
+so another principal or review run cannot replay it. That is a real decision
+rather than a formality: a trusted folder is also where cursor loads project
+rules and `AGENTS.md`, so the repository under review gains some influence over
+its own reviewer, which the fenced review prompt otherwise forbids. The artifact keeps
 committed, staged, unstaged, and regular non-ignored untracked file evidence separate. It
 forces tracked diffs to remain readable even when in-tree attributes mark them
 as non-diffable. The `review-evidence.v2` artifact exposes `committedPatch`,

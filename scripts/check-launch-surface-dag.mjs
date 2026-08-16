@@ -2,116 +2,293 @@
 // Verify docs/plans/validation-launch-surface.dag.toml against the actual code.
 //
 // A map with wrong coordinates is worse than no map: it is a control that
-// cannot fail, in documentation form. Three stale COMMENTS in this same surface
-// each survived a round of review by sounding careful, so this DAG is checked
-// rather than trusted.
-//
-// Checks:
-//   1. every node's file:line still declares the symbol it names
-//   2. every invariant's caller count matches the source
-//   3. every path named in a `flow` list still contains the field
+// cannot fail, in documentation form. The checker therefore rejects incomplete
+// declarations and reduced coverage as well as ordinary coordinate drift.
 //
 // Exit 0 clean, 1 on drift. Run: node scripts/check-launch-surface-dag.mjs
 
-import { readFileSync } from "node:fs";
+import fs from "node:fs";
+import path from "node:path";
+import { fileURLToPath } from "node:url";
+import { parse as parseToml } from "smol-toml";
+import ts from "typescript";
 
-const DAG = "docs/plans/validation-launch-surface.dag.toml";
-const dag = readFileSync(DAG, "utf8");
-const problems = [];
+export const DAG_PATH = "docs/plans/validation-launch-surface.dag.toml";
 
-const fileCache = new Map();
-const linesOf = path => {
-  if (!fileCache.has(path)) fileCache.set(path, readFileSync(path, "utf8").split("\n"));
-  return fileCache.get(path);
+const REQUIRED_COVERAGE = {
+  node_count: { label: "node", expected: 17 },
+  invariant_count: { label: "invariant", expected: 6 },
+  flow_count: { label: "flow hop", expected: 9 },
 };
 
-// ---- 1. node coordinates ---------------------------------------------------
-const nodeBlocks = dag.split("[[node]]").slice(1);
-let nodesChecked = 0;
-for (const block of nodeBlocks) {
-  const id = /id = "([^"]+)"/.exec(block)?.[1];
-  const file = /file = "([^"]+)"/.exec(block)?.[1];
-  const line = /line = (\d+)/.exec(block)?.[1];
-  if (!id || !file || !line) continue;
-  nodesChecked++;
-  const symbol = id.split(".").slice(1).join(".");
-  const lines = linesOf(file);
-  const n = Number(line);
-  if (n > lines.length) {
-    problems.push(`${id}: ${file}:${n} is past end of file (${lines.length} lines)`);
-    continue;
+function isRecord(value) {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+function nonemptyStrings(value) {
+  return (
+    Array.isArray(value) &&
+    value.length > 0 &&
+    value.every(item => typeof item === "string" && item.length > 0)
+  );
+}
+
+function enclosingFunctionName(node) {
+  for (let current = node.parent; current; current = current.parent) {
+    if (ts.isFunctionDeclaration(current)) return current.name?.text ?? "<anonymous>";
+    if (ts.isMethodDeclaration(current)) return current.name?.getText() ?? "<anonymous>";
+    if (ts.isFunctionExpression(current) || ts.isArrowFunction(current)) {
+      if (ts.isVariableDeclaration(current.parent) && ts.isIdentifier(current.parent.name)) {
+        return current.parent.name.text;
+      }
+      if (ts.isPropertyAssignment(current.parent)) return current.parent.name.getText();
+      return "<anonymous>";
+    }
   }
-  // Allow a small window: a declaration may be preceded by a decorator or
-  // spread over a few lines, but it must be findable near the coordinate.
-  const window = lines.slice(Math.max(0, n - 3), n + 2).join("\n");
-  if (!window.includes(symbol)) {
-    problems.push(
-      `${id}: ${file}:${n} no longer declares "${symbol}" (found: ${lines[n - 1].trim().slice(0, 60)})`
-    );
+  return "<top-level>";
+}
+
+function directCallers(sourceText, fileName, symbol) {
+  const sourceFile = ts.createSourceFile(fileName, sourceText, ts.ScriptTarget.Latest, true);
+  const callers = [];
+  const visit = node => {
+    if (
+      ts.isCallExpression(node) &&
+      ts.isIdentifier(node.expression) &&
+      node.expression.text === symbol
+    ) {
+      callers.push(enclosingFunctionName(node));
+    }
+    ts.forEachChild(node, visit);
+  };
+  visit(sourceFile);
+  return callers;
+}
+
+function sortedUnique(values) {
+  return [...new Set(values)].sort();
+}
+
+function sameStrings(left, right) {
+  return left.length === right.length && left.every((value, index) => value === right[index]);
+}
+
+/**
+ * Check the launch-surface map and return every problem instead of exiting.
+ * Tests inject a temporary root so fail-open mutations exercise this exact code.
+ */
+export function checkLaunchSurfaceDag({ rootDir = process.cwd(), dagPath = DAG_PATH } = {}) {
+  const problems = [];
+  const fileCache = new Map();
+  const absolute = relative => path.resolve(rootDir, relative);
+  const readSource = relative => {
+    if (!fileCache.has(relative)) {
+      try {
+        fileCache.set(relative, fs.readFileSync(absolute(relative), "utf8"));
+      } catch (error) {
+        problems.push(`${relative}: cannot read source (${error.message})`);
+        fileCache.set(relative, "");
+      }
+    }
+    return fileCache.get(relative);
+  };
+  const linesOf = relative => readSource(relative).split("\n");
+
+  let document;
+  try {
+    document = parseToml(fs.readFileSync(absolute(dagPath), "utf8"));
+  } catch (error) {
+    return {
+      problems: [`${dagPath}: invalid or unreadable TOML (${error.message})`],
+      nodesChecked: 0,
+      invariantsChecked: 0,
+      flowsChecked: 0,
+    };
+  }
+
+  if (!isRecord(document.meta)) problems.push("meta: missing table");
+  const nodes = Array.isArray(document.node) ? document.node : [];
+  const invariants = Array.isArray(document.invariant) ? document.invariant : [];
+  const flowCount = nodes.reduce(
+    (count, node) => count + (isRecord(node) && Array.isArray(node.flow) ? node.flow.length : 0),
+    0
+  );
+  const actualCounts = {
+    node_count: nodes.length,
+    invariant_count: invariants.length,
+    flow_count: flowCount,
+  };
+  for (const [key, coverage] of Object.entries(REQUIRED_COVERAGE)) {
+    const declared = document.meta?.[key];
+    if (!Number.isInteger(declared)) {
+      problems.push(`meta.${key}: missing integer coverage declaration`);
+    } else if (declared !== coverage.expected) {
+      problems.push(`meta.${key}: must remain ${coverage.expected}, declared ${declared}`);
+    }
+    if (actualCounts[key] !== coverage.expected) {
+      problems.push(
+        `coverage ${key}: requires ${coverage.expected} ${coverage.label}(s), parsed ${actualCounts[key]}`
+      );
+    }
+  }
+
+  const nodeIds = new Set();
+  let nodesChecked = 0;
+  let flowsChecked = 0;
+  for (const [index, node] of nodes.entries()) {
+    const label = `node[${index}]`;
+    if (!isRecord(node)) {
+      problems.push(`${label}: must be a table`);
+      continue;
+    }
+    for (const field of ["id", "kind", "file", "role"]) {
+      if (typeof node[field] !== "string" || node[field].length === 0) {
+        problems.push(`${label}.${field}: missing non-empty string`);
+      }
+    }
+    if (!Number.isInteger(node.line) || node.line < 1) {
+      problems.push(`${label}.line: missing positive integer`);
+    }
+    if (!nonemptyStrings(node.affects))
+      problems.push(`${label}.affects: missing non-empty string list`);
+    if (typeof node.id === "string") {
+      if (nodeIds.has(node.id)) problems.push(`${label}.id: duplicate ${node.id}`);
+      nodeIds.add(node.id);
+    }
+    if (
+      typeof node.id !== "string" ||
+      typeof node.file !== "string" ||
+      !Number.isInteger(node.line)
+    ) {
+      continue;
+    }
+    nodesChecked++;
+    const symbol = node.id.split(".").slice(1).join(".");
+    const lines = linesOf(node.file);
+    if (node.line > lines.length) {
+      problems.push(
+        `${node.id}: ${node.file}:${node.line} is past end of file (${lines.length} lines)`
+      );
+    } else {
+      const window = lines.slice(Math.max(0, node.line - 3), node.line + 2).join("\n");
+      if (!window.includes(symbol)) {
+        problems.push(`${node.id}: ${node.file}:${node.line} no longer declares "${symbol}"`);
+      }
+    }
+
+    if (node.kind === "durable_field") {
+      if (!Array.isArray(node.flow) || node.flow.length === 0) {
+        problems.push(`${node.id}.flow: missing non-empty structured flow`);
+        continue;
+      }
+      for (const [flowIndex, hop] of node.flow.entries()) {
+        const hopLabel = `${node.id}.flow[${flowIndex}]`;
+        if (!isRecord(hop)) {
+          problems.push(`${hopLabel}: must be a table with file, line, token, and role`);
+          continue;
+        }
+        for (const field of ["file", "token", "role"]) {
+          if (typeof hop[field] !== "string" || hop[field].length === 0) {
+            problems.push(`${hopLabel}.${field}: missing non-empty string`);
+          }
+        }
+        if (!Number.isInteger(hop.line) || hop.line < 1) {
+          problems.push(`${hopLabel}.line: missing positive integer`);
+        }
+        if (
+          typeof hop.file !== "string" ||
+          typeof hop.token !== "string" ||
+          !Number.isInteger(hop.line)
+        ) {
+          continue;
+        }
+        flowsChecked++;
+        const flowLines = linesOf(hop.file);
+        const flowWindow = flowLines.slice(Math.max(0, hop.line - 2), hop.line + 1).join("\n");
+        if (!flowWindow.includes(hop.token)) {
+          problems.push(`${hopLabel}: ${hop.file}:${hop.line} no longer carries "${hop.token}"`);
+        }
+      }
+    } else if (Object.hasOwn(node, "flow")) {
+      problems.push(`${node.id}.flow: only durable_field nodes may declare a flow`);
+    }
+  }
+
+  const invariantSymbols = new Set();
+  let invariantsChecked = 0;
+  const orchestratorFile = "src/validation-orchestrator.ts";
+  const orchestratorSource = readSource(orchestratorFile);
+  for (const [index, invariant] of invariants.entries()) {
+    const label = `invariant[${index}]`;
+    if (!isRecord(invariant)) {
+      problems.push(`${label}: must be a table`);
+      continue;
+    }
+    for (const field of ["symbol", "why"]) {
+      if (typeof invariant[field] !== "string" || invariant[field].length === 0) {
+        problems.push(`${label}.${field}: missing non-empty string`);
+      }
+    }
+    if (!Number.isInteger(invariant.callers) || invariant.callers < 0) {
+      problems.push(`${label}.callers: missing non-negative integer`);
+    }
+    if (!nonemptyStrings(invariant.expect)) {
+      problems.push(`${label}.expect: missing non-empty string list`);
+    }
+    if (typeof invariant.symbol === "string") {
+      if (invariantSymbols.has(invariant.symbol)) {
+        problems.push(`${label}.symbol: duplicate ${invariant.symbol}`);
+      }
+      invariantSymbols.add(invariant.symbol);
+    }
+    if (
+      typeof invariant.symbol !== "string" ||
+      !Number.isInteger(invariant.callers) ||
+      !nonemptyStrings(invariant.expect)
+    ) {
+      continue;
+    }
+    invariantsChecked++;
+    const actualCallers = directCallers(orchestratorSource, orchestratorFile, invariant.symbol);
+    const actualIdentities = sortedUnique(actualCallers);
+    const expectedIdentities = sortedUnique(invariant.expect);
+    if (actualCallers.length !== invariant.callers) {
+      problems.push(
+        `invariant ${invariant.symbol}: DAG says ${invariant.callers} call(s), source has ${actualCallers.length}`
+      );
+    }
+    if (!sameStrings(actualIdentities, expectedIdentities)) {
+      problems.push(
+        `invariant ${invariant.symbol}: expected callers [${expectedIdentities.join(", ")}], found [${actualIdentities.join(", ")}]`
+      );
+    }
+  }
+
+  return { problems, nodesChecked, invariantsChecked, flowsChecked };
+}
+
+export function isDirectInvocation(metaUrl, argv1) {
+  if (!argv1) return false;
+  try {
+    return fs.realpathSync(fileURLToPath(metaUrl)) === fs.realpathSync(argv1);
+  } catch {
+    return false;
   }
 }
 
-// ---- 2. caller-count invariants -------------------------------------------
-// Counted from source rather than from sqry, so this runs with no daemon and
-// in CI. The orchestrator is one file, which is what makes this tractable.
-const ORCH = "src/validation-orchestrator.ts";
-const orchLines = linesOf(ORCH);
-const callSitesOf = name =>
-  orchLines.filter(raw => {
-    const line = raw.trim();
-    return (
-      line.includes(`${name}(`) &&
-      !line.startsWith("//") &&
-      !line.startsWith("*") &&
-      !line.startsWith("function ") &&
-      !line.startsWith("async function ")
-    );
-  }).length;
-
-const invariantBlocks = dag.split("[[invariant]]").slice(1);
-let invariantsChecked = 0;
-for (const block of invariantBlocks) {
-  const symbol = /symbol = "([^"]+)"/.exec(block)?.[1];
-  const callers = /callers = (\d+)/.exec(block)?.[1];
-  if (!symbol || !callers) continue;
-  invariantsChecked++;
-  const actual = callSitesOf(symbol);
-  if (actual !== Number(callers)) {
-    problems.push(
-      `invariant ${symbol}: DAG says ${callers} caller(s), source has ${actual}. ` +
-        `If a new caller was added, route it through launchProviderSeat rather than updating this number.`
-    );
+if (isDirectInvocation(import.meta.url, process.argv[1])) {
+  const result = checkLaunchSurfaceDag();
+  console.log(
+    `checked ${result.nodesChecked} nodes, ${result.invariantsChecked} invariants, ${result.flowsChecked} flow hops`
+  );
+  if (result.problems.length === 0) {
+    console.log("launch-surface DAG matches the code");
+    process.exit(0);
   }
+  console.error("\nlaunch-surface DAG has drifted from the code:\n");
+  for (const problem of result.problems) console.error(`  - ${problem}`);
+  console.error(
+    "\nThe DAG is the map used to decide what a change affects. Fix the code or the map, but do not leave them disagreeing."
+  );
+  process.exit(1);
 }
-
-// ---- 3. declared data-flow paths -------------------------------------------
-const flowBlock = /flow = \[([\s\S]*?)\]/.exec(dag)?.[1] ?? "";
-const fieldId = /id = "field\.([^"]+)"/.exec(dag)?.[1];
-let flowsChecked = 0;
-for (const entry of flowBlock.split("\n")) {
-  const m = /"([^"\s]+\.ts):(\d+)/.exec(entry);
-  if (!m || !fieldId) continue;
-  flowsChecked++;
-  const [, file, lineNo] = m;
-  const lines = linesOf(file);
-  const n = Number(lineNo);
-  const window = lines.slice(Math.max(0, n - 3), n + 2).join("\n");
-  if (!window.includes(fieldId)) {
-    problems.push(`flow ${file}:${n} no longer carries "${fieldId}"`);
-  }
-}
-
-console.log(
-  `checked ${nodesChecked} nodes, ${invariantsChecked} invariants, ${flowsChecked} flow hops`
-);
-if (problems.length === 0) {
-  console.log("launch-surface DAG matches the code");
-  process.exit(0);
-}
-console.error(`\nlaunch-surface DAG has drifted from the code:\n`);
-for (const p of problems) console.error(`  - ${p}`);
-console.error(
-  `\nThe DAG is the map used to decide what a change affects. Fix the code or ` +
-    `the map, but do not leave them disagreeing.`
-);
-process.exit(1);
