@@ -27,9 +27,9 @@
 [meta]
 surface = "validation provider launch + cursor trust"
 branch = "fix/270-cursor-trust-devin-sandbox"
-commit = "2aee5f9"
-base = "aae0a75"
-sqry_index_commit = "2aee5f9"
+commit = "8809125"
+base = "5d87ef4"
+sqry_index_commit = "8809125"
 generated_from = "sqry graph callers, verified against git show"
 
 # ---------------------------------------------------------------------------
@@ -40,7 +40,7 @@ generated_from = "sqry graph callers, verified against git show"
 id = "tool.review_changes"
 kind = "mcp_tool"
 file = "src/validation-tools.ts"
-line = 413
+line = 417
 role = "Captures the Git artifact and starts the reviewer roster. Owns the trust CONSENT input."
 affects = ["fn.startReviewRun", "state.reviewRunAuthorization"]
 
@@ -48,7 +48,7 @@ affects = ["fn.startReviewRun", "state.reviewRunAuthorization"]
 id = "tool.synthesize_validation"
 kind = "mcp_tool"
 file = "src/validation-tools.ts"
-line = 866
+line = 870
 role = "Starts the judge in a LATER tool call than review_changes. This separation is what hid round 4: it cannot see the kickoff arguments, only durable state."
 affects = ["fn.startJudgeSynthesis", "state.reviewRunAuthorization"]
 
@@ -56,7 +56,7 @@ affects = ["fn.startJudgeSynthesis", "state.reviewRunAuthorization"]
 id = "tool.validate_with_models"
 kind = "mcp_tool"
 file = "src/validation-tools.ts"
-line = 632
+line = 636
 role = "Ask-path roster. review=false, so no trust is ever granted."
 affects = ["fn.startValidationRun"]
 
@@ -94,7 +94,7 @@ reads = ["state.reviewRunAuthorization"]
 id = "fn.startProviderJob"
 kind = "function"
 file = "src/validation-orchestrator.ts"
-line = 748
+line = 772
 role = "Roster seat. Maps a refusal to normalizeSkippedProvider."
 affects = ["fn.launchProviderSeat"]
 
@@ -102,7 +102,7 @@ affects = ["fn.launchProviderSeat"]
 id = "fn.launchProviderSeat"
 kind = "function"
 file = "src/validation-orchestrator.ts"
-line = 688
+line = 696
 role = "THE launch path. Computes the gates itself and is the only caller of dispatchProviderJob. A new seat MUST call this, never dispatch directly."
 affects = ["fn.providerPreflight", "fn.dispatchProviderJob"]
 critical = true
@@ -111,7 +111,7 @@ critical = true
 id = "fn.dispatchProviderJob"
 kind = "function"
 file = "src/validation-orchestrator.ts"
-line = 154
+line = 155
 role = "Builds argv and starts the job. Private to launchProviderSeat."
 affects = ["fn.buildProviderInvocation", "ext.startJobWithDedup", "ext.startHttpJob"]
 
@@ -119,7 +119,7 @@ affects = ["fn.buildProviderInvocation", "ext.startJobWithDedup", "ext.startHttp
 id = "fn.buildProviderInvocation"
 kind = "function"
 file = "src/validation-orchestrator.ts"
-line = 1117
+line = 1141
 role = "Emits provider argv, INCLUDING --trust. Only ever reflects the verdict it is handed; it must not decide trust."
 affects = ["argv.cursor_trust", "argv.devin_sandbox"]
 
@@ -131,7 +131,7 @@ affects = ["argv.cursor_trust", "argv.devin_sandbox"]
 id = "fn.providerPreflight"
 kind = "function"
 file = "src/validation-orchestrator.ts"
-line = 1107
+line = 1131
 role = "Every launch gate in one call. THE extension point: a new gate goes here."
 affects = ["fn.reviewSandboxGap", "fn.cursorTrustGap"]
 critical = true
@@ -140,7 +140,7 @@ critical = true
 id = "fn.reviewSandboxGap"
 kind = "function"
 file = "src/validation-orchestrator.ts"
-line = 1040
+line = 1066
 role = "devin --sandbox needs bubblewrap on Linux. macOS uses seatbelt, so it does not gate there; other platforms have no probe, and absence of a reading is not evidence of absence."
 affects = ["outcome.skipped"]
 
@@ -148,7 +148,7 @@ affects = ["outcome.skipped"]
 id = "fn.cursorTrustGap"
 kind = "function"
 file = "src/validation-orchestrator.ts"
-line = 1075
+line = 1099
 role = "Decides cursor review trust. The ONLY producer of a trust verdict."
 affects = ["outcome.skipped", "argv.cursor_trust"]
 reads = ["fn.isProviderWorkspacePath", "state.reviewRunAuthorization"]
@@ -158,7 +158,7 @@ critical = true
 id = "fn.isProviderWorkspacePath"
 kind = "function"
 file = "src/workspace-registry.ts"
-line = 622
+line = 651
 role = "The entire automatic-trust boundary. Nearest enclosing registration decides; ties fail closed; containment via isUnder (path.relative)."
 affects = ["fn.cursorTrustGap"]
 critical = true
@@ -167,7 +167,7 @@ critical = true
 id = "fn.isUnder"
 kind = "function"
 file = "src/workspace-registry.ts"
-line = 193
+line = 201
 role = "Containment via path.relative. Used instead of a manual separator prefix, which mishandled a filesystem root."
 affects = ["fn.isProviderWorkspacePath"]
 
@@ -193,15 +193,15 @@ file = "src/review-run-authorization.ts"
 line = 24
 role = "Operator consent to trust an unregistered repository. Defaulted false so pre-existing runs still parse."
 flow = [
-  "src/validation-tools.ts:430  tool input schema",
-  "src/validation-tools.ts:508  handler destructure",
-  "src/validation-tools.ts:574  written into reviewAuthorization",
+  "src/validation-tools.ts:434  tool input schema",
+  "src/validation-tools.ts:512  handler destructure",
+  "src/validation-tools.ts:578  written into reviewAuthorization",
   "src/review-run-authorization.ts:24  durable schema field",
   "persistValidationRun -> validation_runs.requestJson",
   "parseReviewRunAuthorization rehydrates the authorization (validation-tools.ts)",
-  "src/validation-tools.ts:1060 passed to startJudgeSynthesis",
-  "src/validation-orchestrator.ts:590 judge -> launchProviderSeat",
-  "src/validation-orchestrator.ts:448 roster -> launchProviderSeat",
+  "src/validation-tools.ts:1064 passed to startJudgeSynthesis",
+  "src/validation-orchestrator.ts:598 judge -> launchProviderSeat",
+  "src/validation-orchestrator.ts:449 roster -> launchProviderSeat",
 ]
 
 # ---------------------------------------------------------------------------
