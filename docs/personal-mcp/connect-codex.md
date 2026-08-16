@@ -24,7 +24,7 @@ codex mcp list
 
 4. Keep the token export local to the Codex shell. Do not paste the expanded token into chat.
 
-For HTTP provider calls, pass relative `workingDir` and `addDir` values inside the selected workspace. `[workspaces].allow_unregistered_working_dir` is not an HTTP bypass.
+For HTTP provider calls, pass relative `workingDir` and `addDir` values inside the selected workspace. `[workspaces].allow_unregistered_working_dir` is an inert legacy key that is read nowhere, so it is not an HTTP bypass and grants nothing locally.
 
 ## Verification
 

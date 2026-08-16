@@ -62,6 +62,14 @@ const WorkspaceAllowedRootSchema = z
 const WorkspacesSchema = z
   .object({
     default: z.string().optional(),
+    // INERT. Issue #272: this key is parsed and never read. It constrains
+    // nothing, and its name reads as a security control, so an operator
+    // setting it to false believes they have restricted where providers
+    // may be pointed. They have not. See the load-time warning below for
+    // what actually decides workingDir; do not restate it here, because
+    // this comment carried a wrong version of that sentence for a release
+    // and two reviewers refuted it separately. It is still ACCEPTED so
+    // existing configs keep loading, and its presence is warned about.
     allow_unregistered_working_dir: z.boolean().default(false),
     repos: z.array(WorkspaceRepoSchema).default([]),
     allowed_roots: z.array(WorkspaceAllowedRootSchema).default([]),
@@ -284,6 +292,27 @@ export function loadWorkspaceRegistry(
     if (result.data.default && !repos.some(repo => repo.alias === result.data.default)) {
       throw new WorkspaceRegistryError(
         `[workspaces].default references unknown alias "${result.data.default}"`
+      );
+    }
+    // Issue #272: warn if the operator actually SET this, rather than
+    // inheriting the default. Silence here is what produces the false
+    // confidence: the key looks like it did something.
+    if (
+      raw !== null &&
+      typeof raw === "object" &&
+      Object.prototype.hasOwnProperty.call(raw, "allow_unregistered_working_dir")
+    ) {
+      logWarn(
+        logger,
+        "[workspaces].allow_unregistered_working_dir has NO EFFECT and is ignored. " +
+          "It constrains nothing and grants nothing, at either value. What decides " +
+          "workingDir is the transport and the tool: a remote HTTP caller always " +
+          "requires a registered workspace and its paths are validated inside it, " +
+          "while a local caller's explicit path is accepted directly, though a tool " +
+          "may canonicalize it further (review_changes promotes it to the containing " +
+          "Git repository root). None of that consults this key. Remove it to avoid " +
+          "implying a control that does not exist.",
+        { configFile: sourcePath }
       );
     }
     return {

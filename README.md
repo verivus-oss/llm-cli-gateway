@@ -612,7 +612,7 @@ Execute a Claude Code request with optional session management.
 - `promptParts` (object, optional): Cache-aware structured prompt `{ system?, tools?, context?, task }`; mutually exclusive with `prompt`
 - `forceRefresh` (boolean, optional): Bypass dedup and force a fresh CLI run, default: false
 
-Workspace boundary: stdio callers may use machine-local paths directly. HTTP/tunnel callers must pass `workspace` or rely on a configured default/session workspace; path fields are then validated relative to that workspace. `[workspaces].allow_unregistered_working_dir` is a stdio/local legacy setting and does not allow arbitrary HTTP working directories or additional directories.
+Workspace boundary: stdio callers may use machine-local paths directly. HTTP/tunnel callers must pass `workspace` or rely on a configured default/session workspace; path fields are then validated relative to that workspace. `[workspaces].allow_unregistered_working_dir` is an inert legacy key: it is still accepted so old configs keep loading, but nothing reads it at either value, and setting it now logs a warning at startup. It never allowed arbitrary HTTP working directories or additional directories.
 
 **Response extras:**
 
