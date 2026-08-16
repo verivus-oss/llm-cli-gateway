@@ -296,6 +296,8 @@ jobs:
         env:
           PACKAGE_NAME: llm-cli-gateway
         run: |
+          # JavaScript template literals are intentional in the single-quoted program.
+          # shellcheck disable=SC2016
           node -e '
             const name = process.env.PACKAGE_NAME;
             const url = new URL(process.env.ACTIONS_ID_TOKEN_REQUEST_URL);
