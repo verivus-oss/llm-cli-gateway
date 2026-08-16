@@ -428,7 +428,9 @@ describe("durable review synthesis input binding", () => {
       success: true,
       synthesis: {
         status: "running",
-        note: expect.stringContaining("1 non-completed result(s) were preserved but omitted"),
+        note: expect.stringContaining(
+          "1 result(s) without usable output were preserved but omitted as evidence"
+        ),
       },
     });
     expect(httpStarts).toHaveLength(1);

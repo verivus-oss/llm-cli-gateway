@@ -145,7 +145,16 @@ export function deriveValidationRunStatus(
 function summarizeDisagreement(
   results: NormalizedValidationResult[]
 ): ValidationReport["structuredContent"]["disagreements"] {
-  const completed = results.filter(result => result.status === "completed");
+  // Issue #269: a completed provider that produced ZERO bytes is not a
+  // participant with no objection, it is a participant that said nothing. It
+  // must not be counted among `completed` (whose verdicts form the agreement
+  // set) and it must raise a signal, or an empty review reads as consensus.
+  const emptyCompleted = results.filter(
+    result => result.status === "completed" && result.emptyOutput === true
+  );
+  const completed = results.filter(
+    result => result.status === "completed" && result.emptyOutput !== true
+  );
   const terminalProblems = results.filter(result =>
     ["failed", "canceled", "orphaned", "skipped"].includes(result.status)
   );
@@ -162,9 +171,16 @@ function summarizeDisagreement(
     signals.push(`Completed providers returned ${verdicts.size} different verdicts.`);
   for (const result of terminalProblems) signals.push(`${result.provider} is ${result.status}.`);
   for (const result of pending) signals.push(`${result.provider} is still pending.`);
+  for (const result of emptyCompleted)
+    signals.push(
+      `${result.provider} exited successfully but returned no output; its review is unusable and must not be read as agreement.`
+    );
 
   const hasMaterialDisagreement =
-    verdicts.size > 1 || terminalProblems.length > 0 || pending.length > 0;
+    verdicts.size > 1 ||
+    terminalProblems.length > 0 ||
+    pending.length > 0 ||
+    emptyCompleted.length > 0;
   return {
     hasMaterialDisagreement,
     summary: hasMaterialDisagreement
