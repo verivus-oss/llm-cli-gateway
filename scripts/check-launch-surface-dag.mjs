@@ -48,21 +48,61 @@ function enclosingFunctionName(node) {
   return "<top-level>";
 }
 
-function directCallers(sourceText, fileName, symbol) {
+function isTransparentExpression(parent, child) {
+  return (
+    parent.expression === child &&
+    (ts.isParenthesizedExpression(parent) ||
+      ts.isAsExpression(parent) ||
+      ts.isTypeAssertionExpression(parent) ||
+      ts.isNonNullExpression(parent) ||
+      ts.isSatisfiesExpression(parent) ||
+      ts.isPartiallyEmittedExpression(parent))
+  );
+}
+
+function containingDirectCall(identifier) {
+  let expression = identifier;
+  while (expression.parent && isTransparentExpression(expression.parent, expression)) {
+    expression = expression.parent;
+  }
+  const parent = expression.parent;
+  return parent && ts.isCallExpression(parent) && parent.expression === expression ? parent : null;
+}
+
+/**
+ * Protected launch symbols are lexically reserved in the orchestrator. Their
+ * declaration and direct call sites are the only allowed identifier uses.
+ * Rejecting every other reference is deliberately conservative: an alias,
+ * `.call`, `.apply`, `.bind`, comma expression, or shadowing declaration could
+ * otherwise create an executable path that a bare CallExpression count misses.
+ */
+function analyzeProtectedSymbol(sourceText, fileName, symbol) {
   const sourceFile = ts.createSourceFile(fileName, sourceText, ts.ScriptTarget.Latest, true);
   const callers = [];
+  const unexpectedReferences = [];
+  let declarations = 0;
   const visit = node => {
-    if (
-      ts.isCallExpression(node) &&
-      ts.isIdentifier(node.expression) &&
-      node.expression.text === symbol
-    ) {
-      callers.push(enclosingFunctionName(node));
+    if (ts.isIdentifier(node) && node.text === symbol) {
+      if (ts.isFunctionDeclaration(node.parent) && node.parent.name === node) {
+        declarations++;
+      } else {
+        const call = containingDirectCall(node);
+        if (call) {
+          callers.push(enclosingFunctionName(call));
+        } else {
+          const location = sourceFile.getLineAndCharacterOfPosition(node.getStart(sourceFile));
+          unexpectedReferences.push({
+            line: location.line + 1,
+            column: location.character + 1,
+            syntax: node.parent.getText(sourceFile).replaceAll(/\s+/g, " ").slice(0, 100),
+          });
+        }
+      }
     }
     ts.forEachChild(node, visit);
   };
   visit(sourceFile);
-  return callers;
+  return { callers, declarations, unexpectedReferences };
 }
 
 function sortedUnique(values) {
@@ -249,9 +289,20 @@ export function checkLaunchSurfaceDag({ rootDir = process.cwd(), dagPath = DAG_P
       continue;
     }
     invariantsChecked++;
-    const actualCallers = directCallers(orchestratorSource, orchestratorFile, invariant.symbol);
+    const analysis = analyzeProtectedSymbol(orchestratorSource, orchestratorFile, invariant.symbol);
+    const actualCallers = analysis.callers;
     const actualIdentities = sortedUnique(actualCallers);
     const expectedIdentities = sortedUnique(invariant.expect);
+    if (analysis.declarations !== 1) {
+      problems.push(
+        `invariant ${invariant.symbol}: expected one protected function declaration, found ${analysis.declarations}`
+      );
+    }
+    for (const reference of analysis.unexpectedReferences) {
+      problems.push(
+        `invariant ${invariant.symbol}: unsupported reference at ${orchestratorFile}:${reference.line}:${reference.column} (${reference.syntax})`
+      );
+    }
     if (actualCallers.length !== invariant.callers) {
       problems.push(
         `invariant ${invariant.symbol}: DAG says ${invariant.callers} call(s), source has ${actualCallers.length}`

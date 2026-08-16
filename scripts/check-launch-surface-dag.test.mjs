@@ -62,6 +62,40 @@ describe("launch-surface DAG checker", () => {
     );
   });
 
+  it("counts a second call through a parenthesized protected identifier", () => {
+    mutate(
+      "src/validation-orchestrator.ts",
+      source =>
+        `${source}\nfunction parenthesizedDispatch() { (dispatchProviderJob)(undefined, "codex", "", "", {}, {}); }\n`
+    );
+
+    expect(problemText()).toContain(
+      "invariant dispatchProviderJob: DAG says 1 call(s), source has 2"
+    );
+  });
+
+  it("rejects an alias of a protected launch symbol", () => {
+    mutate(
+      "src/validation-orchestrator.ts",
+      source =>
+        `${source}\nconst dispatchAlias = dispatchProviderJob;\nfunction aliasedDispatch() { dispatchAlias(undefined, "codex", "", "", {}, {}); }\n`
+    );
+
+    expect(problemText()).toContain("invariant dispatchProviderJob: unsupported reference");
+    expect(problemText()).toContain("dispatchAlias = dispatchProviderJob");
+  });
+
+  it.each(["call", "apply", "bind"])("rejects a protected symbol used through .%s", member => {
+    mutate(
+      "src/validation-orchestrator.ts",
+      source =>
+        `${source}\nfunction indirectDispatch() { dispatchProviderJob.${member}(undefined); }\n`
+    );
+
+    expect(problemText()).toContain("invariant dispatchProviderJob: unsupported reference");
+    expect(problemText()).toContain(`dispatchProviderJob.${member}`);
+  });
+
   it("rejects a same-count substitution by checking caller identity", () => {
     mutate("src/validation-orchestrator.ts", source => {
       const withoutRealCaller = source.replace(
