@@ -51,7 +51,7 @@ jobs:
     permissions:
       contents: read
     steps:
-      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           # Drop the auth token from .git/config after checkout so it
           # cannot be picked up by tool installers (zizmor artipacked).
@@ -67,7 +67,7 @@ jobs:
         # requirements-security.txt succeeds under python 3.13 and yields the
         # pinned zizmor 1.26.1).
         if: github.repository == 'verivus-oss/llm-cli-gateway'
-        uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
         with:
           python-version: "3.12"
 
@@ -78,7 +78,7 @@ jobs:
         # Deliberately NOT made conditional like the Python step above: Go
         # resolves fine on the self-hosted runner (its tool cache already holds
         # a go toolchain), and disabling a step that works would be guessing.
-        uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
           go-version: "stable"
 
@@ -192,7 +192,7 @@ jobs:
             installer/build-release.sh
 
       - name: Source-code spellcheck (typos)
-        uses: crate-ci/typos@37bb98842b0d8c4ffebdb75301a13db0267cef89 # v1.47.2
+        uses: crate-ci/typos@8a48f81b6c64dcfea44b3633223084c4be58ac5f # v1.49.0
 
       # ---------------------------------------------------------------
       # Secret + CVE scanning.
@@ -272,7 +272,7 @@ jobs:
         # local site links in HTML. Root-relative site links such as
         # /install.md resolve against the Pages output directory.
         # Configured by lychee.toml at the repo root.
-        uses: lycheeverse/lychee-action@8646ba30535128ac92d33dfc9133794bfdd9b411 # v2.8.0
+        uses: lycheeverse/lychee-action@e7477775783ea5526144ba13e8db5eec57747ce8 # v2.9.0
         with:
           fail: true
           args: >-
