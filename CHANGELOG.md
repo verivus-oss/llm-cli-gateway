@@ -4,6 +4,8 @@ All notable changes to the llm-cli-gateway project.
 
 ## [Unreleased]
 
+## [3.1.0-rc.8] - 2026-08-17: a silent reviewer is not agreement
+
 ### Fixed
 
 - **A reviewer that exited 0 with no output was counted as agreement (#269).**
@@ -117,6 +119,50 @@ All notable changes to the llm-cli-gateway project.
   offending file and line, so a production read added anywhere would fail it
   rather than quietly make the warning untrue. `README.md` and the three `docs/personal-mcp/` pages no longer
   describe the key as a live setting.
+
+### Changed
+
+- **`grok` rebaselined to 1.0.4 and `devin` to 3000.4.25, and grok gains a
+  fourth `--output-format`.** Version targets only for the contracts: no flag
+  removals, no new commands, and 0 subcommand drift across 25 declared grok
+  paths and 15 devin paths.
+
+  The watched surfaces were re-probed by hand rather than taken from that
+  report, because the scan's enum check silently skips any flag whose installed
+  values it cannot parse. grok permission-mode, sandbox and session-resume are
+  unchanged; devin permission-mode and its ACP `--agent-type summarizer|review`
+  are unchanged. grok `--output-format` is not: 1.0.4 advertises
+  `streaming-messages-json`, NDJSON in the Anthropic Messages API wire format,
+  and the contract declared three values.
+
+  It is now declared, so callers can pass it through both `grok_request` and
+  `grok_request_async`. That list is enforced by `validateUpstreamCliArgs`, so
+  leaving the value out did not merely decline to document it, it made the
+  gateway refuse a format the installed binary accepts. The gateway does not
+  model that wire: `parseGrokOutput` returns null and the raw stdout is passed
+  through unchanged, with activity-only progress and no invented usage or
+  session id. Verified against the real binary, not assumed.
+
+  Whether the format is new in 1.0.4 or was missed at 1.0.3 is not determinable:
+  xAI publish no CLI release notes, and grok's own declared source URL
+  (`https://docs.x.ai/developers/release-notes.md`) now returns 404.
+
+### Fixed (tooling)
+
+- **`providers:rebaseline --apply` could write a baseline that never matched.**
+  grok 1.0.4 reports `grok 1.0.4 (d846eb93d9) [stable]`, with a release-channel
+  marker after the build hash. `normalizeProviderVersion` only accepted a build
+  id at end-of-string and dropped the hash, while `comparableVersion` in the
+  drift scan reads it from anywhere in the banner: two components reading one
+  banner two ways, and a contract that reported drift forever. The normalizer
+  now scans every parenthesised group and prefers a hash-shaped one across all
+  of them before falling back to digit-leading prose.
+
+  `grok_request_async` separately hand-declared its own copy of the
+  `--output-format` enum, so the same request succeeded or failed depending only
+  on which tool the caller reached for. It now takes the value from the
+  contract-generated shape, and the schema golden asserts every contract-declared
+  value parses on BOTH tools, driven off the contract rather than a literal list.
 
 ## [3.1.0-rc.7] - 2026-08-14: the test suite stops eating live sessions
 
