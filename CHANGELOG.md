@@ -4,6 +4,120 @@ All notable changes to the llm-cli-gateway project.
 
 ## [Unreleased]
 
+### Fixed
+
+- **A reviewer that exited 0 with no output was counted as agreement (#269).**
+  `normalizeJobResult` mapped an empty completed job to `verdict: null`,
+  `summarizeDisagreement` filtered null verdicts out of the verdict set, the set
+  stayed at size one, and `hasMaterialDisagreement` came out false. A silent
+  reviewer and an approving reviewer were indistinguishable, in a gate whose
+  only purpose is to surface disagreement.
+
+  Observed rather than hypothetical: three mistral review jobs on 2026-08-15
+  exited 0 with zero bytes after 10.7s, 60.5s and 35.1s. The operator was
+  already working around it by hand, and the report was affected in a way that
+  was not visible to them.
+
+  The normaliser now records `emptyOutput` on a COMPLETED job with no output,
+  reusing the field name the sync path already used. A failed empty job is
+  deliberately not marked: that is already a terminal problem, and this flag is
+  specifically about the deceptive case of success with nothing to show for it.
+  `summarizeDisagreement` excludes those results from the agreement set, counts
+  them toward `hasMaterialDisagreement`, and names the provider that went quiet
+  rather than only reporting that something did.
+
+  The same seat also had to be kept out of judge evidence one layer down.
+  `startJudgeSynthesis` would otherwise tell the judge that a provider
+  participated and hand it an empty contribution. Empty results are preserved in
+  the report and omitted as evidence, and the synthesis note says how many.
+
+- **Cursor and devin failed on every review seat, for different reasons
+  (#270).** Neither failure was predictable from the gateway's own state.
+
+  Cursor's review argv carried `--print`, `--mode plan` and `--sandbox enabled`,
+  and never included `--trust`, so cursor refused with "Workspace Trust
+  Required". This became deterministic rather than incidental once
+  unscoped children started receiving a fresh neutral temp directory, because
+  such a directory can never appear in cursor's `trusted_folders.toml`.
+
+  Devin emitted `--sandbox` unconditionally for review and resolves it through
+  bubblewrap, so on a host without `bwrap` every seat failed at spawn with
+  "sandbox resolution failed", and nothing in the tree probed for it. The
+  prerequisite is now checked before launch and the seat degrades to `skipped`
+  with that reason. `--sandbox` is still emitted: the review asked for
+  isolation, and silently running unsandboxed is not a smaller failure than not
+  running.
+
+  Trust is not granted unconditionally. `review-prompt.ts` fences the reviewed
+  repository's evidence as untrusted data, never instructions, and `--trust`
+  makes cursor load project rules, `AGENTS.md`/`CLAUDE.md` and project MCP
+  configuration FROM THAT SAME REPOSITORY, which would let a reviewed repository
+  instruct its own reviewer through a channel outside that fence. So `--trust`
+  is emitted only where the operator already made that decision: the cwd is a
+  registered `[[workspaces.repos]]` path whose `providers` include cursor, or a
+  gateway worktree beneath one, or the caller passed the new
+  `trustCursorWorkspace` on `review_changes`. It fails closed, and containment
+  is nearest-match, so a narrower registration can withhold a provider its
+  parent allows. Note this covers instruction loading only: cursor does not
+  attach the repository's MCP servers on trust alone, which needs
+  `--approve-mcps`, a flag this gateway never emits.
+
+  That consent lives on the durable `ReviewRunAuthorization` rather than on the
+  call, because the judge is started by `synthesize_validation`, a later tool
+  call that cannot see `review_changes` arguments. The roster and the judge read
+  one field and cannot disagree.
+
+  Structurally, `launchProviderSeat` is now the only caller of
+  `dispatchProviderJob`, computes both gates itself, and serves the roster and
+  the judge alike. Four consecutive review rounds had found the same defect
+  class in this file, a rule added to one caller while a second caller silently
+  kept the old behaviour, so the second launch path was removed rather than
+  patched again. `docs/plans/validation-launch-surface.dag.toml` maps the
+  surface and `scripts/check-launch-surface-dag.mjs` verifies that map against
+  the code as part of `npm run check`.
+
+- **One provider missing from a workspace aborted the whole validation call
+  (#271).** `resolveWorkspaceForProvider` throws when a provider is absent from
+  the selected workspace's `providers` list. The orchestrator's catch handled
+  `CliInputAdmissionError` and rethrew everything else, so a single unlisted
+  reviewer took down an entire multi-provider validation. The blast radius was
+  inverted: the least important participant could stop every other one from
+  reporting.
+
+  Easy to hit rather than theoretical. The ask-path validation tools
+  (`validate_with_models`, `second_opinion`, `compare_answers`,
+  `red_team_review`, `consensus_check`, `ask_model`) expose no `workingDir` or
+  workspace input, unlike `review_changes` and `synthesize_validation`, so their
+  cwd comes solely from the default workspace lookup and the caller has no way
+  to influence it or to see why it failed. On the host this was found on, every `[[workspaces.repos]]` entry
+  listed `["claude", "codex", "gemini", "grok", "mistral"]`, so any call
+  including cursor or devin failed outright.
+
+  A provider missing from a workspace is a configuration fact about that
+  provider, not an error in the call, so it now takes the same path an admission
+  error already took and is reported as `skipped` with a reason that names the
+  remedy. Any OTHER workspace error is also reported as `skipped`, but carries
+  its own message rather than the providers-list advice, which would be wrong
+  guidance for it. An error that is not a workspace error at all still stays
+  fatal.
+
+- **`allow_unregistered_working_dir` was parsed and never read (#272).** The key
+  validated, round-tripped through the config loader, and was documented as a
+  setting, while no production code path consulted it. Setting it changed
+  nothing and leaving it unset implied a restriction that was not enforced,
+  which is the failure mode of a dead config key that reads as a security
+  control.
+
+  The loader now warns when the key is present. The warning splits by transport,
+  because that is what actually decides: a remote HTTP caller always requires a
+  registered workspace and is validated inside it, while a local caller passing
+  an explicit `workingDir` gets that directory, except where a tool canonicalises
+  it further, as `review_changes` does by promoting it to the containing Git
+  repository root. The accompanying test walks all of `src/` and reports the
+  offending file and line, so a production read added anywhere would fail it
+  rather than quietly make the warning untrue. `README.md` and the three `docs/personal-mcp/` pages no longer
+  describe the key as a live setting.
+
 ## [3.1.0-rc.7] - 2026-08-14: the test suite stops eating live sessions
 
 ### Fixed
