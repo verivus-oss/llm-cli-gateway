@@ -153,4 +153,33 @@ describe("parseGrokOutput / grokDisplayText dispatch", () => {
 
     expect(grokDisplayText("plain", "just text")).toBe("just text");
   });
+
+  it("passes an unmodelled format through as raw stdout instead of throwing", () => {
+    // grok 1.0.4 advertises `streaming-messages-json`, NDJSON in the Anthropic
+    // Messages API wire format. ("Advertises", not "added": whether it is new
+    // in 1.0.4 or was missed at 1.0.3 is not determinable, see the note on the
+    // contract.) The contract exposes it because the binary
+    // accepts it and the gateway passes through what the binary supports; this
+    // parser deliberately does NOT model that wire.
+    //
+    // The behaviour that buys is degradation, not failure: the caller asked for
+    // a wire we do not interpret, so they get the bytes. Pinned here because it
+    // is the whole argument for exposing a format we cannot parse, and an
+    // unpinned argument is one somebody re-litigates later. A future change
+    // that adds real parsing should replace this test, not delete it.
+    const messagesWire = [
+      JSON.stringify({ type: "message_start", message: { role: "assistant" } }),
+      JSON.stringify({ type: "content_block_delta", delta: { text: "hi" } }),
+    ].join("\n");
+
+    expect(parseGrokOutput("streaming-messages-json", messagesWire)).toBeNull();
+    expect(grokDisplayText("streaming-messages-json", messagesWire)).toBe(messagesWire);
+    // Same shape as any other unrecognised format, so this is the fallback path
+    // rather than a special case someone added for this one value. BOTH halves
+    // are asserted against the generic format: review mutation found that with
+    // only the display half generic, a `parseGrokOutput` that special-cased
+    // this one value and threw on every other unknown survived the suite.
+    expect(grokDisplayText("some-future-format", messagesWire)).toBe(messagesWire);
+    expect(parseGrokOutput("some-future-format", messagesWire)).toBeNull();
+  });
 });

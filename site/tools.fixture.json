@@ -3045,9 +3045,10 @@
             "enum": [
               "plain",
               "json",
-              "streaming-json"
+              "streaming-json",
+              "streaming-messages-json"
             ],
-            "description": "Output format (plain|json|streaming-json). Grok default is plain."
+            "description": "Output format for headless mode. Grok default is plain. The gateway parses json and streaming-json; other formats are passed through as raw output."
           },
           "effort": {
             "type": "string",
@@ -3441,9 +3442,10 @@
             "enum": [
               "plain",
               "json",
-              "streaming-json"
+              "streaming-json",
+              "streaming-messages-json"
             ],
-            "description": "Output format (plain|json|streaming-json). Grok default is plain."
+            "description": "Output format for headless mode. Grok default is plain. The gateway parses json and streaming-json; other formats are passed through as raw output."
           },
           "sessionId": {
             "type": "string",

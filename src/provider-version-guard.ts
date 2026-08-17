@@ -106,16 +106,39 @@ export function normalizeProviderVersion(raw: string | null | undefined): Normal
 
   let text = original;
 
-  // Pull out a parenthesised suffix: either a build id or a product name.
-  let build: string | undefined;
-  const paren = text.match(/\(([^)]*)\)\s*$/);
-  if (paren) {
-    const inner = paren[1].trim();
-    text = text.slice(0, paren.index).trim();
-    // A build id looks like a hash or a version; a product name has spaces or
-    // is plainly a word we know. Only keep the former.
-    if (/^[0-9a-f]{6,40}$/i.test(inner) || /^\d/.test(inner)) build = inner;
-  }
+  // Pull out a parenthesised group: either a build id or a product name.
+  //
+  // Deliberately NOT anchored to end-of-string. grok 1.0.4 reports
+  // `grok 1.0.4 (d846eb93d9) [stable]`, putting a release-channel marker AFTER
+  // the hash, and an end-anchored match found nothing and dropped the build id.
+  // That mattered because `comparableVersion` in scripts/upstream-scan.mjs
+  // reads the hash from anywhere in the banner, so the two disagreed about the
+  // same string: `providers:rebaseline --apply` wrote a hash-less
+  // `grok 1.0.4` target that the drift scan then reported as mismatched
+  // forever. One banner must not have two readings.
+  //
+  // Scan every group. A build id looks like a hash or a version; a product name
+  // has spaces or is plainly a word we know.
+  //
+  // Hash-shaped groups are preferred across ALL groups before the looser
+  // digit-leading fallback is considered, rather than taking the first group
+  // that satisfies either test. Taking the first either-way match reintroduces
+  // the bug this function is being fixed for, one shape along: a banner like
+  // `grok 1.0.4 (2026 xAI) (d846eb93d9)` has digit-leading prose BEFORE the
+  // real hash, so a first-match loop keeps "2026 xAI", and versionsMatch then
+  // compares that against a contracted `d846eb93d9` and reports drift on a
+  // correct install. No shipped banner has that shape today; the end-anchored
+  // version it replaced happened to be immune because it only ever looked last.
+  // Bracketed markers are stripped from the version text alongside, being
+  // neither a build id nor part of the version.
+  const groups = Array.from(text.matchAll(/\(([^)]*)\)/g), match => match[1].trim());
+  const build: string | undefined =
+    groups.find(inner => /^[0-9a-f]{6,40}$/i.test(inner)) ??
+    groups.find(inner => /^\d/.test(inner));
+  text = text
+    .replace(/\([^)]*\)/g, " ")
+    .replace(/\[[^\]]*\]/g, " ")
+    .trim();
 
   text = stripProductPrefix(text)
     .replace(/^v(?=\d)/i, "")

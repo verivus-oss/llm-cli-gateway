@@ -226,7 +226,21 @@ export const GROK_GEN_OUTPUT_FORMAT: readonly FlagGenerationMeta[] = [
     requestParameter: "outputFormat",
     emit: "value_if_present",
     inputType: "string",
-    describe: "Output format (plain|json|streaming-json). Grok default is plain.",
+    // Do NOT restate the value list here. This one silently went stale the
+    // moment a fourth format was declared for grok 1.0.4: the schema carried
+    // four enum entries beside a description promising three. The enum is
+    // generated from `contract.flags["--output-format"].values`, which is the
+    // single source; this text says only what the flag is for.
+    //
+    // It is NOT the only describe string in this file that duplicates its
+    // flag's values, which an earlier version of this comment claimed.
+    // `--compaction-mode` and `--compaction-detail` below both enumerate their
+    // complete contract lists in prose and will rot the same way. They are left
+    // alone here because this change is a version rebaseline and neither has
+    // drifted yet; the durable fix is a check that no describe string spells
+    // out its own flag's values.
+    describe:
+      "Output format for headless mode. Grok default is plain. The gateway parses json and streaming-json; other formats are passed through as raw output.",
   },
 ];
 
