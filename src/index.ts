@@ -20513,10 +20513,36 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
           "Cache-aware structured prompt: { system?, tools?, context?, task }. Mutually exclusive with prompt. Stable parts hash into cache_state for prefix-discipline tracking."
         ),
         model: z.string().optional().describe("Model name or alias (e.g. grok-4.5, latest)"),
-        outputFormat: z
-          .enum(["plain", "json", "streaming-json"])
-          .optional()
-          .describe("Output format (plain|json|streaming-json). Grok default is plain."),
+        // Taken from the generated shape, NOT hand-declared. This enum is
+        // generated from the grok contract's `--output-format` values, which
+        // `validateUpstreamCliArgs` also enforces, so a hand-written copy here
+        // is a second source for one fact. It had already drifted: when grok
+        // 1.0.4's fourth format was declared, `grok_request` accepted it and
+        // this tool rejected it at Zod with invalid_enum_value, so the same
+        // request succeeded or failed depending only on which tool you called.
+        //
+        // The rest of this schema still hand-declares fields the generated
+        // shape also covers, and that is a deferral rather than a defence.
+        // Measured at this commit: 19 of the 27 descriptions are identical and
+        // 8 differ. Of those 8, exactly ONE is clearly better here
+        // (workingDir, which carries the stdio-vs-remote path rules the
+        // generated text omits); sandbox is mixed, the generated copy having
+        // useful caller-responsibility text alongside a stale "on Grok
+        // 0.1.210"; the remaining six are better in the generated copy. So
+        // spreading GROK_GENERATED_SHAPE wholesale would IMPROVE most of this
+        // schema and regress one field. The blocker to just doing it is that
+        // workingDir's text has to move into the generated source first, and
+        // the stale version reference in sandbox has to go, which is its own
+        // change rather than part of a version rebaseline.
+        //
+        // An earlier version of this comment claimed 18/9 and said several
+        // async copies were richer. Both were wrong: the count moved when the
+        // line above stopped hand-declaring, and "several" was one.
+        //
+        // What must not diverge meanwhile is a contract-ENFORCED value list,
+        // and grok-schema-golden.test.ts now covers both tools for exactly
+        // that, driven off the contract rather than a literal list.
+        outputFormat: GROK_GENERATED_SHAPE.outputFormat,
         sessionId: z
           .string()
           .optional()

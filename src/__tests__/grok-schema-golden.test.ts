@@ -37,7 +37,7 @@ function mkPersistence(): PersistenceConfig {
   };
 }
 
-function grokSchema(): z.ZodObject<z.ZodRawShape> {
+function grokSchema(toolName = "grok_request"): z.ZodObject<z.ZodRawShape> {
   const server = createGatewayServer({
     asyncJobManager: new AsyncJobManager(noopLogger, undefined, new MemoryJobStore()),
     persistence: mkPersistence(),
@@ -48,8 +48,8 @@ function grokSchema(): z.ZodObject<z.ZodRawShape> {
       Record<string, { inputSchema?: z.ZodObject<z.ZodRawShape> }>
     >
   )._registeredTools;
-  const schema = reg["grok_request"].inputSchema;
-  if (!schema) throw new Error("grok_request has no inputSchema");
+  const schema = reg[toolName]?.inputSchema;
+  if (!schema) throw new Error(`${toolName} has no inputSchema`);
   return schema;
 }
 
@@ -71,6 +71,37 @@ const ENUMS: Array<[string, string, string]> = [
 ];
 
 describe("grok schema fidelity (pre/post cutover)", () => {
+  // Both request tools, because they diverged. `grok_request` spreads the
+  // contract-generated shape while `grok_request_async` hand-declares most of
+  // its fields, and when grok 1.0.4's fourth --output-format was declared the
+  // sync tool accepted it while the async tool rejected it at Zod. Same
+  // contract, same binary, same argv admission, opposite answers depending on
+  // which tool the caller reached for.
+  //
+  // Driven off the CONTRACT rather than a literal list, so this covers the next
+  // value too: any value the gateway will admit at argv must be reachable
+  // through every tool that exposes the flag. A per-tool enum copy that falls
+  // behind fails here rather than in a caller's hands.
+  it.each(["grok_request", "grok_request_async"])(
+    "%s accepts every value the contract admits for --output-format",
+    toolName => {
+      const schema = grokSchema(toolName);
+      const declared = UPSTREAM_CLI_CONTRACTS.grok.flags["--output-format"]?.values ?? [];
+      expect(declared.length).toBeGreaterThan(0);
+      for (const outputFormat of declared) {
+        expect(
+          schema.safeParse({ prompt: "x", outputFormat }).success,
+          `${toolName} rejected contract-declared outputFormat "${outputFormat}"`
+        ).toBe(true);
+      }
+      // The gate is only meaningful if it also rejects something: a schema that
+      // accepts anything would pass the loop above without constraining at all.
+      expect(schema.safeParse({ prompt: "x", outputFormat: "not-a-real-format" }).success).toBe(
+        false
+      );
+    }
+  );
+
   it("covered-field describe text is preserved", () => {
     const schema = grokSchema();
     const shape = schema.shape;

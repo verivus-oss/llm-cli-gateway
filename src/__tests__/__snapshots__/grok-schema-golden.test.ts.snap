@@ -19,7 +19,7 @@ exports[`grok schema fidelity (pre/post cutover) > covered-field describe text i
   "noPlan": "Grok --no-plan: disable plan mode.",
   "noSubagents": "Grok --no-subagents: disable subagent spawning.",
   "oauth": "Grok --oauth: use OAuth during authentication.",
-  "outputFormat": "Output format (plain|json|streaming-json). Grok default is plain.",
+  "outputFormat": "Output format for headless mode. Grok default is plain. The gateway parses json and streaming-json; other formats are passed through as raw output.",
   "promptFile": "Grok --prompt-file <PATH>: single-turn prompt loaded from a file.",
   "reasoningEffort": "Reasoning effort for reasoning models",
   "restoreCode": "Grok --restore-code: check out the original session commit when resuming.",

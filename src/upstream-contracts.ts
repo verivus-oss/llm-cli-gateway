@@ -2330,7 +2330,35 @@ export const UPSTREAM_CLI_CONTRACTS: Record<CliType, CliContract> = {
       "--model": { arity: "one", description: "Model selector" },
       "--output-format": {
         arity: "one",
-        values: ["plain", "json", "streaming-json"],
+        // Four values, because grok 1.0.4 advertises four. This list is NOT
+        // documentation: `validateUpstreamCliArgs` enforces it, so a value
+        // missing from here is a value the gateway REFUSES even though the
+        // binary accepts it, in the same bucket as a typo. Withholding
+        // `streaming-messages-json` would be the gateway managing xAI's release
+        // cycle, and that cycle is not ours to manage. See the governing
+        // principle in scripts/rebaseline-provider-contracts.mjs and
+        // docs/plans/provider-contract-drift-rc3.dag.toml: capability is wired
+        // up as it appears.
+        //
+        // The gateway does not model this wire. `src/grok-json-parser.ts`
+        // parses json and streaming-json; anything else returns null and
+        // `grokDisplayText` falls back to raw stdout, which is what passing
+        // through means: the caller asked for a wire we do not interpret and
+        // gets the bytes. `src/job-progress.ts` keys structured streaming off
+        // the literal `streaming-json`, so this format reports activity-only
+        // progress. Pinned by test in grok-json-parser.test.ts rather than
+        // left to be rediscovered.
+        //
+        // Found by hand-probing `grok --help` during the 1.0.3 -> 1.0.4
+        // rebaseline, NOT by the scan: `output-formats` is a declared watch
+        // category for grok, but `extractHelpOptionSpecs` in
+        // scripts/upstream-scan.mjs cannot read clap's multi-line bulleted
+        // "Possible values:" block, only the inline `[possible values: a, b]`
+        // form, and silently skips what it cannot read. Whether this value is
+        // new in 1.0.4 or was already present at 1.0.3 is not determinable
+        // here: xAI publish no CLI release notes, and grok's own declared
+        // source URL (https://docs.x.ai/developers/release-notes.md) 404s.
+        values: ["plain", "json", "streaming-json", "streaming-messages-json"],
         description: "Output format",
       },
       "--always-approve": { arity: "none", description: "Approve tool use automatically" },
