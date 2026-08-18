@@ -1,6 +1,6 @@
 # docs/plans index
 
-34 `*.dag.toml` implication maps plus supporting drafts, prompts and workflows.
+35 `*.dag.toml` implication maps plus supporting drafts, prompts and workflows.
 
 **Read this before treating any DAG as intent.** Only 3 of the 32 pre-existing DAGs have any node
 marked `done`, 17 carry no `status` field at all, and a dozen still show nodes as
@@ -16,12 +16,13 @@ Re-check before relying on a row.
 | DAG | Surface | Notes |
 | --- | --- | --- |
 | `validation-launch-surface.dag.toml` | Validation provider launch, cursor trust | The only machine-checked DAG (`npm run dag:launch-surface:check`, inside `npm run check`). Real TypeScript AST caller analysis. Caveat: it validates that `affects` is a non-empty string list but never resolves the targets, and `node_count` is pinned in the checker, so the map cannot grow without a checker edit. |
+| `gateway-passthrough-policy.dag.toml` | **Governing rule for the provider surface** | The installed binary is the authority; the gateway never refuses what it accepts. Supersedes the removal auto-apply policy, which was deleting capability from customers who changed nothing. Read this before touching any provider contract, schema or validation path. Where another plan disagrees, this one wins. |
 | `durable-state-lifecycle.dag.toml` | Retention, finalization, telemetry capture | What is written, what is bounded, what leaks. Read before adding a durable table or status value. Evidence: `docs/evidence/durable-state-2026-08-18.md`. |
 | `durable-state-remediation.dag.toml` | The fix program for the above | Five phases, six invariants. P0 ships in 3.1.0. Operator decisions on receipt retention and ACP approval are recorded in its header. |
 | `acp-permission-decision.md` | ACP permission gating (exploration, not a DAG) | Why `ApprovalManager` is the wrong instrument for ACP, why path containment cannot be a real control while the gateway never sees the syscall, and what the category gate actually guarantees. |
 | `request-pipeline-tier-b-t4-driver.dag.toml` | Tier-B handler envelope | Genuinely unimplemented: no `HandlerEnvelope` or `terminalEnvelope` anywhere in `src/`. |
 | `request-pipeline-tier-b-t5a-gemini.dag.toml` | Tier-B gemini slice | Blocked on T4 above. |
-| `provider-contract-removal-autoapply.dag.toml` | Auto-applying upstream flag removals | 9 of 9 nodes `done` and the behaviour shipped. Note `scripts/provider-drift-check.sh` and its systemd unit still print the pre-policy claim that removals are never auto-applied. |
+
 
 ## Completed: the code shipped, the DAG was never marked
 
@@ -44,6 +45,7 @@ status.
 
 | DAG | Why |
 | --- | --- |
+| `provider-contract-removal-autoapply.dag.toml` | Its `removal_policy = "auto_apply"` is **withdrawn** by `gateway-passthrough-policy.dag.toml`. It was deleting capability from customers who never touched their CLI. The lock-step analysis, the `hiddenFromHelp` escape hatch and the residual-reference reporting remain accurate; the policy does not. |
 | `grok-0.2.33-contract-sync.dag.toml` | Targets grok 0.2.33; live is 1.0.4. Premise entirely superseded. |
 | `provider-contract-drift-rc3.dag.toml` | Its rc.3-era version targets were replaced by the rc.8 rebaseline. The decision sections remain useful and are the best statement of the pass-through principle in the repo. |
 | `first-class-acp-gateway-extension.dag.toml` | `status = "native_smoke_passed"` overstates: the smoke harness has zero production callers and `smoke_on_startup` is parsed and never read. Several observability and async claims describe events and metrics that do not exist. |
@@ -70,5 +72,9 @@ status.
   has two callers, delete the second path rather than copying the rule into it.
   `validation-launch-surface.dag.toml` exists because four consecutive review
   rounds each found that same defect one layer further out.
+- **Never remove a provider capability to make a test green.** If the rebaseliner
+  strips a contract entry and a handler test goes red, restore the entry and mark
+  the version boundary. Deleting the request parameter is how three capabilities
+  were taken from customers in 3.1.0. See `gateway-passthrough-policy.dag.toml`.
 - **Mark nodes `done` when they ship.** The Completed section above is what happens
   otherwise, and it costs every later reader a code check to resolve.

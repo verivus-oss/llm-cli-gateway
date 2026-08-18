@@ -1,3 +1,26 @@
+# ============================================================================
+# SUPERSEDED 2026-08-18 by docs/plans/gateway-passthrough-policy.dag.toml.
+#
+# `[decision].removal_policy = "auto_apply"` and its stated reason are WITHDRAWN.
+# That reason reads:
+#
+#   "The registry describes what the binary supports. When the binary stops
+#    supporting something, the truthful registry is the one without it."
+#
+# It is wrong on one unstated word: WHICH binary. The registry is built by
+# probing OUR reference host. This policy then propagated that one machine's
+# view to every installation, so a customer who upgraded the gateway and left
+# their CLI alone lost flags their binary still advertises. 3.1.0 as drafted
+# does exactly that three times (grok bestOfN, grok check, devin agentConfig).
+#
+# The automation described below may still RECORD what the reference host sees.
+# It must never again drive deletion of a request parameter, and a red handler
+# test after a contract strip means "restore the entry and mark the version
+# boundary", not "delete the parameter to make the test green".
+#
+# The rest of this file (the lock-step edit analysis, the hiddenFromHelp escape
+# hatch, the residual-reference reporting) remains accurate and useful.
+# ============================================================================
 # Implementation plan: auto-apply upstream flag REMOVALS, closing the last
 # manual step in provider contract rebaselining.
 #
