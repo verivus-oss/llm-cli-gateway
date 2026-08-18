@@ -14,6 +14,7 @@
 import { describe, expect, it } from "vitest";
 import {
   allFlags,
+  assertProbeArgvCannotRun,
   buildProbeArgv,
   interpretProbeOutput,
   parseClapBashCompletion,
@@ -146,6 +147,7 @@ describe("invalid-value probe", () => {
   it("recovers the real value set when the binary enumerates one", () => {
     const v = interpretProbeOutput(ENUM);
     expect(v.kind).toBe("present");
+    expect(v.kind === "present" && v.arity).toBe("one");
     expect(v.kind === "present" && v.values).toEqual([
       "default",
       "acceptEdits",
@@ -161,7 +163,42 @@ describe("invalid-value probe", () => {
     // the contract asserted a five-level enum for a flag the binary does not
     // constrain, and `values` is enforced as a rejection list.
     const v = interpretProbeOutput(ACCEPTED);
-    expect(v).toEqual({ kind: "present", values: null });
+    expect(v).toEqual({ kind: "present", arity: "one", values: null });
+  });
+
+  it("distinguishes a BOOLEAN flag from a value-taking one", () => {
+    // Only the inline `=` form surfaces this. The space form consumes the
+    // sentinel as a positional, so a boolean and a value-taking flag produce
+    // byte-identical stderr and arity is unrecoverable. Verbatim from grok 1.0.4.
+    const BOOLEAN =
+      "error: unexpected value 'ZZZ' for '--always-approve' found; no more were expected";
+    expect(interpretProbeOutput(BOOLEAN)).toEqual({
+      kind: "present",
+      arity: "none",
+      values: null,
+    });
+  });
+
+  it("SAFETY: probe argv contains no bare token that could become a prompt", () => {
+    // The real invariant, and the one the `claude completion` billing incident
+    // violated: `completion` was a bare token, so it was consumed as a
+    // POSITIONAL and became a prompt that reached the model. A token that does
+    // not start with `-` is the only thing that can turn a probe into a real
+    // invocation.
+    for (const token of buildProbeArgv("--effort", "--single")) {
+      expect(token.startsWith("-"), `bare token ${token}`).toBe(true);
+    }
+    expect(buildProbeArgv("--effort", "--single")).toEqual([
+      "--effort=ZZZ_GATEWAY_PROBE",
+      "--single",
+    ]);
+  });
+
+  it("SAFETY: refuses to build argv containing a bare token", () => {
+    expect(() => assertProbeArgvCannotRun(["--effort=ZZZ", "completion"])).toThrow(
+      /not option-shaped/
+    );
+    expect(() => assertProbeArgvCannotRun(["--effort=ZZZ", "--single"])).not.toThrow();
   });
 
   it("CONTROL: the enum message outranks the missing-value message", () => {
@@ -178,19 +215,39 @@ describe("invalid-value probe", () => {
     // `unparsed` is evidence about our parser. Collapsing the second into the
     // first is how a discovery system silently removes capability.
     expect(interpretProbeOutput("").kind).toBe("unparsed");
-    expect(interpretProbeOutput("error: invalid value 'ZZZ' for '--x <X>'").kind).toBe("unparsed");
+
+    // NOTE the boundary moved when arity detection landed. An "invalid value"
+    // message with no enumerated set is NOT unparsed: it proves the flag exists
+    // and takes a value, which is strictly more than we could say before. Only
+    // the value SET is unknown.
+    //
+    // So `values: null` now carries two distinguishable meanings, "no enum" and
+    // "enum exists but was not disclosed". They are deliberately not separated
+    // in the type, because under fail-open both mean DO NOT ENFORCE and the
+    // behavioural consequence is identical. The difference affects guidance
+    // quality only, and inventing a distinction with no behavioural effect
+    // would be modelling for its own sake.
+    const undisclosed = interpretProbeOutput("error: invalid value 'ZZZ' for '--x <X>'");
+    expect(undisclosed).toEqual({ kind: "present", arity: "one", values: null });
   });
 
-  it("SAFETY: probe argv can never form a runnable invocation", () => {
-    // Structural, not a convention to remember. The headless flag is emitted
-    // with NO value, so the CLI fails at argument parsing before dispatch.
-    // `claude completion` reached the model during this work because
-    // `completion` parsed as a prompt, turning an enumeration into a billed
-    // inference call.
-    const argv = buildProbeArgv("--effort", "--single");
-    expect(argv.at(-1)).toBe("--single");
-    // Nothing follows the headless flag, so its required value is missing.
-    expect(argv.filter(a => a === "--single")).toHaveLength(1);
-    expect(argv).toEqual(["--effort", "ZZZ_GATEWAY_PROBE", "--single"]);
+  it("ABSENCE IS NEVER SUBTRACTIVE: the n1-restored flags probe as absent HERE", () => {
+    // The single most important behaviour in this subsystem.
+    //
+    // Measured on this host 2026-08-18: grok --best-of-n, grok --check and
+    // devin --agent-config all return "unexpected argument", i.e. ABSENT, by
+    // the strongest signal available. They are also absent from completions and
+    // from --help. They are exactly the three capabilities n1 restored, because
+    // customers on older CLIs still have them.
+    //
+    // So a pipeline that trusts its own absence verdict deletes them again,
+    // with better evidence than the rebaseliner ever had, for the same wrong
+    // reason: the question is not "is it on this machine".
+    //
+    // This test pins the INPUT half. The merge must treat `absent` as
+    // non-subtractive; see the absence-is-never-subtractive invariant in
+    // docs/plans/gateway-passthrough-policy.dag.toml.
+    const ABSENT_HERE = "error: unexpected argument '--best-of-n' found";
+    expect(interpretProbeOutput(ABSENT_HERE)).toEqual({ kind: "absent" });
   });
 });

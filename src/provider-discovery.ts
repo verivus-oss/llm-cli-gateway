@@ -197,14 +197,17 @@ export function allFlags(commands: readonly DiscoveredCommand[]): string[] {
 // from "the constraint fired but a different error printed first".
 // ---------------------------------------------------------------------------
 
+/** Whether the flag takes a value, as reported by the binary's own parser. */
+export type ProbedArity = "none" | "one" | "unknown";
+
 /** What a probe concluded about one flag on the installed binary. */
 export type FlagProbeVerdict =
   /** The binary rejected the flag itself. */
   | { kind: "absent" }
   /** The flag exists and constrains its value; these are the accepted values. */
-  | { kind: "present"; values: readonly string[] }
-  /** The flag exists and accepted an arbitrary value: no enum to enforce. */
-  | { kind: "present"; values: null }
+  | { kind: "present"; arity: ProbedArity; values: readonly string[] }
+  /** The flag exists; no enum to enforce (or none the parser disclosed). */
+  | { kind: "present"; arity: ProbedArity; values: null }
   /**
    * The probe could not tell. Under the fail-open policy this must stay
    * DISTINCT from `absent`: absent is evidence about the binary, unparsed is
@@ -221,6 +224,11 @@ export function interpretProbeOutput(stderr: string): FlagProbeVerdict {
   // clap: `error: unexpected argument '--nope' found`
   if (/unexpected argument/i.test(text)) return { kind: "absent" };
 
+  // The flag exists but takes NO value, so supplying one is "unexpected value".
+  // Only the inline `=` form surfaces this; see buildProbeArgv.
+  // clap: `unexpected value 'ZZZ' for '--always-approve' found; no more were expected`
+  if (/unexpected value/i.test(text)) return { kind: "present", arity: "none", values: null };
+
   // clap: `invalid value 'ZZZ' for '--mode <MODE>'\n  [possible values: a, b]`
   const possible = /\[possible values:\s*([^\]]+)\]/i.exec(text);
   if (possible) {
@@ -228,41 +236,77 @@ export function interpretProbeOutput(stderr: string): FlagProbeVerdict {
       .split(",")
       .map(v => v.trim())
       .filter(Boolean);
-    return { kind: "present", values };
+    return { kind: "present", arity: "one", values };
   }
   // An invalid-value complaint with no enumerated set still proves the flag
   // exists and constrains its value; we just do not know the set.
   if (/invalid value/i.test(text)) {
-    return { kind: "unparsed", reason: "flag constrains its value but did not enumerate the set" };
+    // Constrains its value, so arity is one, but the set was not disclosed.
+    return { kind: "present", arity: "one", values: null };
   }
 
   // Anything else means the parser moved PAST our flag and failed on the
   // deliberately-missing prompt instead, so the flag was accepted.
-  return { kind: "present", values: null };
+  return { kind: "present", arity: "one", values: null };
 }
 
 /**
  * Build the argv for a safe probe of one flag.
  *
- * SAFETY IS STRUCTURAL, NOT A CONVENTION. The returned argv always includes the
- * provider's headless flag with NO value, so the CLI fails at ARGUMENT PARSING
- * before it can dispatch. The flag under test is answered by which parse error
- * comes back, and the command can never reach execution whatever the flag would
- * have done.
+ * INLINE `=` FORM, DELIBERATELY. The space form (`--flag ZZZ --anchor`) cannot
+ * distinguish a boolean flag from a value-taking one: the sentinel is consumed
+ * as a positional and both produce identical stderr. The inline form makes the
+ * probe a FOUR-way discriminator that also yields arity. Measured on grok 1.0.4:
  *
- * This is not caution to remember. `claude completion` reached the model during
- * this investigation, because `completion` is not a claude subcommand and so
- * parsed as a PROMPT: an enumeration became a billed inference call. Cost,
- * quota (gemini already returns 429 in production), latency, side effects on a
- * valid invocation, non-determinism, and TUI hang risk all point the same way.
+ *   --not-a-real-flag=ZZZ  -> "unexpected argument"                  ABSENT
+ *   --always-approve=ZZZ   -> "unexpected value ... no more were
+ *                             expected"                              present, arity none
+ *   --permission-mode=ZZZ  -> "invalid value ... [possible values:]" present, arity one, enum
+ *   --effort=ZZZ           -> falls through to the anchor error       present, arity one, no enum
  *
- * `headlessFlagRequiringValue` MUST be a flag that takes a value, or the
- * invocation may be well-formed and run.
+ * All four dialects in play accept `--flag=value` (clap, commander, argparse and
+ * Go's flag), so one form covers all seven providers without a per-provider
+ * branch, which the policy forbids.
+ *
+ * SAFETY IS STRUCTURAL. The real invariant is NOT "the anchor must take a
+ * value", it is:
+ *
+ *     NO PROBE ARGV MAY CONTAIN A TOKEN THAT DOES NOT BEGIN WITH `-`.
+ *
+ * That is what the `claude completion` billing incident actually violated:
+ * `completion` was a bare token, so it became a PROMPT and reached the model.
+ * A bare token is the only thing that can be consumed as a positional and turn
+ * a probe into a real request. The inline form has no bare token by
+ * construction, and `assertProbeArgvCannotRun` enforces it.
+ *
+ * `anchorFlag` should require a value, so the invocation additionally fails on
+ * the missing anchor value. That is defence in depth, not the primary guard.
  */
 export function buildProbeArgv(
   flag: string,
-  headlessFlagRequiringValue: string,
+  anchorFlag: string,
   sentinel = "ZZZ_GATEWAY_PROBE"
 ): string[] {
-  return [flag, sentinel, headlessFlagRequiringValue];
+  const argv = [`${flag}=${sentinel}`, anchorFlag];
+  assertProbeArgvCannotRun(argv);
+  return argv;
+}
+
+/**
+ * Throw unless every token is option-shaped.
+ *
+ * A probe is only safe if the CLI cannot reach dispatch, and the one thing that
+ * lets it reach dispatch is a bare token being taken as a positional argument.
+ * Enforced here rather than trusted to the caller, because the failure mode is
+ * a billed model call and a possible side effect, not a wrong answer.
+ */
+export function assertProbeArgvCannotRun(argv: readonly string[]): void {
+  for (const token of argv) {
+    if (!token.startsWith("-")) {
+      throw new Error(
+        `unsafe probe argv: token ${JSON.stringify(token)} is not option-shaped and could be ` +
+          `consumed as a positional, turning the probe into a real invocation`
+      );
+    }
+  }
 }

@@ -439,6 +439,41 @@ role = "Report the discovered set, its host, the binary version and probe time; 
 # ---------------------------------------------------------------------------
 
 [[invariant]]
+id = "absence-is-never-subtractive"
+question = "Does an `absent` discovery verdict REMOVE a capability the gateway previously offered?"
+why = """
+THE TRAP DISCOVERY WALKS INTO IF NOBODY STOPS IT, and it is the same trap the
+rebaseliner walked into, wearing better clothes.
+
+Discovery describes THE HOST IT RAN ON. Our reference host runs grok 1.0.4 and
+devin 3000.4.25, which do not have the flags a customer on grok 0.2.101 or an
+older devin still has. Measured 2026-08-18, on the three capabilities n1 had
+just restored:
+
+  grok  --best-of-n=ZZZ --single          -> "unexpected argument"  ABSENT
+  grok  --check=ZZZ --single              -> "unexpected argument"  ABSENT
+  devin --agent-config=ZZZ --prompt-file  -> "unexpected argument"  ABSENT
+  grok completions | grep -c -- --best-of-n  -> 0
+  grok --help      | grep -c -- --best-of-n  -> 0
+
+All three are absent here by the strongest signal available: the binary's own
+parser, on the exact flag, at rank 1. A discovery pipeline that trusts its own
+absence verdict therefore DELETES bestOfN, check and agentConfig again, on the
+very release that restored them, and it does so with better evidence than the
+rebaseliner ever had. Better evidence for the same wrong conclusion, because the
+question was never "is it on this machine".
+
+THE RULE: the merged flag set is `discovered UNION retained`. An `absent`
+verdict may lower confidence, mark a flag unadvertised on this host, or shape
+guidance. It may NEVER remove a request parameter or a contract entry.
+
+This is what makes n4 safe. The bundled seed is built by running discovery on
+OUR host, so without this rule the seed ships our host's absences to every
+customer, which is precisely the pinning the policy exists to end.
+"""
+enforced_by = "n2 merge rules, n3 schema derivation, and an acceptance test that pins the three n1 flags"
+
+[[invariant]]
 id = "no-hand-authored-provider-data"
 question = "Is a human typing a provider's flags, values, or argv rules into a file?"
 why = """
