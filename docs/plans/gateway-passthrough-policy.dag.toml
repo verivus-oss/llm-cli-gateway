@@ -4,7 +4,7 @@
 
 [meta]
 surface = "provider capability exposure, discovery and enforcement"
-status = "agreed 2026-08-18. n1 and n3a shipped; n2 partial; n3b and n4-n9 open"
+status = "agreed 2026-08-18. n1, n3a and n3c shipped; n2 partial; n3b, n8a and n4-n9 open"
 release_gate = "This program gates the next release. Scope and version decision are tracked internally."
 supersedes = "provider-contract-removal-autoapply.dag.toml [decision].removal_policy"
 
@@ -78,6 +78,20 @@ status = "REFUTED as written 2026-08-19, superseded by n3b. Do not execute."
 depends_on = ["n2.discovery-produces-the-data", "n3a.passthrough-surface"]
 role = "WAS: point the generic builder at discovery output and delete the seven prepare functions."
 refuted_by = "Its own pilot. The grok cutover removed 73 lines from prepareGrokRequest and added 476 in provider-codegen.ts, and prepareGrokRequest has since grown to 373, larger than the 317 it started at. Marginal cost per further provider is about +319 table lines to remove -73 push lines. The `~1400 lines of argv functions` premise is also wrong: the seven total 1,853 non-blank lines of which 76 mention a flag literal, 4%. The rest is admission, isolation, session, MCP and prompt assembly, none of it generatable."
+
+[[node]]
+id = "n3c.passthrough-reaches-the-cli"
+status = "done 2026-08-19"
+depends_on = ["n3a.passthrough-surface"]
+role = "n3a built argv and assertUpstreamCliArgs then refused it, so nothing it shipped could execute. Caller-named flags are now exempt; the third parameter is required so the compiler names every site. Live-verified against grok --minimal."
+constraint = "TESTING A BUILDER IS NOT TESTING A PATH. Test the admission, not the argv."
+
+[[node]]
+id = "n8a.absence-derived-refusals-still-stand"
+critical = true
+depends_on = []
+role = "12 assertions in 4 files refuse input purely because OUR host stopped advertising it, which absence-is-never-subtractive forbids. Enumerated in the evidence file; acknowledgedUpstreamFlags cannot serve as the refusal list, its own docstring says so."
+constraint = "Widening these is customer-visible and a version decision, NOT a drive-by. n8's job, with live-binary evidence per case."
 
 [[node]]
 id = "n3b.delete-the-table-not-the-prep"
