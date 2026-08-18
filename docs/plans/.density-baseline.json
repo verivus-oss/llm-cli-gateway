@@ -8,7 +8,7 @@
   "durable-state-remediation.dag.toml": 393,
   "first-class-acp-gateway-extension.dag.toml": 1004,
   "full-featured-cli-acp-provider-integrations.dag.toml": 1146,
-  "gateway-passthrough-policy.dag.toml": 151,
+  "gateway-passthrough-policy.dag.toml": 158,
   "grok-0.2.33-contract-sync.dag.toml": 247,
   "http-session-async-backpressure-hardening.dag.toml": 484,
   "hybrid-multi-agent-playbook-evolution.dag.toml": 140,
