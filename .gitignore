@@ -60,5 +60,9 @@ pnpm-workspace.yaml
 # Host-local records, never committed. This repo mirrors to a public GitHub
 # repo, and internal process is not product. Plans stay public and carry the
 # conclusions; the measurements and operator decisions behind them stay here.
-docs/audits/
-docs/evidence/
+# No trailing slash, deliberately. A trailing-slash pattern matches directories
+# only, and these are SYMLINKS into the private internal-records repo. git treats
+# a symlink as a file, so `docs/evidence/` left them untracked-but-visible and a
+# `git add -A` would have committed the link, publishing the private repo's path.
+docs/audits
+docs/evidence
