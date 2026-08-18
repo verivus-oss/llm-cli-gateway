@@ -51,7 +51,8 @@ describe("telemetryTierFor", () => {
   it("assigns the DAG cost-model tier for each of the 7 CLI providers", () => {
     expect(telemetryTierFor("claude")).toBe("T1");
     expect(telemetryTierFor("codex")).toBe("T2");
-    expect(telemetryTierFor("gemini")).toBe("T2");
+    // See doctor.test.ts: gemini emits no usage at all, so T4.
+    expect(telemetryTierFor("gemini")).toBe("T4");
     expect(telemetryTierFor("grok")).toBe("T3");
     expect(telemetryTierFor("mistral")).toBe("T1");
     expect(telemetryTierFor("devin")).toBe("T4");

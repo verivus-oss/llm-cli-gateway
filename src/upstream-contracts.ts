@@ -2255,7 +2255,15 @@ export const UPSTREAM_CLI_CONTRACTS: Record<CliType, CliContract> = {
     // Grok documents --single as the long alias of -p, not a second prompt
     // field. Keeping this in the argv contract prevents a future gateway path
     // from rebuilding the duplicate prompt invocation fixed in this release.
-    mutuallyExclusiveFlagGroups: [["-p", "--single"]],
+    // `--effort` is grok's own alias for `--reasoning-effort`, so emitting both
+    // sends the same upstream option twice and grok silently last-wins. The
+    // gateway exposes them as two independent request parameters, so a caller
+    // passing {effort: "high", reasoningEffort: "low"} would otherwise get
+    // whichever the argv builder happened to place last. Reject instead.
+    mutuallyExclusiveFlagGroups: [
+      ["-p", "--single"],
+      ["--effort", "--reasoning-effort"],
+    ],
     // Grok 0.2.77: `--fork-session`, `--json-schema`, and `--worktree-ref` are
     // now wired through the request path (see flags + prepareGrokRequest), so
     // they live in the argv allowlist, not here. `--session-id` is advertised
@@ -2367,8 +2375,31 @@ export const UPSTREAM_CLI_CONTRACTS: Record<CliType, CliContract> = {
         values: GROK_PERMISSION_MODES,
         description: "Permission mode",
       },
-      "--effort": { arity: "one", values: EFFORT_LEVELS, description: "Reasoning effort" },
-      "--reasoning-effort": { arity: "one", description: "Reasoning effort override" },
+      // grok 1.0.4 declares `--reasoning-effort <EFFORT>` with `[aliases:
+      // --effort]` and NO possible-values set. Neither spelling carries `values`
+      // here, and that is deliberate: `values` is a REJECTION list enforced by
+      // validateUpstreamCliArgs, so declaring one refuses input the binary
+      // parses. Verified by experiment on 1.0.4, with a control that proves the
+      // probe can detect an enum at all:
+      //   grok --permission-mode bogus --single  -> "invalid value 'bogus' ...
+      //                                             [possible values: ...]"
+      //   grok --reasoning-effort bogus --single -> falls through to the
+      //                                             missing-value error
+      //   grok --effort bogus --single           -> same
+      // Do NOT "restore" a five-level enum here by symmetry with claude. Claude
+      // is a genuinely different case: `claude --effort bogus` warns, ignores
+      // the value and prints "Valid values: low, medium, high, xhigh, max", so
+      // its five levels are the complete set of EFFECTIVE values and enforcing
+      // them refuses only a no-op. grok documents no set and its behaviour on
+      // other values is unknown, so enforcing one would invent a constraint.
+      "--effort": {
+        arity: "one",
+        description: "Reasoning effort (alias of --reasoning-effort)",
+      },
+      "--reasoning-effort": {
+        arity: "one",
+        description: "Reasoning effort (canonical spelling; --effort is its alias)",
+      },
       "--tools": { arity: "one", description: "Comma-separated allowed tools" },
       "--disallowed-tools": {
         arity: "one",
@@ -2476,9 +2507,29 @@ export const UPSTREAM_CLI_CONTRACTS: Record<CliType, CliContract> = {
         arity: "one",
         description: "JSON Schema literal constraining structured output (implies json output)",
       },
-      // Grok 0.2.x context/compaction controls (both enum, env-backed).
-      // As of 0.2.60 these are accepted by the runtime but omitted from --help
-      // output; mark hiddenFromHelp so the installed probe does not flag drift.
+      // Grok context/compaction controls, both env-backed. Omitted from rendered
+      // `--help` since 0.2.60, hence hiddenFromHelp so the installed probe does
+      // not flag drift.
+      //
+      // The `values` below ARE upstream-documented, despite grok's clap not
+      // rejecting an out-of-list value at parse (`--compaction-mode nope` is
+      // accepted). Re-verified against the 1.0.4 executable on 2026-08-18 with
+      // `strings`, which recovers the suppressed help text verbatim:
+      //
+      //   "Compaction mode [summary|transcript|segments]: `summary` (default)
+      //    adds no pointer; `transcript` points at the raw transcript;
+      //    `segments` persists per-segment markdown to grep. Sets
+      //    `GROK_COMPACTION_MODE`"
+      //   "Segments verbatim detail [none|minimal|balanced|verbose] (default
+      //    `verbose`). Only affects `--compaction-mode segments`. Sets
+      //    `GROK_COMPACTION_DETAIL`"
+      //
+      // Both lists match exactly, so enforcement refuses nothing the binary
+      // offers. This is the opposite finding to grok `--effort`, where the help
+      // text declares the flag with NO value set and the contract had invented
+      // one. Parse-acceptance alone does not tell you which case you are in;
+      // `strings` on the binary does, and is the only way to evidence a
+      // hiddenFromHelp flag's contract.
       "--compaction-mode": {
         arity: "one",
         values: ["summary", "transcript", "segments"],

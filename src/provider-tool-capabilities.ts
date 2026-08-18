@@ -1007,7 +1007,8 @@ const TOOL_CONTROLS: Record<KnownProviderCapabilityId, ProviderCapabilityStaticD
       outputFormat: {
         supported: true,
         requestField: "outputFormat",
-        behavior: "Supports Grok plain, json, and streaming-json output modes.",
+        behavior:
+          "Supports Grok plain, json, streaming-json and streaming-messages-json output modes.",
       },
       workspace: {
         supported: true,

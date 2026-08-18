@@ -3052,13 +3052,6 @@
           },
           "effort": {
             "type": "string",
-            "enum": [
-              "low",
-              "medium",
-              "high",
-              "xhigh",
-              "max"
-            ],
             "description": "Grok effort level"
           },
           "reasoningEffort": {
@@ -3480,13 +3473,6 @@
           },
           "effort": {
             "type": "string",
-            "enum": [
-              "low",
-              "medium",
-              "high",
-              "xhigh",
-              "max"
-            ],
             "description": "Grok effort level"
           },
           "reasoningEffort": {
@@ -5034,7 +5020,7 @@
               "cursor",
               "grok-api"
             ],
-            "description": "Provider filter (claude|codex|gemini|grok|mistral|grok-api)"
+            "description": "Provider filter (claude|codex|gemini|grok|mistral|devin|cursor|grok-api)"
           }
         },
         "additionalProperties": false,
@@ -5059,7 +5045,7 @@
               "cursor",
               "grok-api"
             ],
-            "description": "Provider type (claude|codex|gemini|grok|mistral|grok-api)"
+            "description": "Provider type (claude|codex|gemini|grok|mistral|devin|cursor|grok-api)"
           },
           "description": {
             "type": "string",
@@ -5132,7 +5118,7 @@
               "cursor",
               "grok-api"
             ],
-            "description": "Provider filter (claude|codex|gemini|grok|mistral|grok-api)"
+            "description": "Provider filter (claude|codex|gemini|grok|mistral|devin|cursor|grok-api)"
           }
         },
         "additionalProperties": false,
@@ -5157,7 +5143,7 @@
               "cursor",
               "grok-api"
             ],
-            "description": "Provider type (claude|codex|gemini|grok|mistral|grok-api)"
+            "description": "Provider type (claude|codex|gemini|grok|mistral|devin|cursor|grok-api)"
           },
           "sessionId": {
             "type": [

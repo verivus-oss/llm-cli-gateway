@@ -156,8 +156,26 @@ const PROVIDER_LABEL_TERNARY = new RegExp(
  * `{ 0: snippet, index }`, for signals a single regex cannot express (pattern 4
  * needs to compare provider prefixes across one line).
  */
+/**
+ * Pattern 6: a pipe-separated provider run inside PROSE, e.g. a `.describe()`
+ * string reading "Provider type (claude|codex|gemini|grok|mistral)".
+ *
+ * Added after four such strings shipped to site/tools.fixture.json listing six
+ * providers while the Zod enum in the SAME schema object accepted eight. The
+ * array patterns above could not see it: the names were not a quoted array, they
+ * were words in a sentence. Prose is a provider surface too, because it is
+ * published to the website and shown to every MCP client.
+ *
+ * Three or more piped provider names is the signal; two could be a legitimate
+ * either/or in a sentence about a specific pair.
+ */
+const PIPED_PROVIDER_PROSE = new RegExp(
+  `(?:${PROVIDER_NAME})(?:\\s*\\|\\s*(?:${PROVIDER_NAME}|grok-api|[a-z]+-api)){2,}`
+);
+
 const PATTERNS = [
   { kind: "literal-provider-array", regex: LITERAL_PROVIDER_ARRAY },
+  { kind: "piped-provider-prose", regex: PIPED_PROVIDER_PROSE },
   { kind: "manual-resource-block", regex: MANUAL_RESOURCE_BLOCK },
   { kind: "literal-resource-uri", regex: LITERAL_RESOURCE_URI },
   { kind: "cross-provider-tool-list", find: findCrossProviderToolList },

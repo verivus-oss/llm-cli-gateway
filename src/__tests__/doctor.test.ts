@@ -1142,7 +1142,10 @@ describe("LCR phase_3 doctor least_cost block", () => {
     expect(seen.get("claude")?.telemetryTier).toBe("T1");
     expect(seen.get("mistral")?.telemetryTier).toBe("T1");
     expect(seen.get("codex")?.telemetryTier).toBe("T2");
-    expect(seen.get("gemini")?.telemetryTier).toBe("T2");
+    // T4, not T2: agy headless is text-only and the adapter rejects
+    // json/stream-json before spawn, so no usage can ever be extracted.
+    // Corrected in 3.1.0; 0 of 2241 live gemini rows carry token counts.
+    expect(seen.get("gemini")?.telemetryTier).toBe("T4");
     expect(seen.get("grok")?.telemetryTier).toBe("T3");
     expect(seen.get("devin")?.telemetryTier).toBe("T4");
     expect(seen.get("cursor")?.telemetryTier).toBe("T4");

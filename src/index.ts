@@ -1111,6 +1111,16 @@ function providerWorkspaceAliasSchema(): z.ZodOptional<typeof WORKSPACE_ALIAS_SC
 
 // Session-provider enum includes spawnable CLIs plus API-backed providers.
 // Keep CLI-only surfaces (contracts, status, updater) on CLI_TYPES.
+/**
+ * Every CLI provider name, pipe-joined, for use inside tool `describe` prose.
+ *
+ * Prose is a published provider surface: these strings reach
+ * site/tools.fixture.json and every MCP client. Twelve of them were maintained
+ * by hand, and the `session_*` set had drifted to six names while the enum in
+ * the same schema accepted eight. Derive, never spell.
+ */
+const CLI_PROVIDER_LABEL = CLI_TYPES.join("|");
+
 export const SESSION_PROVIDER_VALUES = PROVIDER_TYPES;
 export const SESSION_PROVIDER_ENUM = z.enum(SESSION_PROVIDER_VALUES);
 
@@ -20566,11 +20576,13 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
           .describe(
             "Grok permission mode: default|acceptEdits|auto|dontAsk|bypassPermissions|plan."
           ),
-        effort: z
-          .enum(["low", "medium", "high", "xhigh", "max"])
-          .optional()
-          .describe("Grok effort level"),
-        reasoningEffort: z.string().optional().describe("Reasoning effort for reasoning models"),
+        // Derived, not hand-declared. grok 1.0.4 sets no possible-values on this
+        // flag, so a hand-written enum here refuses input the binary parses AND
+        // diverges from the sync tool, which spreads GROK_GENERATED_SHAPE. That
+        // sync/async divergence is a repeat: the same shape shipped for
+        // outputFormat and had to be fixed at :20545.
+        effort: GROK_GENERATED_SHAPE.effort,
+        reasoningEffort: GROK_GENERATED_SHAPE.reasoningEffort,
         approvalStrategy: z
           .enum(["legacy", "mcp_managed"])
           .default("legacy")
@@ -22185,16 +22197,14 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
   ] as [string, ...string[]];
   server.tool(
     "list_models",
-    "List models, aliases, and defaults for one provider (claude|codex|gemini|grok|mistral|devin|cursor, or an enabled API provider name), or omit cli to list all providers. API providers are returned under an `apiProviders` array.",
+    `List models, aliases, and defaults for one provider (${CLI_PROVIDER_LABEL}, or an enabled API provider name), or omit cli to list all providers. API providers are returned under an \`apiProviders\` array.`,
     {
       cli: z
         .preprocess(
           value => (value === "" || value === null ? undefined : value),
           z.enum(listModelsFilterValues).optional()
         )
-        .describe(
-          "Provider filter (claude|codex|gemini|grok|mistral|devin|cursor, or an enabled API provider name)"
-        ),
+        .describe(`Provider filter (${CLI_PROVIDER_LABEL}, or an enabled API provider name)`),
     },
     {
       title: "Provider models",
@@ -22265,7 +22275,7 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
   ] as [string, ...string[]];
   server.tool(
     "provider_tool_capabilities",
-    "Report provider tool/feature capabilities and discovered local skill/tool integrations for claude|codex|gemini|grok|mistral|devin|cursor|grok_api, or an enabled API provider name.",
+    `Report provider tool/feature capabilities and discovered local skill/tool integrations for ${CLI_PROVIDER_LABEL}|grok_api, or an enabled API provider name.`,
     {
       cli: z
         .preprocess(
@@ -22273,7 +22283,7 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
           z.enum(providerToolCapabilitiesFilterValues).optional()
         )
         .describe(
-          "Provider filter (claude|codex|gemini|grok|mistral|devin|cursor|grok_api, or an enabled API provider name)"
+          `Provider filter (${CLI_PROVIDER_LABEL}|grok_api, or an enabled API provider name)`
         ),
       includeSkills: z
         .boolean()
@@ -22324,14 +22334,14 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
 
   server.tool(
     "cli_versions",
-    "Report installed provider CLI versions, availability, and login status for all registered CLI providers (claude|codex|gemini|grok|mistral|devin|cursor) or one.",
+    `Report installed provider CLI versions, availability, and login status for all registered CLI providers (${CLI_PROVIDER_LABEL}) or one.`,
     {
       cli: z
         .preprocess(
           value => (value === "" || value === null ? undefined : value),
           CLI_TYPE_ENUM.optional()
         )
-        .describe("CLI filter (claude|codex|gemini|grok|mistral|devin|cursor)"),
+        .describe(`CLI filter (${CLI_PROVIDER_LABEL})`),
     },
     {
       title: "Provider CLI versions",
@@ -22355,7 +22365,7 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
           value => (value === "" || value === null ? undefined : value),
           CLI_TYPE_ENUM.optional()
         )
-        .describe("CLI filter (claude|codex|gemini|grok|mistral|devin|cursor)"),
+        .describe(`CLI filter (${CLI_PROVIDER_LABEL})`),
       checkUpgrades: z
         .boolean()
         .default(false)
@@ -22461,7 +22471,7 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
           value => (value === "" || value === null ? undefined : value),
           CLI_TYPE_ENUM.optional()
         )
-        .describe("CLI filter (claude|codex|gemini|grok|mistral|devin|cursor)"),
+        .describe(`CLI filter (${CLI_PROVIDER_LABEL})`),
       probeInstalled: z
         .boolean()
         .default(false)
@@ -22491,7 +22501,7 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
           value => (value === "" || value === null ? undefined : value),
           CLI_TYPE_ENUM.optional()
         )
-        .describe("Optional provider filter (claude|codex|gemini|grok|mistral|devin|cursor)"),
+        .describe(`Optional provider filter (${CLI_PROVIDER_LABEL})`),
       tier: z
         .enum(["catalog", "inspect", "execute_candidate", "diagnostic"])
         .optional()
@@ -22548,7 +22558,7 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
     "provider_subcommand_contract",
     "Return the detailed read-only contract for exactly one declared provider CLI subcommand.",
     {
-      provider: CLI_TYPE_ENUM.describe("Provider (claude|codex|gemini|grok|mistral|devin|cursor)"),
+      provider: CLI_TYPE_ENUM.describe(`Provider (${CLI_PROVIDER_LABEL})`),
       commandPath: z.array(z.string().min(1)).min(1).describe("Command path segments"),
     },
     {
@@ -22582,7 +22592,7 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
           value => (value === "" || value === null ? undefined : value),
           CLI_TYPE_ENUM.optional()
         )
-        .describe("Optional provider filter (claude|codex|gemini|grok|mistral|devin|cursor)"),
+        .describe(`Optional provider filter (${CLI_PROVIDER_LABEL})`),
       includeClean: z
         .boolean()
         .default(false)
@@ -22646,7 +22656,7 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
     "cli_upgrade",
     "Plan (dryRun, default true) or execute an upgrade for one provider CLI using its native update mechanism.",
     {
-      cli: CLI_TYPE_ENUM.describe("CLI to upgrade (claude|codex|gemini|grok|mistral|devin|cursor)"),
+      cli: CLI_TYPE_ENUM.describe(`CLI to upgrade (${CLI_PROVIDER_LABEL})`),
       target: z
         .string()
         .min(1)
@@ -22727,14 +22737,20 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
     sessionProviderValues.length > SESSION_PROVIDER_VALUES.length
       ? z.enum(sessionProviderValues as [string, ...string[]])
       : SESSION_PROVIDER_ENUM;
+  // Derived, never hand-spelled. The four describe strings below used to list
+  // only six provider names, omitting devin and cursor, even
+  // though the enum in the SAME schema object accepted them and both expose a
+  // sessions resource. Those strings are published verbatim to
+  // site/tools.fixture.json and shown to every MCP client.
+  // `provider:surfaces:check` did not catch it: it scans for hand-maintained
+  // provider ARRAYS, not provider names inside `.describe()` prose.
+  const sessionProviderLabel = sessionProviderValues.join("|");
 
   server.tool(
     "session_create",
     "Create a gateway session record for a provider. NOTE: this is gateway bookkeeping (a plain UUID), not a provider-native session; Codex resume needs a real Codex UUID.",
     {
-      cli: sessionProviderEnum.describe(
-        "Provider type (claude|codex|gemini|grok|mistral|grok-api)"
-      ),
+      cli: sessionProviderEnum.describe(`Provider type (${sessionProviderLabel})`),
       description: z.string().optional().describe("Session description"),
       setAsActive: z.boolean().default(true).describe("Set as active session"),
     },
@@ -22786,9 +22802,7 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
     "session_list",
     "List gateway session records and the active session per provider, optionally filtered by provider.",
     {
-      cli: sessionProviderEnum
-        .optional()
-        .describe("Provider filter (claude|codex|gemini|grok|mistral|grok-api)"),
+      cli: sessionProviderEnum.optional().describe(`Provider filter (${sessionProviderLabel})`),
     },
     {
       title: "List sessions",
@@ -22857,9 +22871,7 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
     "session_set_active",
     "Set or clear the active session for a provider; the active session is used when a request omits sessionId.",
     {
-      cli: sessionProviderEnum.describe(
-        "Provider type (claude|codex|gemini|grok|mistral|grok-api)"
-      ),
+      cli: sessionProviderEnum.describe(`Provider type (${sessionProviderLabel})`),
       sessionId: z.string().nullable().describe("Session ID (null to clear)"),
     },
     {
@@ -23120,9 +23132,7 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
     "session_clear_all",
     "Delete all gateway session records, optionally scoped to one provider.",
     {
-      cli: sessionProviderEnum
-        .optional()
-        .describe("Provider filter (claude|codex|gemini|grok|mistral|grok-api)"),
+      cli: sessionProviderEnum.optional().describe(`Provider filter (${sessionProviderLabel})`),
     },
     {
       title: "Clear sessions",
@@ -23854,7 +23864,7 @@ async function main() {
     }
     process.stderr.write(
       [
-        "Usage: llm-cli-gateway contracts --json [--cli=claude|codex|gemini|grok|mistral] [--probe-installed]",
+        `Usage: llm-cli-gateway contracts --json [--cli=${CLI_PROVIDER_LABEL}] [--probe-installed]`,
         "",
         "After upgrading any provider CLI, use --probe-installed to detect drift between",
         "the installed binary's advertised flags and the gateway's declared contract.",

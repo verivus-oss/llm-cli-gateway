@@ -21,7 +21,7 @@ import { CLI_TYPES } from "../provider-types.js";
  * test below meaningful.
  */
 const REAL_INSTALLED: Record<string, string> = {
-  claude: "2.1.229 (Claude Code)",
+  claude: "2.1.233 (Claude Code)",
   codex: "codex-cli 0.147.0",
   // agy reports a bare version with no product prefix, unlike codex and mistral.
   gemini: "1.1.13",
