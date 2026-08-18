@@ -354,10 +354,105 @@ Record WHAT COULD NOT BE PARSED distinctly from what was parsed as absent.
 `fail_open` depends on telling them apart.
 """
 
+# ---------------------------------------------------------------------------
+# FINDING 2026-08-19, measured before starting n3, and it changes what n3 is.
+#
+# DISCOVERY IS CURRENTLY DECORATIVE. There is no way for a caller to send a flag
+# the gateway has not hand-declared as a named Zod field. Grepped: no
+# `extraArgs`, no `additionalArgs`, no passthrough, no `z.record` flag surface
+# anywhere in the request path. So a customer on grok 0.2.101 whose binary still
+# has `--best-of-n` cannot use it unless a human added a `bestOfN` field, and a
+# PERFECT per-install discovery does not change that by one flag. The schema is
+# an implicit allowlist, and it is the real thing pinning capability to what we
+# typed, not the contract.
+#
+# n3 AS WRITTEN DOES NOT FIX IT. "Discovery output IS the generation data" was
+# tested against the grok table on 2026-08-19. Only two of its columns are
+# mechanically derivable:
+#
+#   requestParameter   27 of 29 by kebab->camel (`--output-format` ->
+#                      `outputFormat`). The two exceptions are deliberate
+#                      cross-provider naming: `--tools` -> `allowedTools`,
+#                      `--cwd` -> `workingDir`.
+#   emit               fully determined by inputType, EXCEPT `string[]`, which
+#                      splits csv_if_nonempty vs repeat_if_nonempty and is a
+#                      provider fact no safe probe can recover.
+#
+# The rest is not provider data at all and no binary can supply it: inputType
+# refinement (which arity-one flags are numbers or lists), 29 hand-written
+# `describe` strings, 7 minLength bounds, 2 numeric bounds, and the emission
+# ORDER that byte-parity depends on. Deriving the two derivable columns leaves
+# roughly 60% of the table hand-authored in the tree, which is the
+# "moves the hand-maintained facts down one layer" trap this file already names.
+#
+# So the sequence inverts. The pass-through SURFACE is not a consequence of n3,
+# it is the precondition for the whole policy, and the per-provider blocks
+# become redundant only once it exists.
+#
+# OPEN, and the reason n3 has not started: what a generic pass-through still
+# refuses. `retained_enforcement.non_option_value_guard` exists to stop a caller
+# smuggling `--always-approve` through a value field; a generic flags parameter
+# offers it through the front door, legitimately, under p1. That is a security
+# posture decision, not a routine one, and it determines the shape of the code.
+# ---------------------------------------------------------------------------
+
+[[node]]
+id = "n3a.passthrough-surface"
+critical = true
+load_bearing = true
+status = "grok done 2026-08-19; six providers remain"
+depends_on = []
+role = "Let a caller name a flag the gateway has not declared, so discovery is reachable at all."
+outcome = """
+SHIPPED FOR GROK, sync and async. `providerFlags`, keyed exactly as the binary
+spells the flag: {"--best-of-n": "3", "--verbatim": true, "--rules": ["a","b"]}.
+Declared once as PROVIDER_FLAGS_SHAPE and shared by both tools, because the grok
+sync and async schemas have already diverged twice on hand-copied fields.
+
+Enforced for every caller, all of it argv safety rather than capability: values
+may not start with `-` (retained_enforcement.non_option_value_guard), a key may
+not pack its own value, and a flag already in the assembled argv is refused
+rather than duplicated. That last check reads THE ASSEMBLED ARGV, not a
+hand-authored reserved list, so it cannot go stale.
+
+A refused flag is an ERROR naming the flag and the reason. A silent drop is the
+same harm as removing a capability from the contract: the caller asked, did not
+get it, and was not told.
+
+ACCESS MODE SPLITS THE POSTURE, decided 2026-08-19 under p4/p5. On-machine
+stdio callers are unrestricted, because they can already run the binary in a
+shell and a gateway that refuses them a flag protects nothing. Off-machine
+HTTP/OAuth callers are refused four classes (approval bypass, sandbox, host code
+and config, host paths), matched BY CLASS rather than by spelling: the spellings
+in play today already include --yolo, --always-approve, --auto-approve,
+--approve-for-me, --approve-mcps, --dangerously-skip-permissions,
+--allow-dangerously-skip-permissions, --dangerously-bypass-approvals-and-sandbox
+and --dangerously-bypass-hook-trust, they share no substring an exact list would
+generalise from, and a miss is a silent approval bypass. Without the split this
+node would be a hole cut around the H1 host-path gate that already ships.
+
+Also collapsed here: the remote-caller predicate was written out longhand at
+EIGHT call sites across four modules. It is now `isRemotePrincipal` in
+request-context.ts, once. A security predicate that must be retyped to be
+applied will eventually be retyped wrong, and the failure is silent.
+"""
+verification = """
+Registration is not reachability, so both were proven separately.
+
+REGISTRATION: site/tools.fixture.json is generated from the LIVE MCP tool
+surface and now carries providerFlags on both grok tools.
+
+REACHABILITY: a test drives the REGISTERED CALLBACK, not the prepare function,
+using a flag that must be refused, so the refusal text can only appear if the
+value travelled the whole path. Mutation-probed: deleting `providerFlags` from
+the callback's forward turns it red. Every other test in the file stays green
+under that mutation, which is exactly the failure it exists to catch.
+"""
+
 [[node]]
 id = "n3.builder-consumes-discovery"
 critical = true
-depends_on = ["n2.discovery-produces-the-data"]
+depends_on = ["n2.discovery-produces-the-data", "n3a.passthrough-surface"]
 role = "Point the existing generic builder and Zod deriver at discovery output, and DELETE every hand-authored provider artefact."
 action = """
 Deleted, not migrated:

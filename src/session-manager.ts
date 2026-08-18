@@ -24,7 +24,12 @@ import { DEFAULT_SESSION_TTL_SECONDS } from "./config.js";
 import type { DatabaseConnection } from "./db.js";
 import type { Logger } from "./logger.js";
 import { noopLogger } from "./logger.js";
-import { getRequestContext, principalCanAccess, resolveOwnerPrincipal } from "./request-context.js";
+import {
+  getRequestContext,
+  isRemotePrincipal,
+  principalCanAccess,
+  resolveOwnerPrincipal,
+} from "./request-context.js";
 import {
   API_PROVIDER_TYPES,
   CLI_TYPES,
@@ -366,7 +371,7 @@ export function remoteSafeSession(session: Session): Session {
  */
 export function callerIsRemote(): boolean {
   const ctx = getRequestContext();
-  return ctx?.transport === "http" || ctx?.authKind === "oauth";
+  return isRemotePrincipal(ctx);
 }
 
 /**

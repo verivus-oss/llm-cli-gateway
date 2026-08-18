@@ -64,3 +64,20 @@ export function runWithRequestContext<T>(
 export function getRequestContext(): GatewayRequestContext | undefined {
   return requestContext.getStore();
 }
+
+/**
+ * Is the current request off-machine (HTTP/OAuth) rather than on-machine
+ * (stdio)?
+ *
+ * One spelling, because this predicate gates security controls and was written
+ * out longhand at eight separate call sites across four modules. A predicate
+ * that must be retyped to be applied is a predicate that will eventually be
+ * retyped wrong, and the failure is silent: the control simply stops firing for
+ * the caller it was written for.
+ *
+ * `authKind === "oauth"` is checked alongside the transport because an OAuth
+ * caller is remote regardless of how the context was stamped.
+ */
+export function isRemotePrincipal(ctx: GatewayRequestContext | undefined): boolean {
+  return ctx?.transport === "http" || ctx?.authKind === "oauth";
+}

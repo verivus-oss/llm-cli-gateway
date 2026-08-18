@@ -61,6 +61,7 @@ import {
 import type { ApprovalManager, ApprovalCli } from "./approval-manager.js";
 import {
   getRequestContext,
+  isRemotePrincipal,
   resolveOwnerPrincipal,
   type GatewayRequestContext,
 } from "./request-context.js";
@@ -796,7 +797,7 @@ export async function runMutatingAdminOperation(
 
 /** Whether the current request reached the gateway over the remote HTTP/OAuth surface. */
 export function isRemoteAdminCaller(ctx: GatewayRequestContext | undefined): boolean {
-  return ctx?.transport === "http" || ctx?.authKind === "oauth";
+  return isRemotePrincipal(ctx);
 }
 
 /**

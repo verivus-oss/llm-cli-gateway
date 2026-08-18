@@ -4,6 +4,42 @@ All notable changes to the llm-cli-gateway project.
 
 ## [Unreleased]
 
+### Added
+
+- **`providerFlags`: reach a flag the gateway has never heard of.** New
+  parameter on `grok_request` and `grok_request_async`, keyed exactly as the
+  binary spells the flag:
+  `{"--best-of-n": "3", "--verbatim": true, "--rules": ["a", "b"]}`.
+
+  Until now every provider flag had to be hand-declared as a named field before
+  anyone could send it, which made the tool schema an implicit allowlist. A
+  customer whose grok still has `--best-of-n` could not use it no matter what
+  the gateway discovered about their binary, because nobody had typed a
+  `bestOfN` field. The binary decides what it supports; the gateway stops being
+  the thing that refuses.
+
+  What the gateway still enforces is argv safety rather than capability: a value
+  may not start with `-` (argument injection), a key may not pack its own value,
+  and a flag the gateway is already emitting for the request is refused rather
+  than duplicated, because two `--output-format` tokens make the response
+  unparseable. A refused flag is an error naming the flag and the reason, never
+  a silent drop.
+
+  Access mode splits the posture. Local stdio callers are unrestricted: they can
+  already run the binary in a shell, so refusing them a flag protects nothing.
+  Remote HTTP/OAuth callers cannot pass approval, sandbox, host-path or
+  host-config flags, matched by class rather than by a list of spellings, since
+  a list goes stale on every upstream release and a miss is a silent approval
+  bypass. Without that split the parameter would be a hole cut around the H1
+  host-path gate that already ships.
+
+  A list value REPEATS the flag once per item. For an unknown flag the gateway
+  cannot know repetition from comma-joining, and a CLI wanting a joined value
+  can be reached by passing the joined string, whereas one wanting repetition
+  cannot be reached from a joined string at all.
+
+  grok only so far. The remaining six providers follow.
+
 ## [3.1.0-rc.8] - 2026-08-17: a silent reviewer is not agreement
 
 ### Fixed

@@ -298,10 +298,15 @@ import { checkUpgradeAvailability, upgradableProviders } from "./provider-upgrad
 import { startHttpGateway, type HttpGatewayHandle } from "./http-transport.js";
 import {
   getRequestContext,
+  isRemotePrincipal,
   resolveOwnerPrincipal,
   principalCanAccess,
   runWithRequestContext,
 } from "./request-context.js";
+import {
+  buildPassthroughArgv,
+  type PassthroughFlags,
+} from "./provider-passthrough.js";
 import { printDoctorJson } from "./doctor.js";
 import { redactDiagnosticUrl } from "./endpoint-exposure.js";
 import { PrepPhase, PrepPipeline, type PrepStage } from "./prep-pipeline.js";
@@ -986,6 +991,33 @@ const GROK_GENERATED_SHAPE = deriveZodShapeFromGeneration(
   UPSTREAM_CLI_CONTRACTS.grok,
   GROK_FLAG_GENERATION
 ) as unknown as Record<GrokGeneratedField, z.ZodTypeAny>;
+
+/**
+ * n3: the generic pass-through field, declared ONCE and shared by every request
+ * tool that offers it.
+ *
+ * This is the field that makes per-install discovery mean anything. Every other
+ * field in these schemas is an implicit allowlist entry, so before this existed
+ * a customer whose binary had a flag we had not typed could not use it, however
+ * well the gateway had discovered it.
+ *
+ * Declared once because the sync and async grok schemas have already diverged
+ * twice on hand-copied fields (outputFormat, then effort), each time producing a
+ * request that succeeded or failed depending only on which tool was called.
+ */
+const PROVIDER_FLAGS_SHAPE = z
+  .record(z.string(), z.union([z.string(), z.number(), z.boolean(), z.array(z.string())]))
+  .optional()
+  .describe(
+    "Flags passed to the provider binary verbatim, keyed exactly as the binary spells them " +
+      '(e.g. {"--best-of-n": "3", "--verbatim": true, "--rules": ["a", "b"]}). Use this for any ' +
+      "flag your installed CLI accepts that this schema does not name: the binary decides what " +
+      "it supports, not the gateway. true emits the flag alone; a list REPEATS the flag once per " +
+      "item (pass a joined string if your CLI wants a comma-separated value). Values may not " +
+      "start with '-', and a flag the gateway is already emitting for this request is refused " +
+      "rather than duplicated. Remote HTTP/OAuth callers additionally cannot pass approval, " +
+      "sandbox, host-path or host-config flags; local stdio callers are unrestricted."
+  );
 // Token budgets can legitimately exceed the agent-turn cap by orders of
 // magnitude. Keep a finite operational guardrail while avoiding the 10k turn
 // ceiling that would make large-context Vibe sessions unusable.
@@ -3360,7 +3392,7 @@ async function resolveWorkspaceAndWorktreeForRequest(args: {
   const session = await getCallerOwnedSession(args.runtime.sessionManager, args.sessionId);
   const requestContext = getRequestContext();
   const isRemoteTransport =
-    requestContext?.transport === "http" || requestContext?.authKind === "oauth";
+    isRemotePrincipal(requestContext);
   // An explicit local workingDir selects the provider's primary checkout. Do
   // not let an implicit default or a previous session's workspace replace or
   // constrain it. Auxiliary addDir/includeDirs flags do not select a cwd, so
@@ -3527,7 +3559,7 @@ function workspaceAdminEnabled(): boolean {
 
 function assertWorkspaceToolCaller(toolName: string): void {
   const context = getRequestContext();
-  if (context?.transport === "http" || context?.authKind === "oauth") return;
+  if (isRemotePrincipal(context)) return;
   throw new Error(
     `${toolName} is only for remote HTTP/OAuth workspace clients. Stdio/local provider calls must not use workspace_* tools for path access; pass workingDir/addDir/includeDirs directly on the provider request instead.`
   );
@@ -5092,7 +5124,7 @@ function remoteHostPathFieldError(
   fields: Record<string, unknown>
 ): ExtendedToolResponse | null {
   const ctx = getRequestContext();
-  const isRemote = ctx?.transport === "http" || ctx?.authKind === "oauth";
+  const isRemote = isRemotePrincipal(ctx);
   if (!isRemote) return null;
   const present = Object.entries(fields)
     .filter(([, v]) => (Array.isArray(v) ? v.length > 0 : v !== undefined && v !== null))
@@ -6861,6 +6893,13 @@ export function prepareGrokRequest(
     optimizePrompt: boolean;
     operation: string;
     /**
+     * n3: flags the gateway has never heard of, passed to the binary verbatim.
+     * The binary is the authority on whether it accepts them; see
+     * src/provider-passthrough.ts for what the gateway still enforces and why
+     * each of those is argv safety rather than a capability judgement.
+     */
+    providerFlags?: PassthroughFlags;
+    /**
      * Phase 4 slice δ: emit `--max-turns N` so callers can cap agent-loop
      * iterations for cost / latency control. Mirrors Claude's wiring.
      */
@@ -7174,6 +7213,32 @@ export function prepareGrokRequest(
       assertCliArgUtf8Size(schemaArg, { provider: "grok", inputName: "jsonSchema" });
       args.push("--json-schema", schemaArg);
     }
+    // n3: generic pass-through. Appended LAST so `alreadyEmitted` is the real
+    // assembled argv rather than a hand-authored list of reserved flags, and so
+    // a caller can never displace a gateway-emitted token by ordering.
+    //
+    // A refused flag is an ERROR, never a silent drop. Dropping it quietly is
+    // the same harm as removing a capability from the contract: the caller asked
+    // for something, did not get it, and was not told.
+    const passthrough = buildPassthroughArgv(params.providerFlags, {
+      remote: isRemotePrincipal(getRequestContext()),
+      provider: "grok",
+      alreadyEmitted: args,
+    });
+    if (passthrough.rejected.length > 0) {
+      return createErrorResponse(
+        params.operation,
+        1,
+        "",
+        corrId,
+        new Error(
+          `providerFlags refused: ${passthrough.rejected
+            .map(r => `${r.flag} (${r.reason})`)
+            .join("; ")}`
+        )
+      ) as ExtendedToolResponse;
+    }
+    args.push(...passthrough.args);
     assertCliArgvUtf8Size("grok", args, { provider: "grok" });
     return {
       corrId,
@@ -7915,7 +7980,7 @@ function materializeClaudeKitArtifact(
 
 function isRemoteGatewayRequest(): boolean {
   const requestContext = getRequestContext();
-  return requestContext?.transport === "http" || requestContext?.authKind === "oauth";
+  return isRemotePrincipal(requestContext);
 }
 
 function personalKitErrorResponse(
@@ -12195,6 +12260,12 @@ export async function handleGeminiRequestAsync(
 }
 
 export interface GrokRequestParams {
+  /**
+   * n3: flags the caller names itself, passed to the binary verbatim. This is
+   * what makes discovery reachable: without it, a flag the customer's binary
+   * has and our schema does not name is unusable no matter what discovery finds.
+   */
+  providerFlags?: PassthroughFlags;
   prompt?: string;
   promptParts?: PromptParts;
   model?: string;
@@ -12401,6 +12472,7 @@ export async function handleGrokRequest(
       correlationId: params.correlationId,
       optimizePrompt: params.optimizePrompt,
       operation: "grok_request",
+      providerFlags: params.providerFlags,
       maxTurns: params.maxTurns,
       workingDir: params.workingDir,
       sandbox: params.sandbox,
@@ -12720,6 +12792,7 @@ export async function handleGrokRequestAsync(
       correlationId: params.correlationId,
       optimizePrompt: params.optimizePrompt,
       operation: "grok_request_async",
+      providerFlags: params.providerFlags,
       maxTurns: params.maxTurns,
       workingDir: params.workingDir,
       sandbox: params.sandbox,
@@ -17028,7 +17101,7 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
       validationRunStore: asyncJobManager.getValidationRunStore(),
       resolveProviderCwd: provider => {
         const context = getRequestContext();
-        const remote = context?.transport === "http" || context?.authKind === "oauth";
+        const remote = isRemotePrincipal(context);
         if (!remote && !runtime.workspaces.defaultAlias) return undefined;
         return resolveWorkspaceForProvider(runtime.workspaces, provider).cwd;
       },
@@ -17045,7 +17118,7 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
         allowApiUpload,
       }) => {
         const context = getRequestContext();
-        const remote = context?.transport === "http" || context?.authKind === "oauth";
+        const remote = isRemotePrincipal(context);
         const apiReviewers = reviewers.filter(
           reviewer => !(CLI_TYPES as readonly string[]).includes(reviewer)
         );
@@ -18496,6 +18569,7 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
       // table — see GROK_GENERATED_SHAPE / src/provider-codegen.ts. They are
       // spread in here once instead of hand-listed; order is irrelevant to Zod.
       ...GROK_GENERATED_SHAPE,
+      providerFlags: PROVIDER_FLAGS_SHAPE,
       sessionId: z
         .string()
         .optional()
@@ -18669,10 +18743,12 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
       jsonSchema,
       workspace,
       worktree,
+      providerFlags,
     }) => {
       return handleGrokRequest(
         { sessionManager, logger, runtime },
         {
+          providerFlags,
           prompt,
           promptParts,
           model,
@@ -20596,6 +20672,7 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
         // and grok-schema-golden.test.ts now covers both tools for exactly
         // that, driven off the contract rather than a literal list.
         outputFormat: GROK_GENERATED_SHAPE.outputFormat,
+        providerFlags: PROVIDER_FLAGS_SHAPE,
         sessionId: z
           .string()
           .optional()
@@ -20891,10 +20968,12 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
         jsonSchema,
         workspace,
         worktree,
+        providerFlags,
       }) => {
         return handleGrokRequestAsync(
           { sessionManager, asyncJobManager, logger, runtime },
           {
+            providerFlags,
             prompt,
             promptParts,
             model,
