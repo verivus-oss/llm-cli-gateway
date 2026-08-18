@@ -1,3 +1,9 @@
+# ============================================================================
+# DEAD. Not intent, not history worth acting on. Retained only so a reader who
+# finds a reference to it can see why it is dead rather than resurrecting it.
+# release_version = 1.17.2, dated 2026-05-31. Superseded many releases ago.
+# Classified 2026-08-18 at HEAD 801950d. Index: docs/plans/README.md
+# ============================================================================
 # Fix plan: outstanding work review findings.
 #
 # Goal: turn the review blockers from 2026-05-31 into a small, ordered fix

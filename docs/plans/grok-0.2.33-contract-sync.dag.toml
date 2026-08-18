@@ -1,3 +1,9 @@
+# ============================================================================
+# DEAD. Not intent, not history worth acting on. Retained only so a reader who
+# finds a reference to it can see why it is dead rather than resurrecting it.
+# Targets grok 0.2.33. Live is 1.0.4, a major version and roughly 800 releases later. Premise entirely superseded; see docs/upstream/release-targets.md.
+# Classified 2026-08-18 at HEAD 801950d. Index: docs/plans/README.md
+# ============================================================================
 # Implementation plan: Grok Build 0.2.33 contract sync.
 #
 # Goal: update this checkout's xAI Grok CLI evidence and, only if the saved

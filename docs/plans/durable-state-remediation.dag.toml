@@ -1,0 +1,392 @@
+# Durable-state remediation: fix the class, not the twenty sites
+#
+# WHY THIS EXISTS
+# `durable-state-lifecycle.dag.toml` maps what is broken. This maps what to
+# build. They are deliberately separate: the first is a measurement that stays
+# true, the second is a plan that gets consumed.
+#
+# The audit produced roughly twenty symptoms and four causes. Patching symptoms
+# leaves the causes, and every cause in this file has already produced more than
+# one symptom, so it will produce more.
+#
+#   RC1  nothing forces a durable table to name its reaper
+#   RC2  terminal status has exactly one writer, and it is caller-driven
+#   RC3  checks anchored to a hand-maintained snapshot
+#   RC4  the telemetry handoff is optional per call site
+#
+# OPERATOR DECISIONS TAKEN 2026-08-18
+#   1. Both P0 blockers ship IN 3.1.0, not 3.1.1.
+#   2. Receipts: export-then-prune with a documented policy, and a config option
+#      to pin immutable-forever. Default is immutable until the exporter exists.
+#   3. ACP approval: explored in docs/plans/acp-permission-decision.md.
+#      Option A adopted. The scorer is not fixed; the false claim is removed.
+#
+# EVIDENCE
+# docs/evidence/durable-state-2026-08-18.md carries every number and every
+# reproduction referenced below. Do not re-derive them from a live DB without
+# checking which store you are reading; logs.db holds an abandoned SQLite copy.
+
+[meta]
+surface = "durable-state remediation program"
+branch = "unassigned"
+based_on_head = "801950d"
+maps_defects_in = "docs/plans/durable-state-lifecycle.dag.toml"
+phase_count = 5
+invariant_count = 6
+
+# ---------------------------------------------------------------------------
+# P0. Ships in 3.1.0. Both are live defects, both are small, both are verified.
+# ---------------------------------------------------------------------------
+
+[[node]]
+id = "p0.claude-rebaseline"
+phase = "P0"
+kind = "fix"
+blocks_release = true
+role = "`upstream:drift` exits 1: installed claude 2.1.233 against target 2.1.229. pre-release.sh runs it before npm run check, so 3.1.0 cannot be cut."
+action = """
+Run `npm run providers:rebaseline -- --apply` for claude and re-probe the watched
+surfaces rather than editing the string. Refresh the REAL_INSTALLED pins in
+src/__tests__/provider-version-guard.test.ts. Claude is a major-version-stable
+CLI so flag drift is unlikely, but the probe is the point: PR #279 rebaselined
+grok across a MAJOR version and the build hash turned out to be load-bearing.
+"""
+validation = "npm run upstream:drift exits 0; npm run check exits 0; scripts/pre-release.sh reaches the check stage."
+note = "Self-inflicted: claude was upgraded 2.1.229 to 2.1.233 during the audit session. npm run check cannot see this class of drift, only pre-release.sh probes binaries."
+
+[[node]]
+id = "p0.grok-effort-enum"
+phase = "P0"
+kind = "fix"
+blocks_release = true
+role = "The contract enum-locks the ALIAS and leaves the canonical flag unenforced, refusing effort values grok 1.0.4 parses. A live pass-through violation."
+action = """
+1. src/upstream-contracts.ts:2370-2371, remove `values: EFFORT_LEVELS` from
+   `--effort`. grok 1.0.4 has NO possible-values set on this flag.
+2. Make `--reasoning-effort` canonical and `--effort` its alias, matching
+   `grok --help` (`--reasoning-effort <EFFORT>` `[aliases: --effort]`).
+3. Relax the Zod enums that mirror it (src/index.ts:20570 and the sync twin) to
+   the contract-derived shape, as grok outputFormat already does via
+   GROK_GENERATED_SHAPE.
+4. Delete the fabricated evidence comment at src/provider-definitions.ts:942,
+   which cites a `[possible values: ...]` line that does not exist.
+5. Add `--effort` / `--reasoning-effort` to mutuallyExclusiveFlagGroups. Today
+   both are emitted independently and grok silently last-wins.
+"""
+validation = """
+Experiment, with the control, is the acceptance test:
+  grok --permission-mode bogus --single   -> rejected with [possible values: ...]
+  grok --reasoning-effort bogus --single  -> falls through to missing-value
+  grok --effort bogus --single            -> falls through to missing-value
+The control must reject, or the probe proves nothing about the test cases.
+"""
+
+[[node]]
+id = "p0.acp-claim"
+phase = "P0"
+kind = "documentation_fix"
+blocks_release = true
+role = "README.md:308 promises write/terminal callbacks need host-service config `plus a one-time ApprovalManager decision`. That decision approves 21 of 21 inputs at score 0."
+action = """
+Adopt Option A from docs/plans/acp-permission-decision.md. Rewrite the sentence
+to describe what actually gates: a deny-by-default category gate (unknown kinds
+denied, `fetch` denied, write/execute denied unless explicitly configured) and
+single-use-allow-only option selection. That is a STRONGER claim than the one it
+replaces. Fix the false comment at src/approval-manager.ts:62 in the same pass.
+"""
+note = "Code removal of the inert decide() call is P4, not P0. The release blocker is the false security claim, not the dead call."
+
+# ---------------------------------------------------------------------------
+# P1. Stop the leak at source. Small, independently shippable.
+# ---------------------------------------------------------------------------
+
+[[node]]
+id = "p1.kickoff-writes-computed-status"
+phase = "P1"
+kind = "fix"
+fixes = "leak.zero_seat"
+role = "startValidationRun computes the correct terminal status and discards it. Response and durable row disagree inside one function."
+action = """
+Thread the value already computed at src/validation-orchestrator.ts:340 into
+persistValidationRun at :349, and stop defaulting to `running` at :915 when a
+terminal value is supplied. A run with zero dispatched seats must be written
+terminal at kickoff.
+"""
+validation = """
+Drive an all-seats-refused ask-path call and assert the DURABLE ROW, not just
+the report. The existing test (validation-cursor-devin-admission.test.ts:257,
+:301, :328) asserts only the per-seat report status and is exactly why this
+survived. Add the row assertion to that file.
+"""
+
+[[node]]
+id = "p1.gateway-observes-terminal"
+phase = "P1"
+kind = "fix"
+fixes = "leak.unminted"
+role = "dispatchProviderJob passes no onTerminal, so finalization happens only when a caller reads through one of three tools. A run nobody reads is a row nobody finishes."
+action = "Pass an onTerminal hook from dispatchProviderJob so the manager's terminal path can drive the mint, instead of waiting for job_result / synthesize_validation / validation_receipt."
+validation = "A run whose seats complete reaches a terminal status with NO subsequent tool call. Assert with the manager driven directly, not through a collection tool."
+
+# ---------------------------------------------------------------------------
+# P2. The structural fix. This is the phase that stops it recurring.
+# ---------------------------------------------------------------------------
+
+[[node]]
+id = "p2.retention-registry"
+phase = "P2"
+kind = "structural"
+fixes = "RC1"
+critical = true
+role = "One registry keyed by durable table. A table with no entry fails the build. `immutable` is a valid answer; silence is not."
+action = """
+export const RETENTION_POLICY: Record<DurableTable, RetentionRule> = {
+  jobs:                { kind: "ttl", days: cfg.retentionDays },
+  validation_run_jobs: { kind: "cascade_from", table: "jobs" },
+  validation_runs:     { kind: "ttl_after_terminal", days: cfg.validationRetentionDays },
+  validation_receipts: { kind: "export_then_prune", days: cfg.receiptRetentionDays, exporter: required },
+  sessions:            { kind: "ttl_idle", days: cfg.sessionTtlDays },
+  requests:            { kind: "ttl", days: cfg.flightRecorderRetentionDays },
+  kit_attempt_fences:  { kind: "immutable", why: "recovery fence" },
+  gateway_instances:   { kind: "gc", ms: cfg.instanceGcMs },
+}
+"""
+validation = """
+The test MUST enumerate tables from the schema (information_schema on the pg
+path, sqlite_master on the sqlite path), NOT from a hand-maintained list. A
+hand-maintained list is the same defect class this phase exists to remove: it
+would only ever confirm the snapshot it was written against.
+"""
+
+[[node]]
+id = "p2.receipt-export-then-prune"
+phase = "P2"
+kind = "feature"
+role = "OPERATOR DECISION 2. Receipts are audit evidence, so they are exported before deletion, never deleted outright. An operator may pin immutable-forever."
+action = """
+[persistence.retention]
+receipts = "export_then_prune"   # or "immutable"
+receipt_export_dir = "..."       # REQUIRED when export_then_prune
+
+Prune deletes a receipt only after a verified export: write the canonical hashed
+receipt to the export sink, read it back, verify the hash, THEN delete. A failed
+or unverified export must leave the row in place. Default to `immutable` until
+the exporter ships, so the safe state is the one you get by doing nothing.
+"""
+validation = "Kill the process between export and delete; the row must survive. Corrupt the exported bytes; the delete must not happen."
+
+[[node]]
+id = "p2.reconciler"
+phase = "P2"
+kind = "structural"
+critical = true
+fixes = "leak.unminted"
+role = "Convergence loop. Finds non-terminal runs whose every linked job is terminal or missing and drives them to a terminal state. Catches any future path that forgets, and clears the existing 97."
+action = """
+Per-instance, LEASE-FENCED. Must distinguish mintable from unmintable:
+  every linked job present and complete  -> mint, then `finalized`
+  any linked job evicted or unreadable   -> `expired_unminted`, NEVER `finalized`
+Marking an unmintable run `finalized` would fabricate evidence, which is worse
+than the leak it fixes.
+"""
+constraint = """
+NEVER a blanket sweep. A fresh instance once orphaned every other live
+instance's running jobs by sweeping on startup; the fix was instance-scoped
+recovery. Any reconciler that reasons about rows it does not own repeats that
+bug in a new table. Scope by owner_instance or take a lease.
+"""
+validation = "Run two instances concurrently. Instance B's reconciler must not move instance A's live runs. A test that only asserts the stuck run got cleaned up passes against the blanket-sweep version too."
+
+[[node]]
+id = "p2.cascade-link-rows"
+phase = "P2"
+kind = "fix"
+fixes = "leak.dangling_links"
+role = "207 of 1094 validation_run_jobs rows point at deleted jobs. No FK, no cascade, no sweep."
+action = """
+Delete link rows in the SAME TRANSACTION as job eviction rather than adding
+ON DELETE CASCADE. A cascade changes delete semantics globally and can fire from
+paths that did not intend it; an explicit transactional delete is auditable and
+scoped to the eviction path.
+"""
+validation = "Evict a job that is linked to a run; assert the link row is gone and the run reached `expired_unminted` rather than staying `running`."
+
+[[node]]
+id = "p2.session-ttl-parity"
+phase = "P2"
+kind = "fix"
+fixes = "regression.session_ttl_lost"
+role = "3.1.0 hands sessions to a Postgres store with no TTL, where the file store evicted at 30 days."
+action = """
+Give PostgreSQLSessionManager the same TTL the file backend has, driven by the
+same `sessionTtl` config that createSessionManager already computes and
+currently discards on that branch. Either call the existing
+`cleanup_expired_sessions(max_age_days)` (defined in migrations 001 and 009 and
+never invoked from src/) or implement eviction in the manager; do not leave both.
+"""
+validation = "Backend parity test: the same TTL config produces the same eviction behaviour on both backends. This is the test that would have caught the regression at review."
+
+[[node]]
+id = "p2.one-time-cleanup"
+phase = "P2"
+kind = "migration"
+role = "Clear the accumulated 97 wedged runs and 207 dangling links."
+action = "A one-shot, idempotent, dry-run-first script. It must reuse the reconciler's mintable/unmintable classification rather than reimplementing it, or the historical rows get a different verdict than future ones."
+depends_on = ["p2.reconciler"]
+
+# ---------------------------------------------------------------------------
+# P3. Contract surface. One gate replaces seventeen hand-copies.
+# ---------------------------------------------------------------------------
+
+[[node]]
+id = "p3.contract-value-property-gate"
+phase = "P3"
+kind = "structural"
+critical = true
+fixes = "RC3"
+role = "For every contract flag carrying `values`, every tool exposing that flag must accept every value. One test, all 17 hand-copied enums, no exceptions list."
+action = """
+Generalise the shape that already exists for one flag on one provider
+(src/__tests__/grok-schema-golden.test.ts:85-103) into a provider-agnostic
+property test driven by the contract registry. Then delete the hand-copies by
+deriving them, as grok outputFormat already does via GROK_GENERATED_SHAPE.
+"""
+validation = "Mutation probe: add a fifth value to any contract flag and confirm the gate goes red BEFORE the schema is updated. A gate that only passes proves nothing."
+note = "All 17 match today, so this is latent. It is also the cheapest of the RC3 items and the one that covers the most sites."
+
+[[node]]
+id = "p3.scanner-repairs"
+phase = "P3"
+kind = "fix"
+role = "The drift detector is blind on 41% of the enum surface and on 15 of 25 codex flags."
+action = """
+1. scripts/upstream-scan.mjs:714-719, `declarationIndent ??= indent` locks to
+   the first `-` line's indent and discards every declaration at another indent.
+   Clap emits short-flag and long-only declarations at different indents, so one
+   group is always dropped. Restores 15 codex and 6 grok flags.
+2. Make `inferEnumValues` marker-agnostic: clap bulleted `Possible values:`
+   blocks, `(a, b)` prose, `a | b` pipes. Lifts coverage from 10/17 to 17/17 and
+   is what would have caught grok's fourth output format.
+3. computeFlagDrift uses `helpText.includes(flag)`, a substring match, so
+   dropping `--print` while keeping `--print-timeout` reads as no drift.
+4. hiddenFromHelp flags are invisible to every probe, because the probe reads
+   rendered `--help`. `strings` on the executable recovers the suppressed text
+   verbatim, including the value list. Demonstrated 2026-08-18 on grok
+   `--compaction-mode` / `--compaction-detail`, which look like invented enums
+   (clap accepts out-of-list values at parse) and are in fact upstream-documented
+   with exactly the lists the contract carries. Add a strings-based probe for the
+   hiddenFromHelp set, or those flags drift forever with nothing to notice.
+"""
+note = """
+Parse-acceptance does NOT distinguish an invented enum from a documented one.
+grok `--effort` and grok `--compaction-mode` behave identically at the command
+line (both accept anything) and are opposite cases: `--effort` is declared in
+help with no value set, so the contract's enum was invented; `--compaction-mode`
+is undeclared in rendered help but documented in the binary, so its enum is
+correct. Any future audit that concludes "accepted at parse, therefore the
+contract is wrong" will get one of these two backwards.
+"""
+
+[[node]]
+id = "p3.must-cover-generated"
+phase = "P3"
+kind = "structural"
+role = "must_cover_cli_flags is parsed live from a DAG whose lists were frozen at older CLI versions, and can only assert listed flags exist, never that new upstream flags got listed. This is why three Antigravity capabilities are refused with a green coverage gate."
+action = "Generate the list from the installed-binary probe instead of hand-maintaining it. Until then the gate is one-way and its greenness means nothing about completeness."
+note = "This and p3.contract-value-property-gate are the two nodes that delete the second path. The rest of P3 repairs individual detectors."
+
+# ---------------------------------------------------------------------------
+# P4. Make omission impossible, and make the state visible.
+# ---------------------------------------------------------------------------
+
+[[node]]
+id = "p4.telemetry-handoff-required"
+phase = "P4"
+kind = "structural"
+fixes = "RC4"
+role = "The CLI validation branch silently omits the flight-recorder handoff. Make the decision required by the type so it cannot be omitted, only declined with a reason."
+action = """
+type TelemetryHandoff =
+  | { record: true; entry: FlightRecorderEntry; extractUsage: ExtractFn; outputFormat: string }
+  | { record: false; reason: "review-evidence-not-retained" | ... };
+
+Required on startJobWithDedup, not optional. The API branch already does the
+right thing WITH a written rationale; this makes that practice mandatory rather
+than exemplary. Same pattern as the existing `backend: "none"` invariant, where
+not registering the tools makes silent in-memory loss impossible by construction.
+"""
+validation = "Deleting the handoff from any call site must fail the build, not the tests."
+
+[[node]]
+id = "p4.doctor-storage-health"
+phase = "P4"
+kind = "feature"
+fixes = "gap.no_storage_health"
+role = "Every finding in this audit came from querying production by hand. doctor reports no storage health at all."
+action = "Add DB file sizes, per-table row counts, growth rate, non-terminal-run count, and pending-pin count to doctor --json and setup/status.schema.json. Have the soak check consume it rather than re-deriving with ad-hoc SQL."
+validation = "The 97 wedged runs would have been visible in doctor output on the day they crossed a threshold."
+
+[[node]]
+id = "p4.postgres-in-release-gate"
+phase = "P4"
+kind = "gap"
+role = "No Postgres behaviour is release-gated. npm run check runs `npm test` only; the pg suites need test:pg. The error_category round-trip test exists and never runs before a release."
+action = "Add the pg suites to the release gate (pre-release.sh at minimum, since npm run check should stay fast and dependency-free for contributors without a database)."
+
+[[node]]
+id = "p4.acp-inert-call-removal"
+phase = "P4"
+kind = "cleanup"
+role = "Remove or explicitly demote the ApprovalManager call in the ACP bridge. Do not leave code that looks like a gate and is not."
+action = "Per docs/plans/acp-permission-decision.md option A. If the audit append is kept, discard the return value and say so in a comment. Replace the stub-only deny tests (acp-permission-bridge.test.ts:34-40) with tests that drive the real path in BOTH states."
+
+# ---------------------------------------------------------------------------
+# INVARIANTS. Six questions a reviewer must be able to answer.
+# ---------------------------------------------------------------------------
+
+[[invariant]]
+id = "every-durable-table-names-its-reaper"
+question = "What deletes this row, and on what timer?"
+enforced_by = "p2.retention-registry"
+why = "Five of six durable stores currently have no answer."
+
+[[invariant]]
+id = "no-status-without-a-writer-to-terminal"
+question = "For every non-terminal status, which path writes a terminal one, and can it always run?"
+enforced_by = "p1.gateway-observes-terminal, p2.reconciler"
+why = "'running' had one exit and it was caller-driven."
+
+[[invariant]]
+id = "never-blanket-sweep"
+question = "Does this sweep touch rows owned by another instance?"
+enforced_by = "p2.reconciler"
+why = "A blanket startup sweep once orphaned every other live instance's jobs. Any new reconciler can repeat it in a new table."
+
+[[invariant]]
+id = "never-fabricate-terminal-evidence"
+question = "Can this path mark something finalized that was never verified?"
+enforced_by = "p2.reconciler, p2.receipt-export-then-prune"
+why = "An unmintable run must reach `expired_unminted`, not `finalized`. A receipt must be exported and verified before it is pruned."
+
+[[invariant]]
+id = "checks-must-not-be-anchored-to-their-own-snapshot"
+question = "Can this check only ever confirm the state it was written against?"
+enforced_by = "p3.contract-value-property-gate, p3.must-cover-generated, p2.retention-registry"
+why = "Four separate defects were this one failure. Enumerate from the schema or the binary, never from a hand-maintained list."
+
+[[invariant]]
+id = "a-bound-that-existed-still-exists"
+question = "Does this backend change remove a limit the previous backend enforced?"
+enforced_by = "p2.session-ttl-parity"
+why = "The 3.1.0 session cutover dropped a 30-day TTL and passed review, because everyone compared features and TTL eviction is not a feature anyone lists."
+
+# ---------------------------------------------------------------------------
+# SEQUENCING
+# ---------------------------------------------------------------------------
+
+[sequencing]
+ship_in_3_1_0 = "P0 only. Three items: claude rebaseline, grok effort enum, ACP README claim."
+independent = "P1 depends on nothing and stops new leaks. Ship it whenever, before or after 3.1.0."
+big_one = "P2. Needs migrations, a config surface, a reconciler and a one-time cleanup. Do not start it between rc.8 and the tag."
+order_within_p2 = "retention-registry -> cascade-link-rows -> reconciler -> one-time-cleanup. session-ttl-parity and receipt-export-then-prune are independent of that chain."
+p3_p4 = "Independent of P2 and of each other. p3.contract-value-property-gate is the highest value-per-effort item in the whole program."

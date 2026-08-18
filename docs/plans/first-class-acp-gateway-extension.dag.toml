@@ -1,5 +1,45 @@
 # Implementation specification: first-class ACP gateway extension.
 #
+# ============================================================================
+# AUDIT CORRECTIONS, 2026-08-18, at HEAD 801950d. READ BEFORE TRUSTING A CLAIM.
+#
+# This plan's `status` reads "native_smoke_passed", which overstates what is
+# live. Verified against the code and against production data:
+#
+#   * `[observability].flight_recorder_events` names 14 events. EIGHT DO NOT
+#     EXIST anywhere in src/: acp.initialize.failure, acp.session.new.*,
+#     acp.session.prompt.*, acp.permission.requested. Grep returns 0 for each.
+#   * `[observability].metrics` names six metrics. NONE of them exist.
+#   * `[architecture].fallback_flow` (below) describes falling back to the CLI
+#     transport when ACP is "unavailable, unsupported, or unhealthy". There is
+#     no health check anywhere in the ACP path, and the config knob
+#     `fallback_to_cli_when_unhealthy` is parsed and read by nothing.
+#   * `[failure_policy].unsupported_provider` relies on ProviderAcpUnsupportedError.
+#     It is declared in src/acp/errors.ts:275 and NEVER THROWN.
+#   * `[failure_policy].unhealthy_smoke` is vacuous: runAcpSmoke has zero
+#     production callers, and `smoke_on_startup` is parsed and never read. The
+#     gateway has NO automated mechanism that verifies any provider's ACP
+#     handshake. The `provider-acp://` "negotiated initialize capability" probe
+#     actually runs `acp --help` and feeds help text to a JSON parser, so every
+#     record on the reference host is `static-fallback` with a null checksum.
+#   * The async half of every pilot step is unimplemented: no *_request_async
+#     accepts transport:"acp", and AcpEventNormalizer's progress events are
+#     discarded by runAcpRequest rather than streamed anywhere.
+#   * `[test_matrix.integration]` "async jobs record ACP terminal failures" is
+#     unimplementable today: ACP creates no job rows at all. The `transport`
+#     column is "process" | "http" and has no ACP value.
+#   * `provider_matrix.*.target_version` entries are stale; the live targets are
+#     in docs/upstream/release-targets.md (3.1.0 baseline).
+#
+# Production evidence: FIVE ACP requests exist in the flight recorder, ever.
+# All mistral, all 2026-07-12, four failing with JSON-RPC -32603 and one
+# returning 14 characters. Grok, devin and cursor have never completed a live
+# ACP round trip despite being runtime_enabled since.
+#
+# The permission-bridge design question is settled separately in
+# docs/plans/acp-permission-decision.md.
+# ============================================================================
+#
 # Scope:
 #   Add Agent Client Protocol (ACP) as a first-class, optional provider
 #   transport behind llm-cli-gateway's existing MCP server. MCP remains the
@@ -80,7 +120,7 @@ expose_raw_acp_json_rpc = "Agents continue using gateway MCP tools and resources
 inbound_protocol = "MCP over stdio"
 internal_acp_transport = "JSON-RPC over provider stdio"
 primary_flow = "MCP client -> llm-cli-gateway MCP tool -> provider request router -> ACP client/host layer -> provider ACP agent"
-fallback_flow = "If ACP is disabled, unavailable, unsupported, or unhealthy, request tools use the existing CLI transport unless the caller explicitly required ACP."
+fallback_flow = "ASPIRATIONAL, NOT IMPLEMENTED (see audit corrections above). Today: if ACP is disabled or a gate fails, the request is refused before any process work; there is no health probe and no automatic fallback. `fallback_to_cli_when_unhealthy` is dead config."
 stdout_rule = "Gateway stdout remains reserved for MCP JSON-RPC. Provider ACP stdout is consumed only by the ACP transport and never forwarded to gateway stdout as logs."
 runtime_gate = "ACP runtime routing is disabled unless gateway config enables ACP and enables the provider."
 

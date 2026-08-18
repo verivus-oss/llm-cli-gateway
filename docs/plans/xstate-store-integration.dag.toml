@@ -1,3 +1,9 @@
+# ============================================================================
+# DEAD. Not intent, not history worth acting on. Retained only so a reader who
+# finds a reference to it can see why it is dead rather than resurrecting it.
+# Zero xstate packages in dependencies or devDependencies, and both modules it names (src/xstate-store-engine.ts, src/store-persistence.ts) do not exist. Never started.
+# Classified 2026-08-18 at HEAD 801950d. Index: docs/plans/README.md
+# ============================================================================
 # Implementation plan: integrate @xstate/store v4 as a durable, observable
 # agent-state engine inside/alongside llm-cli-gateway.
 #

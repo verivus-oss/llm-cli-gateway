@@ -1,0 +1,305 @@
+# Durable-state lifecycle: what is written, what is bounded, what leaks
+#
+# WHY THIS EXISTS
+# The gateway has four durable stores and exactly one of them is bounded. That
+# was not a decision anybody made; it is what you get when retention is added to
+# the subsystem that noticed it needed retention, and every later table is
+# introduced by a different slice. Each of those slices was reviewed and
+# approved. None of them was asked "what deletes this row".
+#
+# It surfaced from production, not from reading the code. On 2026-08-18 the
+# shared Postgres store on the dev host held:
+#
+#   jobs                  3141 rows   BOUNDED  (retentionDays -> expires_at)
+#   validation_runs        353 rows   unbounded, 97 wedged in status='running'
+#   validation_run_jobs   1094 rows   unbounded, 207 pointing at deleted jobs
+#   validation_receipts    n/a        unbounded by design, undocumented
+#   sessions              1728 rows   unbounded, 82% never reused after creation
+#   logs.db (requests)    1.23 GB     unbounded, no retention, no VACUUM
+#
+# The 97 wedged runs are the load-bearing observation. They are not slow, not
+# in flight, and not recoverable. 0 of 257 finalized runs have zero seats, so a
+# zero-seat run has never once reached a terminal state.
+#
+# HOW TO USE IT
+# Before adding a durable table, or changing who writes a status, find the node
+# and follow `affects`. The `invariants` are the questions a reviewer must be
+# able to answer; a table that cannot answer `reaped_by` does not ship.
+#
+# EVIDENCE
+# Snapshot: docs/evidence/durable-state-2026-08-18.md
+# Reproduction of the zero-seat leak is two MCP calls and is recorded there.
+
+[meta]
+surface = "durable state lifecycle: retention, finalization, telemetry capture"
+branch = "unassigned"
+last_reviewed_head = "801950d"
+generated_from = "live Postgres + logs.db measurement on workhorse3, cross-checked against source"
+measured_at = "2026-08-18"
+node_count = 16
+invariant_count = 5
+
+# ---------------------------------------------------------------------------
+# THE STORES. One is bounded. The boundedness is the property to check.
+# ---------------------------------------------------------------------------
+
+[[node]]
+id = "store.jobs"
+kind = "durable_table"
+file = "src/job-store.ts"
+line = 1322
+role = "The ONLY bounded store. `retentionDays` sets `expires_at`; `evictExpired` deletes on a 5-minute timer. Every other table in this map was modelled on this one and inherited none of it."
+reaped_by = "evictExpired (src/job-store.ts:1322, src/postgres-job-store-worker.ts:1093)"
+affects = ["store.validation_run_jobs", "store.validation_runs", "leak.dangling_links"]
+
+[[node]]
+id = "store.validation_runs"
+kind = "durable_table"
+file = "src/job-store.ts"
+line = 1106
+role = "Unbounded. No reaper, no retention, no cascade. 97 of 353 live rows are wedged at 'running' with nothing able to move them."
+reaped_by = "NOTHING"
+affects = ["leak.zero_seat", "leak.unminted", "leak.dangling_links"]
+critical = true
+
+[[node]]
+id = "store.validation_run_jobs"
+kind = "durable_table"
+file = "src/job-store.ts"
+line = 1124
+role = "Unbounded and uncascaded. Declared with no REFERENCES clause in all three declaration sites, so job retention orphans link rows silently. 207 of 1094 live rows point at deleted jobs."
+reaped_by = "NOTHING (only role='provider' replacement within one run)"
+affects = ["leak.unminted"]
+note = "Job ids are randomUUID, so a stale primary key cannot be re-bound. The dead rows are weight, not a correctness hazard. The uncoordinated jobs DELETE is the fault."
+
+[[node]]
+id = "store.validation_receipts"
+kind = "durable_table"
+file = "src/job-store.ts"
+line = 1130
+role = "Unbounded, and deliberately immutable. That is defensible; the absence of any user-facing statement that it grows forever is not."
+reaped_by = "NOTHING (by design)"
+affects = []
+
+[[node]]
+id = "store.sessions_pg"
+kind = "durable_table"
+file = "src/session-manager-pg.ts"
+line = 1
+role = "Unbounded. The file backend has a 30-day TTL; the Postgres backend has none, and 3.1.0 moved sessions onto the [persistence] selector."
+reaped_by = "NOTHING"
+affects = ["regression.session_ttl_lost"]
+critical = true
+
+[[node]]
+id = "store.flight_recorder"
+kind = "durable_table"
+file = "src/flight-recorder.ts"
+line = 1
+role = "Unbounded. 886 lines with no DELETE, no TTL, no rotation, no VACUUM. Stores full prompt and response bodies. Measured at 1.23 GB."
+reaped_by = "NOTHING"
+affects = ["gap.retention_scope_misread"]
+
+# ---------------------------------------------------------------------------
+# THE LEAKS. Two distinct causes, established by decomposition, not by guess.
+# ---------------------------------------------------------------------------
+
+[[node]]
+id = "leak.zero_seat"
+kind = "defect"
+file = "src/validation-orchestrator.ts"
+line = 340
+role = "CAUSE 1, 14 live rows. `deriveValidationRunStatus` computes the correct terminal status, `persistValidationRun` is then called WITHOUT it, and the writer hardcodes `args.initialStatus ?? \"running\"`. The tool response and the durable row disagree inside one function."
+affects = ["store.validation_runs"]
+critical = true
+flow = [
+  { file = "src/validation-orchestrator.ts", line = 340, token = "deriveValidationRunStatus", role = "correct status computed" },
+  { file = "src/validation-report.ts", line = 127, token = "not_started", role = "returns not_started when nothing dispatched" },
+  { file = "src/validation-orchestrator.ts", line = 349, token = "persistValidationRun", role = "called WITHOUT the computed status" },
+  { file = "src/validation-orchestrator.ts", line = 915, token = "initialStatus ?? \"running\"", role = "hardcodes running; only startReviewRun supplies initialStatus" },
+]
+note = """
+Not caller negligence. Every seat was terminally refused at admission, so no job
+exists to poll and no seat can finish. `admission_failed` is already a modelled
+terminal status, reached only from a THROW inside review admission; issues #270
+and #271 deliberately converted refusals into `skipped` results, so no exception
+ever reaches that catch. Affects every ask-path tool except compare_answers,
+which is local-only.
+"""
+
+[[node]]
+id = "leak.unminted"
+kind = "defect"
+file = "src/validation-receipt.ts"
+line = 361
+role = "CAUSE 2, 83 live rows. Seats ran and all reached terminal states, but finalization is caller-driven only. `tryMint` returns `unmintable` without writing any status, so the row stays 'running' forever."
+affects = ["store.validation_runs"]
+critical = true
+note = """
+"finalized" is written in exactly ONE place, src/validation-receipt.ts:456,
+inside tryMint. tryMint has three drivers and all three are caller-initiated
+MCP tool calls: the job_result eager hook, synthesize_validation, and
+validation_receipt mint-on-read. dispatchProviderJob passes no onTerminal and
+no onComplete, so the GATEWAY OBSERVES NOTHING. Note llm_job_result and
+llm_request_result do NOT mint, so collecting output through the llm_* namespace
+leaks the row by construction.
+"""
+
+[[node]]
+id = "leak.dangling_links"
+kind = "defect"
+file = "src/job-store.ts"
+line = 1866
+role = "Job retention sets expires_at and evicts, with no cascade to validation_run_jobs. One-way: the run can never be minted afterwards, and no status is written, so it is permanently and irrecoverably 'running'."
+affects = ["store.validation_run_jobs", "leak.unminted"]
+
+[[node]]
+id = "regression.session_ttl_lost"
+kind = "regression"
+file = "src/session-manager.ts"
+line = 1837
+role = "NEW IN 3.1.0. createSessionManager computes sessionTtlMs and passes it only on the file branch; the Postgres branch is `new PostgreSQLSessionManager(db.getPool())`. Upgrading a Postgres host silently removes an eviction bound that existed before."
+affects = ["store.sessions_pg"]
+critical = true
+note = """
+A reaper exists and is never called. `cleanup_expired_sessions(max_age_days)` is
+defined in migrations/001 and migrations/009. Its only other appearances in the
+whole repo are one code comment and one DAG line. No production code, script,
+cron, or doctor path invokes it. src/session-manager-pg.ts:44 justifies a
+timestamp fix by saying the function "sees a June session as minutes old and
+never reaps it", which presupposes it runs. It does not. The timestamp fix was
+still correct for ordering and most-recent resolution.
+"""
+
+# ---------------------------------------------------------------------------
+# TELEMETRY CAPTURE. Separate from retention, same root question: who writes.
+# ---------------------------------------------------------------------------
+
+[[node]]
+id = "gap.validation_seats_unrecorded"
+kind = "defect"
+file = "src/validation-orchestrator.ts"
+line = 207
+role = "The CLI seat branch calls startJobWithDedup with no flightRecorderEntry, no writeFlightStart, no extractUsage and no outputFormat. Zero flight-recorder rows exist for validation seats, all time, across 11502 rows."
+affects = ["gap.no_readback", "gap.lcr_blind"]
+note = """
+The API branch DOES write (src/validation-orchestrator.ts:176), gated on
+review !== true with a stated rationale. Only the CLI omission is unexplained:
+no comment, no test, no DAG node. It reads as never-implemented rather than
+decided. Prompts are NOT lost; they persist in async_jobs.args and, for reviews,
+in payload_json with argv redacted. Latency and success rate are captured via
+metrics.recordRequest. Only tokens and cost are missing.
+"""
+
+[[node]]
+id = "gap.no_readback"
+kind = "consequence"
+file = "src/index.ts"
+line = 21907
+role = "llm_request_result reads the flight recorder only, so a validation correlationId can never resolve. Its not-found hint offers three explanations and all three are wrong for this case."
+affects = []
+
+[[node]]
+id = "gap.lcr_blind"
+kind = "consequence"
+file = "src/validation-tools.ts"
+line = 406
+role = "The validation tools build their LCR selectionContext from the flight recorder, so `select: cheapest` can never learn from its own traffic. A self-referential blind spot."
+affects = []
+
+[[node]]
+id = "gap.retention_scope_misread"
+kind = "documentation_defect"
+file = "README.md"
+line = 959
+role = "retentionDays is presented next to logs.db in a way that reads as bounding the file. It prunes exactly one table. README:569 gets it right (`non-expiring flight recorder`) but the phrase sits in a privacy paragraph and is never connected to disk growth."
+affects = []
+
+[[node]]
+id = "gap.no_storage_health"
+kind = "gap"
+file = "src/doctor.ts"
+line = 488
+role = "doctor reports backend and asyncJobsEnabled only. No file size, no row counts, no retention state, no wedged-run count. An operator gets no warning before 1.23 GB."
+affects = []
+
+[[node]]
+id = "gap.no_vacuum"
+kind = "gap"
+file = "src/sqlite-driver.ts"
+line = 196
+role = "No VACUUM anywhere in production code; the only occurrence is the read-only rejection guard. Even the bounded jobs deletions never return pages, so the file is monotonic."
+affects = []
+
+# ---------------------------------------------------------------------------
+# INVARIANTS. These are review questions, not currently machine-checked.
+# A table that cannot answer all five does not ship.
+# ---------------------------------------------------------------------------
+
+[[invariant]]
+id = "every-durable-table-names-its-reaper"
+question = "What deletes this row, and on what timer?"
+holds_for = ["store.jobs"]
+fails_for = ["store.validation_runs", "store.validation_run_jobs", "store.validation_receipts", "store.sessions_pg", "store.flight_recorder"]
+why = "Five of six durable stores have no answer. This is the whole finding in one line."
+
+[[invariant]]
+id = "no-status-without-a-writer-to-terminal"
+question = "For every non-terminal status, which code path writes a terminal one, and can it always run?"
+holds_for = []
+fails_for = ["leak.zero_seat", "leak.unminted"]
+why = "'running' has exactly one exit, tryMint, driven only by caller tool calls. A run nobody reads is a row nobody finishes."
+
+[[invariant]]
+id = "response-and-durable-row-agree"
+question = "Does the status returned to the caller match the status written to the store?"
+holds_for = []
+fails_for = ["leak.zero_seat"]
+why = "startValidationRun computes not_started, returns it, and writes running, in one function."
+
+[[invariant]]
+id = "deleting-a-row-cascades-to-its-references"
+question = "What else points at this row, and what happens to those pointers?"
+holds_for = []
+fails_for = ["leak.dangling_links"]
+why = "validation_run_jobs has no REFERENCES clause in any of its three declaration sites."
+
+[[invariant]]
+id = "a-bound-that-existed-still-exists"
+question = "Does this backend change remove a limit the previous backend enforced?"
+holds_for = []
+fails_for = ["regression.session_ttl_lost"]
+why = "The 3.1.0 session cutover dropped a 30-day TTL and no release note says so. This is the invariant that would have caught it at review."
+
+# ---------------------------------------------------------------------------
+# CHANGE PROTOCOL.
+# ---------------------------------------------------------------------------
+
+[protocol]
+before_adding_a_durable_table = """
+Answer `every-durable-table-names-its-reaper` in the PR description. "Immutable
+by design" is a valid answer; "not yet" is not, because the four unbounded
+tables in this map were each introduced with "not yet" and none was revisited.
+If it is genuinely unbounded, say so in README under Persistence, which today
+says nothing about any of them.
+"""
+
+before_adding_a_status_value = """
+Name the code path that writes the terminal value and say whether it can always
+run. If the only writer is a caller-initiated tool call, the status leaks the
+moment a caller walks away. That is Cause 2, 83 rows.
+"""
+
+before_changing_a_storage_backend = """
+List the limits the OLD backend enforced and confirm each is preserved. The
+3.1.0 session cutover passed review because everyone compared features, and TTL
+eviction is not a feature anyone lists. Grep the old implementation for
+timers, TTLs and eviction before claiming parity.
+"""
+
+before_wiring_a_new_provider_launch = """
+dispatchProviderJob's CLI branch passes no flight-recorder handoff. If you copy
+it for a new launch path you inherit the telemetry hole. Pass
+flightRecorderEntry, writeFlightStart, extractUsage and outputFormat, or state
+in the PR why this path deliberately has no cost accounting.
+"""

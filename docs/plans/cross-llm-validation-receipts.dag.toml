@@ -64,7 +64,14 @@ predecessor_plan = "docs/plans/cross-llm-validation-receipts.draft.md"
 [decision]
 receipt_is_minted_only_at_terminal_run = true
 receipt_is_immutable_no_update_path = true
-mint_is_eager_at_first_terminal_observation = true
+# FALSIFIED 2026-08-18. The gateway OBSERVES NOTHING: dispatchProviderJob passes
+# no onTerminal/onComplete, so nothing in the async manager knows a validation
+# run exists. "Eager" means only that three CALLER-INITIATED tools mint on the
+# way past (job_result, synthesize_validation, validation_receipt). A run whose
+# caller never reads it is never minted and never leaves `running`. Live
+# evidence: 97 of 353 runs wedged, oldest 2026-07-01.
+mint_is_eager_at_first_terminal_observation = false
+mint_is_driven_by = "caller traversal of job_result / synthesize_validation / validation_receipt"
 mint_on_read_is_fallback_only = true
 run_identity_key = "validationId"
 report_envelope = "validation-report.v1 structuredContent (machine-readable only; humanReadable re-derived on read, never stored, never hashed)"
@@ -184,7 +191,7 @@ Columns (written once at kickoff; `status` mutable to terminal):
   request_json    TEXT NOT NULL   -- owner-scoped question/content/focus/riskLevel/modelList/judge plan
   provider_links  TEXT NOT NULL   -- JSON [{provider, jobId, correlationId}]
   judge_link      TEXT            -- JSON {provider, jobId, correlationId} or NULL
-  status          TEXT NOT NULL   -- running | finalized
+  status          TEXT NOT NULL   -- admitting | running | judge_skipped | admission_failed | finalized
 
 `startValidationRun` writes the row before returning, stamping
 `owner_principal` from the request context. Expose a typed read/update API on the
@@ -273,11 +280,17 @@ Mint logic (eager, race-guarded):
   - A run is terminal when every provider job is terminal
     (completed|failed|canceled|orphaned|skipped) and, if a judge was requested,
     the judge job is terminal.
-  - The gateway mints eagerly the FIRST time it observes the run reach terminal,
-    which it already passes through during result collection (`job_result`) and
-    `synthesize_validation`, while the linked job outputs are guaranteed to still
-    exist (they are evicted after the retention window, so mint-on-read alone
-    would silently fail once jobs are gone).
+  - CORRECTED 2026-08-18. The mint fires the first time a CALLER passes through
+    `job_result` or `synthesize_validation` (or reads `validation_receipt`).
+    There is no gateway-side observation: no onTerminal hook is wired, so a run
+    nobody collects is never minted.
+  - The "guaranteed to still exist" clause is also false. `jobs` retention
+    evicts on its own timer with no coordination with `validation_run_jobs`, so
+    a run collected late finds its linked jobs gone, `tryMint` returns
+    `unmintable` WITHOUT writing a status, and the row stays `running` forever.
+    Live evidence: 207 of 1094 link rows already dangle. Tracked in
+    docs/plans/durable-state-lifecycle.dag.toml and remediated in
+    docs/plans/durable-state-remediation.dag.toml (p2.reconciler).
   - Minting builds the report from the collected terminal results (reusing
     `buildValidationReport`), captures its `structuredContent` as `report_json`,
     computes `canonical_sha256` (next step's serializer), and writes ONE row.

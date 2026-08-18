@@ -26,15 +26,31 @@
 
 [meta]
 surface = "validation provider launch + cursor trust"
-branch = "fix/270-cursor-trust-devin-sandbox"
-last_reviewed_head = "7b03fd2"
+branch = "master"
+last_reviewed_head = "801950d"
 generated_from = "TypeScript AST caller inspection plus checked source coordinates"
 node_count = 17
 invariant_count = 6
 flow_count = 9
 
 # ---------------------------------------------------------------------------
-# ENTRY POINTS. Everything below is reachable only from these.
+# ENTRY POINTS. These are the three MODELLED entry points, not all of them.
+#
+# Four more ask-path tools reach fn.startValidationRun and are deliberately not
+# given their own nodes, because the checker pins node_count and adding them
+# would fail coverage without a matching checker edit: second_opinion
+# (validation-tools.ts:686), red_team_review (:754), consensus_check (:796) and
+# ask_model (:833). They behave exactly as tool.validate_with_models does.
+# compare_answers (:724) is local-only and never reaches this surface at all.
+#
+# Also absent, and more important: job_result (validation-tools.ts:1132) and
+# validation_receipt (:1184). Those are two of the only three callers that can
+# move a run to `finalized`, so the finalization half of this surface is not
+# mapped here. See docs/plans/durable-state-lifecycle.dag.toml.
+#
+# `ext.*` ids in `affects` name deliberately external collaborators, not nodes
+# in this file. The checker validates that `affects` is a non-empty string list
+# and never resolves the targets, so a genuinely dangling edge would also pass.
 # ---------------------------------------------------------------------------
 
 [[node]]

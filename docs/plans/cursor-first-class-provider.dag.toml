@@ -1,3 +1,10 @@
+# ============================================================================
+# SHIPPED. Per-node `status` in this file was never maintained: 13 node(s)
+# below still read `planned` for code that is live. Do not read a `planned`
+# node here as evidence that something is unimplemented; check the code.
+# Cursor shipped as a first-class provider (27 references in src/provider-definitions.ts, cursor_request/_async registered). The ONE genuinely open item is src/cursor-parser.ts: nobody has captured what `cursor-agent --output-format stream-json` actually emits, which is why cursor reports no token usage. Note this file also names four other modules that do not exist.
+# Classified 2026-08-18 at HEAD 801950d. Index: docs/plans/README.md
+# ============================================================================
 # Implementation plan: full-featured first-class Cursor provider integration.
 #
 # Purpose:
