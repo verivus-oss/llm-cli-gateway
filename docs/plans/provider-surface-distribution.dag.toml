@@ -25,11 +25,20 @@ schema_swap_is_live_why = "SDK 1.29 RegisteredTool.update({paramsSchema}) emits 
 
 [[node]]
 id = "d1.seed-is-generated-not-written"
+status = "sources 1-2 landed 2026-08-19 as seed/provider-seed.json; source 3 open, see d1a"
 critical = true
 depends_on = []
 role = "GROK_FLAG_GENERATION and UPSTREAM_CLI_CONTRACTS become a build-time artefact produced by discovery on a reference host, not a literal a human maintains."
-action = "Nothing else here works until the data is an artefact. This is the node that ends the rebaseliner-driven removal loop, because no hand-maintained registry is left to prune."
-constraint = "The artefact must name its generator, its host and its probe time in-band, or the next reader will treat it as hand-authored and edit it."
+outcome = "mergeSeed unions, assertSeedIsAdditive throws on a subtractive regeneration, validateSeed closes the provenance keys against a hostname leak. Completions run only when root help advertises the subcommand. Measured on 7 binaries: 362 flags seen against 167 declared."
+constraint = "The artefact names its generator, platform and probe time and NOT its host. Provenance ships in the tarball."
+
+[[node]]
+id = "d1a.probe-needs-a-derived-anchor"
+critical = true
+depends_on = ["d1.seed-is-generated-not-written"]
+role = "Source 3 gives arity and real value sets, and is the only source that can retire an invented enum. It is unwired because the probe argv needs a value-taking anchor flag per provider."
+action = "Derive the anchor from help text, a flag printed with its own value placeholder. Taking it from contract.flags would be hand-authored provider data by the back door."
+constraint = "Until it lands every provider records probe as unread, so absent arity reads as NOT ASKED. Never let it read as arity none."
 
 [[node]]
 id = "d2.gates-pin-the-seed"
