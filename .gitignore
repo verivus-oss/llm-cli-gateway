@@ -56,3 +56,9 @@ pnpm-workspace.yaml
 
 # Reviewer/agent scratch: vibe writes .vibe/tmp when run with workingDir here
 .vibe/
+
+# Host-local records, never committed. This repo mirrors to a public GitHub
+# repo, and internal process is not product. Plans stay public and carry the
+# conclusions; the measurements and operator decisions behind them stay here.
+docs/audits/
+docs/evidence/

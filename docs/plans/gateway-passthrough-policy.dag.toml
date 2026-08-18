@@ -1,11 +1,11 @@
 # Gateway pass-through policy: the installed binary is the authority.
 # Governing rule for the provider surface; where another plan disagrees, this wins.
-# Evidence: docs/evidence/gateway-passthrough-2026-08-19.md
+# Evidence: docs/evidence/gateway-passthrough-2026-08-19.md (internal, not mirrored)
 
 [meta]
 surface = "provider capability exposure, discovery and enforcement"
-status = "agreed 2026-08-18. n1 and n3a shipped; n2 partial; n3-n9 BLOCK THE NEXT RELEASE"
-release_gate = "No release until n2-n8. ~295 commits held back, cost accepted. Version number 3.1.0 vs 4.0.0 still open. See evidence."
+status = "agreed 2026-08-18. n1 and n3a shipped; n2 partial; n3b and n4-n9 open"
+release_gate = "This program gates the next release. Scope and version decision are tracked internally."
 supersedes = "provider-contract-removal-autoapply.dag.toml [decision].removal_policy"
 
 # Everything below derives from these seven.
@@ -85,7 +85,7 @@ critical = true
 depends_on = ["n3a.passthrough-surface"]
 role = "Delete GROK_FLAG_GENERATION and the 29 named parameters it derives, since providerFlags reaches all of them with no per-provider data."
 action = "The table only ever covered flags where the gateway adds nothing beyond emitting them (its own docstring; bespoke ones sit in UNGENERATED_GROK_FLAGS). Those are exactly the flags pass-through serves. Keep buildArgvFromGeneration and deriveZodShapeFromGeneration only if a second consumer appears; otherwise they go too."
-constraint = "BREAKING: removes 29 named grok parameters from the tool surface. Needs the version decision in [meta].release_gate first, and a migration note telling callers the providerFlags spelling of each dropped parameter."
+constraint = "BREAKING: removes 29 named grok parameters from the tool surface. Needs the version decision first, and a migration note telling callers the providerFlags spelling of each dropped parameter."
 
 [[node]]
 id = "n4.seed-is-generated-not-written"

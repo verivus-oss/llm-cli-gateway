@@ -22,7 +22,7 @@
 #      Option A adopted. The scorer is not fixed; the false claim is removed.
 #
 # EVIDENCE
-# docs/evidence/durable-state-2026-08-18.md carries every number and every
+# docs/evidence/durable-state-2026-08-18.md (internal, not mirrored) carries every number and every
 # reproduction referenced below. Do not re-derive them from a live DB without
 # checking which store you are reading; logs.db holds an abandoned SQLite copy.
 

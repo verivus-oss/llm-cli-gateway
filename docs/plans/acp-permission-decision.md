@@ -4,7 +4,7 @@ Exploration, 2026-08-18, at HEAD `801950d`. Prompted by the finding that
 `ApprovalManager.decide` cannot deny for any ACP input: 21 of 21 approved at
 score 0 across every policy and category, while content-bearing controls score
 3, 5 and 7. Evidence and reproduction in
-`docs/evidence/durable-state-2026-08-18.md`.
+`docs/evidence/durable-state-2026-08-18.md` (internal, not mirrored).
 
 The question was framed as "fix the scorer, or drop the claim". Both framings
 were wrong, and the reason is architectural rather than a scoring bug.
@@ -21,8 +21,9 @@ nothing else honest to pass.
 It has exactly **one** content-sensitive branch:
 
 ```ts
-if (/\b(delete|destroy|wipe|exfiltrate|credential|token|password|secret)\b/i
-      .test(request.prompt)) { score += 3; }
+if (/\b(delete|destroy|wipe|exfiltrate|credential|token|password|secret)\b/i.test(request.prompt)) {
+  score += 3;
+}
 ```
 
 So even if the bridge passed the real tool call, the only reachable signal would
@@ -30,8 +31,8 @@ be that regex. It would fire on a legitimate `delete` tool call and stay silent
 on everything genuinely dangerous. That is false positives and false negatives,
 not a control.
 
-Note also `src/approval-manager.ts:62`: *"`decide()` is only ever reached on the
-`approvalStrategy:"mcp_managed"` path."* The ACP bridge falsified that comment
+Note also `src/approval-manager.ts:62`: _"`decide()` is only ever reached on the
+`approvalStrategy:"mcp_managed"` path."_ The ACP bridge falsified that comment
 without updating it, which is how a second caller acquired a risk model built for
 a different question.
 
@@ -73,8 +74,8 @@ Two things block that, and the second is fatal to the idea:
 
 2. **The gateway never sees the syscall.** ACP host services flat-deny file
    reads today (`src/acp/host-services.ts:87`, "the request path is never
-   inspected"), so an agent that wants to read or write a file does it *in its
-   own process*, with its own file handles. A permission bridge cannot contain an
+   inspected"), so an agent that wants to read or write a file does it _in its
+   own process_, with its own file handles. A permission bridge cannot contain an
    operation the host does not perform. Checking a path the agent volunteered
    constrains a **claim**, not an action, and an agent willing to lie about
    `kind` will lie about `locations`.
@@ -96,11 +97,11 @@ top of an agent-supplied label it would have to trust anyway.
 
 ## 4. Options
 
-| | Option | Verdict |
-|---|---|---|
-| A | Remove the decision call, keep an audit append, document the category gate as the boundary, fix `README.md:308` | **Recommended now.** Small, honest, ships with 3.1.0 |
-| B | Widen `HostCallbackContext`, add workspace containment on `toolCall.locations` | **Rejected as a security control.** Constrains a claim, not an action. Worth doing only as defence in depth once host services actually perform file operations |
-| C | Give `ApprovalManager` an ACP-shaped request kind that scores on the derived category | **Rejected.** Two risk models in one class, and the category is agent-supplied, so it scores a self-report |
+|     | Option                                                                                                          | Verdict                                                                                                                                                         |
+| --- | --------------------------------------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| A   | Remove the decision call, keep an audit append, document the category gate as the boundary, fix `README.md:308` | **Recommended now.** Small, honest, ships with 3.1.0                                                                                                            |
+| B   | Widen `HostCallbackContext`, add workspace containment on `toolCall.locations`                                  | **Rejected as a security control.** Constrains a claim, not an action. Worth doing only as defence in depth once host services actually perform file operations |
+| C   | Give `ApprovalManager` an ACP-shaped request kind that scores on the derived category                           | **Rejected.** Two risk models in one class, and the category is agent-supplied, so it scores a self-report                                                      |
 
 Option A is not a retreat. The security property users were promised
 ("plus a one-time ApprovalManager decision") never existed; what exists is a
@@ -108,8 +109,8 @@ stricter gate than the sentence describes.
 
 ## 5. What this means for the real work
 
-The security question worth spending effort on is not *how do we score an ACP
-permission request*, it is **what should host services expose at all**. Today
+The security question worth spending effort on is not _how do we score an ACP
+permission request_, it is **what should host services expose at all**. Today
 they expose almost nothing, which is why the bridge has so little to decide. The
 moment `allow_write_host_services` or `allow_terminal_host_services` is turned
 on, the category gate is the entire boundary, and the operator should be told

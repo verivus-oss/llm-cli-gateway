@@ -282,7 +282,7 @@ of `src`. These are numbers because "concise" is not enforceable and a number is
 
 **Where the detail goes instead.** A DAG node states the work and links its
 evidence; measurements, alternatives considered and reasoning history belong in
-`docs/evidence/<topic>-<date>.md`, which `durable-state-lifecycle.dag.toml`
+`docs/evidence/<topic>-<date>.md` (gitignored, host-local, never mirrored), which `durable-state-lifecycle.dag.toml`
 already does. A code comment explains what is non-obvious about the CODE, not
 the policy behind it, which is in the plan file. A commit states the change and
 the evidence for it, not how the conclusion was reached.
@@ -322,4 +322,4 @@ Refer to these files for deeper context:
 
   The two currently load-bearing maps:
   - `validation-launch-surface.dag.toml` - the only machine-checked one (`npm run dag:launch-surface:check`, inside `npm run check`). It verifies caller counts by real TypeScript AST analysis. Note its checker validates that `affects` is a non-empty string list but never that those strings name declared nodes, so a dangling edge passes silently.
-  - `durable-state-lifecycle.dag.toml` - what is written, what is bounded, what leaks. Read it before adding any durable table or status value. Evidence in `docs/evidence/durable-state-2026-08-18.md`.
+  - `durable-state-lifecycle.dag.toml` - what is written, what is bounded, what leaks. Read it before adding any durable table or status value. Evidence in `docs/evidence/durable-state-2026-08-18.md` (internal, not mirrored).

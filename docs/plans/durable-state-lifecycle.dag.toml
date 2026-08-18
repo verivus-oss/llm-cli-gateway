@@ -27,7 +27,7 @@
 # able to answer; a table that cannot answer `reaped_by` does not ship.
 #
 # EVIDENCE
-# Snapshot: docs/evidence/durable-state-2026-08-18.md
+# Snapshot: docs/evidence/durable-state-2026-08-18.md (internal, not mirrored)
 # Reproduction of the zero-seat leak is two MCP calls and is recorded there.
 
 [meta]

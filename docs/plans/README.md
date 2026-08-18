@@ -13,16 +13,15 @@ Re-check before relying on a row.
 
 ## Live: read these before changing the surface they map
 
-| DAG | Surface | Notes |
-| --- | --- | --- |
-| `validation-launch-surface.dag.toml` | Validation provider launch, cursor trust | The only machine-checked DAG (`npm run dag:launch-surface:check`, inside `npm run check`). Real TypeScript AST caller analysis. Caveat: it validates that `affects` is a non-empty string list but never resolves the targets, and `node_count` is pinned in the checker, so the map cannot grow without a checker edit. |
-| `gateway-passthrough-policy.dag.toml` | **Governing rule for the provider surface** | The installed binary is the authority; the gateway never refuses what it accepts. Supersedes the removal auto-apply policy, which was deleting capability from customers who changed nothing. Read this before touching any provider contract, schema or validation path. Where another plan disagrees, this one wins. |
-| `durable-state-lifecycle.dag.toml` | Retention, finalization, telemetry capture | What is written, what is bounded, what leaks. Read before adding a durable table or status value. Evidence: `docs/evidence/durable-state-2026-08-18.md`. |
-| `durable-state-remediation.dag.toml` | The fix program for the above | Five phases, six invariants. P0 ships in 3.1.0. Operator decisions on receipt retention and ACP approval are recorded in its header. |
-| `acp-permission-decision.md` | ACP permission gating (exploration, not a DAG) | Why `ApprovalManager` is the wrong instrument for ACP, why path containment cannot be a real control while the gateway never sees the syscall, and what the category gate actually guarantees. |
-| `request-pipeline-tier-b-t4-driver.dag.toml` | Tier-B handler envelope | Genuinely unimplemented: no `HandlerEnvelope` or `terminalEnvelope` anywhere in `src/`. |
-| `request-pipeline-tier-b-t5a-gemini.dag.toml` | Tier-B gemini slice | Blocked on T4 above. |
-
+| DAG                                           | Surface                                        | Notes                                                                                                                                                                                                                                                                                                                    |
+| --------------------------------------------- | ---------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `validation-launch-surface.dag.toml`          | Validation provider launch, cursor trust       | The only machine-checked DAG (`npm run dag:launch-surface:check`, inside `npm run check`). Real TypeScript AST caller analysis. Caveat: it validates that `affects` is a non-empty string list but never resolves the targets, and `node_count` is pinned in the checker, so the map cannot grow without a checker edit. |
+| `gateway-passthrough-policy.dag.toml`         | **Governing rule for the provider surface**    | The installed binary is the authority; the gateway never refuses what it accepts. Supersedes the removal auto-apply policy, which was deleting capability from customers who changed nothing. Read this before touching any provider contract, schema or validation path. Where another plan disagrees, this one wins.   |
+| `durable-state-lifecycle.dag.toml`            | Retention, finalization, telemetry capture     | What is written, what is bounded, what leaks. Read before adding a durable table or status value. Evidence: `docs/evidence/durable-state-2026-08-18.md` (internal, not mirrored).                                                                                                                                        |
+| `durable-state-remediation.dag.toml`          | The fix program for the above                  | Five phases, six invariants. P0 ships in 3.1.0. Operator decisions on receipt retention and ACP approval are recorded in its header.                                                                                                                                                                                     |
+| `acp-permission-decision.md`                  | ACP permission gating (exploration, not a DAG) | Why `ApprovalManager` is the wrong instrument for ACP, why path containment cannot be a real control while the gateway never sees the syscall, and what the category gate actually guarantees.                                                                                                                           |
+| `request-pipeline-tier-b-t4-driver.dag.toml`  | Tier-B handler envelope                        | Genuinely unimplemented: no `HandlerEnvelope` or `terminalEnvelope` anywhere in `src/`.                                                                                                                                                                                                                                  |
+| `request-pipeline-tier-b-t5a-gemini.dag.toml` | Tier-B gemini slice                            | Blocked on T4 above.                                                                                                                                                                                                                                                                                                     |
 
 ## Completed: the code shipped, the DAG was never marked
 
@@ -43,23 +42,23 @@ status.
 
 ## Superseded: premise no longer holds
 
-| DAG | Why |
-| --- | --- |
-| `provider-contract-removal-autoapply.dag.toml` | Its `removal_policy = "auto_apply"` is **withdrawn** by `gateway-passthrough-policy.dag.toml`. It was deleting capability from customers who never touched their CLI. The lock-step analysis, the `hiddenFromHelp` escape hatch and the residual-reference reporting remain accurate; the policy does not. |
-| `grok-0.2.33-contract-sync.dag.toml` | Targets grok 0.2.33; live is 1.0.4. Premise entirely superseded. |
-| `provider-contract-drift-rc3.dag.toml` | Its rc.3-era version targets were replaced by the rc.8 rebaseline. The decision sections remain useful and are the best statement of the pass-through principle in the repo. |
-| `first-class-acp-gateway-extension.dag.toml` | `status = "native_smoke_passed"` overstates: the smoke harness has zero production callers and `smoke_on_startup` is parsed and never read. Several observability and async claims describe events and metrics that do not exist. |
-| `full-featured-cli-acp-provider-integrations.dag.toml` | Still `status = "draft"` against a stale feature branch; names four modules that do not exist; its `must_cover_cli_flags` lists were frozen at older CLI versions and can only assert listed flags exist, never that new upstream flags got listed. |
-| `cursor-first-class-provider.dag.toml` | Cursor shipped (27 references in `provider-definitions.ts`) yet all 13 nodes are still `planned`, and it names five modules that do not exist. The one genuinely open item is `cursor-parser.ts`: nobody has captured what `cursor-agent --output-format stream-json` actually emits. |
-| `acp-provider-transport-research.dag.toml` | Research premise falsified by production: ACP has five requests in the flight recorder ever, four of them failures. |
+| DAG                                                    | Why                                                                                                                                                                                                                                                                                                        |
+| ------------------------------------------------------ | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `provider-contract-removal-autoapply.dag.toml`         | Its `removal_policy = "auto_apply"` is **withdrawn** by `gateway-passthrough-policy.dag.toml`. It was deleting capability from customers who never touched their CLI. The lock-step analysis, the `hiddenFromHelp` escape hatch and the residual-reference reporting remain accurate; the policy does not. |
+| `grok-0.2.33-contract-sync.dag.toml`                   | Targets grok 0.2.33; live is 1.0.4. Premise entirely superseded.                                                                                                                                                                                                                                           |
+| `provider-contract-drift-rc3.dag.toml`                 | Its rc.3-era version targets were replaced by the rc.8 rebaseline. The decision sections remain useful and are the best statement of the pass-through principle in the repo.                                                                                                                               |
+| `first-class-acp-gateway-extension.dag.toml`           | `status = "native_smoke_passed"` overstates: the smoke harness has zero production callers and `smoke_on_startup` is parsed and never read. Several observability and async claims describe events and metrics that do not exist.                                                                          |
+| `full-featured-cli-acp-provider-integrations.dag.toml` | Still `status = "draft"` against a stale feature branch; names four modules that do not exist; its `must_cover_cli_flags` lists were frozen at older CLI versions and can only assert listed flags exist, never that new upstream flags got listed.                                                        |
+| `cursor-first-class-provider.dag.toml`                 | Cursor shipped (27 references in `provider-definitions.ts`) yet all 13 nodes are still `planned`, and it names five modules that do not exist. The one genuinely open item is `cursor-parser.ts`: nobody has captured what `cursor-agent --output-format stream-json` actually emits.                      |
+| `acp-provider-transport-research.dag.toml`             | Research premise falsified by production: ACP has five requests in the flight recorder ever, four of them failures.                                                                                                                                                                                        |
 
 ## Never started
 
-| DAG | Why |
-| --- | --- |
-| `xstate-store-integration.dag.toml` | Zero xstate packages in `dependencies` or `devDependencies`; both modules it names are absent. Never begun. |
-| `outstanding-work-fix.dag.toml` | `release_version = "1.17.2"`, dated 2026-05-31. |
-| `hybrid-multi-agent-playbook-evolution.dag.toml` | Untracked host-local artifact that happens to live here. |
+| DAG                                              | Why                                                                                                         |
+| ------------------------------------------------ | ----------------------------------------------------------------------------------------------------------- |
+| `xstate-store-integration.dag.toml`              | Zero xstate packages in `dependencies` or `devDependencies`; both modules it names are absent. Never begun. |
+| `outstanding-work-fix.dag.toml`                  | `release_version = "1.17.2"`, dated 2026-05-31.                                                             |
+| `hybrid-multi-agent-playbook-evolution.dag.toml` | Untracked host-local artifact that happens to live here.                                                    |
 
 ## Conventions
 
