@@ -2451,6 +2451,22 @@ export const UPSTREAM_CLI_CONTRACTS: Record<CliType, CliContract> = {
       },
       "--agent": { arity: "one", description: "Agent name or definition file path" },
       "--agents": { arity: "one", description: "Inline subagent definitions JSON" },
+      // RESTORED before the 3.1.0 stable tag. grok 1.0.4 no longer advertises
+      // `--best-of-n` or `--check`, and both are passed through anyway: every
+      // customer still on a 0.2.x grok has them, and deleting them took a
+      // working capability from people who upgraded the gateway and never
+      // touched their CLI. The binary is the authority; a customer on 1.0.4
+      // gets grok's own rejection, which is a better error than ours.
+      // See docs/plans/gateway-passthrough-policy.dag.toml.
+      "--best-of-n": {
+        arity: "one",
+        pattern: /^[1-9][0-9]*$/,
+        description: "Run the task N ways in parallel and pick the best (grok 0.2.x)",
+      },
+      "--check": {
+        arity: "none",
+        description: "Append a self-verification loop (grok 0.2.x)",
+      },
       "--disable-web-search": {
         arity: "none",
         description: "Disable web search and remote retrieval tools",
@@ -2558,6 +2574,25 @@ export const UPSTREAM_CLI_CONTRACTS: Record<CliType, CliContract> = {
         description: "Unsupported flag is rejected before spawn",
         args: ["-p", "hello", "--not-a-grok-flag"],
         expect: "fail",
+      },
+      {
+        id: "grok-best-of-n",
+        description:
+          "--best-of-n <N> is accepted. grok 1.0.4+ no longer advertises it; the gateway passes it through so customers still on 0.2.x keep the capability, and lets the binary reject it otherwise.",
+        args: ["-p", "hello", "--best-of-n", "3"],
+        expect: "pass",
+      },
+      {
+        id: "grok-best-of-n-invalid-zero",
+        description: "--best-of-n rejects 0: the contract pattern is upstream's own, not invented",
+        args: ["-p", "hello", "--best-of-n", "0"],
+        expect: "fail",
+      },
+      {
+        id: "grok-check",
+        description: "--check is accepted. Same pass-through rationale as --best-of-n above.",
+        args: ["-p", "hello", "--check"],
+        expect: "pass",
       },
       {
         id: "grok-max-turns",
@@ -3242,6 +3277,7 @@ export const UPSTREAM_CLI_CONTRACTS: Record<CliType, CliContract> = {
         arity: "optional",
         description: "Export the session (optional output path; bare flag uses the default)",
       },
+      "--agent-config": { arity: "one", description: "Agent config file path" },
       "--respect-workspace-trust": {
         arity: "optional",
         values: ["true", "false"],
@@ -3255,14 +3291,25 @@ export const UPSTREAM_CLI_CONTRACTS: Record<CliType, CliContract> = {
     // Probe acknowledgement only. (--config/--sandbox/--export/--respect-workspace-trust
     // graduated to the flags allowlist as wired request fields.)
     //
-    // `--agent-config` was removed in devin 3000.4.16: the binary no longer
-    // advertises it, so the gateway must stop emitting it. Keeping it in `flags`
-    // would leave the gateway sending a dead flag on every request that set the
-    // parameter, the same failure shape as the grok `--best-of-n` regression.
-    // The `agentConfig` request parameter went with it, since a parameter whose
-    // only effect is a rejected invocation is worse than no parameter. Unrelated
-    // to the Personal Agent Config Kit, whose `~/.agent-config` is a baseline
-    // DIRECTORY and shares only the name.
+    // `--agent-config` stopped being advertised by devin 3000.4.16 and is
+    // RETAINED anyway. It was removed in 3.1.0-rc and restored before the stable
+    // tag under docs/plans/gateway-passthrough-policy.dag.toml.
+    //
+    // The removal argued that "a parameter whose only effect is a rejected
+    // invocation is worse than no parameter". That is true for a customer on
+    // 3000.4.16 or newer, and false for every customer still on an older devin,
+    // whose binary still accepts the flag. We serve both, and only one of them
+    // was considered. Deleting it took a working capability away from customers
+    // who never touched their CLI: they upgraded the gateway, and we removed
+    // their flag.
+    //
+    // Under the policy the installed binary is the authority. We emit the flag
+    // and let devin answer. A customer on a newer devin gets devin's own
+    // rejection, which is a better error than ours and is authoritative;
+    // a customer on an older devin keeps the capability they have.
+    //
+    // Unrelated to the Personal Agent Config Kit, whose `~/.agent-config` is a
+    // baseline DIRECTORY and shares only the name.
     acknowledgedUpstreamFlags: ["--print", "--version"],
     env: {},
     conformanceFixtures: [
@@ -3363,10 +3410,11 @@ export const UPSTREAM_CLI_CONTRACTS: Record<CliType, CliContract> = {
         expect: "fail",
       },
       {
-        id: "devin-agent-config-removed",
-        description: "--agent-config is rejected: devin 3000.4.16 dropped it",
+        id: "devin-agent-config",
+        description:
+          "--agent-config path is accepted. devin 3000.4.16+ no longer advertises it, but the gateway passes it through and lets the binary decide: customers on older devin still have the flag.",
         args: ["-p", "hello", "--agent-config", "/tmp/agent.toml"],
-        expect: "fail",
+        expect: "pass",
       },
     ],
   },

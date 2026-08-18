@@ -935,7 +935,23 @@ const CODEX_PART_A_FIELDS = {
  * The remaining grok_request fields (prompt, model, session, approval, agents,
  * promptJson, nativeWorktree, …) stay hand-written — they need bespoke schemas.
  */
+//
+// HAND-MAINTAINED DUPLICATE of the generation table's `requestParameter`
+// values, and therefore an instance of the exact class this repo keeps being
+// bitten by: one fact spelled in two places. Restoring `bestOfN` and `check`
+// needed an edit here as well as the table row, and a future addition will too.
+//
+// The fix is to derive it:
+//   export const GROK_FLAG_GENERATION = [ ... ] as const satisfies readonly FlagGenerationMeta[];
+//   type GrokGeneratedField = (typeof GROK_FLAG_GENERATION)[number]["requestParameter"];
+// which needs the table to carry literal types rather than the current
+// `readonly FlagGenerationMeta[]` annotation that widens them to `string`.
+// Deliberately NOT done here: this change landed as a release-blocking
+// capability revert and a type-system refactor does not belong in it. Tracked
+// as n2 work in docs/plans/gateway-passthrough-policy.dag.toml.
 type GrokGeneratedField =
+  | "bestOfN"
+  | "check"
   | "outputFormat"
   | "effort"
   | "reasoningEffort"
@@ -6889,6 +6905,10 @@ export function prepareGrokRequest(
     /** Grok 0.2.x: `--disable-web-search` disable web search and remote retrieval tools. */
     disableWebSearch?: boolean;
     /** Grok 0.2.x: `--todo-gate` enable runtime turn-end TodoGate for this session. */
+    /** Grok 0.2.x `--best-of-n <N>`: parallel headless attempts. Not advertised by grok 1.0.4+ and passed through anyway: older grok installs still accept it and the binary is the authority. See docs/plans/gateway-passthrough-policy.dag.toml. */
+    bestOfN?: number;
+    /** Grok 0.2.x `--check`: append a self-verification loop. Not advertised by grok 1.0.4+ and passed through anyway: older grok installs still accept it and the binary is the authority. See docs/plans/gateway-passthrough-policy.dag.toml. */
+    check?: boolean;
     todoGate?: boolean;
     /** Grok 0.2.x: `--verbatim` send prompt exactly as given (skips gateway optimization). */
     verbatim?: boolean;
@@ -12221,6 +12241,10 @@ export interface GrokRequestParams {
   /** Grok 0.2.x: `--disable-web-search`. */
   disableWebSearch?: boolean;
   /** Grok 0.2.x: `--todo-gate` runtime turn-end TodoGate. */
+  /** Grok 0.2.x `--best-of-n <N>`: parallel headless attempts. Not advertised by grok 1.0.4+ and passed through anyway: older grok installs still accept it and the binary is the authority. See docs/plans/gateway-passthrough-policy.dag.toml. */
+  bestOfN?: number;
+  /** Grok 0.2.x `--check`: append a self-verification loop. Not advertised by grok 1.0.4+ and passed through anyway: older grok installs still accept it and the binary is the authority. See docs/plans/gateway-passthrough-policy.dag.toml. */
+  check?: boolean;
   todoGate?: boolean;
   /** Grok 0.2.x: `--verbatim` (also skips gateway prompt optimization). */
   verbatim?: boolean;
@@ -12302,6 +12326,8 @@ function rejectUnsupportedGrokAcpParams(
     ["compactionDetail", hasNonEmptyString(params.compactionDetail)],
     ["agent", hasNonEmptyString(params.agent)],
     ["disableWebSearch", params.disableWebSearch === true],
+    ["bestOfN", params.bestOfN !== undefined],
+    ["check", params.check === true],
     ["todoGate", params.todoGate === true],
     ["verbatim", params.verbatim === true],
     ["agents", hasNonEmptyAgentInput(params.agents)],
@@ -12954,6 +12980,12 @@ export interface DevinRequestParams {
    */
   respectWorkspaceTrust?: boolean;
   /**
+   * Devin `--agent-config <FILE>`. Not advertised by devin 3000.4.16+, and
+   * passed through anyway: older devin still accepts it, and the binary is the
+   * authority on its own flags. See docs/plans/gateway-passthrough-policy.dag.toml.
+   */
+  agentConfig?: string;
+  /**
    * Devin ACP `--agent-type <type>` (summarizer|review). Only applies when
    * transport=acp; threaded into the `devin acp` spawn argv. Ignored for the CLI
    * transport.
@@ -12987,6 +13019,7 @@ export function prepareDevinRequest(
     sandbox?: boolean;
     exportSession?: boolean | string;
     respectWorkspaceTrust?: boolean;
+    agentConfig?: string;
     correlationId?: string;
     optimizePrompt: boolean;
     operation: string;
@@ -13060,6 +13093,7 @@ export function prepareDevinRequest(
   if (params.respectWorkspaceTrust !== undefined) {
     args.push("--respect-workspace-trust", params.respectWorkspaceTrust ? "true" : "false");
   }
+  if (params.agentConfig) args.push("--agent-config", params.agentConfig);
   try {
     if (resolvedModel) {
       assertCliArgUtf8Size(resolvedModel, { provider: "devin", inputName: "model" });
@@ -13106,6 +13140,7 @@ function rejectUnsupportedDevinAcpParams(
     ["sandbox", params.sandbox === true],
     ["exportSession", params.exportSession !== undefined],
     ["respectWorkspaceTrust", params.respectWorkspaceTrust !== undefined],
+    ["agentConfig", params.agentConfig !== undefined],
     ["resumeLatest", params.resumeLatest === true],
     ["createNewSession", params.createNewSession === true],
     ["optimizePrompt", params.optimizePrompt],
@@ -13165,6 +13200,7 @@ export async function handleDevinRequest(
       sandbox: params.sandbox,
       exportSession: params.exportSession,
       respectWorkspaceTrust: params.respectWorkspaceTrust,
+      agentConfig: params.agentConfig,
       correlationId: params.correlationId,
       optimizePrompt: params.optimizePrompt,
       operation: "devin_request",
@@ -13419,6 +13455,7 @@ export async function handleDevinRequestAsync(
       sandbox: params.sandbox,
       exportSession: params.exportSession,
       respectWorkspaceTrust: params.respectWorkspaceTrust,
+      agentConfig: params.agentConfig,
       correlationId: params.correlationId,
       optimizePrompt: params.optimizePrompt,
       operation: "devin_request_async",
@@ -18757,6 +18794,12 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
         .describe(
           "Respect workspace trust (Devin --respect-workspace-trust <bool>). Devin defaults true for interactive and false for print mode; set explicitly to override."
         ),
+      agentConfig: z
+        .string()
+        .optional()
+        .describe(
+          "Agent config file path (Devin --agent-config <FILE>). devin 3000.4.16 and newer no longer advertise this flag and will reject it; the gateway passes it through rather than refusing it, because older devin installs still accept it and the binary is the authority on its own flags."
+        ),
       agentType: z
         .enum(DEVIN_ACP_AGENT_TYPES)
         .optional()
@@ -20693,6 +20736,8 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
           .boolean()
           .optional()
           .describe("Grok --disable-web-search: disable web search and remote retrieval tools."),
+        bestOfN: GROK_GENERATED_SHAPE.bestOfN,
+        check: GROK_GENERATED_SHAPE.check,
         todoGate: z
           .boolean()
           .optional()
@@ -20955,6 +21000,12 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
           .optional()
           .describe(
             "Respect workspace trust (Devin --respect-workspace-trust <bool>). Devin defaults true for interactive and false for print mode; set explicitly to override."
+          ),
+        agentConfig: z
+          .string()
+          .optional()
+          .describe(
+            "Agent config file path (Devin --agent-config <FILE>). devin 3000.4.16 and newer no longer advertise this flag and will reject it; the gateway passes it through rather than refusing it, because older devin installs still accept it and the binary is the authority on its own flags."
           ),
         sessionId: z
           .string()

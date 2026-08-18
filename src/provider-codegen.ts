@@ -263,6 +263,23 @@ export const GROK_GEN_MAIN: readonly FlagGenerationMeta[] = [
     describe: "Reasoning effort for reasoning models",
   },
   {
+    flag: "--best-of-n",
+    requestParameter: "bestOfN",
+    emit: "value_if_defined",
+    inputType: "number",
+    numeric: MAX_TURNS_NUMERIC,
+    describe:
+      "Grok --best-of-n <N>: run the task N ways in parallel and pick the best (headless only). Not advertised by grok 1.0.4+; passed through for older installs.",
+  },
+  {
+    flag: "--check",
+    requestParameter: "check",
+    emit: "flag_if_true",
+    inputType: "boolean",
+    describe:
+      "Grok --check: append a self-verification loop to the prompt (headless only). Not advertised by grok 1.0.4+; passed through for older installs.",
+  },
+  {
     flag: "--tools",
     requestParameter: "allowedTools",
     emit: "csv_if_nonempty",

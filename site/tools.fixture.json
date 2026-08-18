@@ -2207,6 +2207,10 @@
             "type": "boolean",
             "description": "Respect workspace trust (Devin --respect-workspace-trust <bool>). Devin defaults true for interactive and false for print mode; set explicitly to override."
           },
+          "agentConfig": {
+            "type": "string",
+            "description": "Agent config file path (Devin --agent-config <FILE>). devin 3000.4.16 and newer no longer advertise this flag and will reject it; the gateway passes it through rather than refusing it, because older devin installs still accept it and the binary is the authority on its own flags."
+          },
           "agentType": {
             "type": "string",
             "enum": [
@@ -2369,6 +2373,10 @@
           "respectWorkspaceTrust": {
             "type": "boolean",
             "description": "Respect workspace trust (Devin --respect-workspace-trust <bool>). Devin defaults true for interactive and false for print mode; set explicitly to override."
+          },
+          "agentConfig": {
+            "type": "string",
+            "description": "Agent config file path (Devin --agent-config <FILE>). devin 3000.4.16 and newer no longer advertise this flag and will reject it; the gateway passes it through rather than refusing it, because older devin installs still accept it and the binary is the authority on its own flags."
           },
           "sessionId": {
             "type": "string",
@@ -3058,6 +3066,17 @@
             "type": "string",
             "description": "Reasoning effort for reasoning models"
           },
+          "bestOfN": {
+            "type": "integer",
+            "exclusiveMinimum": 0,
+            "minimum": -9007199254740991,
+            "maximum": 10000,
+            "description": "Grok --best-of-n <N>: run the task N ways in parallel and pick the best (headless only). Not advertised by grok 1.0.4+; passed through for older installs."
+          },
+          "check": {
+            "type": "boolean",
+            "description": "Grok --check: append a self-verification loop to the prompt (headless only). Not advertised by grok 1.0.4+; passed through for older installs."
+          },
           "allowedTools": {
             "type": "array",
             "items": {
@@ -3611,6 +3630,17 @@
           "disableWebSearch": {
             "type": "boolean",
             "description": "Grok --disable-web-search: disable web search and remote retrieval tools."
+          },
+          "bestOfN": {
+            "type": "integer",
+            "exclusiveMinimum": 0,
+            "minimum": -9007199254740991,
+            "maximum": 10000,
+            "description": "Grok --best-of-n <N>: run the task N ways in parallel and pick the best (headless only). Not advertised by grok 1.0.4+; passed through for older installs."
+          },
+          "check": {
+            "type": "boolean",
+            "description": "Grok --check: append a self-verification loop to the prompt (headless only). Not advertised by grok 1.0.4+; passed through for older installs."
           },
           "todoGate": {
             "type": "boolean",
