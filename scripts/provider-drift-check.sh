@@ -12,10 +12,15 @@
 #
 # Modes (GATEWAY_DRIFT_MODE, default report):
 #   report   detect and log only; never edits the repo.
-#   apply    additionally run the rebaseliner's safe auto-apply (version
-#            targets). Flag REMOVALS are never auto-applied: `flags` is the
-#            argv emit allowlist and a removal needs a coordinated three-file
-#            edit, so those are always reported for a human.
+#   apply    additionally run the rebaseliner's safe auto-apply. This covers
+#            version targets AND flag REMOVALS: the rebaseliner edits the
+#            contract, the acknowledgements and the codegen tables in one run
+#            and fails with a residual-reference report if any emitter survives.
+#            See docs/plans/provider-contract-removal-autoapply.dag.toml.
+#            An earlier version of this file said removals are never
+#            auto-applied. That stopped being true in rc.4 and the text was
+#            left behind, so operators waited for a hand edit the tooling had
+#            already performed.
 #
 # Exit codes: 0 clean, 2 rebaselinable drift, 3 drift needing a human, 1 error.
 set -euo pipefail
@@ -101,7 +106,7 @@ render() {
       }
       for (const r of removed) {
         console.log(`LINE ${r.cli}: contract declares flag(s) the installed binary NO LONGER advertises: ${r.flags.join(" ")}`);
-        console.log("LINE   NOT auto-applied: a removal needs a lock-step edit across upstream-contracts.ts, provider-codegen.ts and index.ts.");
+        console.log("LINE   auto-applicable: run GATEWAY_DRIFT_MODE=apply (or npm run providers:rebaseline -- --apply) to edit the contract, acknowledgements and codegen tables together; it fails closed with a residual-reference report if an emitter survives.");
       }
       if (!versionUpdates.length && !additive.length && !removed.length) {
         console.log("LINE no drift: installed CLIs match their contracts");

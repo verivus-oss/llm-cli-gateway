@@ -31,6 +31,58 @@ claim installed-binary compatibility for that provider in the release notes.
 
 ## Most recent recorded contract refresh baseline
 
+> **This file is a propagation root.** Its version table is copied by hand into
+> `README.md`, all seven `.agents/skills/provider-*/SKILL.md` files, and the
+> release article. When it goes stale, every one of those goes stale with it and
+> nothing fails. It was last left at the 3.0.0 baseline while seven providers
+> moved underneath it, which is how eleven surfaces ended up citing versions that
+> had not been installed for a month. Update this table in the same change as
+> `PROVIDER_TARGET_VERSIONS`, then sweep the copies.
+
+### 3.1.0 release baseline - 2026-08-18
+
+Target versions accepted for the 3.1.0 release, matching
+`PROVIDER_TARGET_VERSIONS` in `src/provider-definitions.ts` (the source of
+truth). `npm run upstream:drift` is clean at these versions.
+
+| Provider           | Executable     | Target/probed CLI version         |
+| ------------------ | -------------- | --------------------------------- |
+| Claude Code        | `claude`       | `claude 2.1.233`                  |
+| Codex CLI          | `codex`        | `codex-cli 0.147.0`               |
+| Gemini/Antigravity | `agy`          | `1.1.13`                          |
+| Grok CLI           | `grok`         | `grok 1.0.4 (d846eb93d9)`         |
+| Mistral Vibe       | `vibe`         | `vibe 2.24.1`                     |
+| Devin CLI          | `devin`        | `devin 3000.4.25 (7e8e528a)`      |
+| Cursor Agent CLI   | `cursor-agent` | `cursor-agent 2026.08.11-e8db854` |
+
+Two spellings are load-bearing and must not be "tidied":
+
+- **grok** reports `grok 1.0.4 (d846eb93d9) [stable]`, putting a release-channel
+  marker after the build hash. The target keeps the hash because
+  `comparableVersion` reads it out of that banner; a hash-less `grok 1.0.4` can
+  never match. `providers:rebaseline --apply` wrote exactly that bare form once.
+- **claude** and **cursor** report without and with a product prefix
+  respectively (`2.1.233 (Claude Code)` vs `2026.08.11-e8db854`), which is why
+  `REAL_INSTALLED` in `src/__tests__/provider-version-guard.test.ts` pins the
+  raw reported strings separately and is deliberately NOT derived from this
+  table.
+
+Changes since the 3.0.0 baseline below: **grok crossed a major version**
+(`0.2.101` to `1.0.4`), gaining a fourth `--output-format`
+(`streaming-messages-json`) and dropping `--best-of-n` and `--check`; devin
+`3000.1.27` to `3000.4.25`, dropping `--agent-config`; claude `2.1.212` to
+`2.1.233`; codex-cli `0.144.5` to `0.147.0`; agy `1.1.3` to `1.1.13`; vibe
+`2.20.0` to `2.24.1`; cursor-agent `2026.07.16` to `2026.08.11`.
+
+One correction recorded here because the probe that found it is easy to get
+backwards: grok's `--reasoning-effort` (alias `--effort`) declares **no**
+possible-values set, and the contract had invented a five-level enum for it,
+which `validateUpstreamCliArgs` enforced as a rejection list. Fixed in 3.1.0.
+By contrast grok's `--compaction-mode` / `--compaction-detail` also accept
+out-of-list values at parse but ARE upstream-documented; their text is
+`hiddenFromHelp` and only `strings` on the executable recovers it. Parse
+acceptance alone does not tell you which case you have.
+
 ### 3.0.0 release baseline - 2026-07-18
 
 Target versions accepted for the 3.0.0 release, matching

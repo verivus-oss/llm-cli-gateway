@@ -106,7 +106,7 @@ installed help probe is the primary evidence for fast-moving CLI surface drift.
 
 ## Devin-specific notes
 
-- Tested against `devin 3000.1.27 (0d4bf12e)`.
+- Tested against `devin 3000.4.25 (7e8e528a)`.
 - Current upstream help includes `auto`, `accept-edits`, `smart`, and
   `dangerous` permission modes. Keep the gateway contract, request schemas,
   capability description, and fixtures synchronized when that set changes.
