@@ -1706,7 +1706,13 @@ async function awaitJobOrDefer(
    * session capture on the deferred path. Process-local, never persisted. Set only
    * for mistral Kit jobs; undefined for every other request.
    */
-  kitNativeCaptureSessionDir?: string
+  kitNativeCaptureSessionDir?: string,
+  /**
+   * The caller's `providerFlags`, needed because this function re-runs the argv
+   * contract assertion on the deferred path. Omitting it re-refuses every
+   * pass-through flag the sync handler already admitted.
+   */
+  passthroughFlags?: Readonly<Record<string, unknown>>
 ): Promise<InlineJobResponse | DeferredJobResponse> {
   // U26 fix: ownership of onComplete is a contract. Once this function returns
   // OR throws, the caller MUST consider onComplete consumed — i.e. it has
@@ -1732,7 +1738,7 @@ async function awaitJobOrDefer(
       }
       assertUpstreamCliSubcommandArgs(cli, subcommandPath, args.slice(subcommandPath.length));
     } else {
-      assertUpstreamCliArgs(cli, args);
+      assertUpstreamCliArgs(cli, args, passthroughFlags);
     }
     assertUpstreamCliEnv(cli, env);
     assertFinalCliProcessAdmission(providerCommandName(cli), args, cli, env);
@@ -10890,7 +10896,7 @@ export async function handleClaudeRequest(
         "--add-dir",
         worktreeResolution.effectiveAddDirs
       );
-      assertUpstreamCliArgs("claude", args);
+      assertUpstreamCliArgs("claude", args, params.providerFlags);
       assertUpstreamCliEnv("claude", undefined);
       assertFinalCliProcessAdmission("claude", args, "claude");
       let admittedSession = existingSession;
@@ -11014,7 +11020,9 @@ export async function handleClaudeRequest(
             sessionBoundDedupArgs(buildClaudeMcpDedupArgs(args, mcpConfig), effectiveSessionId),
             undefined,
             mcpConfig?.cleanup ? mcpConfig.path : undefined,
-            mcpConfig?.cleanup ? mcpConfig.artifactScope : undefined
+            mcpConfig?.cleanup ? mcpConfig.artifactScope : undefined,
+            undefined,
+            params.providerFlags
           ),
       });
     },
@@ -11470,7 +11478,7 @@ export async function handleCodexRequest(
       "--add-dir",
       worktreeResolution.effectiveAddDirs
     );
-    assertUpstreamCliArgs("codex", args);
+    assertUpstreamCliArgs("codex", args, params.providerFlags);
     assertUpstreamCliEnv("codex", kit?.codexIsolation?.env);
     assertFinalCliProcessAdmission("codex", args, "codex", kit?.codexIsolation?.env);
   } catch (error) {
@@ -11652,7 +11660,12 @@ export async function handleCodexRequest(
               : undefined,
             kitSession?.gatewaySessionId,
             kitSession?.attemptKind === "durable" ? kitSession.attemptId : undefined,
-            sessionBoundDedupArgs(args, effectiveSessionId)
+            sessionBoundDedupArgs(args, effectiveSessionId),
+            undefined,
+            undefined,
+            undefined,
+            undefined,
+            params.providerFlags
           ),
       });
     },
@@ -11921,7 +11934,7 @@ export async function handleGeminiRequest(
         "--add-dir",
         worktreeResolution.effectiveAddDirs
       );
-      assertUpstreamCliArgs("gemini", args);
+      assertUpstreamCliArgs("gemini", args, params.providerFlags);
       assertUpstreamCliEnv("gemini", undefined);
       assertFinalCliProcessAdmission("agy", args, "gemini");
       if (effectiveSessionIdHint) {
@@ -12004,7 +12017,12 @@ export async function handleGeminiRequest(
         undefined,
         undefined,
         undefined,
-        sessionBoundDedupArgs(args, effectiveSessionIdHint)
+        sessionBoundDedupArgs(args, effectiveSessionIdHint),
+        undefined,
+        undefined,
+        undefined,
+        undefined,
+        params.providerFlags
       );
     },
     computeSuccessFacts: stdout => {
@@ -12196,7 +12214,7 @@ export async function handleGeminiRequestAsync(
       // Start job only after all session I/O succeeds. U23: forward outputFormat
       // so AsyncJobManager records it in the durable store (the manager also
       // surfaces it in the snapshot).
-      assertUpstreamCliArgs("gemini", args);
+      assertUpstreamCliArgs("gemini", args, params.providerFlags);
       assertUpstreamCliEnv("gemini", undefined);
       assertFinalCliProcessAdmission("agy", args, "gemini");
       if (effectiveSessionId) {
@@ -12656,7 +12674,7 @@ export async function handleGrokRequest(
         worktreeResolution.effectiveWorkingDir,
         "grok"
       );
-      assertUpstreamCliArgs("grok", args);
+      assertUpstreamCliArgs("grok", args, params.providerFlags);
       assertUpstreamCliEnv("grok", undefined);
       assertFinalCliProcessAdmission("grok", args, "grok");
       if (effectiveSessionId) {
@@ -12738,7 +12756,12 @@ export async function handleGrokRequest(
         undefined,
         undefined,
         undefined,
-        sessionBoundDedupArgs(args, effectiveSessionId)
+        sessionBoundDedupArgs(args, effectiveSessionId),
+        undefined,
+        undefined,
+        undefined,
+        undefined,
+        params.providerFlags
       );
     },
     // Grok json/streaming-json carries a provider-native session id and stop
@@ -12948,7 +12971,7 @@ export async function handleGrokRequestAsync(
       );
 
       // Start job only after all session I/O succeeds
-      assertUpstreamCliArgs("grok", args);
+      assertUpstreamCliArgs("grok", args, params.providerFlags);
       assertUpstreamCliEnv("grok", undefined);
       assertFinalCliProcessAdmission("grok", args, "grok");
       if (sessionResult.userProvidedSession && effectiveSessionId) {
@@ -13425,7 +13448,7 @@ export async function handleDevinRequest(
         requireStableCwd: sessionResult.resumeArgs.includes("--continue"),
         deferWorktree: true,
       });
-      assertUpstreamCliArgs("devin", args);
+      assertUpstreamCliArgs("devin", args, params.providerFlags);
       assertUpstreamCliEnv("devin", undefined);
       assertFinalCliProcessAdmission("devin", args, "devin");
       if (effectiveSessionId) {
@@ -13504,7 +13527,12 @@ export async function handleDevinRequest(
         undefined,
         undefined,
         undefined,
-        sessionBoundDedupArgs(args, effectiveSessionId)
+        sessionBoundDedupArgs(args, effectiveSessionId),
+        undefined,
+        undefined,
+        undefined,
+        undefined,
+        params.providerFlags
       );
     },
     decorateDeferred: deferred => {
@@ -13661,7 +13689,7 @@ export async function handleDevinRequestAsync(
         deferWorktree: true,
       });
 
-      assertUpstreamCliArgs("devin", args);
+      assertUpstreamCliArgs("devin", args, params.providerFlags);
       assertUpstreamCliEnv("devin", undefined);
       assertFinalCliProcessAdmission("devin", args, "devin");
       if (sessionResult.userProvidedSession && effectiveSessionId) {
@@ -14233,7 +14261,7 @@ export async function handleCursorRequest(
         "--add-dir",
         worktreeResolution.effectiveAddDirs
       );
-      assertUpstreamCliArgs("cursor", args);
+      assertUpstreamCliArgs("cursor", args, params.providerFlags);
       assertUpstreamCliEnv("cursor", undefined);
       assertFinalCliProcessAdmission("cursor-agent", args, "cursor");
       if (effectiveSessionId) {
@@ -14296,7 +14324,12 @@ export async function handleCursorRequest(
         undefined,
         undefined,
         undefined,
-        sessionBoundDedupArgs(args, effectiveSessionId)
+        sessionBoundDedupArgs(args, effectiveSessionId),
+        undefined,
+        undefined,
+        undefined,
+        undefined,
+        params.providerFlags
       );
     },
     computeSuccessFacts: () => undefined,
@@ -14467,7 +14500,7 @@ export async function handleCursorRequestAsync(
         worktreeResolution.effectiveAddDirs
       );
 
-      assertUpstreamCliArgs("cursor", args);
+      assertUpstreamCliArgs("cursor", args, params.providerFlags);
       assertUpstreamCliEnv("cursor", undefined);
       assertFinalCliProcessAdmission("cursor-agent", args, "cursor");
       if (sessionResult.userProvidedSession && effectiveSessionId) {
@@ -14940,7 +14973,7 @@ export async function handleMistralRequest(
           "--add-dir",
           []
         );
-        assertUpstreamCliArgs("mistral", args);
+        assertUpstreamCliArgs("mistral", args, params.providerFlags);
         assertUpstreamCliEnv("mistral", kitEnvFragment!);
         assertFinalCliProcessAdmission("vibe", args, "mistral", kitEnvFragment!);
         // Fail closed if the compiled context drifted from what the plan admitted.
@@ -14987,7 +15020,7 @@ export async function handleMistralRequest(
         "--add-dir",
         worktreeResolution.effectiveAddDirs
       );
-      assertUpstreamCliArgs("mistral", args);
+      assertUpstreamCliArgs("mistral", args, params.providerFlags);
       assertUpstreamCliEnv("mistral", mistralEnv);
       assertFinalCliProcessAdmission("vibe", args, "mistral", mistralEnv);
       if (effectiveSessionId) {
@@ -15093,7 +15126,8 @@ export async function handleMistralRequest(
           undefined,
           undefined,
           undefined,
-          kit?.mistralIsolation?.sessionDir
+          kit?.mistralIsolation?.sessionDir,
+          params.providerFlags
         );
       // The Kit heartbeat keeps the attempt lease alive until deferral or terminal
       // state; a null kitSession runs the dispatch directly.
@@ -15153,7 +15187,12 @@ export async function handleMistralRequest(
             undefined,
             undefined,
             undefined,
-            sessionBoundDedupArgs(retryArgs, effectiveSessionId)
+            sessionBoundDedupArgs(retryArgs, effectiveSessionId),
+            undefined,
+            undefined,
+            undefined,
+            undefined,
+            params.providerFlags
           );
           if (isDeferredResponse(result)) return result;
           prep.resolvedModel = recoveryModel;
@@ -15331,7 +15370,7 @@ export async function handleMistralRequestAsync(
       worktreeResolution.effectiveAddDirs
     );
 
-    assertUpstreamCliArgs("mistral", args);
+    assertUpstreamCliArgs("mistral", args, params.providerFlags);
     assertUpstreamCliEnv("mistral", mistralEnv);
     assertFinalCliProcessAdmission("vibe", args, "mistral", mistralEnv);
     if (sessionResult.userProvidedSession && effectiveSessionId) {
@@ -15721,7 +15760,7 @@ export async function handleCodexRequestAsync(
 
     // Start job only after all session I/O succeeds. If startJob throws before
     // registering the record, ownership stays here and we run it in the catch.
-    assertUpstreamCliArgs("codex", args);
+    assertUpstreamCliArgs("codex", args, params.providerFlags);
     assertUpstreamCliEnv("codex", undefined);
     assertFinalCliProcessAdmission("codex", args, "codex");
     if (!kitSession && createLegacySessionAfterAdmission && effectiveSessionId) {
@@ -16045,7 +16084,8 @@ async function dispatchRoutedCli(
       workspace: params.workspace,
       runtime,
     });
-    assertUpstreamCliArgs(cli, args);
+    // route_request exposes no providerFlags; this argv is entirely gateway-built.
+    assertUpstreamCliArgs(cli, args, undefined);
     assertUpstreamCliEnv(cli, cliEnv);
     assertFinalCliProcessAdmission(providerCommandName(cli), args, cli, cliEnv);
     const effectiveCompress = resolveEffectiveCompression(runtime.compression, {
@@ -16075,7 +16115,17 @@ async function dispatchRoutedCli(
       frHandoff.extractUsage,
       prep.stdinPayload,
       workspaceResolution.cwd,
-      effectiveCompress
+      effectiveCompress,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      undefined
     );
 
     if (isDeferredResponse(result)) {
@@ -16667,7 +16717,8 @@ async function dispatchRoutedCliAsync(
       workspace: params.workspace,
       runtime,
     });
-    assertUpstreamCliArgs(cli, args);
+    // route_request exposes no providerFlags; this argv is entirely gateway-built.
+    assertUpstreamCliArgs(cli, args, undefined);
     assertUpstreamCliEnv(cli, cliEnv);
     assertFinalCliProcessAdmission(providerCommandName(cli), args, cli, cliEnv);
     const effectiveCompress = resolveEffectiveCompression(runtime.compression, {
@@ -18353,7 +18404,11 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
           undefined,
           undefined,
           undefined,
-          ["fork"]
+          ["fork"],
+          undefined,
+          undefined,
+          undefined,
+          undefined
         );
 
         if (isDeferredResponse(result)) {
@@ -20108,7 +20163,7 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
             effectiveOutputFormat === "stream-json"
               ? resolveIdleTimeout("claude", idleTimeoutMs)
               : undefined;
-          assertUpstreamCliArgs("claude", args);
+          assertUpstreamCliArgs("claude", args, providerFlags);
           assertUpstreamCliEnv("claude", undefined);
           assertFinalCliProcessAdmission("claude", args, "claude");
           if (!kitSession && effectiveSessionId && !existingSession) {

@@ -200,7 +200,8 @@ function dispatchProviderJob(
     options.review ?? false,
     preflight.trusted
   );
-  assertUpstreamCliArgs(cli, invocation.args);
+  // Validation argv comes from buildProviderInvocation; no caller flags reach it.
+  assertUpstreamCliArgs(cli, invocation.args, undefined);
   const cwd = options.cwd ?? deps.resolveProviderCwd?.(cli);
   if (options.review) {
     const promptSha256 = createHash("sha256").update(prompt).digest("hex");

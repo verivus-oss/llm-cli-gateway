@@ -208,9 +208,23 @@ export interface ContractViolation {
   message: string;
 }
 
+export interface UpstreamArgsValidationOptions {
+  /**
+   * The caller's `providerFlags` record. Its keys are exempt from the
+   * unknown-flag rejection and its values give each one's arity.
+   */
+  passthroughFlags?: Readonly<Record<string, unknown>>;
+}
+
 export interface ContractValidationResult {
   ok: boolean;
   violations: ContractViolation[];
+  /**
+   * How many argv flags were accepted under fail_open because the bundled table
+   * does not describe them. A count, not the names: a caller-supplied token can
+   * be a secret and this result is logged and serialised.
+   */
+  unknownFlagCount?: number;
 }
 
 export interface SubcommandContractValidationResult extends ContractValidationResult {
@@ -3727,8 +3741,10 @@ export const UPSTREAM_CLI_CONTRACTS: Record<CliType, CliContract> = {
 
 export function validateUpstreamCliArgs(
   cli: CliType,
-  args: readonly string[]
+  args: readonly string[],
+  options: UpstreamArgsValidationOptions = {}
 ): ContractValidationResult {
+  const passthrough = options.passthroughFlags ?? {};
   const contract = UPSTREAM_CLI_CONTRACTS[cli];
   const violations: ContractViolation[] = [];
   let i = 0;
@@ -3737,6 +3753,7 @@ export function validateUpstreamCliArgs(
   const positionals: string[] = [];
   const endOfOptionsPositionals: string[] = [];
   const presentFlags = new Set<string>();
+  let unknownFlagCount = 0;
 
   if (contract.command) {
     if (args[0] !== contract.command.requiredFirstArg) {
@@ -3780,12 +3797,28 @@ export function validateUpstreamCliArgs(
     if (!flag) {
       if (arg === contract.stdinPromptMarker || !arg.startsWith("-")) {
         positionals.push(arg);
-      } else {
+        continue;
+      }
+      // p1 / unparseable_capability = fail_open, but ONLY for a flag the caller
+      // named through providerFlags. The bundled table describes one machine, so
+      // it cannot say whether the customer's binary accepts this; the binary
+      // decides. Gateway-built argv stays closed, because there a flag missing
+      // from the table is our bug, not their capability.
+      if (!Object.hasOwn(passthrough, flagName)) {
         violations.push({
           cli,
           index: i,
           message: `Unsupported ${cli} CLI flag for bundled upstream contract`,
         });
+        continue;
+      }
+      unknownFlagCount += 1;
+      // The caller's value tells us the arity exactly, so nothing is guessed.
+      // Without consuming it the value lands in the positional count and trips
+      // argv_shape_bounds, refusing the flag by a second route.
+      if (inlineValue === undefined && passthrough[flagName] !== true) {
+        const next = args[i + 1];
+        if (next !== undefined && next !== "--" && !next.startsWith("-")) i += 1;
       }
       continue;
     }
@@ -3901,11 +3934,25 @@ export function validateUpstreamCliArgs(
     });
   }
 
-  return { ok: violations.length === 0, violations };
+  return {
+    ok: violations.length === 0,
+    violations,
+    ...(unknownFlagCount > 0 ? { unknownFlagCount } : {}),
+  };
 }
 
-export function assertUpstreamCliArgs(cli: CliType, args: readonly string[]): void {
-  const result = validateUpstreamCliArgs(cli, args);
+/**
+ * `passthroughFlags` is REQUIRED, not optional. Yesterday's pass-through surface
+ * shipped green because `prepare*Request` builds argv and something else
+ * validates it; a defaulted parameter would let the next call site repeat that
+ * exactly. Pass `undefined` where the argv is entirely gateway-built.
+ */
+export function assertUpstreamCliArgs(
+  cli: CliType,
+  args: readonly string[],
+  passthroughFlags: Readonly<Record<string, unknown>> | undefined
+): void {
+  const result = validateUpstreamCliArgs(cli, args, { passthroughFlags });
   if (!result.ok) {
     const details = result.violations.map(v => v.message).join("; ");
     throw new Error(`Upstream ${cli} CLI contract violation: ${details}`);
