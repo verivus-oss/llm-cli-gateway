@@ -18,7 +18,8 @@
 #            and fails with a residual-reference report if any emitter survives.
 #            See docs/plans/provider-contract-removal-autoapply.dag.toml.
 #            An earlier version of this file said removals are never
-#            auto-applied. That stopped being true in rc.4 and the text was
+#            auto-applied. That stopped being true in 3.1.0-rc.5 (commit
+#            c19f4a3, 2026-08-14) and the text was
 #            left behind, so operators waited for a hand edit the tooling had
 #            already performed.
 #
