@@ -173,6 +173,102 @@ const PIPED_PROVIDER_PROSE = new RegExp(
   `(?:${PROVIDER_NAME})(?:\\s*\\|\\s*(?:${PROVIDER_NAME}|grok-api|[a-z]+-api)){2,}`
 );
 
+// ---------------------------------------------------------------------------
+// CENSUS RATCHET: hand-authored provider data.
+//
+// The other patterns in this file are per-file regexes. This one cannot be,
+// because a new hand-authored table would live in the SAME file as the
+// grandfathered one (src/provider-codegen.ts), so a file allowlist would admit
+// it. What is being ratcheted is the SET of hand-authored artefacts, repo-wide.
+//
+// WHY THIS EXISTS, which is the part that matters:
+//
+//   When an existing mechanism and a stated principle disagree, the mechanism
+//   wins, because a mechanism tells you what to type next and a principle does
+//   not. `pass-through` was documented when the rebaseliner's red test said
+//   "delete the parameter", and the red test won: capability was removed from
+//   customers three times. The pass-through POLICY had just been written when a
+//   half-finished migration in the tree (grok on a generation table, six
+//   providers not) said "complete this pattern", and the pattern won: a
+//   CURSOR_FLAG_GENERATION table was written with a green parity gate before
+//   the contradiction surfaced.
+//
+//   The rule has now been written twice and lost twice. So it stops being prose
+//   and becomes a mechanism: authoring one of these fails the build, and the
+//   failure says what to do instead.
+//
+// The set must be updated in BOTH directions. An addition is the defect this
+// guards. A deletion must also update the set, or the removed name stays
+// grandfathered and re-adding it later passes silently.
+// ---------------------------------------------------------------------------
+
+const HAND_AUTHORED_PROVIDER_DATA = [
+  {
+    kind: "generation-table",
+    regex: /export const ([A-Z0-9_]+_FLAG_GENERATION)\b/g,
+    grandfathered: new Set(["GROK_FLAG_GENERATION"]),
+    guidance:
+      "A generation table is hand-authored provider data: it pins the flag set to whatever the author typed, which is wrong on any customer machine that differs. Discovery must produce this. See docs/plans/gateway-passthrough-policy.dag.toml (n2, n3).",
+  },
+  {
+    kind: "provider-argv-builder",
+    regex: /export function (prepare[A-Z][A-Za-z]*Request)\b/g,
+    grandfathered: new Set([
+      // The seven CLI argv builders, ~1400 lines, all deleted by n3.
+      "prepareClaudeRequest",
+      "prepareCodexRequest",
+      "prepareGeminiRequest",
+      "prepareGrokRequest",
+      "prepareMistralRequest",
+      "prepareDevinRequest",
+      "prepareCursorRequest",
+      // Not CLI argv builders. Kept in the census anyway so the set is an exact
+      // inventory rather than a judgement call at each edit.
+      "prepareApiRequest",
+      "prepareCodexForkRequest",
+    ]),
+    guidance:
+      "A per-provider argv function can only emit what a human typed at build time. Route argv through the generic builder fed by discovery. See docs/plans/gateway-passthrough-policy.dag.toml (n3).",
+  },
+];
+
+function censusHandAuthoredProviderData(files) {
+  const problems = [];
+  for (const entry of HAND_AUTHORED_PROVIDER_DATA) {
+    const found = new Map();
+    for (const { relPath, content } of files) {
+      if (relPath.includes("__tests__")) continue;
+      for (const m of content.matchAll(entry.regex)) {
+        found.set(m[1], relPath);
+      }
+    }
+    for (const [name, relPath] of found) {
+      if (!entry.grandfathered.has(name)) {
+        problems.push({
+          kind: entry.kind,
+          direction: "added",
+          name,
+          relPath,
+          guidance: entry.guidance,
+        });
+      }
+    }
+    for (const name of entry.grandfathered) {
+      if (!found.has(name)) {
+        problems.push({
+          kind: entry.kind,
+          direction: "removed",
+          name,
+          relPath: "(gone)",
+          guidance:
+            "Deleted, which is the goal. Remove it from `grandfathered` in this script so the ratchet tightens; leaving it there would let the name be re-added later without failing.",
+        });
+      }
+    }
+  }
+  return problems;
+}
+
 const PATTERNS = [
   { kind: "literal-provider-array", regex: LITERAL_PROVIDER_ARRAY },
   { kind: "piped-provider-prose", regex: PIPED_PROVIDER_PROSE },
@@ -225,9 +321,14 @@ function walk(dir) {
 
 const newViolations = [];
 const legacyHits = [];
+// Every scanned file, for the repo-wide census below. Collected BEFORE the
+// per-file allowlist skip, because a hand-authored generation table living in an
+// always-allowed file must still be counted.
+const scannedFiles = [];
 
 for (const absPath of walk(srcRoot)) {
   const relPath = relative(repoRoot, absPath).split("\\").join("/");
+  scannedFiles.push({ relPath, content: readFileSync(absPath, "utf8") });
   if (isAlwaysAllowed(relPath)) continue;
 
   const content = readFileSync(absPath, "utf8");
@@ -262,6 +363,22 @@ if (legacyHits.length > 0) {
   for (const hit of legacyHits) {
     log(`    ${hit.relPath}:${hit.line} [${hit.kind}] drained by ${hit.phase}`);
   }
+}
+
+const censusProblems = censusHandAuthoredProviderData(scannedFiles);
+if (censusProblems.length > 0) {
+  log("");
+  log("  FAIL: hand-authored provider data (the flag set belongs to the customer's binary):");
+  for (const c of censusProblems) {
+    const verb = c.direction === "added" ? "NEW" : "GONE (update the set)";
+    log(`    ${verb} [${c.kind}] ${c.name}  ${c.relPath}`);
+    log(`      ${c.guidance}`);
+  }
+  log("");
+  log("  A hand-authored list of a provider's flags is wrong on any machine that");
+  log("  differs from the author's, which is every customer machine. Discovery");
+  log("  produces this data; the generic builder consumes it.");
+  process.exit(1);
 }
 
 if (newViolations.length > 0) {

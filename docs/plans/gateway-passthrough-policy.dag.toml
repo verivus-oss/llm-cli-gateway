@@ -466,7 +466,22 @@ do instead.
 A corollary worth stating: any deliberate intermediate state must carry its own
 expiry in the tree, next to the artefact, or it will be read as the destination.
 """
-enforced_by = "n3.builder-consumes-discovery, plus a provider:surfaces:check extension"
+enforced_by = "scripts/provider-surfaces-check.mjs census ratchet (SHIPPED 2026-08-18), inside npm run check"
+enforcement_detail = """
+A repo-wide SET ratchet, not a per-file regex: a new hand-authored table would
+live in the same file as the grandfathered one, so a file allowlist would admit
+it. Two artefact classes are censused, `*_FLAG_GENERATION` tables and
+`prepare<X>Request` argv builders, against an exact grandfathered set.
+
+It fails in BOTH directions, deliberately. An addition is the defect. A deletion
+must also update the set, or the removed name stays grandfathered and re-adding
+it later passes silently.
+
+Verified by three mutation probes rather than assumed:
+  adding CURSOR_FLAG_GENERATION      -> FAIL (the exact 2026-08-18 mistake)
+  adding prepareHermesRequest        -> FAIL
+  deleting prepareCursorRequest      -> FAIL, "GONE (update the set)"
+"""
 
 [[invariant]]
 id = "gateway-never-refuses-what-the-binary-accepts"
