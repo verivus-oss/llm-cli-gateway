@@ -173,3 +173,96 @@ export function allFlags(commands: readonly DiscoveredCommand[]): string[] {
   for (const c of commands) for (const f of c.flags) out.add(f);
   return [...out].sort();
 }
+
+// ---------------------------------------------------------------------------
+// SOURCE 3: the invalid-value probe.
+//
+// Answers two questions completions cannot: does this flag EXIST on the
+// installed binary, and does it carry a REAL value set? That second question is
+// the one that matters most, because a contract `values` list is enforced as a
+// REJECTION list, so an invented one refuses input the binary accepts. grok
+// `--effort` carried a five-level enum the binary has never had.
+//
+// The discriminator, verified against grok 1.0.4:
+//
+//   grok --not-a-real-flag ZZZ  -> "unexpected argument"           ABSENT
+//   grok --permission-mode ZZZ  -> "invalid value ... [possible values: ...]"
+//                                                                  PRESENT + enum
+//   grok --compaction-mode ZZZ  -> falls through to another error   PRESENT, no enum
+//
+// The control is load bearing and easy to omit. clap reports an enum violation
+// IN PREFERENCE TO the missing-value error, so for a flag that has a value set
+// the enum message wins. The ABSENCE of that message is the signal, which means
+// a probe run without a known-enum control cannot distinguish "no constraint"
+// from "the constraint fired but a different error printed first".
+// ---------------------------------------------------------------------------
+
+/** What a probe concluded about one flag on the installed binary. */
+export type FlagProbeVerdict =
+  /** The binary rejected the flag itself. */
+  | { kind: "absent" }
+  /** The flag exists and constrains its value; these are the accepted values. */
+  | { kind: "present"; values: readonly string[] }
+  /** The flag exists and accepted an arbitrary value: no enum to enforce. */
+  | { kind: "present"; values: null }
+  /**
+   * The probe could not tell. Under the fail-open policy this must stay
+   * DISTINCT from `absent`: absent is evidence about the binary, unparsed is
+   * evidence about our parser, and treating the second as the first is how a
+   * discovery system starts silently removing capability.
+   */
+  | { kind: "unparsed"; reason: string };
+
+/** Interpret a CLI's stderr from a deliberately-invalid probe invocation. */
+export function interpretProbeOutput(stderr: string): FlagProbeVerdict {
+  const text = stderr.trim();
+  if (!text) return { kind: "unparsed", reason: "probe produced no diagnostic output" };
+
+  // clap: `error: unexpected argument '--nope' found`
+  if (/unexpected argument/i.test(text)) return { kind: "absent" };
+
+  // clap: `invalid value 'ZZZ' for '--mode <MODE>'\n  [possible values: a, b]`
+  const possible = /\[possible values:\s*([^\]]+)\]/i.exec(text);
+  if (possible) {
+    const values = possible[1]
+      .split(",")
+      .map(v => v.trim())
+      .filter(Boolean);
+    return { kind: "present", values };
+  }
+  // An invalid-value complaint with no enumerated set still proves the flag
+  // exists and constrains its value; we just do not know the set.
+  if (/invalid value/i.test(text)) {
+    return { kind: "unparsed", reason: "flag constrains its value but did not enumerate the set" };
+  }
+
+  // Anything else means the parser moved PAST our flag and failed on the
+  // deliberately-missing prompt instead, so the flag was accepted.
+  return { kind: "present", values: null };
+}
+
+/**
+ * Build the argv for a safe probe of one flag.
+ *
+ * SAFETY IS STRUCTURAL, NOT A CONVENTION. The returned argv always includes the
+ * provider's headless flag with NO value, so the CLI fails at ARGUMENT PARSING
+ * before it can dispatch. The flag under test is answered by which parse error
+ * comes back, and the command can never reach execution whatever the flag would
+ * have done.
+ *
+ * This is not caution to remember. `claude completion` reached the model during
+ * this investigation, because `completion` is not a claude subcommand and so
+ * parsed as a PROMPT: an enumeration became a billed inference call. Cost,
+ * quota (gemini already returns 429 in production), latency, side effects on a
+ * valid invocation, non-determinism, and TUI hang risk all point the same way.
+ *
+ * `headlessFlagRequiringValue` MUST be a flag that takes a value, or the
+ * invocation may be well-formed and run.
+ */
+export function buildProbeArgv(
+  flag: string,
+  headlessFlagRequiringValue: string,
+  sentinel = "ZZZ_GATEWAY_PROBE"
+): string[] {
+  return [flag, sentinel, headlessFlagRequiringValue];
+}

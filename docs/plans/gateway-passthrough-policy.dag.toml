@@ -354,10 +354,27 @@ omits `--output-format` when the value is `text`, so a naive value rule would
 change argv).
 """
 verification = """
-Byte-parity against the hand-written path DURING the cutover only, and the test
-must say so. It is a migration instrument, not a standing gate: after deletion
-it compares the generator with itself, proven above. Do not carry the parity
-docstring's current claim forward, and fix it on the grok test.
+APPROVED SEQUENCE, per provider, 2026-08-18. Deviating from it risks a silent
+argv change against live production traffic:
+
+  1. Discovery feeds the generic builder for that provider.
+  2. Byte-parity goes GREEN against the still-present hand-written path.
+  3. THEN delete the hand-written path.
+  4. Accept that the parity test retires with it, and delete the test too rather
+     than leaving a green tautology behind.
+
+Step 4 is not optional tidying. A parity test that outlives its hand-written
+counterpart compares the generator with itself and passes unconditionally, which
+is worse than no test: it reports coverage that does not exist. Proven on grok,
+where corrupting a real behaviour rule (`--tools` from `csv_if_nonempty` to
+`repeat_if_nonempty`) left all 20 parity tests green. Fix the grok parity
+docstring's claim at the same time; it still asserts a guarantee it lost at its
+own cutover.
+
+What replaces parity after the cutover is not another argv test. It is the fact
+that argv is DERIVED from discovery, so the question stops being "does the
+builder match the hand-written path" and becomes "does discovery match the
+binary", which is answered by probing the binary, not by a fixture.
 """
 
 [[node]]
