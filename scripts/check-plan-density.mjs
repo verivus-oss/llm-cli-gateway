@@ -2,7 +2,7 @@
 /**
  * Plan-density ratchet.
  *
- * docs/plans is 16,699 lines across 33 files, and one recent program put 2,499
+ * docs/plans is 16,699 lines across 33 files, and one recent program put 1,799
  * lines there against 1,095 lines of src. A plan file is a map: it states the
  * work and links its evidence. Measurements, alternatives considered and
  * reasoning history go in docs/evidence/<topic>-<date>.md, which the

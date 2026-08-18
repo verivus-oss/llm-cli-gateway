@@ -270,7 +270,8 @@ Sessions persist conversation context across requests:
 ## Writing volume (enforced, not advisory)
 
 Every other writing rule here governs style. None governed VOLUME, and one
-recent program shipped 5,665 lines of which 2,499 were plan prose against 1,095
+recent program shipped 5,665 lines of which 1,799 were plan prose (2,499 counting
+all of `docs/`) against 1,095
 of `src`. These are numbers because "concise" is not enforceable and a number is.
 
 | artefact                | limit                                                                             | enforced by                               |
