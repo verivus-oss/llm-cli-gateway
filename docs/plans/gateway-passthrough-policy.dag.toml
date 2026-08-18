@@ -313,6 +313,30 @@ Layered, measured on the installed binaries 2026-08-18:
        --not-a-real-flag ZZZ  -> "unexpected argument"           NOT present
        --permission-mode ZZZ  -> "invalid value ... [values: ]"  present, HAS enum
        --compaction-mode ZZZ  -> falls through to another error  present, no enum
+
+MEASURED 2026-08-18, and both findings changed the code:
+
+  SOURCE 2 IS ONE REGEX AND MUST READ BOTH STREAMS. It does not parse help, it
+  nominates every `--token` and lets the probe adjudicate. Over-collection is
+  free (a false candidate probes absent, and absence subtracts nothing);
+  missing a real flag is the only error that costs anything. Candidates from
+  `--help`: grok 48, claude 65, gemini 29, cursor-agent 26, codex 23, vibe 21,
+  agy 20, devin 12. agy is a Go `flag` binary and writes usage to STDERR, so a
+  stdout-only read reports it as having no flags at all.
+
+  THE ANCHOR MASKS THE VERDICT ON THREE OF FOUR DIALECTS. clap validates left
+  to right, so reaching the anchor's error PROVES the flag under test parsed
+  clean. argparse, Go flag and commander report an unknown flag LAST, after the
+  missing-argument check, so the anchor error comes back for a real flag and a
+  fictional one alike: `agy --effort=ZZZ --model`, `--mode=ZZZ --model` and
+  `--not-real-xyz=ZZZ --model` return BYTE-IDENTICAL stderr. Those three anchor
+  messages therefore return `unparsed`, never `present`, and so does any
+  message the interpreter does not recognise. Reading them as `present`
+  fabricated arity for every agy candidate until it was measured.
+
+  What survives the mask is still worth having: vibe yields real value sets
+  (`--output` -> text, json, streaming) and real arity (`--yolo` -> none),
+  because argparse does report VALUE errors first. Only absence is masked.
 """
 constraint = """
 EVERY PROBE MUST BE STRUCTURALLY INCAPABLE OF EXECUTING. Construct each so the

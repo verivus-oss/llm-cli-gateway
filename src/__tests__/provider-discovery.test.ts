@@ -18,6 +18,7 @@ import {
   buildProbeArgv,
   interpretProbeOutput,
   parseClapBashCompletion,
+  scrapeCandidateFlags,
 } from "../provider-discovery.js";
 
 /**
@@ -249,5 +250,159 @@ describe("invalid-value probe", () => {
     // docs/plans/gateway-passthrough-policy.dag.toml.
     const ABSENT_HERE = "error: unexpected argument '--best-of-n' found";
     expect(interpretProbeOutput(ABSENT_HERE)).toEqual({ kind: "absent" });
+  });
+});
+
+/**
+ * Discovery source 2: the help-text scrape.
+ *
+ * Fixtures are verbatim excerpts of real `--help` output captured 2026-08-18,
+ * chosen for the two things a hand-written approximation would smooth over: agy
+ * writes its usage to STDERR in Go `flag` style, and vibe wraps a flag name
+ * across a line break mid-token.
+ */
+const AGY_HELP_STDERR_FIXTURE = `Usage of agy:
+  --add-dir                       Add a directory to the workspace (repeatable) (default [])
+  --agent                         Agent for the current CLI session
+  -c                              Short alias for --continue
+  --continue                      Continue the most recent conversation
+`;
+
+const VIBE_HELP_WRAPPED_FIXTURE = `  -p, --prompt [TEXT]   Run in programmatic mode: send prompt, output
+                        response, and exit. Tool approval follows the selected
+                        --agent (or 'default_agent' config); pass --auto-
+                        approve or --yolo to allow all tool calls.
+  --max-turns N         Maximum number of assistant turns (only applies in
+`;
+
+describe("help scrape", () => {
+  it("nominates every long flag written in the text", () => {
+    expect(scrapeCandidateFlags(AGY_HELP_STDERR_FIXTURE)).toEqual([
+      "--add-dir",
+      "--agent",
+      "--continue",
+    ]);
+  });
+
+  it("reads flags out of prose, not only out of a usage column", () => {
+    // `--yolo` appears ONLY in a sentence here. A help parser that understood
+    // the format would attribute it to nothing and drop it; the scrape does not
+    // understand the format, which is why it keeps it.
+    expect(scrapeCandidateFlags(VIBE_HELP_WRAPPED_FIXTURE)).toContain("--yolo");
+  });
+
+  it("OVER-COLLECTION IS THE DESIGN: a line-wrapped token still nominates", () => {
+    // vibe wraps `--auto-approve` after the hyphen. The scrape yields `--auto`,
+    // which is not a flag. That costs one probe, comes back `absent`, and under
+    // absence-is-never-subtractive removes nothing. Missing a REAL flag is the
+    // failure that matters, and this direction of error is the safe one.
+    const candidates = scrapeCandidateFlags(VIBE_HELP_WRAPPED_FIXTURE);
+    expect(candidates).toContain("--auto");
+    expect(candidates).not.toContain("--auto-");
+  });
+
+  it("does not nominate a bare end-of-options marker", () => {
+    expect(scrapeCandidateFlags("run -- everything after is positional")).toEqual([]);
+  });
+
+  it("does not nominate short flags, which the probe cannot safely adjudicate", () => {
+    expect(scrapeCandidateFlags("  -p, --print   run once")).toEqual(["--print"]);
+  });
+
+  it("deduplicates and sorts, so the probe runs once per distinct candidate", () => {
+    expect(scrapeCandidateFlags("--model x --agent y --model z")).toEqual(["--agent", "--model"]);
+  });
+
+  it("EMPTY IS NOT ABSENT: no candidates is a fact about the text, not the binary", () => {
+    // The caller must not record this as "the binary has no flags". agy on
+    // stdout alone produces exactly this, and it has 20 flags.
+    expect(scrapeCandidateFlags("")).toEqual([]);
+  });
+
+  it("STREAM TRAP: agy's help is on stderr, so a stdout-only read finds nothing", () => {
+    const stdout = "";
+    const stderr = AGY_HELP_STDERR_FIXTURE;
+    expect(scrapeCandidateFlags(stdout)).toEqual([]);
+    expect(scrapeCandidateFlags(stdout + stderr).length).toBeGreaterThan(0);
+  });
+});
+
+/**
+ * Discovery source 3, the other three dialects.
+ *
+ * Every string here is verbatim stderr from the installed binaries, captured
+ * 2026-08-18. The interpreter matches on the MESSAGE, never on which provider
+ * produced it, so these are dialect tests and not provider tests.
+ */
+describe("probe interpretation across dialects", () => {
+  it("argparse: recovers the real value set", () => {
+    // vibe --output=ZZZ --agent
+    const v = interpretProbeOutput(
+      "vibe: error: argument --output: invalid choice: 'ZZZ' (choose from 'text', 'json', 'streaming')"
+    );
+    expect(v).toEqual({ kind: "present", arity: "one", values: ["text", "json", "streaming"] });
+  });
+
+  it("argparse: a boolean given a value reads as arity none", () => {
+    // vibe --yolo=ZZZ --agent
+    expect(
+      interpretProbeOutput(
+        "vibe: error: argument --auto-approve/--yolo: ignored explicit argument 'ZZZ'"
+      )
+    ).toEqual({ kind: "present", arity: "none", values: null });
+  });
+
+  it("argparse: an unknown flag reads as absent", () => {
+    expect(interpretProbeOutput("vibe: error: unrecognized arguments: --not-real-xyz=ZZZ")).toEqual(
+      { kind: "absent" }
+    );
+  });
+
+  it("Go flag: an unknown flag reads as absent", () => {
+    expect(interpretProbeOutput("flags provided but not defined: -not-real-xyz")).toEqual({
+      kind: "absent",
+    });
+  });
+
+  it("commander: an unknown flag reads as absent", () => {
+    expect(interpretProbeOutput("error: unknown option '--not-real-xyz'")).toEqual({
+      kind: "absent",
+    });
+  });
+
+  it("clap reaching the anchor PROVES the flag parsed clean", () => {
+    // clap validates left to right and reports the first failure, so the
+    // anchor's error can only surface once the flag under test was accepted.
+    // Measured on grok: --permission-mode and --not-real-xyz never get here.
+    expect(
+      interpretProbeOutput("error: a value is required for '--model <MODEL>' but none was supplied")
+    ).toEqual({ kind: "present", arity: "one", values: null });
+  });
+
+  it("THE ANCHOR MASK: the other three dialects reaching the anchor proves NOTHING", () => {
+    // The defect this test exists to pin. argparse, Go flag and commander
+    // report an unknown flag LAST, after the missing-argument check, so the
+    // anchor error is what comes back for a real flag and a fictional one
+    // alike. Measured on agy, where these three return byte-identical stderr:
+    //
+    //   agy --effort=ZZZ --model        -> flag needs an argument: -model
+    //   agy --mode=ZZZ --model          -> flag needs an argument: -model
+    //   agy --not-real-xyz=ZZZ --model  -> flag needs an argument: -model
+    //
+    // Reading that as `present` fabricates arity for a flag that does not
+    // exist, which is what happened to every agy candidate before this was
+    // measured. `unparsed` is the only honest verdict.
+    for (const anchorError of [
+      "flag needs an argument: -model", // Go flag
+      "vibe: error: argument --agent: expected one argument", // argparse
+      "error: option '--model <model>' argument missing", // commander
+    ]) {
+      expect(interpretProbeOutput(anchorError).kind, anchorError).toBe("unparsed");
+    }
+  });
+
+  it("declines to guess on a message it does not recognise", () => {
+    // Fail-open still offers the flag; what it must not do is invent arity.
+    expect(interpretProbeOutput("error: something entirely new").kind).toBe("unparsed");
   });
 });

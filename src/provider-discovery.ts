@@ -175,6 +175,75 @@ export function allFlags(commands: readonly DiscoveredCommand[]): string[] {
 }
 
 // ---------------------------------------------------------------------------
+// SOURCE 2: the help-text scrape.
+//
+// Deliberately the dumbest step in the pipeline. It does not parse help, does
+// not detect a dialect, and is not trying to be right. It collects every
+// `--token` in the text and hands the lot to the probe, which asks the binary
+// itself which of them are real. One regex, no per-provider branch, no format
+// understanding, because the intelligence belongs in the binary and the data
+// belongs in a table; anything in between is plumbing that would otherwise need
+// maintaining per provider per version, which is the hand-authored provider
+// data the policy forbids.
+//
+// OVER-COLLECTION IS THE DESIGN, NOT A TOLERATED FLAW. A candidate scraped out
+// of prose costs exactly one probe, and the probe answers `absent`, and
+// `absence-is-never-subtractive` means an absent verdict removes nothing. The
+// error that would matter is the other direction, missing a real flag, and a
+// regex that reads every token cannot miss one that is written down. Real
+// example, vibe's help wraps mid-flag: "pass --auto-\napprove or --yolo",
+// yielding the non-flag `--auto`. It probes absent and nothing happens.
+//
+// READ BOTH STREAMS. Candidates from `--help`, measured 2026-08-18:
+//
+//                    stdout only   stdout+stderr
+//       grok               48            48
+//       codex              23            23
+//       claude             65            65
+//       vibe               21            21
+//       devin              12            12
+//       cursor-agent       26            26
+//       gemini             29            29
+//       agy                 0            20
+//
+// agy is a Go `flag` binary and Go writes usage to STDERR, so a stdout-only
+// read reports a provider with no flags at all rather than a read that failed.
+// That is the fail-open distinction at its most concrete: zero candidates from
+// an empty read is evidence about our plumbing, never about the binary, and a
+// caller that conflates the two removes every agy flag on the strength of
+// having looked at the wrong file descriptor.
+// ---------------------------------------------------------------------------
+
+/**
+ * Every `--token`, in one regex.
+ *
+ * Requires a leading alphanumeric, so a bare `--` end-of-options marker is not
+ * a candidate. Requires a trailing alphanumeric, so a token broken by a line
+ * wrap (`--auto-`) yields `--auto` rather than a name no parser would accept; a
+ * trailing hyphen is a token boundary, not a fact about the dialect.
+ *
+ * Consequence worth stating: grok emits a malformed `----reauthenticate` in its
+ * own completion output, and this yields `--reauthenticate` from it. Source 1
+ * keeps that token verbatim on purpose. Here the scrape is only nominating
+ * candidates, both spellings are cheap to probe, and the binary settles it.
+ */
+const CANDIDATE_FLAG = /--[A-Za-z0-9](?:[A-Za-z0-9-]*[A-Za-z0-9])?/g;
+
+/**
+ * Nominate candidate flags from a binary's help output.
+ *
+ * Pass BOTH stdout and stderr concatenated; see the stream note above.
+ *
+ * Returns candidates, not capability. An empty result means this text named no
+ * flags, which is NOT the same fact as "the binary has no flags" and must never
+ * be recorded as one. The caller owns that distinction because only the caller
+ * knows whether the read succeeded.
+ */
+export function scrapeCandidateFlags(helpText: string): string[] {
+  return [...new Set(helpText.match(CANDIDATE_FLAG) ?? [])].sort();
+}
+
+// ---------------------------------------------------------------------------
 // SOURCE 3: the invalid-value probe.
 //
 // Answers two questions completions cannot: does this flag EXIST on the
@@ -216,38 +285,115 @@ export type FlagProbeVerdict =
    */
   | { kind: "unparsed"; reason: string };
 
-/** Interpret a CLI's stderr from a deliberately-invalid probe invocation. */
+/**
+ * Interpret a CLI's stderr from a deliberately-invalid probe invocation.
+ *
+ * FOUR DIALECTS, ONE FUNCTION, NO PER-PROVIDER BRANCH. Every pattern below is
+ * matched on the MESSAGE, not on who emitted it, so a provider that switches
+ * argument parser between versions is handled without a code change. Measured
+ * verbatim on the installed binaries 2026-08-18:
+ *
+ *   clap       grok 1.0.4, devin 3000.4.25
+ *   argparse   vibe 2.14.1
+ *   Go flag    agy
+ *   commander  cursor-agent
+ *
+ * THE ANCHOR CUTS BOTH WAYS, which is the finding that shaped this function.
+ * The probe argv is `[--flag=ZZZ, --anchor]` and the anchor is missing its
+ * value, so every probe produces an error from SOMEWHERE. Which error surfaces
+ * depends on the dialect's reporting order, and the two orders mean opposite
+ * things:
+ *
+ *   clap validates left to right and reports the first failure. Reaching the
+ *   anchor's "a value is required" therefore PROVES the flag under test parsed
+ *   clean. Measured: `--permission-mode=ZZZ --model` returns the enum error,
+ *   `--not-real-xyz=ZZZ --model` returns "unexpected argument", and only
+ *   `--effort=ZZZ --model` reaches the anchor.
+ *
+ *   argparse, Go flag and commander report an UNKNOWN FLAG last, after the
+ *   missing-argument check. Reaching the anchor there proves nothing: the flag
+ *   may have parsed clean, or may not exist at all. Measured on agy, where
+ *   `--effort=ZZZ --model`, `--mode=ZZZ --model` and `--not-real-xyz=ZZZ
+ *   --model` return BYTE-IDENTICAL stderr.
+ *
+ * So those three anchor messages return `unparsed`, not `present`. Reading them
+ * as `present` is not a harmless over-report: it fabricates arity for a flag
+ * that does not exist, and it did exactly that for every agy candidate before
+ * this was measured.
+ *
+ * The fall-through is `unparsed` for the same reason. Under fail-open an
+ * unparsed flag is still offered to the caller and still adjudicated by the
+ * binary, so nothing is lost by declining to guess; inventing `arity: "one"`
+ * for an unrecognised message loses the distinction the whole policy rests on.
+ */
 export function interpretProbeOutput(stderr: string): FlagProbeVerdict {
   const text = stderr.trim();
   if (!text) return { kind: "unparsed", reason: "probe produced no diagnostic output" };
 
-  // clap: `error: unexpected argument '--nope' found`
-  if (/unexpected argument/i.test(text)) return { kind: "absent" };
+  // ABSENT: the parser rejected the flag itself.
+  //   clap       error: unexpected argument '--nope' found
+  //   argparse   vibe: error: unrecognized arguments: --nope=ZZZ
+  //   Go flag    flags provided but not defined: -nope
+  //   commander  error: unknown option '--nope'
+  if (
+    /unexpected argument/i.test(text) ||
+    /unrecognized arguments?:/i.test(text) ||
+    /flags? provided but not defined/i.test(text) ||
+    /unknown option/i.test(text)
+  )
+    return { kind: "absent" };
 
-  // The flag exists but takes NO value, so supplying one is "unexpected value".
-  // Only the inline `=` form surfaces this; see buildProbeArgv.
-  // clap: `unexpected value 'ZZZ' for '--always-approve' found; no more were expected`
-  if (/unexpected value/i.test(text)) return { kind: "present", arity: "none", values: null };
+  // PRESENT, ARITY NONE: the flag exists and takes no value, so supplying one
+  // is itself the error. Only the inline `=` form surfaces this; see
+  // buildProbeArgv.
+  //   clap       unexpected value 'ZZZ' for '--always-approve' found; no more were expected
+  //   argparse   argument --auto-approve/--yolo: ignored explicit argument 'ZZZ'
+  if (/unexpected value/i.test(text) || /ignored explicit argument/i.test(text))
+    return { kind: "present", arity: "none", values: null };
 
-  // clap: `invalid value 'ZZZ' for '--mode <MODE>'\n  [possible values: a, b]`
-  const possible = /\[possible values:\s*([^\]]+)\]/i.exec(text);
-  if (possible) {
-    const values = possible[1]
-      .split(",")
-      .map(v => v.trim())
-      .filter(Boolean);
-    return { kind: "present", arity: "one", values };
-  }
-  // An invalid-value complaint with no enumerated set still proves the flag
-  // exists and constrains its value; we just do not know the set.
-  if (/invalid value/i.test(text)) {
-    // Constrains its value, so arity is one, but the set was not disclosed.
+  // PRESENT, ARITY ONE, WITH A REAL VALUE SET. This is the verdict that matters
+  // most: `values` is enforced as a rejection list, so an invented set refuses
+  // input the binary accepts, which is the grok `--effort` defect exactly.
+  //   clap       invalid value 'ZZZ' for '--mode <MODE>'
+  //                [possible values: a, b]
+  //   argparse   argument --output: invalid choice: 'ZZZ' (choose from 'text', 'json')
+  const clapValues = /\[possible values:\s*([^\]]+)\]/i.exec(text);
+  if (clapValues) return { kind: "present", arity: "one", values: splitValues(clapValues[1]) };
+  const argparseValues = /choose from\s*\(?([^)]+)\)/i.exec(text);
+  if (argparseValues)
+    return { kind: "present", arity: "one", values: splitValues(argparseValues[1]) };
+
+  // PRESENT, ARITY ONE, SET UNDISCLOSED. An invalid-value complaint with no
+  // enumeration still proves the flag exists and constrains its value.
+  if (/invalid value/i.test(text) || /invalid choice/i.test(text))
     return { kind: "present", arity: "one", values: null };
-  }
 
-  // Anything else means the parser moved PAST our flag and failed on the
-  // deliberately-missing prompt instead, so the flag was accepted.
-  return { kind: "present", arity: "one", values: null };
+  // PRESENT: clap reached the ANCHOR, which under its left-to-right reporting
+  // means it already accepted the flag under test.
+  if (/a value is required for/i.test(text)) return { kind: "present", arity: "one", values: null };
+
+  // UNPARSED: the other three dialects reached the anchor, which tells us
+  // nothing about the flag because they report unknown flags LAST. See the
+  // docstring; this is not a `present` in disguise.
+  if (
+    /expected one argument/i.test(text) ||
+    /flag needs an argument/i.test(text) ||
+    /argument missing/i.test(text)
+  )
+    return {
+      kind: "unparsed",
+      reason: "the anchor's own error surfaced first; this dialect reports unknown flags last",
+    };
+
+  return { kind: "unparsed", reason: "unrecognised diagnostic; declining to guess arity" };
+}
+
+/** Split an enumerated value list, tolerating the quoting argparse adds. */
+function splitValues(raw: string): string[] {
+  return raw
+    .split(",")
+    .map(v => v.trim().replace(/^['"]|['"]$/g, ""))
+    .filter(Boolean);
 }
 
 /**
