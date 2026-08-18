@@ -255,6 +255,12 @@ construction, not the customer's choices.
 #     DERIVER (`deriveZodShapeFromGeneration`) are sound and stay. They are not
 #     the problem. Their INPUT being hand-authored is the problem.
 #
+# EXPIRY NOTICE, per the no-hand-authored-provider-data corollary: the grok
+# generation table in src/provider-codegen.ts is an INTERMEDIATE state, not a
+# convention to copy. It is one step of a move to discovery-driven data, and it
+# is as hand-authored as the six prepare functions it replaced. Do not add a
+# sibling table for another provider. It is deleted by n3.
+#
 # So there is no "generalise the codegen" node. There is one pipeline:
 # discovery produces the data, the existing generic builder consumes it, and
 # every hand-authored provider artefact is deleted rather than multiplied.
@@ -419,22 +425,46 @@ role = "Report the discovered set, its host, the binary version and probe time; 
 id = "no-hand-authored-provider-data"
 question = "Is a human typing a provider's flags, values, or argv rules into a file?"
 why = """
-This is the invariant that keeps being violated, INCLUDING while writing this
-policy. The pass-through principle was already documented in the repo and a
-hand-authored `CURSOR_FLAG_GENERATION` table was still written, with a green
-parity gate, before it was caught. Prose does not stop it.
+WHY THIS KEEPS HAPPENING, which matters more than the instances.
 
-Every previous instance is the same move at a different layer: a prepare
-function, then a generation table, then a `GrokGeneratedField` union, then a
-provider list in a describe string. Each looked like progress because it was
-more structured than the last. All of them pin the customer's capability to
-what an author typed.
+When an existing MECHANISM and a stated PRINCIPLE disagree, the mechanism wins.
+Not through carelessness: through asymmetry. A mechanism tells you what to type
+next. A principle does not. Faced with "make this change", the concrete artefact
+in front of you supplies an answer and the principle supplies a constraint, so
+the artefact drives and the principle gets read as satisfied.
 
-MAKE IT A BUILD FAILURE. `scripts/provider-surfaces-check.mjs` already rejects
-hand-maintained provider ARRAYS and, since 2026-08-18, provider names in prose.
-Extend it to reject a hand-authored `*_FLAG_GENERATION` table and any new
-`prepare<X>Request` argv block. A rule nobody can commit against is worth more
-than a rule everybody agrees with.
+Both failures in this file are that one mechanism, not two mistakes:
+
+  - THE REMOVAL LOOP. `pass-through` was documented. The rebaseliner stripped a
+    contract entry, a handler test went red, and the red test said exactly what
+    to type: delete the parameter. Deleting made it green. The principle said
+    only "expose what the binary offers", which does not tell you what to type
+    when a test is red. The mechanism won, and capability was removed from
+    customers three times.
+
+  - THE HAND-AUTHORED TABLE. The pass-through policy had JUST been written, by
+    the same author, in this file. But the codebase contained a half-finished
+    migration: grok converted to a generation table, six providers not. That
+    reads as a pattern to complete. It supplied the next thing to type, so it
+    won, and a `CURSOR_FLAG_GENERATION` table was written with a green parity
+    gate before anyone noticed it contradicted the policy on the previous page.
+
+The half-finished migration is the sharpest case, because an intermediate state
+is indistinguishable from a target state by inspection. Nothing in the tree said
+"grok's table is also wrong, it is one step of a longer move". A reader sees a
+convention and completes it.
+
+The consequence for this repo: writing the rule down again cannot work. It has
+now been written twice and lost twice to whatever mechanism was nearest. The
+rule has to BECOME a mechanism, so that it is what tells you what to type.
+`scripts/provider-surfaces-check.mjs` already rejects hand-maintained provider
+ARRAYS and, since 2026-08-18, provider names in prose. Extend it to reject a
+hand-authored `*_FLAG_GENERATION` table and any new `prepare<X>Request` argv
+block, so that authoring one fails the build and the build failure says what to
+do instead.
+
+A corollary worth stating: any deliberate intermediate state must carry its own
+expiry in the tree, next to the artefact, or it will be read as the destination.
 """
 enforced_by = "n3.builder-consumes-discovery, plus a provider:surfaces:check extension"
 

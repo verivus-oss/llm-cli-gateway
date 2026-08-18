@@ -482,6 +482,25 @@ export const GROK_GEN_TAIL: readonly FlagGenerationMeta[] = [
  * runs above. Used by the schema-derivation + parity tests (which set only
  * covered params, so the runs are contiguous).
  */
+/**
+ * INTERMEDIATE STATE, NOT A CONVENTION TO COPY. Do not add a sibling table for
+ * another provider.
+ *
+ * This table is hand-authored, which makes it exactly as pinned to one author's
+ * machine as the `prepare<X>Request` function it replaced. It was one step of a
+ * move toward discovery-driven data, and the move stalled here with grok
+ * converted and six providers not.
+ *
+ * A half-finished migration is indistinguishable from a finished convention by
+ * inspection, and on 2026-08-18 it was read as one: a `CURSOR_FLAG_GENERATION`
+ * table was written and its parity gate went green before anyone noticed it
+ * contradicted the pass-through policy. Hence this notice, next to the artefact
+ * rather than only in a plan nobody reads first.
+ *
+ * The generic consumers (`buildArgvFromGeneration`,
+ * `deriveZodShapeFromGeneration`) are correct and stay. Only their
+ * hand-authored INPUT is wrong. See docs/plans/gateway-passthrough-policy.dag.toml.
+ */
 export const GROK_FLAG_GENERATION: readonly FlagGenerationMeta[] = [
   ...GROK_GEN_OUTPUT_FORMAT,
   ...GROK_GEN_MAIN,
