@@ -11,6 +11,10 @@
 import { describe, expect, it } from "vitest";
 import { createGatewayServer, prepareGrokRequest } from "../index.js";
 import { AsyncJobManager } from "../async-job-manager.js";
+import { SessionManager } from "../session-manager.js";
+import { mkdtempSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { MemoryJobStore } from "../job-store.js";
 import { noopLogger } from "../logger.js";
 import { runWithRequestContext, type GatewayRequestContext } from "../request-context.js";
@@ -123,8 +127,11 @@ describe("grok pass-through, end to end", () => {
  * instead let the request proceed to launch, which is a visibly different
  * outcome and not a passing test.
  */
-describe("grok pass-through reaches the registered tool callback", () => {
+describe("pass-through reaches every registered tool callback", () => {
   const server = createGatewayServer({
+    sessionManager: new SessionManager(
+      join(mkdtempSync(join(tmpdir(), "gw-pt-")), "sessions.json")
+    ),
     asyncJobManager: new AsyncJobManager(noopLogger, undefined, new MemoryJobStore()),
     persistence: {
       backend: "memory",
@@ -139,35 +146,47 @@ describe("grok pass-through reaches the registered tool callback", () => {
     },
   });
 
-  it.each(["grok_request", "grok_request_async"])(
-    "%s forwards providerFlags from the callback into argv construction",
-    async toolName => {
-      const registered = (
-        server as unknown as Record<
+  it.each([
+    "claude_request",
+    "codex_request",
+    "gemini_request",
+    "grok_request",
+    "mistral_request",
+    "devin_request",
+    "cursor_request",
+    "claude_request_async",
+    "codex_request_async",
+    "gemini_request_async",
+    "grok_request_async",
+    "mistral_request_async",
+    "devin_request_async",
+    "cursor_request_async",
+  ])("%s forwards providerFlags from the callback into argv construction", async toolName => {
+    const registered = (
+      server as unknown as Record<
+        string,
+        Record<
           string,
-          Record<
-            string,
-            {
-              handler: (
-                a: Record<string, unknown>,
-                e?: Record<string, unknown>
-              ) => Promise<{ content: { text: string }[]; isError?: boolean }>;
-              inputSchema?: { parse: (a: unknown) => unknown };
-            }
-          >
+          {
+            handler: (
+              a: Record<string, unknown>,
+              e?: Record<string, unknown>
+            ) => Promise<{ content: { text: string }[]; isError?: boolean }>;
+            inputSchema?: { parse: (a: unknown) => unknown };
+          }
         >
-      )._registeredTools;
-      const tool = registered[toolName];
-      expect(tool, `${toolName} not registered`).toBeDefined();
-      const args = {
-        prompt: "hi",
-        approvalStrategy: "legacy",
-        providerFlags: { "--rules": "--always-approve" },
-      };
-      const parsed = tool.inputSchema ? tool.inputSchema.parse(args) : args;
-      const result = await tool.handler(parsed as Record<string, unknown>, {});
-      expect(result.isError).toBe(true);
-      expect(result.content[0].text).toMatch(/must not start with/);
-    }
-  );
+      >
+    )._registeredTools;
+    const tool = registered[toolName];
+    expect(tool, `${toolName} not registered`).toBeDefined();
+    const args = {
+      prompt: "hi",
+      approvalStrategy: "legacy",
+      providerFlags: { "--rules": "--always-approve" },
+    };
+    const parsed = tool.inputSchema ? tool.inputSchema.parse(args) : args;
+    const result = await tool.handler(parsed as Record<string, unknown>, {});
+    expect(result.isError).toBe(true);
+    expect(result.content[0].text).toMatch(/must not start with/);
+  });
 });

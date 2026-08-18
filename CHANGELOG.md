@@ -38,7 +38,7 @@ All notable changes to the llm-cli-gateway project.
   can be reached by passing the joined string, whereas one wanting repetition
   cannot be reached from a joined string at all.
 
-  grok only so far. The remaining six providers follow.
+  All seven providers, sync and async.
 
 ## [3.1.0-rc.8] - 2026-08-17: a silent reviewer is not agreement
 

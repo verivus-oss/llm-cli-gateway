@@ -303,7 +303,7 @@ import {
   principalCanAccess,
   runWithRequestContext,
 } from "./request-context.js";
-import { buildPassthroughArgv, type PassthroughFlags } from "./provider-passthrough.js";
+import { passthroughArgvOrRejection, type PassthroughFlags } from "./provider-passthrough.js";
 import { printDoctorJson } from "./doctor.js";
 import { redactDiagnosticUrl } from "./endpoint-exposure.js";
 import { PrepPhase, PrepPipeline, type PrepStage } from "./prep-pipeline.js";
@@ -5470,6 +5470,8 @@ const claudePrepPipeline = new PrepPipeline<
 
 export function prepareClaudeRequest(
   params: {
+    /** Flags the caller names itself; see src/provider-passthrough.ts. */
+    providerFlags?: PassthroughFlags;
     prompt?: string;
     promptParts?: PromptParts;
     model?: string;
@@ -5872,6 +5874,20 @@ export function prepareClaudeRequest(
       }
     }
 
+    // Pass-through, before the MCP materialisation fence so both admission
+    // checks see the final argv. The prompt terminator is already in args.
+    const pt = passthroughArgvOrRejection(params.providerFlags, "claude", args);
+    if (pt.rejection) {
+      return createErrorResponse(
+        params.operation,
+        1,
+        "",
+        corrId,
+        new Error(pt.rejection)
+      ) as ExtendedToolResponse;
+    }
+    insertCliArgsBeforePrompt(args, pt.args);
+
     // All caller-controlled argv values, including final serialized JSON and
     // the argv-bound prompt, have now passed pure admission. Only now may MCP
     // resolution create its request-scoped config artifact.
@@ -6093,6 +6109,8 @@ function assertCodexKitPreparationControls(
 
 function prepareCodexRequestInternal(
   params: {
+    /** Flags the caller names itself; see src/provider-passthrough.ts. */
+    providerFlags?: PassthroughFlags;
     prompt?: string;
     promptParts?: PromptParts;
     model?: string;
@@ -6483,6 +6501,18 @@ function prepareCodexRequestInternal(
   const promptPlan = planCodexStdinPrompt(effectivePrompt);
   const stdinPayload = promptPlan.stdin;
   appendCliPrompt(args, promptPlan.argument);
+  // Pass-through. The prompt terminator is already in args.
+  const pt = passthroughArgvOrRejection(params.providerFlags, "codex", args);
+  if (pt.rejection) {
+    return createErrorResponse(
+      params.operation,
+      1,
+      "",
+      corrId,
+      new Error(pt.rejection)
+    ) as ExtendedToolResponse;
+  }
+  insertCliArgsBeforePrompt(args, pt.args);
 
   try {
     assertCliArgvUtf8Size("codex", args, { provider: "codex" });
@@ -6627,6 +6657,8 @@ function preAdmitCodexKitRequest(
 
 export function prepareGeminiRequest(
   params: {
+    /** Flags the caller names itself; see src/provider-passthrough.ts. */
+    providerFlags?: PassthroughFlags;
     prompt?: string;
     promptParts?: PromptParts;
     model?: string;
@@ -6851,6 +6883,18 @@ export function prepareGeminiRequest(
     args.push("--print-timeout", params.printTimeout);
   }
 
+  // Pass-through. effectivePrompt is returned separately, so no terminator in args yet.
+  const pt = passthroughArgvOrRejection(params.providerFlags, "gemini", args);
+  if (pt.rejection) {
+    return createErrorResponse(
+      params.operation,
+      1,
+      "",
+      corrId,
+      new Error(pt.rejection)
+    ) as ExtendedToolResponse;
+  }
+  args.push(...pt.args);
   try {
     assertCliArgvUtf8Size("agy", args, { provider: "gemini" });
   } catch (error) {
@@ -7209,32 +7253,20 @@ export function prepareGrokRequest(
       assertCliArgUtf8Size(schemaArg, { provider: "grok", inputName: "jsonSchema" });
       args.push("--json-schema", schemaArg);
     }
-    // n3: generic pass-through. Appended LAST so `alreadyEmitted` is the real
-    // assembled argv rather than a hand-authored list of reserved flags, and so
-    // a caller can never displace a gateway-emitted token by ordering.
-    //
-    // A refused flag is an ERROR, never a silent drop. Dropping it quietly is
-    // the same harm as removing a capability from the contract: the caller asked
-    // for something, did not get it, and was not told.
-    const passthrough = buildPassthroughArgv(params.providerFlags, {
-      remote: isRemotePrincipal(getRequestContext()),
-      provider: "grok",
-      alreadyEmitted: args,
-    });
-    if (passthrough.rejected.length > 0) {
+    // Pass-through goes LAST, so `alreadyEmitted` is the real assembled argv and
+    // a caller can never displace a gateway token by ordering. No prompt
+    // terminator in `args` here: grok returns effectivePrompt separately.
+    const pt = passthroughArgvOrRejection(params.providerFlags, "grok", args);
+    if (pt.rejection) {
       return createErrorResponse(
         params.operation,
         1,
         "",
         corrId,
-        new Error(
-          `providerFlags refused: ${passthrough.rejected
-            .map(r => `${r.flag} (${r.reason})`)
-            .join("; ")}`
-        )
+        new Error(pt.rejection)
       ) as ExtendedToolResponse;
     }
-    args.push(...passthrough.args);
+    args.push(...pt.args);
     assertCliArgvUtf8Size("grok", args, { provider: "grok" });
     return {
       corrId,
@@ -7290,6 +7322,8 @@ export function resolveMistralKitAgentMode(): MistralAgentMode {
 
 export function prepareMistralRequest(
   params: {
+    /** Flags the caller names itself; see src/provider-passthrough.ts. */
+    providerFlags?: PassthroughFlags;
     prompt?: string;
     promptParts?: PromptParts;
     model?: string;
@@ -7415,6 +7449,16 @@ export function prepareMistralRequest(
   } catch (error) {
     return createErrorResponse(params.operation, 1, "", corrId, error as Error);
   }
+
+  // Pass-through. Applied here rather than inside buildMistralCliInvocation
+  // because that lives in request-helpers.ts, which provider-passthrough.ts
+  // already imports; wiring it there would close an import cycle. vibe returns
+  // effectivePrompt separately, so there is no terminator in args.
+  const pt = passthroughArgvOrRejection(params.providerFlags, "mistral", prep.args);
+  if (pt.rejection) {
+    return createErrorResponse(params.operation, 1, "", corrId, new Error(pt.rejection));
+  }
+  prep.args.push(...pt.args);
 
   return {
     corrId,
@@ -10252,6 +10296,8 @@ function maybeBuildCacheTtlWarning(args: {
 //──────────────────────────────────────────────────────────────────────────────
 
 export interface GeminiRequestParams {
+  /** Flags the caller names itself; see src/provider-passthrough.ts. */
+  providerFlags?: PassthroughFlags;
   prompt?: string;
   promptParts?: PromptParts;
   model?: string;
@@ -10346,6 +10392,8 @@ function resolveHandlerRuntime(deps: HandlerDeps): GatewayServerRuntime {
 }
 
 export interface ClaudeRequestParams {
+  /** Flags the caller names itself; see src/provider-passthrough.ts. */
+  providerFlags?: PassthroughFlags;
   prompt?: string;
   promptParts?: PromptParts;
   model?: string;
@@ -10612,6 +10660,7 @@ export async function handleClaudeRequest(
   }
   const prep = prepareClaudeRequest(
     {
+      providerFlags: params.providerFlags,
       prompt,
       promptParts,
       model: kitPreferences.model as string | undefined,
@@ -11117,6 +11166,8 @@ export async function handleClaudeRequest(
 }
 
 export interface CodexRequestParams {
+  /** Flags the caller names itself; see src/provider-passthrough.ts. */
+  providerFlags?: PassthroughFlags;
   prompt?: string;
   promptParts?: PromptParts;
   model?: string;
@@ -11270,6 +11321,7 @@ export async function handleCodexRequest(
       : (kitPreferences.outputFormat ?? "text")
   ) as "text" | "json";
   const codexPreparationParams: Parameters<typeof prepareCodexRequest>[0] = {
+    providerFlags: params.providerFlags,
     prompt,
     promptParts,
     model: kitPreferences.model as string | undefined,
@@ -11733,6 +11785,7 @@ export async function handleGeminiRequest(
   }
   const prep = prepareGeminiRequest(
     {
+      providerFlags: params.providerFlags,
       prompt: params.prompt,
       promptParts: params.promptParts,
       model: params.model,
@@ -12041,6 +12094,7 @@ export async function handleGeminiRequestAsync(
   }
   const prep = prepareGeminiRequest(
     {
+      providerFlags: params.providerFlags,
       prompt: params.prompt,
       promptParts: params.promptParts,
       model: params.model,
@@ -13026,6 +13080,8 @@ export async function handleGrokRequestAsync(
 //──────────────────────────────────────────────────────────────────────────────
 
 export interface DevinRequestParams {
+  /** Flags the caller names itself; see src/provider-passthrough.ts. */
+  providerFlags?: PassthroughFlags;
   prompt?: string;
   model?: string;
   permissionMode?: "auto" | "accept-edits" | "smart" | "dangerous";
@@ -13078,6 +13134,8 @@ export interface DevinRequestParams {
 /** Build the headless Devin CLI argv (print mode). Pure, no I/O. */
 export function prepareDevinRequest(
   params: {
+    /** Flags the caller names itself; see src/provider-passthrough.ts. */
+    providerFlags?: PassthroughFlags;
     prompt?: string;
     model?: string;
     permissionMode?: DevinRequestParams["permissionMode"];
@@ -13181,6 +13239,18 @@ export function prepareDevinRequest(
     }
     assertCliArgUtf8Size(prompt, { provider: "devin", inputName: "prompt argv element" });
     appendCliPrompt(args, prompt);
+    // Pass-through. The prompt terminator is ALREADY in args, so these must go before it or they become prompt text.
+    const pt = passthroughArgvOrRejection(params.providerFlags, "devin", args);
+    if (pt.rejection) {
+      return createErrorResponse(
+        params.operation,
+        1,
+        "",
+        corrId,
+        new Error(pt.rejection)
+      ) as ExtendedToolResponse;
+    }
+    insertCliArgsBeforePrompt(args, pt.args);
     assertCliArgvUtf8Size("devin", args, { provider: "devin" });
   } catch (error) {
     return createErrorResponse(params.operation, 1, "", corrId, error as Error);
@@ -13259,6 +13329,7 @@ export async function handleDevinRequest(
   }
   const prep = prepareDevinRequest(
     {
+      providerFlags: params.providerFlags,
       prompt: params.prompt,
       model: params.model,
       permissionMode: params.permissionMode,
@@ -13514,6 +13585,7 @@ export async function handleDevinRequestAsync(
   }
   const prep = prepareDevinRequest(
     {
+      providerFlags: params.providerFlags,
       prompt: params.prompt,
       model: params.model,
       permissionMode: params.permissionMode,
@@ -13721,6 +13793,8 @@ export async function handleDevinRequestAsync(
 //──────────────────────────────────────────────────────────────────────────────
 
 export interface CursorRequestParams {
+  /** Flags the caller names itself; see src/provider-passthrough.ts. */
+  providerFlags?: PassthroughFlags;
   prompt?: string;
   model?: string;
   mode?: "plan" | "ask";
@@ -13750,6 +13824,8 @@ export interface CursorRequestParams {
 /** Build the headless Cursor Agent argv (print mode). Pure, no I/O. */
 export function prepareCursorRequest(
   params: {
+    /** Flags the caller names itself; see src/provider-passthrough.ts. */
+    providerFlags?: PassthroughFlags;
     prompt?: string;
     model?: string;
     mode?: CursorRequestParams["mode"];
@@ -13829,6 +13905,18 @@ export function prepareCursorRequest(
     }
     assertCliArgUtf8Size(prompt, { provider: "cursor", inputName: "prompt argv element" });
     appendCliPrompt(args, prompt);
+    // Pass-through. The prompt terminator is ALREADY in args, so these must go before it or they become prompt text.
+    const pt = passthroughArgvOrRejection(params.providerFlags, "cursor", args);
+    if (pt.rejection) {
+      return createErrorResponse(
+        params.operation,
+        1,
+        "",
+        corrId,
+        new Error(pt.rejection)
+      ) as ExtendedToolResponse;
+    }
+    insertCliArgsBeforePrompt(args, pt.args);
     assertCliArgvUtf8Size("cursor-agent", args, { provider: "cursor" });
   } catch (error) {
     return createErrorResponse(params.operation, 1, "", corrId, error as Error);
@@ -14026,6 +14114,7 @@ export async function handleCursorRequest(
   }
   const prep = prepareCursorRequest(
     {
+      providerFlags: params.providerFlags,
       prompt: params.prompt,
       model: params.model,
       mode: params.mode,
@@ -14288,6 +14377,7 @@ export async function handleCursorRequestAsync(
   }
   const prep = prepareCursorRequest(
     {
+      providerFlags: params.providerFlags,
       prompt: params.prompt,
       model: params.model,
       mode: params.mode,
@@ -14482,6 +14572,8 @@ export async function handleCursorRequestAsync(
 }
 
 export interface MistralRequestParams {
+  /** Flags the caller names itself; see src/provider-passthrough.ts. */
+  providerFlags?: PassthroughFlags;
   prompt?: string;
   promptParts?: PromptParts;
   model?: string;
@@ -14682,6 +14774,7 @@ export async function handleMistralRequest(
     : { model: params.model, maxTurns: params.maxTurns };
   const prep = prepareMistralRequest(
     {
+      providerFlags: params.providerFlags,
       prompt: params.prompt,
       promptParts: params.promptParts,
       model: kitPreferences.model as string | undefined,
@@ -15166,6 +15259,7 @@ export async function handleMistralRequestAsync(
   }
   const prep = prepareMistralRequest(
     {
+      providerFlags: params.providerFlags,
       prompt: params.prompt,
       promptParts: params.promptParts,
       model: params.model,
@@ -15376,6 +15470,8 @@ export async function handleMistralRequestAsync(
 export async function handleCodexRequestAsync(
   deps: AsyncHandlerDeps,
   params: {
+    /** Flags the caller names itself; see src/provider-passthrough.ts. */
+    providerFlags?: PassthroughFlags;
     prompt?: string;
     promptParts?: PromptParts;
     model?: string;
@@ -15447,6 +15543,7 @@ export async function handleCodexRequestAsync(
       : (kitPreferences.outputFormat ?? "text")
   ) as "text" | "json";
   const codexPreparationParams: Parameters<typeof prepareCodexRequest>[0] = {
+    providerFlags: params.providerFlags,
     prompt: params.prompt,
     promptParts: params.promptParts,
     model: kitPreferences.model as string | undefined,
@@ -17589,6 +17686,7 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
         .describe(
           "Restrict Claude to provided MCP config only. mcp_managed always enforces this isolation, even when false is supplied."
         ),
+      providerFlags: PROVIDER_FLAGS_SHAPE,
       correlationId: z.string().optional().describe("Request trace ID (auto if omitted)"),
       optimizePrompt: z.boolean().default(false).describe("Optimize prompt before execution"),
       optimizeResponse: z.boolean().default(false).describe("Optimize response output"),
@@ -17681,10 +17779,12 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
       idleTimeoutMs,
       forceRefresh,
       requestInstructions,
+      providerFlags,
     }) =>
       handleClaudeRequest(
         { sessionManager, logger, runtime },
         {
+          providerFlags,
           prompt,
           promptParts,
           model,
@@ -17809,6 +17909,7 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
           "Resume a previous Codex session via `codex exec resume --last`. UNDER REVIEW: do not rely on which session this selects or on the resumed working directory. `--last` is filtered by cwd upstream unless `--all` is passed, which the gateway does not emit, and the child is still spawned with the gateway-resolved cwd even though `-C`/`--add-dir` are dropped from the resume argv. Verify the target, or start a fresh session when it must be certain. Ignored if sessionId is set; an explicit real Codex UUID targets that session. A brand-new session returns no resumable sessionId; continue with resumeLatest:true or a real Codex UUID."
         ),
       createNewSession: z.boolean().default(false).describe("Force a fresh session (no resume)"),
+      providerFlags: PROVIDER_FLAGS_SHAPE,
       correlationId: z.string().optional().describe("Request trace ID (auto if omitted)"),
       optimizePrompt: z.boolean().default(false).describe("Optimize prompt before execution"),
       optimizeResponse: z.boolean().default(false).describe("Optimize response output"),
@@ -17957,10 +18058,12 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
       workspace,
       worktree,
       requestInstructions,
+      providerFlags,
     }) =>
       handleCodexRequest(
         { sessionManager, logger, runtime },
         {
+          providerFlags,
           prompt,
           promptParts,
           model,
@@ -18370,6 +18473,7 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
         .describe(
           "Additional workspace directories passed as --add-dir." + LOCAL_INCLUDE_DIRS_FIELD_SUFFIX
         ),
+      providerFlags: PROVIDER_FLAGS_SHAPE,
       correlationId: z.string().optional().describe("Request trace ID (auto if omitted)"),
       optimizePrompt: z.boolean().default(false).describe("Optimize prompt before execution"),
       optimizeResponse: z.boolean().default(false).describe("Optimize response output"),
@@ -18496,10 +18600,12 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
       workingDir,
       workspace,
       worktree,
+      providerFlags,
     }) => {
       return handleGeminiRequest(
         { sessionManager, logger, runtime },
         {
+          providerFlags,
           prompt,
           promptParts,
           model,
@@ -18894,6 +19000,7 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
         .boolean()
         .default(false)
         .describe("Force a new session on transport=cli. true is rejected on transport=acp."),
+      providerFlags: PROVIDER_FLAGS_SHAPE,
       correlationId: z.string().optional().describe("Request trace ID (auto if omitted)"),
       optimizePrompt: z.boolean().default(false).describe("Optimize prompt before execution"),
       optimizeResponse: z.boolean().default(false).describe("Optimize response output"),
@@ -18958,10 +19065,12 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
       workingDir,
       workspace,
       worktree,
+      providerFlags,
     }) => {
       return handleDevinRequest(
         { sessionManager, logger, runtime },
         {
+          providerFlags,
           prompt,
           model,
           transport,
@@ -19074,6 +19183,7 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
         .describe(
           "On transport=cli, approvalPolicy has no effect because mcp_managed is unavailable. On transport=acp, supplying approvalPolicy is rejected because ACP has its own permission bridge."
         ),
+      providerFlags: PROVIDER_FLAGS_SHAPE,
       correlationId: z.string().optional().describe("Request trace ID (auto if omitted)"),
       optimizePrompt: z.boolean().default(false).describe("Optimize prompt before execution"),
       optimizeResponse: z.boolean().default(false).describe("Optimize response output"),
@@ -19130,10 +19240,12 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
       compressResponse,
       idleTimeoutMs,
       forceRefresh,
+      providerFlags,
     }) => {
       return handleCursorRequest(
         { sessionManager, logger, runtime },
         {
+          providerFlags,
           prompt,
           model,
           mode,
@@ -19240,6 +19352,7 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
         .describe(
           "Denylist of built-in tools, each emitted as a separate --disabled-tools <tool> flag"
         ),
+      providerFlags: PROVIDER_FLAGS_SHAPE,
       correlationId: z.string().optional().describe("Request trace ID (auto if omitted)"),
       optimizePrompt: z.boolean().default(false).describe("Optimize prompt before execution"),
       optimizeResponse: z.boolean().default(false).describe("Optimize response output"),
@@ -19334,10 +19447,12 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
       addDir,
       workspace,
       worktree,
+      providerFlags,
     }) => {
       return handleMistralRequest(
         { sessionManager, logger, runtime },
         {
+          providerFlags,
           prompt,
           promptParts,
           model,
@@ -19561,6 +19676,7 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
           .describe(
             "Restrict Claude to provided MCP config only. mcp_managed always enforces this isolation, even when false is supplied."
           ),
+        providerFlags: PROVIDER_FLAGS_SHAPE,
         correlationId: z.string().optional().describe("Request trace ID (auto if omitted)"),
         optimizePrompt: z.boolean().default(false).describe("Optimize prompt before execution"),
         compressResponse: z
@@ -19651,6 +19767,7 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
         idleTimeoutMs,
         forceRefresh,
         requestInstructions,
+        providerFlags,
       }) => {
         // Prompt XOR is a pure admission check. Run it before Kit/session
         // resolution so raw invalid requests retain the public validation
@@ -19826,6 +19943,7 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
         }
         const prep = prepareClaudeRequest(
           {
+            providerFlags,
             prompt,
             promptParts,
             model: kitPreferences.model as string | undefined,
@@ -20229,6 +20347,7 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
             "Resume a previous Codex session via `codex exec resume --last`. UNDER REVIEW: do not rely on which session this selects or on the resumed working directory. `--last` is filtered by cwd upstream unless `--all` is passed, which the gateway does not emit, and the child is still spawned with the gateway-resolved cwd even though `-C`/`--add-dir` are dropped from the resume argv. Verify the target, or start a fresh session when it must be certain. Ignored if sessionId is set; an explicit real Codex UUID targets that session. A brand-new session returns no resumable sessionId; continue with resumeLatest:true or a real Codex UUID."
           ),
         createNewSession: z.boolean().default(false).describe("Force a fresh session (no resume)"),
+        providerFlags: PROVIDER_FLAGS_SHAPE,
         correlationId: z.string().optional().describe("Request trace ID (auto if omitted)"),
         optimizePrompt: z.boolean().default(false).describe("Optimize prompt before execution"),
         compressResponse: z
@@ -20353,10 +20472,12 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
         workspace,
         worktree,
         requestInstructions,
+        providerFlags,
       }) => {
         return handleCodexRequestAsync(
           { sessionManager, asyncJobManager, logger, runtime },
           {
+            providerFlags,
             prompt,
             promptParts,
             model,
@@ -20461,6 +20582,7 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
             "Additional workspace directories passed as --add-dir." +
               LOCAL_INCLUDE_DIRS_FIELD_SUFFIX
           ),
+        providerFlags: PROVIDER_FLAGS_SHAPE,
         correlationId: z.string().optional().describe("Request trace ID (auto if omitted)"),
         optimizePrompt: z.boolean().default(false).describe("Optimize prompt before execution"),
         compressResponse: z
@@ -20585,10 +20707,12 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
         workingDir,
         workspace,
         worktree,
+        providerFlags,
       }) => {
         return handleGeminiRequestAsync(
           { sessionManager, asyncJobManager, logger, runtime },
           {
+            providerFlags,
             prompt,
             promptParts,
             model,
@@ -21095,6 +21219,7 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
             "Resume the most recent Devin session in cwd (--continue). Note: the gw-* id minted for a brand-new session is not resumable via sessionId; continue with resumeLatest:true."
           ),
         createNewSession: z.boolean().default(false).describe("Force a new session"),
+        providerFlags: PROVIDER_FLAGS_SHAPE,
         correlationId: z.string().optional().describe("Request trace ID (auto if omitted)"),
         optimizePrompt: z.boolean().default(false).describe("Optimize prompt before execution"),
         compressResponse: z
@@ -21155,10 +21280,12 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
         workingDir,
         workspace,
         worktree,
+        providerFlags,
       }) => {
         return handleDevinRequestAsync(
           { sessionManager, asyncJobManager, logger, runtime },
           {
+            providerFlags,
             prompt,
             model,
             permissionMode,
@@ -21257,6 +21384,7 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
           .enum(["strict", "balanced", "permissive"])
           .optional()
           .describe(NON_CLAUDE_MANAGED_APPROVAL_POLICY_UNAVAILABLE),
+        providerFlags: PROVIDER_FLAGS_SHAPE,
         correlationId: z.string().optional().describe("Request trace ID (auto if omitted)"),
         optimizePrompt: z.boolean().default(false).describe("Optimize prompt before execution"),
         compressResponse: z
@@ -21310,10 +21438,12 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
         compressResponse,
         idleTimeoutMs,
         forceRefresh,
+        providerFlags,
       }) => {
         return handleCursorRequestAsync(
           { sessionManager, asyncJobManager, logger, runtime },
           {
+            providerFlags,
             prompt,
             model,
             mode,
@@ -21408,6 +21538,7 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
           .describe(
             "Denylist of built-in tools, each emitted as a separate --disabled-tools <tool> flag"
           ),
+        providerFlags: PROVIDER_FLAGS_SHAPE,
         correlationId: z.string().optional().describe("Request trace ID (auto if omitted)"),
         optimizePrompt: z.boolean().default(false).describe("Optimize prompt before execution"),
         compressResponse: z
@@ -21499,10 +21630,12 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
         addDir,
         workspace,
         worktree,
+        providerFlags,
       }) => {
         return handleMistralRequestAsync(
           { sessionManager, asyncJobManager, logger, runtime },
           {
+            providerFlags,
             prompt,
             promptParts,
             model,

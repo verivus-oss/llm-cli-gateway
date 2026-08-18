@@ -52,6 +52,7 @@
  */
 import { sanitizeCliArgValue } from "./request-helpers.js";
 import { assertCliArgUtf8Size } from "./cli-input-limits.js";
+import { getRequestContext, isRemotePrincipal } from "./request-context.js";
 
 /** One caller-supplied flag value. `true` emits the flag alone. */
 export type PassthroughValue = string | number | boolean | readonly string[];
@@ -225,4 +226,32 @@ export function deniedClassFor(flag: string): (typeof OFF_MACHINE_DENIED_CLASSES
     if (cls.pattern.test(normalised)) return cls;
   }
   return null;
+}
+
+/**
+ * One call per provider prep function: resolve access mode, build the tokens,
+ * and flatten any refusal into a message the caller can return.
+ *
+ * Callers must place the tokens with `insertCliArgsBeforePrompt` when the prompt
+ * terminator is already in `args`, or the flags land after `--` and become
+ * prompt text. Four of the seven providers append the prompt inside their prep
+ * function, so this is the common case rather than the exception.
+ */
+export function passthroughArgvOrRejection(
+  flags: PassthroughFlags | undefined,
+  provider: string,
+  alreadyEmitted: readonly string[]
+): { args: string[]; rejection: string | null } {
+  const result = buildPassthroughArgv(flags, {
+    remote: isRemotePrincipal(getRequestContext()),
+    provider,
+    alreadyEmitted,
+  });
+  if (result.rejected.length === 0) return { args: result.args, rejection: null };
+  return {
+    args: [],
+    rejection: `providerFlags refused: ${result.rejected
+      .map(r => `${r.flag} (${r.reason})`)
+      .join("; ")}`,
+  };
 }

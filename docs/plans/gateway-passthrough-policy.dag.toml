@@ -66,11 +66,11 @@ constraint = "EVERY PROBE MUST BE STRUCTURALLY INCAPABLE OF EXECUTING: no probe 
 
 [[node]]
 id = "n3a.passthrough-surface"
-status = "grok done 2026-08-19; six providers remain"
+status = "done 2026-08-19, all seven providers, sync and async"
 critical = true
 depends_on = []
 role = "Let a caller name a flag the gateway has not declared, so discovery is reachable at all."
-outcome = "`providerFlags` on grok sync and async. Local callers unrestricted; remote refused four classes by pattern. Argv safety enforced for all; a refused flag errors rather than dropping silently."
+outcome = "`providerFlags` on all 14 request tools. Local callers unrestricted; remote refused four classes by pattern. Argv safety enforced for all; a refused flag errors rather than dropping silently."
 
 [[node]]
 id = "n3.builder-consumes-discovery"
