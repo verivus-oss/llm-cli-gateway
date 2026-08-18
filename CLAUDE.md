@@ -44,7 +44,7 @@ npm run test:watch
 npm run check
 ```
 
-**`npm run check` never probes an installed provider binary.** `upstream:contracts` inside it is the offline contract check. Version drift against the CLIs actually installed on the host is caught only by `npm run upstream:drift`, which `scripts/pre-release.sh` runs *before* `npm run check`. So a green `npm run check` says nothing about provider drift, and upgrading any provider CLI (including `claude` itself) can turn the release gate red while `check` stays green. Re-probe and rebaseline via `npm run providers:rebaseline`.
+**`npm run check` never probes an installed provider binary.** `upstream:contracts` inside it is the offline contract check. Version drift against the CLIs actually installed on the host is caught only by `npm run upstream:drift`, which `scripts/pre-release.sh` runs _before_ `npm run check`. So a green `npm run check` says nothing about provider drift, and upgrading any provider CLI (including `claude` itself) can turn the release gate red while `check` stays green. Re-probe and rebaseline via `npm run providers:rebaseline`.
 
 `npm run check` also runs two structural gates and the release audit:
 
@@ -266,6 +266,28 @@ Sessions persist conversation context across requests:
 - Always use pattern: write to temp → fsync → rename
 - Temp files include process.pid to avoid conflicts
 - Set file permissions (0o600) after atomic rename
+
+## Writing volume (enforced, not advisory)
+
+Every other writing rule here governs style. None governed VOLUME, and one
+recent program shipped 5,665 lines of which 2,499 were plan prose against 1,095
+of `src`. These are numbers because "concise" is not enforceable and a number is.
+
+| artefact                | limit                                                                             | enforced by                               |
+| ----------------------- | --------------------------------------------------------------------------------- | ----------------------------------------- |
+| commit / PR body        | 20 non-blank lines                                                                | `~/.claude/hooks/limit-prose-volume.sh`   |
+| a new `src/**.ts`       | comment lines <= code lines (applies at 40+ code lines)                           | same hook                                 |
+| `docs/plans/*.dag.toml` | 150 lines for a new file, 40 lines per edit, and never above its recorded ceiling | same hook + `npm run plans:density:check` |
+
+**Where the detail goes instead.** A DAG node states the work and links its
+evidence; measurements, alternatives considered and reasoning history belong in
+`docs/evidence/<topic>-<date>.md`, which `durable-state-lifecycle.dag.toml`
+already does. A code comment explains what is non-obvious about the CODE, not
+the policy behind it, which is in the plan file. A commit states the change and
+the evidence for it, not how the conclusion was reached.
+
+`npm run plans:density:update` re-records the ceilings; it fails on a deleted
+file too, so a removed ceiling cannot silently return.
 
 ## Pre-Commit Checklist
 

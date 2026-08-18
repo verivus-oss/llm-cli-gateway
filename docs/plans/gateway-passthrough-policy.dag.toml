@@ -1,547 +1,107 @@
-# Gateway pass-through policy: the installed binary is the authority
-#
-# WHY THIS EXISTS
-# The gateway has been removing capability from customers who changed nothing.
-#
-# 3.1.0 as drafted deletes `bestOfN`, `check` and `agentConfig`. A customer who
-# upgrades the gateway and leaves their CLI alone loses flags their binary still
-# advertises. They did not touch grok; we took `--best-of-n` away from them.
-#
-# That is not a slip. It is the written policy in
-# `provider-contract-removal-autoapply.dag.toml` working exactly as specified:
-#
-#   "The registry describes what the binary supports. When the binary stops
-#    supporting something, the truthful registry is the one without it."
-#
-# The sentence is wrong on one unstated word: WHICH binary. The registry is
-# built by probing OUR binary on OUR dev host, and the policy then propagates
-# that one machine's truth to every installation. There is exactly one version
-# of the world in which it is correct, the one where every customer runs the
-# version we happen to have installed.
-#
-# The loop it creates is fully automatic in the destructive direction and
-# nowhere else: our host upgrades, help text loses a flag, the rebaseliner
-# strips the contract, handler tests go red, and a human deletes the remaining
-# plumbing to make them green. The red test IS the instruction to remove the
-# capability. Nothing in that loop ever asks what a consumer has installed.
-#
-# This file replaces that policy. It is the governing rule for the provider
-# surface; where any other plan disagrees, this one wins.
+# Gateway pass-through policy: the installed binary is the authority.
+# Governing rule for the provider surface; where another plan disagrees, this wins.
+# Evidence: docs/evidence/gateway-passthrough-2026-08-19.md
 
 [meta]
 surface = "provider capability exposure, discovery and enforcement"
-status = "policy agreed; n1 shipped; n2-n8 BLOCK THE NEXT RELEASE"
-release_gate = """
-OPERATOR DECISION 2026-08-18: no release ships until n2 through n8 are done.
+status = "agreed 2026-08-18. n1 and n3a shipped; n2 partial; n3-n9 BLOCK THE NEXT RELEASE"
+release_gate = "No release until n2-n8. ~295 commits held back, cost accepted. Version number 3.1.0 vs 4.0.0 still open. See evidence."
+supersedes = "provider-contract-removal-autoapply.dag.toml [decision].removal_policy"
 
-n1 (the capability revert) is complete and verified: comparing v3.0.0 to HEAD,
-zero contract flags removed (113 = 113), zero tools removed, zero request
-parameters removed across all 63 shared tools, zero enum constraints narrowed,
-and two enum constraints correctly WIDENED (grok effort, sync and async).
-
-So the REGRESSION is gone. What remains is the long-standing design flaw that
-3.0.0 has equally: a static contract pinned to our reference host, `values` as a
-rejection list, and no per-install discovery. The decision is that we do not ship
-another release carrying it, even though shipping would not make any customer
-worse off than the version they run today.
-
-Consequence, stated plainly: the ~295 commits already in the 3.1.0 line stay
-unreleased until this program lands. That includes the idle-timeout fix (healthy
-jobs killed on four of seven providers), the silent-reviewer fix (no output
-counted as agreement), instance-scoped orphan recovery, and the cost-surface
-corrections. Customers stay on 3.0.0 with those bugs for the duration. That cost
-was weighed and accepted rather than overlooked.
-
-OPEN: version number. n2-n8 changes documented behaviour (capability determined
-per install rather than by our pin, fail-open on unparseable capability, a new
-durable table, tiered tool presentation). That is a major-version shape, not a
-minor. Decide 3.1.0 vs 4.0.0 before the tag, not after.
-"""
-supersedes = "docs/plans/provider-contract-removal-autoapply.dag.toml [decision].removal_policy"
-branch = "unassigned"
-agreed_on = "2026-08-18"
-
-# ---------------------------------------------------------------------------
-# THE POLICY. Seven statements. Everything below derives from these.
-# ---------------------------------------------------------------------------
-
+# Everything below derives from these seven.
 [policy]
-
-p1_authority = """
-We are a gateway. The customer's INSTALLED BINARY is the authority on what it
-accepts, always, and the gateway is never the thing that refuses a flag or a
-value that binary would take. We cannot know what their binary accepts without
-asking it, so we ask it rather than guessing from ours.
-"""
-
-p2_all_versions = """
-Every supported CLI, at ANY version the customer has. No minimum, no maximum, no
-pinned baseline that gates behaviour. A customer on grok 0.2.101 and a customer
-on grok 1.0.4 each get exactly what their own binary offers. Our dev host's
-version has no bearing on either of them.
-"""
-
-p3_cross_provider = """
-Any supported CLI may be reached alongside any other, SINGLE LEVEL ONLY. The
-orchestrating caller fans out to several providers directly. A child provider
-does not orchestrate a grandchild: nested MCP connections fail with -32000, and
-that limit is upstream of us. Multi-level orchestration is out of scope, not
-merely unimplemented.
-"""
-
-p4_access_modes = """
-Two access modes: on-machine (stdio, local caller, full local path access) and
-off-machine (HTTP with OAuth, remote caller).
-"""
-
-p5_off_machine_limits = """
-Off-machine mode is constrained on workspaces and path access: a remote caller
-selects a registered workspace alias and uses relative paths inside it.
-
-Load-bearing and easy to get wrong: in off-machine mode, DISCOVERY DESCRIBES THE
-GATEWAY HOST, NOT THE CALLER'S MACHINE. A remote caller sees the CLIs installed
-on the server they connected to. Every surface that presents discovered
-capability to a remote caller must say whose machine it is describing, or the
-caller will reasonably read it as their own laptop.
-"""
-
-p6_discovery_is_mechanical = """
-Detection of what is installed, and enumeration of its flags, options and
-subcommands, is a MECHANICAL APP-DRIVEN OPERATION performed by the gateway at
-start and at restart. No human transcribes a `--help` output into a source file,
-and no release pins what a customer may use. End users are shown guidance
-derived from what was actually found on their machine.
-"""
-
-p7_persist_and_tier = """
-Discovery results are persisted in PostgreSQL and presented to the calling LLM
-HIERARCHICALLY: a compact top level, with an explicit documented path to drill
-into more commands, flags and arguments on demand. The full surface is never
-dumped into a caller's context window by default.
-"""
-
-# ---------------------------------------------------------------------------
-# DECISIONS. Taken 2026-08-18. These were the genuinely open questions.
-# ---------------------------------------------------------------------------
+p1_authority = "The customer's INSTALLED BINARY decides what it accepts. We ask it rather than guessing from ours, and we are never the thing that refuses what it would take."
+p2_all_versions = "Every supported CLI at ANY version the customer has. No pinned baseline. Our dev host's version has no bearing."
+p3_cross_provider = "Any CLI alongside any other, SINGLE LEVEL ONLY. Nested MCP fails with -32000; multi-level is out of scope, not unimplemented."
+p4_access_modes = "Two modes: on-machine (stdio, full local path access) and off-machine (HTTP + OAuth)."
+p5_off_machine_limits = "Remote callers select a registered workspace and use relative paths. DISCOVERY DESCRIBES THE GATEWAY HOST, NOT THEIRS, and every surface must say so or they will read it as their own laptop."
+p6_discovery_is_mechanical = "Enumeration is app-driven, at start and restart. No human transcribes --help into a source file."
+p7_persist_and_tier = "Persisted in PostgreSQL, presented HIERARCHICALLY. The full surface is never dumped into a caller's context by default."
 
 [decisions]
-
 startup_behaviour = "serve_last_persisted_then_refresh_in_background"
-startup_behaviour_why = """
-Probing seven CLIs at startup costs real time and readiness must not wait on it.
-The gateway serves the LAST PERSISTED discovery immediately and refreshes in the
-background. First-ever start with nothing persisted falls back to the bundled
-seed contract, which is the only remaining job the static contract has.
-"""
-
+startup_behaviour_why = "Readiness must not wait on probing seven CLIs. First-ever start falls back to the generated seed, which is the only job the static contract keeps."
 unparseable_capability = "fail_open"
-unparseable_capability_why = """
-When help parsing cannot determine whether a flag or value is supported, ALLOW
-it and let the binary decide. This is a deliberate reversal of the current
-posture, which fails closed and is precisely how the gateway ended up refusing
-input grok parses. Failing open cannot remove a capability the customer has; the
-worst case is an error message written by their own CLI, which is the authority
-anyway and phrases it better than we would.
-
-This does NOT relax the guards in `retained_enforcement` below. Those are about
-malformed or dangerous argv, not about capability.
-"""
-
+unparseable_capability_why = "When parsing cannot tell, ALLOW and let the binary decide. Failing closed is how we ended up refusing input grok parses. Does NOT relax retained_enforcement."
 rediscovery_trigger = "gateway_restart_only"
-rediscovery_trigger_why = """
-Restarting the gateway is the only trigger. No filesystem watching, no periodic
-re-probe, no version polling. A customer who upgrades a CLI restarts the gateway
-to pick it up, and that is documented rather than inferred. Simple, predictable,
-and it means discovery cost is paid once per process lifetime.
-"""
+rediscovery_trigger_why = "No watching, no polling. Cost paid once per process lifetime, documented rather than inferred."
 
-# ---------------------------------------------------------------------------
-# WHAT THIS INVALIDATES. Named explicitly so it cannot be quietly re-adopted.
-# ---------------------------------------------------------------------------
-
+# Invalidated, named so it cannot be quietly re-adopted.
 [[invalidates]]
-what = "provider-contract-removal-autoapply.dag.toml [decision].removal_policy = auto_apply"
-why = """
-Replaced wholesale, not amended. Under p2 there is no single truthful registry;
-there is one per installation. A flag our host stopped advertising is a VERSION
-BOUNDARY to record, never a capability to delete. The rebaseliner may continue
-to record what our reference host sees, but its output is evidence, not a gate,
-and it must never again drive deletion of a request parameter.
-"""
-
+what = "provider-contract-removal-autoapply.dag.toml removal_policy = auto_apply"
+why = "Replaced wholesale. Under p2 there is one truthful registry per installation. A flag our host stopped advertising is a version boundary to record, never a capability to delete."
 [[invalidates]]
 what = "UPSTREAM_CLI_CONTRACTS as the enforced authority"
-why = """
-It is a static const compiled into the tarball and `assertUpstreamCliArgs`
-throws against it, so today the contract built from our dev host is enforced
-against every customer's request. It demotes to a SEED: used on first start
-before discovery has run, and as a fallback when discovery fails.
-"""
-
+why = "assertUpstreamCliArgs throws against a const built from our dev host. Demotes to a SEED: first-start only, and fallback when discovery fails."
 [[invalidates]]
 what = "`values` as a rejection list"
-why = """
-`validateUpstreamCliArgs` rejects any value outside a flag's `values`. That is
-the mechanism that refused grok effort levels the binary parses. `values`
-becomes discovery output used for descriptions and autocomplete. It never
-rejects.
-"""
-
+why = "It is what refused grok effort levels the binary parses. `values` becomes description and autocomplete data. It never rejects."
 [[invalidates]]
 what = "deleting a request parameter when upstream drops a flag"
-why = """
-Three live instances ship in 3.1.0 as drafted and must be reverted before the
-tag: grok `bestOfN`, grok `check`, devin `agentConfig`. `bestOfN` and
-`agentConfig` are at ZERO references in src/index.ts, so this is a real revert,
-and `agentConfig` alone touched 22 references on the way out.
-"""
+why = "Three instances shipped in 3.1.0 as drafted: grok bestOfN, grok check, devin agentConfig. Reverted by n1."
 
-# ---------------------------------------------------------------------------
-# WHAT SURVIVES. Protection, not curation. Do not delete these while
-# enthusiastically deleting the rest.
-# ---------------------------------------------------------------------------
-
+# Protection, not curation. Do not delete these while deleting the rest.
 [retained_enforcement]
+headless_flag_required = "A request must carry -p / --single / --print or the CLI opens a TUI and hangs forever. Protects the gateway from a wedged child."
+non_option_value_guard = "A caller value must not itself look like an option. The argument-injection guard, and the most important check in the file. Unrelated to capability."
+argv_shape_bounds = "Positional counts, required first argument, end-of-options boundary. Constrains OUR argv construction, not the customer's choices."
 
-headless_flag_required = """
-A request must carry the provider's headless flag (`-p`, `--single`, `--print`).
-Without it the CLI opens an interactive TUI and hangs forever on a server. This
-protects the gateway from a wedged child, not the customer from their own CLI.
-"""
-
-non_option_value_guard = """
-A value supplied by a caller must not itself look like an option. This is the
-argument-injection guard: it stops a caller smuggling `--always-approve` through
-a value field. It is the single most important check in the file and it is
-unrelated to capability.
-"""
-
-argv_shape_bounds = """
-Positional counts, required first argument, and end-of-options boundary. These
-stop the gateway building a malformed invocation. They constrain OUR argv
-construction, not the customer's choices.
-"""
-
-# ---------------------------------------------------------------------------
-# IMPLEMENTATION NODES.
-#
-# THE TRAP, recorded because it was walked into on 2026-08-18 and it looks
-# exactly like progress:
-#
-#   "Generalise the codegen" was first planned as: hand-author a
-#   `<PROVIDER>_FLAG_GENERATION` table for each of the six remaining providers,
-#   prove byte-parity against the hand-written `prepare<X>Request`, then delete
-#   the hand-written path. A cursor table was written and its parity gate went
-#   green before the error was pointed out.
-#
-#   That is still hand-coding. It moves the hand-maintained provider facts down
-#   one layer, from a function to a table, and leaves them just as pinned to
-#   whatever a human typed at build time. Under p2 the flag set is a property of
-#   the CUSTOMER'S binary, so ANY human-authored list of it is wrong on a machine
-#   that differs from the author's.
-#
-#   Two things also came out of that attempt and are worth keeping:
-#
-#   - The byte-parity gate has a SHELF LIFE. It compares the generator against
-#     the hand-written path, so it is meaningful only while both exist. After
-#     cutover it compares the generator with itself. Proven, not assumed:
-#     corrupting a real behaviour rule in the grok table (`--tools` from
-#     `csv_if_nonempty` to `repeat_if_nonempty`, a genuine argv change) left all
-#     20 grok parity tests GREEN, because `prepareGrokRequest` now calls
-#     `buildArgvFromGeneration` five times. Its docstring still claims
-#     "Reverting any hand-written grok argv conditional turns the ARGV parity
-#     red", which was true before the cutover and is false now.
-#   - The generic BUILDER (`buildArgvFromGeneration`) and the generic Zod
-#     DERIVER (`deriveZodShapeFromGeneration`) are sound and stay. They are not
-#     the problem. Their INPUT being hand-authored is the problem.
-#
-# EXPIRY NOTICE, per the no-hand-authored-provider-data corollary: the grok
-# generation table in src/provider-codegen.ts is an INTERMEDIATE state, not a
-# convention to copy. It is one step of a move to discovery-driven data, and it
-# is as hand-authored as the six prepare functions it replaced. Do not add a
-# sibling table for another provider. It is deleted by n3.
-#
-# So there is no "generalise the codegen" node. There is one pipeline:
-# discovery produces the data, the existing generic builder consumes it, and
-# every hand-authored provider artefact is deleted rather than multiplied.
-# ---------------------------------------------------------------------------
+# TRAP 2026-08-18: a hand-authored table per provider is hand-coding one layer down; there is no "generalise the codegen" node.
 
 [[node]]
 id = "n1.revert-the-three-removals"
 status = "done"
 depends_on = []
 role = "Restore grok bestOfN and check, and devin agentConfig, as pass-through parameters."
-outcome = """
-DONE 2026-08-18. Verified against v3.0.0: zero contract flags removed
-(113 = 113), zero tools removed, zero request parameters removed across all 63
-shared tools, zero enum constraints narrowed, two correctly WIDENED (grok
-effort, sync and async). The regression is gone; the design flaw below remains.
-"""
+outcome = "Verified against v3.0.0: zero flags, tools or parameters removed; two enum constraints correctly widened."
 
 [[node]]
 id = "n2.discovery-produces-the-data"
+status = "sources 1-3 landed; per-provider merge and command attribution remain"
 critical = true
-load_bearing = true
 depends_on = []
-role = "Mechanical per-install enumeration, emitting the SAME structure the existing generic builder already consumes."
-action = """
-Discovery output IS the generation data. Not a hand-authored table that
-discovery later validates: the only source.
-
-Layered, measured on the installed binaries 2026-08-18:
-
-  1. SHELL COMPLETIONS, machine-generated by the CLI itself and the single best
-     source. It covers the whole command tree in one call and INCLUDES FLAGS
-     HIDDEN FROM HELP:
-
-                    --help flags   completion flags
-        grok              48             116
-        codex             23              97
-
-     Every grok flag invisible to help is here, including `--compaction-mode`,
-     `--compaction-detail`, `--effort` and `--reasoning-effort`. Probe BOTH
-     spellings: grok uses `completions`, codex uses `completion`. claude, vibe,
-     devin, cursor-agent and agy have none at their current versions.
-
-  2. HELP TRAVERSAL across the subcommand tree, which also attributes a flag to
-     the command that owns it (completions give a tree-wide list).
-
-  3. INVALID-VALUE PROBE, to confirm existence and detect real enums, including
-     for candidates recovered by `strings` on statically linked binaries.
-     Verified three-way discriminator:
-
-       --not-a-real-flag ZZZ  -> "unexpected argument"           NOT present
-       --permission-mode ZZZ  -> "invalid value ... [values: ]"  present, HAS enum
-       --compaction-mode ZZZ  -> falls through to another error  present, no enum
-
-MEASURED 2026-08-18, and both findings changed the code:
-
-  SOURCE 2 IS ONE REGEX AND MUST READ BOTH STREAMS. It does not parse help, it
-  nominates every `--token` and lets the probe adjudicate. Over-collection is
-  free (a false candidate probes absent, and absence subtracts nothing);
-  missing a real flag is the only error that costs anything. Candidates from
-  `--help`: grok 48, claude 65, gemini 29, cursor-agent 26, codex 23, vibe 21,
-  agy 20, devin 12. agy is a Go `flag` binary and writes usage to STDERR, so a
-  stdout-only read reports it as having no flags at all.
-
-  THE ANCHOR MASKS THE VERDICT ON THREE OF FOUR DIALECTS. clap validates left
-  to right, so reaching the anchor's error PROVES the flag under test parsed
-  clean. argparse, Go flag and commander report an unknown flag LAST, after the
-  missing-argument check, so the anchor error comes back for a real flag and a
-  fictional one alike: `agy --effort=ZZZ --model`, `--mode=ZZZ --model` and
-  `--not-real-xyz=ZZZ --model` return BYTE-IDENTICAL stderr. Those three anchor
-  messages therefore return `unparsed`, never `present`, and so does any
-  message the interpreter does not recognise. Reading them as `present`
-  fabricated arity for every agy candidate until it was measured.
-
-  What survives the mask is still worth having: vibe yields real value sets
-  (`--output` -> text, json, streaming) and real arity (`--yolo` -> none),
-  because argparse does report VALUE errors first. Only absence is masked.
-"""
-constraint = """
-EVERY PROBE MUST BE STRUCTURALLY INCAPABLE OF EXECUTING. Construct each so the
-CLI fails at ARGUMENT PARSING before dispatch, e.g. by omitting the value of a
-required headless flag. The flag under test is answered by WHICH parse error
-returns, and the command can never reach execution.
-
-Testable, not a caution: assert no probe path can produce a zero-exit run.
-`claude completion` became a BILLED INFERENCE CALL during this investigation
-because `completion` is not a claude subcommand and parsed as a prompt. Cost,
-quota (gemini already hits 429 in production), latency, side effects,
-determinism and TUI-hang risk all point the same way.
-
-Record WHAT COULD NOT BE PARSED distinctly from what was parsed as absent.
-`fail_open` depends on telling them apart.
-"""
-
-# ---------------------------------------------------------------------------
-# FINDING 2026-08-19, measured before starting n3, and it changes what n3 is.
-#
-# DISCOVERY IS CURRENTLY DECORATIVE. There is no way for a caller to send a flag
-# the gateway has not hand-declared as a named Zod field. Grepped: no
-# `extraArgs`, no `additionalArgs`, no passthrough, no `z.record` flag surface
-# anywhere in the request path. So a customer on grok 0.2.101 whose binary still
-# has `--best-of-n` cannot use it unless a human added a `bestOfN` field, and a
-# PERFECT per-install discovery does not change that by one flag. The schema is
-# an implicit allowlist, and it is the real thing pinning capability to what we
-# typed, not the contract.
-#
-# n3 AS WRITTEN DOES NOT FIX IT. "Discovery output IS the generation data" was
-# tested against the grok table on 2026-08-19. Only two of its columns are
-# mechanically derivable:
-#
-#   requestParameter   27 of 29 by kebab->camel (`--output-format` ->
-#                      `outputFormat`). The two exceptions are deliberate
-#                      cross-provider naming: `--tools` -> `allowedTools`,
-#                      `--cwd` -> `workingDir`.
-#   emit               fully determined by inputType, EXCEPT `string[]`, which
-#                      splits csv_if_nonempty vs repeat_if_nonempty and is a
-#                      provider fact no safe probe can recover.
-#
-# The rest is not provider data at all and no binary can supply it: inputType
-# refinement (which arity-one flags are numbers or lists), 29 hand-written
-# `describe` strings, 7 minLength bounds, 2 numeric bounds, and the emission
-# ORDER that byte-parity depends on. Deriving the two derivable columns leaves
-# roughly 60% of the table hand-authored in the tree, which is the
-# "moves the hand-maintained facts down one layer" trap this file already names.
-#
-# So the sequence inverts. The pass-through SURFACE is not a consequence of n3,
-# it is the precondition for the whole policy, and the per-provider blocks
-# become redundant only once it exists.
-#
-# OPEN, and the reason n3 has not started: what a generic pass-through still
-# refuses. `retained_enforcement.non_option_value_guard` exists to stop a caller
-# smuggling `--always-approve` through a value field; a generic flags parameter
-# offers it through the front door, legitimately, under p1. That is a security
-# posture decision, not a routine one, and it determines the shape of the code.
-# ---------------------------------------------------------------------------
+role = "Mechanical per-install enumeration emitting the structure the generic builder already consumes."
+action = "Three layered sources: shell completions (best, includes hidden flags), help-text scrape (one regex, over-collects on purpose), invalid-value probe (existence, arity, real enums)."
+constraint = "EVERY PROBE MUST BE STRUCTURALLY INCAPABLE OF EXECUTING: no probe argv token may lack a leading dash. Record UNPARSED distinctly from ABSENT; fail_open depends on telling them apart."
 
 [[node]]
 id = "n3a.passthrough-surface"
-critical = true
-load_bearing = true
 status = "grok done 2026-08-19; six providers remain"
+critical = true
 depends_on = []
 role = "Let a caller name a flag the gateway has not declared, so discovery is reachable at all."
-outcome = """
-SHIPPED FOR GROK, sync and async. `providerFlags`, keyed exactly as the binary
-spells the flag: {"--best-of-n": "3", "--verbatim": true, "--rules": ["a","b"]}.
-Declared once as PROVIDER_FLAGS_SHAPE and shared by both tools, because the grok
-sync and async schemas have already diverged twice on hand-copied fields.
-
-Enforced for every caller, all of it argv safety rather than capability: values
-may not start with `-` (retained_enforcement.non_option_value_guard), a key may
-not pack its own value, and a flag already in the assembled argv is refused
-rather than duplicated. That last check reads THE ASSEMBLED ARGV, not a
-hand-authored reserved list, so it cannot go stale.
-
-A refused flag is an ERROR naming the flag and the reason. A silent drop is the
-same harm as removing a capability from the contract: the caller asked, did not
-get it, and was not told.
-
-ACCESS MODE SPLITS THE POSTURE, decided 2026-08-19 under p4/p5. On-machine
-stdio callers are unrestricted, because they can already run the binary in a
-shell and a gateway that refuses them a flag protects nothing. Off-machine
-HTTP/OAuth callers are refused four classes (approval bypass, sandbox, host code
-and config, host paths), matched BY CLASS rather than by spelling: the spellings
-in play today already include --yolo, --always-approve, --auto-approve,
---approve-for-me, --approve-mcps, --dangerously-skip-permissions,
---allow-dangerously-skip-permissions, --dangerously-bypass-approvals-and-sandbox
-and --dangerously-bypass-hook-trust, they share no substring an exact list would
-generalise from, and a miss is a silent approval bypass. Without the split this
-node would be a hole cut around the H1 host-path gate that already ships.
-
-Also collapsed here: the remote-caller predicate was written out longhand at
-EIGHT call sites across four modules. It is now `isRemotePrincipal` in
-request-context.ts, once. A security predicate that must be retyped to be
-applied will eventually be retyped wrong, and the failure is silent.
-"""
-verification = """
-Registration is not reachability, so both were proven separately.
-
-REGISTRATION: site/tools.fixture.json is generated from the LIVE MCP tool
-surface and now carries providerFlags on both grok tools.
-
-REACHABILITY: a test drives the REGISTERED CALLBACK, not the prepare function,
-using a flag that must be refused, so the refusal text can only appear if the
-value travelled the whole path. Mutation-probed: deleting `providerFlags` from
-the callback's forward turns it red. Every other test in the file stays green
-under that mutation, which is exactly the failure it exists to catch.
-"""
+outcome = "`providerFlags` on grok sync and async. Local callers unrestricted; remote refused four classes by pattern. Argv safety enforced for all; a refused flag errors rather than dropping silently."
 
 [[node]]
 id = "n3.builder-consumes-discovery"
 critical = true
 depends_on = ["n2.discovery-produces-the-data", "n3a.passthrough-surface"]
-role = "Point the existing generic builder and Zod deriver at discovery output, and DELETE every hand-authored provider artefact."
-action = """
-Deleted, not migrated:
-  - the seven `prepare<X>Request` argv functions (~1400 lines)
-  - `GROK_FLAG_GENERATION` and any sibling table
-  - `GrokGeneratedField`, a hand-maintained 26-member union duplicating the
-    table's `requestParameter` values, which restoring two flags in n1 forced an
-    edit to
-  - the per-provider hand-declared Zod fields, sync and async separately
-
-Kept: `buildArgvFromGeneration` and `deriveZodShapeFromGeneration`. They are
-correct and generic; only their input was wrong.
-
-What genuinely cannot be data-driven stays a named, per-provider exception with
-a stated reason, not a silent hand-written block: model-alias resolution before
-emission, the prompt/session assembly, and defaults-that-skip-emission (cursor
-omits `--output-format` when the value is `text`, so a naive value rule would
-change argv).
-"""
-verification = """
-APPROVED SEQUENCE, per provider, 2026-08-18. Deviating from it risks a silent
-argv change against live production traffic:
-
-  1. Discovery feeds the generic builder for that provider.
-  2. Byte-parity goes GREEN against the still-present hand-written path.
-  3. THEN delete the hand-written path.
-  4. Accept that the parity test retires with it, and delete the test too rather
-     than leaving a green tautology behind.
-
-Step 4 is not optional tidying. A parity test that outlives its hand-written
-counterpart compares the generator with itself and passes unconditionally, which
-is worse than no test: it reports coverage that does not exist. Proven on grok,
-where corrupting a real behaviour rule (`--tools` from `csv_if_nonempty` to
-`repeat_if_nonempty`) left all 20 parity tests green. Fix the grok parity
-docstring's claim at the same time; it still asserts a guarantee it lost at its
-own cutover.
-
-What replaces parity after the cutover is not another argv test. It is the fact
-that argv is DERIVED from discovery, so the question stops being "does the
-builder match the hand-written path" and becomes "does discovery match the
-binary", which is answered by probing the binary, not by a fixture.
-"""
+role = "Point the generic builder and Zod deriver at discovery output, and DELETE every hand-authored provider artefact."
+action = "Deleted: the seven prepare<X>Request functions (~1400 lines), GROK_FLAG_GENERATION and any sibling, GrokGeneratedField, the per-provider hand-declared Zod fields. Kept: buildArgvFromGeneration and deriveZodShapeFromGeneration, which are correct and generic. Named exceptions with stated reasons: model-alias resolution, prompt/session assembly, defaults-that-skip-emission."
+verification = "Per provider: discovery feeds the builder, byte-parity goes green against the hand-written path, THEN delete the path, THEN delete the parity test. Step 4 is not tidying: parity has a shelf life and passes unconditionally once its counterpart is gone."
 
 [[node]]
 id = "n4.seed-is-generated-not-written"
 depends_on = ["n3.builder-consumes-discovery"]
-role = "The bundled contract becomes a build-time SNAPSHOT of discovery run on the reference host."
-action = """
-`UPSTREAM_CLI_CONTRACTS` stops being hand-maintained. It is produced by running
-the same discovery pipeline at build time and committing the output as a
-generated artefact, used only as the first-start seed and the fallback when
-discovery fails.
-
-This is what finally kills the rebaseliner-driven removal loop: there is no
-hand-maintained registry left for a human to be told to prune, and a flag
-absent from our host's snapshot simply means our snapshot, not the customer's
-reality.
-"""
+role = "UPSTREAM_CLI_CONTRACTS becomes a build-time snapshot of discovery on the reference host, used only as first-start seed and fallback."
+action = "Kills the rebaseliner-driven removal loop: no hand-maintained registry is left for a human to be told to prune."
 
 [[node]]
 id = "n5.persist-discovery"
 depends_on = ["n3.builder-consumes-discovery"]
-role = "Persist the discovered capability set to PostgreSQL, keyed per host and binary version."
-constraint = """
-Keyed by (owner_hostname, cli, binary_version). Seven instances already share
-one store and can legitimately differ. NEVER a blanket read or write: a global
-"latest discovery" row is the orphan-sweep bug in a new table. MUST name its
-reaper before it ships.
-"""
+role = "Persist discovered capability to PostgreSQL."
+constraint = "Keyed by (owner_hostname, cli, binary_version). NEVER a blanket read or write: a global latest-discovery row is the orphan-sweep bug in a new table. MUST name its reaper before it ships."
 
 [[node]]
 id = "n6.serve-persisted-refresh-background"
 depends_on = ["n5.persist-discovery"]
-role = "Startup serves last persisted discovery immediately; a background pass refreshes it."
-action = """
-Precedence: last persisted for THIS host, else the generated seed. Refresh in
-background, replace atomically, never fatal on failure.
-"""
+role = "Startup serves last persisted discovery for THIS host, else the generated seed; a background pass refreshes and replaces atomically, never fatally."
 
 [[node]]
 id = "n7.hierarchical-presentation"
 depends_on = ["n5.persist-discovery"]
-role = "Present discovered capability in tiers, with a documented drill-down path."
-action = """
-64 tools already serialise to roughly 45,000 tokens, the 14 `*_request*` tools
-are 77% of that, and `claude_request` alone carries 52 properties. Per-install
-discovered detail in the default surface without tiering makes the gateway
-unusable in a normal context window.
-"""
+role = "Present discovered capability in tiers with a documented drill-down path."
+action = "64 tools already serialise to ~45,000 tokens and the 14 *_request* tools are 77% of it. Per-install detail without tiering makes the gateway unusable in a normal context window."
 
 [[node]]
 id = "n8.stop-rejecting"
@@ -553,155 +113,38 @@ id = "n9.user-guidance"
 depends_on = ["n6.serve-persisted-refresh-background"]
 role = "Report the discovered set, its host, the binary version and probe time; tell remote callers whose machine it describes."
 
-# ---------------------------------------------------------------------------
-# INVARIANTS.
-# ---------------------------------------------------------------------------
-
 [[invariant]]
 id = "absence-is-never-subtractive"
 question = "Does an `absent` discovery verdict REMOVE a capability the gateway previously offered?"
-why = """
-THE TRAP DISCOVERY WALKS INTO IF NOBODY STOPS IT, and it is the same trap the
-rebaseliner walked into, wearing better clothes.
-
-Discovery describes THE HOST IT RAN ON. Our reference host runs grok 1.0.4 and
-devin 3000.4.25, which do not have the flags a customer on grok 0.2.101 or an
-older devin still has. Measured 2026-08-18, on the three capabilities n1 had
-just restored:
-
-  grok  --best-of-n=ZZZ --single          -> "unexpected argument"  ABSENT
-  grok  --check=ZZZ --single              -> "unexpected argument"  ABSENT
-  devin --agent-config=ZZZ --prompt-file  -> "unexpected argument"  ABSENT
-  grok completions | grep -c -- --best-of-n  -> 0
-  grok --help      | grep -c -- --best-of-n  -> 0
-
-All three are absent here by the strongest signal available: the binary's own
-parser, on the exact flag, at rank 1. A discovery pipeline that trusts its own
-absence verdict therefore DELETES bestOfN, check and agentConfig again, on the
-very release that restored them, and it does so with better evidence than the
-rebaseliner ever had. Better evidence for the same wrong conclusion, because the
-question was never "is it on this machine".
-
-THE RULE: the merged flag set is `discovered UNION retained`. An `absent`
-verdict may lower confidence, mark a flag unadvertised on this host, or shape
-guidance. It may NEVER remove a request parameter or a contract entry.
-
-This is what makes n4 safe. The bundled seed is built by running discovery on
-OUR host, so without this rule the seed ships our host's absences to every
-customer, which is precisely the pinning the policy exists to end.
-"""
-enforced_by = "n2 merge rules, n3 schema derivation, and an acceptance test that pins the three n1 flags"
-
+why = "The trap discovery walks into if nobody stops it, wearing better clothes than the rebaseliner. All three n1-restored flags probe ABSENT on our host by the strongest signal available. THE RULE: the merged set is `discovered UNION retained`. An absent verdict may lower confidence or shape guidance; it may never remove a parameter or a contract entry."
+enforced_by = "n2 merge rules, n3 schema derivation, and an acceptance test pinning the three n1 flags"
 [[invariant]]
 id = "no-hand-authored-provider-data"
 question = "Is a human typing a provider's flags, values, or argv rules into a file?"
-why = """
-WHY THIS KEEPS HAPPENING, which matters more than the instances.
-
-When an existing MECHANISM and a stated PRINCIPLE disagree, the mechanism wins.
-Not through carelessness: through asymmetry. A mechanism tells you what to type
-next. A principle does not. Faced with "make this change", the concrete artefact
-in front of you supplies an answer and the principle supplies a constraint, so
-the artefact drives and the principle gets read as satisfied.
-
-Both failures in this file are that one mechanism, not two mistakes:
-
-  - THE REMOVAL LOOP. `pass-through` was documented. The rebaseliner stripped a
-    contract entry, a handler test went red, and the red test said exactly what
-    to type: delete the parameter. Deleting made it green. The principle said
-    only "expose what the binary offers", which does not tell you what to type
-    when a test is red. The mechanism won, and capability was removed from
-    customers three times.
-
-  - THE HAND-AUTHORED TABLE. The pass-through policy had JUST been written, by
-    the same author, in this file. But the codebase contained a half-finished
-    migration: grok converted to a generation table, six providers not. That
-    reads as a pattern to complete. It supplied the next thing to type, so it
-    won, and a `CURSOR_FLAG_GENERATION` table was written with a green parity
-    gate before anyone noticed it contradicted the policy on the previous page.
-
-The half-finished migration is the sharpest case, because an intermediate state
-is indistinguishable from a target state by inspection. Nothing in the tree said
-"grok's table is also wrong, it is one step of a longer move". A reader sees a
-convention and completes it.
-
-The consequence for this repo: writing the rule down again cannot work. It has
-now been written twice and lost twice to whatever mechanism was nearest. The
-rule has to BECOME a mechanism, so that it is what tells you what to type.
-`scripts/provider-surfaces-check.mjs` already rejects hand-maintained provider
-ARRAYS and, since 2026-08-18, provider names in prose. Extend it to reject a
-hand-authored `*_FLAG_GENERATION` table and any new `prepare<X>Request` argv
-block, so that authoring one fails the build and the build failure says what to
-do instead.
-
-A corollary worth stating: any deliberate intermediate state must carry its own
-expiry in the tree, next to the artefact, or it will be read as the destination.
-"""
-enforced_by = "scripts/provider-surfaces-check.mjs census ratchet (SHIPPED 2026-08-18), inside npm run check"
-enforcement_detail = """
-A repo-wide SET ratchet, not a per-file regex: a new hand-authored table would
-live in the same file as the grandfathered one, so a file allowlist would admit
-it. Two artefact classes are censused, `*_FLAG_GENERATION` tables and
-`prepare<X>Request` argv builders, against an exact grandfathered set.
-
-It fails in BOTH directions, deliberately. An addition is the defect. A deletion
-must also update the set, or the removed name stays grandfathered and re-adding
-it later passes silently.
-
-Verified by three mutation probes rather than assumed:
-  adding CURSOR_FLAG_GENERATION      -> FAIL (the exact 2026-08-18 mistake)
-  adding prepareHermesRequest        -> FAIL
-  deleting prepareCursorRequest      -> FAIL, "GONE (update the set)"
-"""
-
+why = "Written twice and lost twice, both times to whatever mechanism was nearest, because a mechanism tells you what to type and a principle does not. So it had to BECOME a mechanism. Corollary: any deliberate intermediate state must carry its own expiry in the tree or it will be read as the destination."
+enforced_by = "scripts/provider-surfaces-check.mjs census ratchet (shipped 2026-08-18), inside npm run check. Fails in both directions; three mutation probes verified."
 [[invariant]]
 id = "gateway-never-refuses-what-the-binary-accepts"
 question = "Can this rejection fire on input the customer's installed binary would have accepted?"
-why = "If yes it is a defect, regardless of how well reasoned the rule is. This is the whole policy in one question."
-
+why = "If yes it is a defect regardless of how well reasoned the rule is. The whole policy in one question."
 [[invariant]]
 id = "no-capability-removal-without-a-customer-changing-anything"
 question = "Does a gateway upgrade alone take a capability away from a customer who did not touch their CLI?"
-why = "3.1.0 as drafted fails this three times. It is the specific harm that produced this file."
-
+why = "3.1.0 as drafted fails this three times. The specific harm that produced this file."
 [[invariant]]
 id = "discovery-is-per-host-never-global"
-question = "Does this read or write a discovery row that another instance with a different CLI version is serving?"
+question = "Does this read or write a discovery row another instance with a different CLI version is serving?"
 why = "Seven instances already share one store. A blanket write repeats the orphan-sweep bug in a new table."
-
 [[invariant]]
 id = "remote-callers-are-told-whose-machine"
 question = "Does this surface make clear that discovery describes the gateway host, not the caller's?"
 why = "Off-machine callers will otherwise read a capability list as describing their own laptop."
-
 [[invariant]]
 id = "every-durable-table-names-its-reaper"
 question = "What deletes a superseded discovery row, and on what timer?"
 why = "Inherited from durable-state-lifecycle.dag.toml. Five of six existing stores have no answer because nobody was made to give one."
 
-# ---------------------------------------------------------------------------
-# CHANGE PROTOCOL.
-# ---------------------------------------------------------------------------
-
 [protocol]
-
-before_removing_anything_from_the_provider_surface = """
-Do not. A flag our reference host stopped advertising is a version boundary to
-record, not a capability to delete. If a handler test goes red because the
-rebaseliner stripped a contract entry, the fix is to restore the entry and mark
-the boundary, NOT to delete the parameter to make the test green. That exact
-loop is what this file exists to stop.
-"""
-
-before_adding_a_rejection = """
-Answer `gateway-never-refuses-what-the-binary-accepts`. If the rejection is
-about malformed argv, a hang risk, or argument injection, it belongs in
-`retained_enforcement`. If it is about whether a provider supports something,
-it does not belong in the gateway at all: emit it and let the binary answer.
-"""
-
-before_trusting_a_rebaseline = """
-The rebaseliner describes ONE machine. Its output is evidence about our
-reference host and nothing more. It may update the seed contract. It may never
-drive a change to what a customer is permitted to send.
-"""
+before_removing_anything_from_the_provider_surface = "Do not. A flag our host stopped advertising is a version boundary to record. If a handler test goes red because the rebaseliner stripped a contract entry, restore the entry and mark the boundary; do NOT delete the parameter to make it green."
+before_adding_a_rejection = "Answer gateway-never-refuses-what-the-binary-accepts. Malformed argv, hang risk and argument injection belong in retained_enforcement. Whether a provider supports something does not belong in the gateway at all."
+before_trusting_a_rebaseline = "It describes ONE machine. It may update the seed. It may never change what a customer is permitted to send."

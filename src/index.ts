@@ -303,10 +303,7 @@ import {
   principalCanAccess,
   runWithRequestContext,
 } from "./request-context.js";
-import {
-  buildPassthroughArgv,
-  type PassthroughFlags,
-} from "./provider-passthrough.js";
+import { buildPassthroughArgv, type PassthroughFlags } from "./provider-passthrough.js";
 import { printDoctorJson } from "./doctor.js";
 import { redactDiagnosticUrl } from "./endpoint-exposure.js";
 import { PrepPhase, PrepPipeline, type PrepStage } from "./prep-pipeline.js";
@@ -3391,8 +3388,7 @@ async function resolveWorkspaceAndWorktreeForRequest(args: {
   // session's metadata.
   const session = await getCallerOwnedSession(args.runtime.sessionManager, args.sessionId);
   const requestContext = getRequestContext();
-  const isRemoteTransport =
-    isRemotePrincipal(requestContext);
+  const isRemoteTransport = isRemotePrincipal(requestContext);
   // An explicit local workingDir selects the provider's primary checkout. Do
   // not let an implicit default or a previous session's workspace replace or
   // constrain it. Auxiliary addDir/includeDirs flags do not select a cwd, so
