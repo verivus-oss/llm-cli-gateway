@@ -4,9 +4,10 @@
 
 [meta]
 surface = "provider capability exposure, discovery and enforcement"
-status = "agreed 2026-08-18. n1, n3a and n3c shipped; n2 partial; n3b, n8a and n4-n9 open"
+status = "agreed 2026-08-18. n1, n3a, n3c shipped; n2 partial; n3b withdrawn, n4 absorbed; n8a and n5-n9 open"
 release_gate = "This program gates the next release. Scope and version decision are tracked internally."
 supersedes = "provider-contract-removal-autoapply.dag.toml [decision].removal_policy"
+see_also = "provider-surface-distribution.dag.toml: how the primary surface ships without a product release"
 
 # Everything below derives from these seven.
 [policy]
@@ -74,7 +75,7 @@ outcome = "`providerFlags` on all 14 request tools. Local callers unrestricted; 
 
 [[node]]
 id = "n3.builder-consumes-discovery"
-status = "REFUTED as written 2026-08-19, superseded by n3b. Do not execute."
+status = "REFUTED as written 2026-08-19. Do not execute; see n3b and d9."
 depends_on = ["n2.discovery-produces-the-data", "n3a.passthrough-surface"]
 role = "WAS: point the generic builder at discovery output and delete the seven prepare functions."
 refuted_by = "Its own pilot. The grok cutover removed 73 lines from prepareGrokRequest and added 476 in provider-codegen.ts, and prepareGrokRequest has since grown to 373, larger than the 317 it started at. Marginal cost per further provider is about +319 table lines to remove -73 push lines. The `~1400 lines of argv functions` premise is also wrong: the seven total 1,853 non-blank lines of which 76 mention a flag literal, 4%. The rest is admission, isolation, session, MCP and prompt assembly, none of it generatable."
@@ -95,21 +96,20 @@ constraint = "Widening these is customer-visible and a version decision, NOT a d
 
 [[node]]
 id = "n3b.delete-the-table-not-the-prep"
-critical = true
+status = "WITHDRAWN 2026-08-19. Do not execute; its version question is void, not open."
 depends_on = ["n3a.passthrough-surface"]
-role = "Delete GROK_FLAG_GENERATION and the 29 named parameters it derives, since providerFlags reaches all of them with no per-provider data."
-action = "The table only ever covered flags where the gateway adds nothing beyond emitting them (its own docstring; bespoke ones sit in UNGENERATED_GROK_FLAGS). Those are exactly the flags pass-through serves. Keep buildArgvFromGeneration and deriveZodShapeFromGeneration only if a second consumer appears; otherwise they go too."
-constraint = "BREAKING: removes 29 named grok parameters from the tool surface. Needs the version decision first, and a migration note telling callers the providerFlags spelling of each dropped parameter."
+role = "WAS: delete GROK_FLAG_GENERATION and the 29 named grok parameters, since providerFlags reaches them."
+superseded_by = "provider-surface-distribution.dag.toml d9. Pass-through is a FLOOR for what the schema does not name, never a replacement for what it does. Under d1-d4 those parameters stop being compiled rather than being deleted, so nothing is removed and no version decision is needed."
 
 [[node]]
 id = "n4.seed-is-generated-not-written"
-depends_on = ["n3b.delete-the-table-not-the-prep"]
+status = "ABSORBED by provider-surface-distribution.dag.toml d1. Track it there."
+depends_on = ["n3a.passthrough-surface"]
 role = "UPSTREAM_CLI_CONTRACTS becomes a build-time snapshot of discovery on the reference host, used only as first-start seed and fallback."
-action = "Kills the rebaseliner-driven removal loop: no hand-maintained registry is left for a human to be told to prune."
 
 [[node]]
 id = "n5.persist-discovery"
-depends_on = ["n3b.delete-the-table-not-the-prep"]
+depends_on = ["n3a.passthrough-surface"]
 role = "Persist discovered capability to PostgreSQL."
 constraint = "Keyed by (owner_hostname, cli, binary_version). NEVER a blanket read or write: a global latest-discovery row is the orphan-sweep bug in a new table. MUST name its reaper before it ships."
 
