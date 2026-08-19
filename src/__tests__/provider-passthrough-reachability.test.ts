@@ -139,3 +139,62 @@ describe("d4a: admission consults the resolved surface, not just the typed table
     expect(validateUpstreamCliArgs("mistral", ["-p", "hello", "--auto-approve"]).ok).toBe(false);
   });
 });
+
+describe("review findings: one validation path, several fact sources", () => {
+  // Codex and Grok both attacked the branch d4a added. It returned early, so a
+  // surfaced flag skipped every check a declared flag gets. Each case below is
+  // a reviewer's verbatim input.
+
+  it("GROK: an inline --flag=--value on a surfaced flag is refused", () => {
+    // Was ok:true. The declared path already refuses this, because most flags
+    // carry inlineValue:false; the surfaced branch never asked.
+    const result = validateUpstreamCliArgs("grok", [
+      "-p=hi",
+      "--client-identifier=--always-approve",
+    ]);
+    expect(result.ok).toBe(false);
+    expect(result.violations.map(v => v.message).join("; ")).toMatch(/inline value/);
+  });
+
+  it("GROK: the caller's boolean is honoured even when the surface knows the flag", () => {
+    // Was: surfaced arity won and swallowed "stray", so the positional bound
+    // stopped firing for exactly the flags the seed had taught us about.
+    const surfaced = validateUpstreamCliArgs("grok", ["-p=hi", "--client-identifier", "stray"], {
+      passthroughFlags: { "--client-identifier": true },
+    });
+    const unsurfaced = validateUpstreamCliArgs("grok", ["-p=hi", "--not-surfaced", "stray"], {
+      passthroughFlags: { "--not-surfaced": true },
+    });
+    expect(surfaced.ok, "surfaced").toBe(false);
+    expect(unsurfaced.ok, "unsurfaced").toBe(false);
+    expect(surfaced.violations.map(v => v.message).join("; ")).toMatch(/positional/);
+  });
+
+  it("GROK: a surfaced flag with a value still rejects a leading-hyphen value", () => {
+    const result = validateUpstreamCliArgs(
+      "grok",
+      ["-p=hi", "--client-identifier", "--always-approve"],
+      {
+        passthroughFlags: { "--client-identifier": "x" },
+      }
+    );
+    expect(result.ok).toBe(false);
+  });
+
+  it("a surfaced flag of UNKNOWN arity consumes a value but never an option", () => {
+    // claude --help is seed-only and probes unparsed, so no arity is known.
+    // `optional` is the honest reading: take a plain token, leave an option.
+    expect(validateUpstreamCliArgs("claude", ["-p", "--help", "value", "--", "hi"]).ok).toBe(true);
+    // The discriminating half: with arity UNKNOWN we must not reject an
+    // option-shaped next token either. Treating unknown as "one" would demand a
+    // value that may not exist, which is the gateway refusing what the binary
+    // takes. `optional` declines to consume and says nothing.
+    expect(validateUpstreamCliArgs("claude", ["-p", "--help", "--verbose", "--", "hi"]).ok).toBe(
+      true
+    );
+  });
+
+  it("still admits what d4a set out to admit", () => {
+    expect(validateUpstreamCliArgs("grok", ["-p=hi", "--client-identifier", "x"]).ok).toBe(true);
+  });
+});

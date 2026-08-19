@@ -3796,6 +3796,51 @@ export function resetResolvedSurface(): void {
   resolvedSurface = undefined;
 }
 
+/**
+ * A contract for a flag nobody declared, or undefined when nothing knows it.
+ *
+ * p1 / unparseable_capability = fail_open: the bundled table describes one
+ * machine, so it cannot say whether the customer's binary accepts this. Two
+ * sources may vouch for a flag, and they answer different questions.
+ *
+ * The CALLER, through providerFlags, knows the argv SHAPE exactly, because the
+ * encoding is theirs: `true` emits the flag alone, anything else emits a value
+ * after it. Their answer therefore wins over the surface.
+ *
+ * The SURFACE knows what the binaries ACCEPT. Its arity is used when the caller
+ * has not spoken, and `optional` when even it cannot tell, which consumes a
+ * following non-option token and leaves an option-shaped one alone.
+ *
+ * The rest is gateway policy and is deliberately strict: inline `--flag=value`
+ * is refused exactly as it is for most declared flags, and a value beginning
+ * with `-` stays an option rather than becoming free text. Neither is a
+ * capability judgement; both stop our own argv being reinterpreted.
+ *
+ * `values` is deliberately NOT carried across. The surface reads them from one
+ * host and `values` is enforced as a rejection list, so importing them would
+ * refuse input another customer's binary accepts.
+ */
+function undeclaredFlagContract(
+  cli: CliType,
+  flagName: string,
+  passthrough: Readonly<Record<string, unknown>>
+): CliFlagContract | undefined {
+  const namedByCaller = Object.hasOwn(passthrough, flagName);
+  const surfaced = surfaceFlags(cli).get(flagName);
+  if (!namedByCaller && !surfaced) return undefined;
+  const arity: CliFlagArity = namedByCaller
+    ? passthrough[flagName] === true
+      ? "none"
+      : "one"
+    : (surfaced?.arity ?? "optional");
+  return {
+    arity,
+    description: `Undeclared ${cli} flag admitted from ${namedByCaller ? "the caller" : "the resolved surface"}`,
+    inlineValue: false,
+    allowLeadingHyphenValue: false,
+  };
+}
+
 export function validateUpstreamCliArgs(
   cli: CliType,
   args: readonly string[],
@@ -3850,47 +3895,30 @@ export function validateUpstreamCliArgs(
     const equalsIndex = arg.indexOf("=");
     const flagName = equalsIndex > 0 ? arg.slice(0, equalsIndex) : arg;
     const inlineValue = equalsIndex > 0 ? arg.slice(equalsIndex + 1) : undefined;
-    const flag = contract.flags[flagName];
-    if (!flag) {
-      if (arg === contract.stdinPromptMarker || !arg.startsWith("-")) {
-        positionals.push(arg);
-        continue;
-      }
-      // d4a: the RESOLVED surface, not just the hand-typed table. A flag the
-      // seed evidenced is known even though nobody declared it, which is the
-      // whole point of generating the seed.
-      const surfaced = surfaceFlags(cli).get(flagName);
-      if (surfaced) {
-        unknownFlagCount += 1;
-        if (inlineValue === undefined && surfaced.arity !== "none") {
-          const next = args[i + 1];
-          if (next !== undefined && next !== "--" && !next.startsWith("-")) i += 1;
-        }
-        continue;
-      }
-      // p1 / unparseable_capability = fail_open, but ONLY for a flag the caller
-      // named through providerFlags. The bundled table describes one machine, so
-      // it cannot say whether the customer's binary accepts this; the binary
-      // decides. Gateway-built argv stays closed, because there a flag missing
-      // from the table is our bug, not their capability.
-      if (!Object.hasOwn(passthrough, flagName)) {
-        violations.push({
-          cli,
-          index: i,
-          message: `Unsupported ${cli} CLI flag for bundled upstream contract`,
-        });
-        continue;
-      }
-      unknownFlagCount += 1;
-      // The caller's value tells us the arity exactly, so nothing is guessed.
-      // Without consuming it the value lands in the positional count and trips
-      // argv_shape_bounds, refusing the flag by a second route.
-      if (inlineValue === undefined && passthrough[flagName] !== true) {
-        const next = args[i + 1];
-        if (next !== undefined && next !== "--" && !next.startsWith("-")) i += 1;
-      }
+    const declared = contract.flags[flagName];
+    if (!declared && (arg === contract.stdinPromptMarker || !arg.startsWith("-"))) {
+      positionals.push(arg);
       continue;
     }
+    // ONE VALIDATION PATH, SEVERAL FACT SOURCES.
+    //
+    // An undeclared flag is admitted by synthesising a contract for it and then
+    // running exactly the checks a declared flag gets. An earlier version gave
+    // it its own branch that returned early, so knowing MORE about a flag
+    // removed validation instead of adding it: an inline `--flag=--value` was
+    // never checked, and a caller who declared a boolean still had the next
+    // token swallowed. Authority over whether a flag EXISTS is provider data;
+    // authority over the SHAPE of its argv is ours, and the two were conflated.
+    const flag = declared ?? undeclaredFlagContract(cli, flagName, passthrough);
+    if (!flag) {
+      violations.push({
+        cli,
+        index: i,
+        message: `Unsupported ${cli} CLI flag for bundled upstream contract`,
+      });
+      continue;
+    }
+    if (!declared) unknownFlagCount += 1;
     presentFlags.add(flagName);
 
     if (inlineValue !== undefined) {
