@@ -32,6 +32,7 @@
   "session-manager-postgres-migration.dag.toml": 241,
   "session-store-test-isolation.dag.toml": 139,
   "supply-chain-guard.dag.toml": 320,
+  "typed-parameter-derivation.dag.toml": 93,
   "validation-launch-surface.dag.toml": 301,
   "worktrees-on-postgres-sessions.dag.toml": 185,
   "xstate-store-integration.dag.toml": 758
