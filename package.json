@@ -48,6 +48,7 @@
     "dist/**/*.js",
     "dist/**/*.d.ts",
     "!dist/__tests__/**",
+    "seed/provider-seed.json",
     "migrations/**/*.sql",
     "docs/guides/PERSONAL_AGENT_CONFIG_KIT.md",
     "npm-shrinkwrap.json",
