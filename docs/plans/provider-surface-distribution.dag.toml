@@ -73,10 +73,26 @@ constraint = "Do NOT allowlist a new *_FLAG_GENERATION to get past the gate, and
 
 [[node]]
 id = "d4.surface-loader-and-precedence"
+status = "resolver done 2026-08-19. Wiring it into tool registration is d4a."
 critical = true
 depends_on = ["d2.gates-pin-the-seed", "d1c.probe-with-a-guaranteed-unknown-sentinel"]
-role = "Resolve {contract, generation} per provider at startup from the p2 precedence chain instead of reading a module-level const."
-constraint = "Merge is union. A source that fails to load is skipped with a warning, never fatal: a broken pack must degrade to the seed, not to a dead gateway."
+role = "Resolve one merged view per provider from the precedence chain instead of reading a module-level const."
+outcome = "FIVE sources, not four: RETAINED, the bundled contract, is the floor. p2 named seed/pack/discovery/overlay and that does not satisfy discovered-UNION-retained. Measured: the three n1-restored flags all probe absent here, so a seed-only loader takes them again. Acceptance test pins all three plus a companion proving they vanish without the floor."
+constraint = "Merge is union, precedence is a module constant rather than an argument, and a source that throws is skipped rather than fatal."
+
+[[node]]
+id = "d4a.registration-reads-the-loader"
+critical = true
+depends_on = ["d4.surface-loader-and-precedence"]
+role = "Nothing consumes the resolver yet. Tool registration and argv admission still read UPSTREAM_CLI_CONTRACTS directly."
+action = "Point them at the resolved surface, seed-only by default so the published surface stays reproducible."
+constraint = "surface:invariance:check is the control and will fail the moment discovery or overlay reaches the site capture. That is the gate working, not a bug to route around."
+
+[[node]]
+id = "d4b.seed-records-short-flags"
+depends_on = ["d1c.probe-with-a-guaranteed-unknown-sentinel"]
+role = "The scrape regex collects only --long tokens and the generator drops the completion parser's shortFlags, so -p, -c, -i, -C and -v are in the contract and not the seed."
+constraint = "Harmless only while the retained floor carries them. It is the headless flag on six providers, so the floor is doing real work here rather than being belt and braces."
 
 [[node]]
 id = "d5.pack-is-a-separate-package"
