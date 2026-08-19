@@ -49,11 +49,11 @@ constraint = "Only codex has a request subcommand today. A provider that grows o
 
 [[node]]
 id = "d1c.probe-with-a-guaranteed-unknown-sentinel"
-critical = true
+status = "done 2026-08-19. The anchor is deleted, not deprecated."
 depends_on = ["d1b.probe-the-request-subcommand"]
-role = "The help-derived anchor leaves agy unprobed (no value placeholder) and 99 flags unparsed across claude, cursor and mistral. gemini, the provider with the highest churn, is the one discovery cannot describe."
-action = "Replace the anchor with a flag guaranteed NOT to exist. The discriminator is whether the not-defined list names the FLAG UNDER TEST or only the sentinel. Needs no help parsing, and is structurally safer: it relies on a flag not existing, which we control, rather than on one existing. Measurements in the evidence file."
-constraint = "COMMANDER IS ONLY HALF SOLVED. claude and cursor report a real BOOLEAN given =value identically to an absent flag. Sentinel named means present; flag-under-test named must stay UNPARSED, or every claude boolean is fabricated as a removal."
+role = "The help-derived anchor left agy unprobed and 99 flags unparsed. Every probe now carries a flag no parser knows, and the verdict is WHICH flag the rejection named."
+outcome = "0 providers unasked, arity 108 -> 181, gemini 20 unasked -> 20 present, no present-to-absent flip anywhere. Arity is inferred from the same fact: a parser that did not complain about `=VALUE` takes a value."
+constraint = "COMMANDER STAYS HALF SOLVED ON PURPOSE. claude and cursor report a real BOOLEAN given =value identically to an absent flag, so a named flag there is UNPARSED. Reading it as absent fabricates a removal for every claude boolean."
 
 [[node]]
 id = "d2.gates-pin-the-seed"
