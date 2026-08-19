@@ -66,3 +66,6 @@ pnpm-workspace.yaml
 # `git add -A` would have committed the link, publishing the private repo's path.
 docs/audits
 docs/evidence
+
+# Review briefs: process, not product. Same reason as docs/audits.
+REVIEW-SPEC-*.md
