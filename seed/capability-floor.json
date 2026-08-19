@@ -1,0 +1,699 @@
+{
+  "claude": [
+    "--add-dir",
+    "--agent",
+    "--agents",
+    "--allowed-tools",
+    "--append-system-prompt",
+    "--append-system-prompt-file",
+    "--bare",
+    "--continue",
+    "--debug",
+    "--debug-file",
+    "--disable-slash-commands",
+    "--disallowed-tools",
+    "--effort",
+    "--exclude-dynamic-system-prompt-sections",
+    "--fallback-model",
+    "--fork-session",
+    "--include-hook-events",
+    "--include-partial-messages",
+    "--input-format",
+    "--json-schema",
+    "--max-budget-usd",
+    "--max-turns",
+    "--mcp-config",
+    "--model",
+    "--name",
+    "--no-session-persistence",
+    "--output-format",
+    "--permission-mode",
+    "--plugin-dir",
+    "--plugin-url",
+    "--replay-user-messages",
+    "--resume",
+    "--safe-mode",
+    "--session-id",
+    "--setting-sources",
+    "--settings",
+    "--strict-mcp-config",
+    "--system-prompt",
+    "--system-prompt-file",
+    "--tools",
+    "--verbose",
+    "-p"
+  ],
+  "claude agents": [
+    "--add-dir",
+    "--agent",
+    "--all",
+    "--allow-dangerously-skip-permissions",
+    "--cwd",
+    "--dangerously-skip-permissions",
+    "--effort",
+    "--json",
+    "--mcp-config",
+    "--model",
+    "--permission-mode",
+    "--plugin-dir",
+    "--setting-sources",
+    "--settings",
+    "--strict-mcp-config"
+  ],
+  "claude auth": [],
+  "claude auto-mode": [],
+  "claude doctor": [],
+  "claude gateway": [
+    "--config"
+  ],
+  "claude import": [],
+  "claude install": [
+    "--force"
+  ],
+  "claude mcp": [],
+  "claude plugin": [],
+  "claude plugins": [],
+  "claude project": [],
+  "claude setup-token": [],
+  "claude ultrareview": [
+    "--json",
+    "--timeout"
+  ],
+  "claude update": [],
+  "claude upgrade": [],
+  "codex": [
+    "--add-dir",
+    "--all",
+    "--cd",
+    "--color",
+    "--config",
+    "--dangerously-bypass-approvals-and-sandbox",
+    "--dangerously-bypass-hook-trust",
+    "--disable",
+    "--enable",
+    "--ephemeral",
+    "--ignore-rules",
+    "--ignore-user-config",
+    "--image",
+    "--json",
+    "--last",
+    "--local-provider",
+    "--model",
+    "--oss",
+    "--output-last-message",
+    "--output-schema",
+    "--profile",
+    "--sandbox",
+    "--skip-git-repo-check",
+    "--strict-config",
+    "--version",
+    "-C",
+    "-c",
+    "-i"
+  ],
+  "codex app-server": [
+    "--analytics-default-enabled",
+    "--config",
+    "--disable",
+    "--enable",
+    "--listen",
+    "--stdio",
+    "--strict-config",
+    "--ws-audience",
+    "--ws-auth",
+    "--ws-issuer",
+    "--ws-max-clock-skew-seconds",
+    "--ws-shared-secret-file",
+    "--ws-token-file",
+    "--ws-token-sha256"
+  ],
+  "codex apply": [
+    "--config",
+    "--disable",
+    "--enable"
+  ],
+  "codex archive": [
+    "--add-dir",
+    "--cd",
+    "--config",
+    "--dangerously-bypass-approvals-and-sandbox",
+    "--dangerously-bypass-hook-trust",
+    "--disable",
+    "--enable",
+    "--image",
+    "--local-provider",
+    "--model",
+    "--oss",
+    "--profile",
+    "--remote",
+    "--remote-auth-token-env",
+    "--sandbox",
+    "--strict-config"
+  ],
+  "codex cloud": [
+    "--config",
+    "--disable",
+    "--enable",
+    "--version"
+  ],
+  "codex completion": [
+    "--config",
+    "--disable",
+    "--enable"
+  ],
+  "codex debug": [
+    "--config",
+    "--disable",
+    "--enable"
+  ],
+  "codex delete": [
+    "--add-dir",
+    "--cd",
+    "--config",
+    "--dangerously-bypass-approvals-and-sandbox",
+    "--dangerously-bypass-hook-trust",
+    "--disable",
+    "--enable",
+    "--force",
+    "--image",
+    "--local-provider",
+    "--model",
+    "--oss",
+    "--profile",
+    "--remote",
+    "--remote-auth-token-env",
+    "--sandbox",
+    "--strict-config"
+  ],
+  "codex doctor": [
+    "--all",
+    "--ascii",
+    "--config",
+    "--disable",
+    "--enable",
+    "--json",
+    "--no-color",
+    "--summary"
+  ],
+  "codex exec": [
+    "--add-dir",
+    "--cd",
+    "--color",
+    "--config",
+    "--dangerously-bypass-approvals-and-sandbox",
+    "--dangerously-bypass-hook-trust",
+    "--disable",
+    "--enable",
+    "--ephemeral",
+    "--ignore-rules",
+    "--ignore-user-config",
+    "--image",
+    "--json",
+    "--local-provider",
+    "--model",
+    "--oss",
+    "--output-last-message",
+    "--output-schema",
+    "--profile",
+    "--sandbox",
+    "--skip-git-repo-check",
+    "--strict-config",
+    "--version"
+  ],
+  "codex exec resume": [
+    "--all",
+    "--config",
+    "--dangerously-bypass-approvals-and-sandbox",
+    "--dangerously-bypass-hook-trust",
+    "--disable",
+    "--enable",
+    "--ephemeral",
+    "--ignore-rules",
+    "--ignore-user-config",
+    "--image",
+    "--json",
+    "--last",
+    "--model",
+    "--output-last-message",
+    "--output-schema",
+    "--skip-git-repo-check",
+    "--strict-config"
+  ],
+  "codex exec review": [
+    "--base",
+    "--commit",
+    "--config",
+    "--dangerously-bypass-approvals-and-sandbox",
+    "--dangerously-bypass-hook-trust",
+    "--disable",
+    "--enable",
+    "--ephemeral",
+    "--ignore-rules",
+    "--ignore-user-config",
+    "--json",
+    "--model",
+    "--output-last-message",
+    "--output-schema",
+    "--skip-git-repo-check",
+    "--strict-config",
+    "--title",
+    "--uncommitted"
+  ],
+  "codex exec-server": [
+    "--config",
+    "--disable",
+    "--enable",
+    "--environment-id",
+    "--listen",
+    "--name",
+    "--remote",
+    "--strict-config",
+    "--use-agent-identity-auth"
+  ],
+  "codex features": [
+    "--config",
+    "--disable",
+    "--enable"
+  ],
+  "codex fork": [
+    "--add-dir",
+    "--all",
+    "--ask-for-approval",
+    "--cd",
+    "--config",
+    "--dangerously-bypass-approvals-and-sandbox",
+    "--dangerously-bypass-hook-trust",
+    "--disable",
+    "--enable",
+    "--image",
+    "--last",
+    "--local-provider",
+    "--model",
+    "--no-alt-screen",
+    "--oss",
+    "--profile",
+    "--remote",
+    "--remote-auth-token-env",
+    "--sandbox",
+    "--search",
+    "--strict-config",
+    "--version"
+  ],
+  "codex login": [
+    "--config",
+    "--device-auth",
+    "--disable",
+    "--enable",
+    "--with-access-token",
+    "--with-api-key"
+  ],
+  "codex logout": [
+    "--config",
+    "--disable",
+    "--enable"
+  ],
+  "codex mcp": [
+    "--config",
+    "--disable",
+    "--enable"
+  ],
+  "codex mcp-server": [
+    "--config",
+    "--disable",
+    "--enable",
+    "--strict-config"
+  ],
+  "codex plugin": [
+    "--config",
+    "--disable",
+    "--enable"
+  ],
+  "codex remote-control": [
+    "--config",
+    "--disable",
+    "--enable",
+    "--json"
+  ],
+  "codex resume": [
+    "--add-dir",
+    "--all",
+    "--ask-for-approval",
+    "--cd",
+    "--config",
+    "--dangerously-bypass-approvals-and-sandbox",
+    "--dangerously-bypass-hook-trust",
+    "--disable",
+    "--enable",
+    "--image",
+    "--include-non-interactive",
+    "--last",
+    "--local-provider",
+    "--model",
+    "--no-alt-screen",
+    "--oss",
+    "--profile",
+    "--remote",
+    "--remote-auth-token-env",
+    "--sandbox",
+    "--search",
+    "--strict-config",
+    "--version"
+  ],
+  "codex review": [
+    "--base",
+    "--commit",
+    "--config",
+    "--disable",
+    "--enable",
+    "--strict-config",
+    "--title",
+    "--uncommitted"
+  ],
+  "codex sandbox": [
+    "--cd",
+    "--config",
+    "--disable",
+    "--enable",
+    "--include-managed-config",
+    "--permission-profile",
+    "--profile",
+    "--sandbox-state-disable-network",
+    "--sandbox-state-json",
+    "--sandbox-state-readable-root"
+  ],
+  "codex unarchive": [
+    "--add-dir",
+    "--cd",
+    "--config",
+    "--dangerously-bypass-approvals-and-sandbox",
+    "--dangerously-bypass-hook-trust",
+    "--disable",
+    "--enable",
+    "--image",
+    "--local-provider",
+    "--model",
+    "--oss",
+    "--profile",
+    "--remote",
+    "--remote-auth-token-env",
+    "--sandbox",
+    "--strict-config"
+  ],
+  "codex update": [
+    "--config",
+    "--disable",
+    "--enable"
+  ],
+  "gemini": [
+    "--add-dir",
+    "--continue",
+    "--conversation",
+    "--dangerously-skip-permissions",
+    "--mode",
+    "--model",
+    "--new-project",
+    "--print",
+    "--print-timeout",
+    "--project",
+    "--prompt",
+    "--sandbox",
+    "-c",
+    "-p"
+  ],
+  "gemini agent": [],
+  "gemini changelog": [],
+  "gemini install": [
+    "--dir",
+    "--skip-aliases",
+    "--skip-path"
+  ],
+  "gemini models": [],
+  "gemini plugin": [],
+  "gemini plugins": [],
+  "gemini update": [],
+  "grok": [
+    "--agent",
+    "--agents",
+    "--allow",
+    "--always-approve",
+    "--best-of-n",
+    "--check",
+    "--compaction-detail",
+    "--compaction-mode",
+    "--continue",
+    "--cwd",
+    "--deny",
+    "--disable-web-search",
+    "--disallowed-tools",
+    "--effort",
+    "--experimental-memory",
+    "--fork-session",
+    "--json-schema",
+    "--leader-socket",
+    "--max-turns",
+    "--model",
+    "--no-alt-screen",
+    "--no-memory",
+    "--no-plan",
+    "--no-subagents",
+    "--oauth",
+    "--output-format",
+    "--permission-mode",
+    "--prompt-file",
+    "--prompt-json",
+    "--reasoning-effort",
+    "--restore-code",
+    "--resume",
+    "--rules",
+    "--sandbox",
+    "--single",
+    "--system-prompt-override",
+    "--todo-gate",
+    "--tools",
+    "--verbatim",
+    "--version",
+    "--worktree",
+    "--worktree-ref",
+    "-p"
+  ],
+  "grok agent": [
+    "--agent-profile",
+    "--always-approve",
+    "--cli-chat-proxy-base-url",
+    "--grok-ws-origin",
+    "--grok-ws-url",
+    "--leader",
+    "--leader-socket",
+    "--model",
+    "--no-leader",
+    "--plugin-dir",
+    "--reasoning-effort",
+    "--reauth",
+    "--xai-api-base-url"
+  ],
+  "grok agent headless": [
+    "--grok-ws-origin",
+    "--grok-ws-url",
+    "--leader-socket"
+  ],
+  "grok agent leader": [
+    "--grok-ws-origin",
+    "--grok-ws-url",
+    "--leader-socket",
+    "--no-auto-update",
+    "--no-exit-on-disconnect",
+    "--relay-on-demand"
+  ],
+  "grok agent serve": [
+    "--bind",
+    "--grok-ws-origin",
+    "--grok-ws-url",
+    "--leader-socket",
+    "--remote",
+    "--secret"
+  ],
+  "grok agent stdio": [
+    "--leader-socket"
+  ],
+  "grok completions": [
+    "--leader-socket"
+  ],
+  "grok dashboard": [
+    "--leader-socket"
+  ],
+  "grok doctor": [
+    "--json",
+    "--leader-socket"
+  ],
+  "grok du": [],
+  "grok export": [
+    "--clipboard",
+    "--leader-socket"
+  ],
+  "grok inspect": [
+    "--json",
+    "--leader-socket"
+  ],
+  "grok leader": [
+    "--leader-socket"
+  ],
+  "grok login": [
+    "--device-auth",
+    "--leader-socket",
+    "--oauth"
+  ],
+  "grok logout": [
+    "--leader-socket"
+  ],
+  "grok mcp": [
+    "--leader-socket"
+  ],
+  "grok memory": [
+    "--leader-socket"
+  ],
+  "grok models": [
+    "--leader-socket"
+  ],
+  "grok plugin": [
+    "--leader-socket"
+  ],
+  "grok sessions": [
+    "--leader-socket"
+  ],
+  "grok setup": [
+    "--json",
+    "--leader-socket"
+  ],
+  "grok trace": [
+    "--json",
+    "--leader-socket",
+    "--local",
+    "--output"
+  ],
+  "grok update": [
+    "--alpha",
+    "--check",
+    "--force-reinstall",
+    "--json",
+    "--leader-socket",
+    "--stable",
+    "--version"
+  ],
+  "grok version": [
+    "--json",
+    "--leader-socket"
+  ],
+  "grok worktree": [
+    "--leader-socket"
+  ],
+  "grok wrap": [
+    "--leader-socket"
+  ],
+  "mistral": [
+    "--add-dir",
+    "--agent",
+    "--continue",
+    "--disabled-tools",
+    "--enabled-tools",
+    "--max-price",
+    "--max-tokens",
+    "--max-turns",
+    "--output",
+    "--prompt",
+    "--resume",
+    "--setup",
+    "--trust",
+    "--version",
+    "--workdir",
+    "-p",
+    "-v"
+  ],
+  "mistral mcp": [],
+  "devin": [
+    "--agent-config",
+    "--config",
+    "--continue",
+    "--export",
+    "--model",
+    "--permission-mode",
+    "--prompt-file",
+    "--respect-workspace-trust",
+    "--resume",
+    "--sandbox",
+    "-p"
+  ],
+  "devin acp": [
+    "--agent-type"
+  ],
+  "devin auth": [],
+  "devin cloud": [],
+  "devin list": [
+    "--format"
+  ],
+  "devin mcp": [],
+  "devin migrate": [],
+  "devin models": [],
+  "devin plugins": [],
+  "devin rules": [],
+  "devin sandbox": [],
+  "devin setup": [
+    "--force-manual-token-flow"
+  ],
+  "devin skills": [],
+  "devin uninstall": [
+    "--clean",
+    "--force"
+  ],
+  "devin update": [
+    "--force"
+  ],
+  "devin version": [],
+  "cursor": [
+    "--add-dir",
+    "--auto-review",
+    "--continue",
+    "--force",
+    "--mode",
+    "--model",
+    "--output-format",
+    "--print",
+    "--resume",
+    "--sandbox",
+    "--trust",
+    "--workspace"
+  ],
+  "cursor about": [
+    "--format"
+  ],
+  "cursor agent": [],
+  "cursor bedrock": [],
+  "cursor create-chat": [],
+  "cursor generate-rule": [],
+  "cursor install-shell-integration": [],
+  "cursor login": [],
+  "cursor logout": [],
+  "cursor ls": [],
+  "cursor mcp": [],
+  "cursor models": [],
+  "cursor plugin": [],
+  "cursor resume": [],
+  "cursor status": [
+    "--format"
+  ],
+  "cursor uninstall-shell-integration": [],
+  "cursor update": [],
+  "cursor worker": [
+    "--auth-token-file",
+    "--data-dir",
+    "--debug",
+    "--idle-release-timeout",
+    "--label",
+    "--labels-file",
+    "--management-addr",
+    "--name",
+    "--pool",
+    "--pool-name",
+    "--single-use",
+    "--worker-dir"
+  ]
+}
