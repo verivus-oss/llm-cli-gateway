@@ -264,14 +264,21 @@ export const GROK_GEN_MAIN: readonly FlagGenerationMeta[] = [
     requestParameter: "effort",
     emit: "value_if_present",
     inputType: "string",
-    describe: "Grok effort level",
+    // KNOWN VALUES, NOT A REJECTION LIST. The contract carried these five as a
+    // Zod enum, which refused input grok's own parser accepts, and n1 removed
+    // the enum. Removing it entirely made the interface poorer than it needed to
+    // be: the policy says `values` becomes description and autocomplete data and
+    // never rejects, so the caller keeps the list and the binary keeps the vote.
+    describe:
+      "Grok effort level. Known values: low, medium, high, xhigh, max. Your installed grok decides what it accepts; these are not enforced.",
   },
   {
     flag: "--reasoning-effort",
     requestParameter: "reasoningEffort",
     emit: "value_if_present",
     inputType: "string",
-    describe: "Reasoning effort for reasoning models",
+    describe:
+      "Reasoning effort for reasoning models. Known values: low, medium, high, xhigh, max. Not enforced; the installed binary decides.",
   },
   {
     flag: "--best-of-n",

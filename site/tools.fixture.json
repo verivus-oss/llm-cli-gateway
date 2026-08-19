@@ -3290,11 +3290,11 @@
           },
           "effort": {
             "type": "string",
-            "description": "Grok effort level"
+            "description": "Grok effort level. Known values: low, medium, high, xhigh, max. Your installed grok decides what it accepts; these are not enforced."
           },
           "reasoningEffort": {
             "type": "string",
-            "description": "Reasoning effort for reasoning models"
+            "description": "Reasoning effort for reasoning models. Known values: low, medium, high, xhigh, max. Not enforced; the installed binary decides."
           },
           "bestOfN": {
             "type": "integer",
@@ -3768,11 +3768,11 @@
           },
           "effort": {
             "type": "string",
-            "description": "Grok effort level"
+            "description": "Grok effort level. Known values: low, medium, high, xhigh, max. Your installed grok decides what it accepts; these are not enforced."
           },
           "reasoningEffort": {
             "type": "string",
-            "description": "Reasoning effort for reasoning models"
+            "description": "Reasoning effort for reasoning models. Known values: low, medium, high, xhigh, max. Not enforced; the installed binary decides."
           },
           "approvalStrategy": {
             "type": "string",
