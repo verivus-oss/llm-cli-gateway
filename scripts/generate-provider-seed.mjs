@@ -10,10 +10,11 @@
 //      difference between a pure emit and a billed call.
 //   2. help text, stdout AND stderr, because agy is a Go binary and writes
 //      usage to stderr; a stdout-only read reports a provider with no flags.
-//   3. the invalid-value probe, anchored on a value-requiring flag DERIVED from
-//      the same help text. A binary whose help prints no value placeholder
-//      (agy) yields no anchor and records "probe" as unread, so a missing arity
-//      reads as not asked and never as arity none.
+//   3. the invalid-value probe, carrying a sentinel flag no parser knows. Every
+//      dialect therefore rejects something, and the verdict is WHICH flag the
+//      rejection named: only the sentinel means the flag under test parsed
+//      clean. No help parsing, so a binary that prints no value placeholder is
+//      probed like any other.
 //
 // The executable and helpArgs come from the bundled contract because they are
 // gateway plumbing (which binary to run), not provider capability.
@@ -133,27 +134,24 @@ function gatherProvider(discovery, cli, contract) {
     else for (const flag of discovery.allFlags(commands)) record(flag, "completions");
   }
 
-  // Anchored on the REQUEST command's own help, so the anchor is a flag that
-  // command accepts. A root-derived anchor can be absent here, which turns every
-  // verdict into the anchor's own error.
-  const anchor = requestHelp.ok
-    ? discovery.deriveProbeAnchor(`${requestHelp.stdout}\n${requestHelp.stderr}`)
-    : null;
-  if (!anchor) {
-    unread.push("probe");
-  } else {
-    for (const entry of byFlag.values()) {
-      if (entry.flag === anchor || !discovery.isProbeSafeFlag(entry.flag)) continue;
-      const probeArgv = discovery.buildProbeArgv(entry.flag, anchor, undefined, commandPath);
-      const result = run(executable, probeArgv);
-      if (!result.ok) continue;
-      const verdict = discovery.interpretProbeOutput(`${result.stderr}\n${result.stdout}`);
-      entry.probe = verdict.kind;
-      if (verdict.kind !== "present") continue;
-      entry.evidence.add("probe");
-      if (verdict.arity !== "unknown") entry.arity = verdict.arity;
-      if (verdict.values) entry.values = verdict.values;
-    }
+  // d1c: every probe carries a sentinel flag no parser knows, so the rejection
+  // always names something and the verdict is which flag it named. No anchor is
+  // derived, so a binary that prints no value placeholder is probed like any
+  // other.
+  for (const entry of byFlag.values()) {
+    if (!discovery.isProbeSafeFlag(entry.flag)) continue;
+    const probeArgv = discovery.buildProbeArgv(entry.flag, commandPath);
+    const result = run(executable, probeArgv);
+    if (!result.ok) continue;
+    const verdict = discovery.interpretProbeOutput(`${result.stderr}\n${result.stdout}`, {
+      flag: entry.flag,
+      sentinel: discovery.PROBE_SENTINEL,
+    });
+    entry.probe = verdict.kind;
+    if (verdict.kind !== "present") continue;
+    entry.evidence.add("probe");
+    if (verdict.arity !== "unknown") entry.arity = verdict.arity;
+    if (verdict.values) entry.values = verdict.values;
   }
   return {
     cli,

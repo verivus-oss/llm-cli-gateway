@@ -16,7 +16,7 @@ import {
   allFlags,
   assertProbeArgvCannotRun,
   buildProbeArgv,
-  deriveProbeAnchor,
+  PROBE_SENTINEL,
   isProbeSafeFlag,
   interpretProbeOutput,
   parseClapBashCompletion,
@@ -67,6 +67,8 @@ _codex() {
     esac
 }
 `;
+
+const CTX = { flag: "--probe-target", sentinel: PROBE_SENTINEL };
 
 describe("completions parsing", () => {
   it("extracts the root command's flags and subcommands", () => {
@@ -137,18 +139,23 @@ describe("completions parsing", () => {
  * nothing dispatched.
  */
 describe("invalid-value probe", () => {
-  const ABSENT = "error: unexpected argument '--not-a-real-flag' found\n\nUsage: grok [OPTIONS]";
+  // The usage block is deliberate: several binaries print their whole help
+  // alongside the error, and that help names every flag they have.
+  const ABSENT =
+    "error: unexpected argument '--not-a-real-flag' found\n\nUsage: grok [OPTIONS]\n  --probe-target <X>";
   const ENUM =
     "error: invalid value 'ZZZ' for '--permission-mode <MODE>'\n" +
     "  [possible values: default, acceptEdits, auto, dontAsk, bypassPermissions, plan]";
-  const ACCEPTED = "error: a value is required for '--single <PROMPT>' but none was supplied";
+  const ACCEPTED = `error: unexpected argument '${PROBE_SENTINEL}' found`;
 
   it("reports a flag the binary rejects as absent", () => {
-    expect(interpretProbeOutput(ABSENT)).toEqual({ kind: "absent" });
+    expect(
+      interpretProbeOutput(ABSENT, { flag: "--not-a-real-flag", sentinel: PROBE_SENTINEL })
+    ).toEqual({ kind: "absent" });
   });
 
   it("recovers the real value set when the binary enumerates one", () => {
-    const v = interpretProbeOutput(ENUM);
+    const v = interpretProbeOutput(ENUM, CTX);
     expect(v.kind).toBe("present");
     expect(v.kind === "present" && v.arity).toBe("one");
     expect(v.kind === "present" && v.values).toEqual([
@@ -165,7 +172,7 @@ describe("invalid-value probe", () => {
     // This is the verdict that would have prevented the grok --effort defect:
     // the contract asserted a five-level enum for a flag the binary does not
     // constrain, and `values` is enforced as a rejection list.
-    const v = interpretProbeOutput(ACCEPTED);
+    const v = interpretProbeOutput(ACCEPTED, CTX);
     expect(v).toEqual({ kind: "present", arity: "one", values: null });
   });
 
@@ -175,7 +182,7 @@ describe("invalid-value probe", () => {
     // byte-identical stderr and arity is unrecoverable. Verbatim from grok 1.0.4.
     const BOOLEAN =
       "error: unexpected value 'ZZZ' for '--always-approve' found; no more were expected";
-    expect(interpretProbeOutput(BOOLEAN)).toEqual({
+    expect(interpretProbeOutput(BOOLEAN, CTX)).toEqual({
       kind: "present",
       arity: "none",
       values: null,
@@ -188,13 +195,10 @@ describe("invalid-value probe", () => {
     // POSITIONAL and became a prompt that reached the model. A token that does
     // not start with `-` is the only thing that can turn a probe into a real
     // invocation.
-    for (const token of buildProbeArgv("--effort", "--single")) {
+    for (const token of buildProbeArgv("--effort")) {
       expect(token.startsWith("-"), `bare token ${token}`).toBe(true);
     }
-    expect(buildProbeArgv("--effort", "--single")).toEqual([
-      "--effort=ZZZ_GATEWAY_PROBE",
-      "--single",
-    ]);
+    expect(buildProbeArgv("--effort")).toEqual(["--effort=ZZZ_GATEWAY_PROBE", PROBE_SENTINEL]);
   });
 
   it("SAFETY: refuses to build argv containing a bare token", () => {
@@ -209,15 +213,17 @@ describe("invalid-value probe", () => {
     // so for a constrained flag the enum message is what comes back. Without
     // this control, "an error was produced" would read as "the flag was
     // rejected", and every constrained flag would be misclassified as absent.
-    expect(interpretProbeOutput(ENUM).kind).toBe("present");
-    expect(interpretProbeOutput(ABSENT).kind).toBe("absent");
+    expect(interpretProbeOutput(ENUM, CTX).kind).toBe("present");
+    expect(
+      interpretProbeOutput(ABSENT, { flag: "--not-a-real-flag", sentinel: PROBE_SENTINEL }).kind
+    ).toBe("absent");
   });
 
   it("keeps unparsed distinct from absent", () => {
     // Load-bearing under fail-open. `absent` is evidence about the binary;
     // `unparsed` is evidence about our parser. Collapsing the second into the
     // first is how a discovery system silently removes capability.
-    expect(interpretProbeOutput("").kind).toBe("unparsed");
+    expect(interpretProbeOutput("", CTX).kind).toBe("unparsed");
 
     // NOTE the boundary moved when arity detection landed. An "invalid value"
     // message with no enumerated set is NOT unparsed: it proves the flag exists
@@ -230,7 +236,7 @@ describe("invalid-value probe", () => {
     // behavioural consequence is identical. The difference affects guidance
     // quality only, and inventing a distinction with no behavioural effect
     // would be modelling for its own sake.
-    const undisclosed = interpretProbeOutput("error: invalid value 'ZZZ' for '--x <X>'");
+    const undisclosed = interpretProbeOutput("error: invalid value 'ZZZ' for '--x <X>'", CTX);
     expect(undisclosed).toEqual({ kind: "present", arity: "one", values: null });
   });
 
@@ -251,7 +257,9 @@ describe("invalid-value probe", () => {
     // non-subtractive; see the absence-is-never-subtractive invariant in
     // docs/plans/gateway-passthrough-policy.dag.toml.
     const ABSENT_HERE = "error: unexpected argument '--best-of-n' found";
-    expect(interpretProbeOutput(ABSENT_HERE)).toEqual({ kind: "absent" });
+    expect(
+      interpretProbeOutput(ABSENT_HERE, { flag: "--best-of-n", sentinel: PROBE_SENTINEL })
+    ).toEqual({ kind: "absent" });
   });
 });
 
@@ -340,7 +348,8 @@ describe("probe interpretation across dialects", () => {
   it("argparse: recovers the real value set", () => {
     // vibe --output=ZZZ --agent
     const v = interpretProbeOutput(
-      "vibe: error: argument --output: invalid choice: 'ZZZ' (choose from 'text', 'json', 'streaming')"
+      "vibe: error: argument --output: invalid choice: 'ZZZ' (choose from 'text', 'json', 'streaming')",
+      CTX
     );
     expect(v).toEqual({ kind: "present", arity: "one", values: ["text", "json", "streaming"] });
   });
@@ -349,35 +358,54 @@ describe("probe interpretation across dialects", () => {
     // vibe --yolo=ZZZ --agent
     expect(
       interpretProbeOutput(
-        "vibe: error: argument --auto-approve/--yolo: ignored explicit argument 'ZZZ'"
+        "vibe: error: argument --auto-approve/--yolo: ignored explicit argument 'ZZZ'",
+        CTX
       )
     ).toEqual({ kind: "present", arity: "none", values: null });
   });
 
   it("argparse: an unknown flag reads as absent", () => {
-    expect(interpretProbeOutput("vibe: error: unrecognized arguments: --not-real-xyz=ZZZ")).toEqual(
-      { kind: "absent" }
-    );
+    expect(
+      interpretProbeOutput("vibe: error: unrecognized arguments: --not-real-xyz=ZZZ", {
+        flag: "--not-real-xyz",
+        sentinel: PROBE_SENTINEL,
+      })
+    ).toEqual({ kind: "absent" });
   });
 
   it("Go flag: an unknown flag reads as absent", () => {
-    expect(interpretProbeOutput("flags provided but not defined: -not-real-xyz")).toEqual({
-      kind: "absent",
-    });
-  });
-
-  it("commander: an unknown flag reads as absent", () => {
-    expect(interpretProbeOutput("error: unknown option '--not-real-xyz'")).toEqual({
-      kind: "absent",
-    });
-  });
-
-  it("clap reaching the anchor PROVES the flag parsed clean", () => {
-    // clap validates left to right and reports the first failure, so the
-    // anchor's error can only surface once the flag under test was accepted.
-    // Measured on grok: --permission-mode and --not-real-xyz never get here.
     expect(
-      interpretProbeOutput("error: a value is required for '--model <MODEL>' but none was supplied")
+      interpretProbeOutput("flags provided but not defined: -not-real-xyz", {
+        flag: "--not-real-xyz",
+        sentinel: PROBE_SENTINEL,
+      })
+    ).toEqual({
+      kind: "absent",
+    });
+  });
+
+  it("commander: a named flag stays UNPARSED, because a real boolean looks identical", () => {
+    // claude reports `--continue=ZZZ` for a flag it HAS exactly as it reports
+    // one it does not. Reading either as absent fabricates a removal for every
+    // boolean flag claude has.
+    const verdict = interpretProbeOutput("error: unknown option '--not-real-xyz=ZZZ'", {
+      flag: "--not-real-xyz",
+      sentinel: PROBE_SENTINEL,
+    });
+    expect(verdict.kind).toBe("unparsed");
+    expect(verdict.kind === "unparsed" && verdict.reason).toMatch(/boolean/);
+  });
+
+  it("naming ONLY the sentinel proves the flag parsed clean, and that it takes a value", () => {
+    // The parser rejected the flag we know does not exist and said nothing
+    // about the flag under test, which was handed `=VALUE` and not complained
+    // about. Every dialect here rejects a value on a no-value flag, so
+    // accepting one is itself the arity evidence.
+    expect(
+      interpretProbeOutput(`error: unexpected argument '${PROBE_SENTINEL}' found`, {
+        flag: "--probe-target",
+        sentinel: PROBE_SENTINEL,
+      })
     ).toEqual({ kind: "present", arity: "one", values: null });
   });
 
@@ -399,57 +427,13 @@ describe("probe interpretation across dialects", () => {
       "vibe: error: argument --agent: expected one argument", // argparse
       "error: option '--model <model>' argument missing", // commander
     ]) {
-      expect(interpretProbeOutput(anchorError).kind, anchorError).toBe("unparsed");
+      expect(interpretProbeOutput(anchorError, CTX).kind, anchorError).toBe("unparsed");
     }
   });
 
   it("declines to guess on a message it does not recognise", () => {
     // Fail-open still offers the flag; what it must not do is invent arity.
-    expect(interpretProbeOutput("error: something entirely new").kind).toBe("unparsed");
-  });
-});
-
-describe("deriveProbeAnchor", () => {
-  it("takes an angle-bracket placeholder, which means the value is REQUIRED", () => {
-    expect(deriveProbeAnchor("  -m, --model <MODEL>   Pick one\n")).toBe("--model");
-  });
-
-  it("takes a bare uppercase metavar, which argparse also requires", () => {
-    expect(deriveProbeAnchor("  --agent NAME          Agent to use\n")).toBe("--agent");
-  });
-
-  it("REFUSES a square-bracket placeholder, whose value is optional", () => {
-    // `--worktree [NAME]` omitted is legal, so the probe would RUN the CLI.
-    expect(deriveProbeAnchor("  --worktree [NAME]     Run inside a worktree\n")).toBeNull();
-  });
-
-  it("does not mistake a capitalised description word for a metavar", () => {
-    // The real hazard is ONE space then a capitalised word, which is exactly how
-    // a metavar is spaced. Only the all-caps requirement separates them, so the
-    // input has to be single-spaced or the test proves nothing.
-    expect(deriveProbeAnchor("  --dry-run Perform a trial run\n")).toBeNull();
-    expect(deriveProbeAnchor("  --workdir DIR Change to this directory\n")).toBe("--workdir");
-  });
-
-  it("refuses an anchor that could DO something", () => {
-    expect(deriveProbeAnchor("  --login <TOKEN>   Sign in\n")).toBeNull();
-  });
-
-  it("excludes the flag under test, so a flag is never its own anchor", () => {
-    const help = "  --model <M>  x\n  --agent <A>  y\n";
-    expect(deriveProbeAnchor(help)).toBe("--agent");
-    expect(deriveProbeAnchor(help, ["--agent"])).toBe("--model");
-  });
-
-  it("returns null for help that prints no placeholder at all", () => {
-    // agy, a Go flag binary. No anchor means the provider is recorded as
-    // unprobeable, never probed with a guessed anchor.
-    expect(deriveProbeAnchor("  --effort   Reasoning effort\n  --model    Model\n")).toBeNull();
-  });
-
-  it("is deterministic, so a regenerated seed is diffable", () => {
-    const help = "  --zulu <Z>  z\n  --alpha <A>  a\n  --mike <M>  m\n";
-    expect(deriveProbeAnchor(help)).toBe("--alpha");
+    expect(interpretProbeOutput("error: something entirely new", CTX).kind).toBe("unparsed");
   });
 });
 
@@ -467,10 +451,10 @@ describe("isProbeSafeFlag", () => {
 
 describe("probing a request subcommand", () => {
   it("puts the declared command path first", () => {
-    expect(buildProbeArgv("--sandbox", "--add-dir", "ZZZ", ["exec"])).toEqual([
+    expect(buildProbeArgv("--sandbox", ["exec"])).toEqual([
       "exec",
-      "--sandbox=ZZZ",
-      "--add-dir",
+      "--sandbox=ZZZ_GATEWAY_PROBE",
+      PROBE_SENTINEL,
     ]);
   });
 
@@ -496,5 +480,73 @@ describe("probing a request subcommand", () => {
 
   it("still refuses every bare token when no path is declared", () => {
     expect(() => assertProbeArgvCannotRun(["exec", "--x=Z"])).toThrow(/not option-shaped/);
+  });
+});
+
+describe("the sentinel probe reads the REJECTION LINE, not the whole output", () => {
+  const S = PROBE_SENTINEL;
+
+  it("ignores help text that names the flag under test", () => {
+    // The defect this exists for, caught by diffing a regenerated seed: several
+    // binaries print their whole help alongside the error, and that help lists
+    // every flag they have. Reading the combined streams turned 22 real grok
+    // flags into absent verdicts, which is a fabricated removal 22 times over.
+    const output = [
+      `error: unexpected argument '${S}' found`,
+      "",
+      "Usage: grok [OPTIONS] [PROMPT]",
+      "      --agents <JSON>   Inline subagent definitions",
+      "      --allow <RULE>    Permission allow rule",
+    ].join("\n");
+    expect(interpretProbeOutput(output, { flag: "--agents", sentinel: S })).toEqual({
+      kind: "present",
+      arity: "one",
+      values: null,
+    });
+  });
+
+  it("matches Go's single-dash spelling of a double-dash flag", () => {
+    // Go's flag package prints `-add-dir` for what its own help calls
+    // `--add-dir`, so a literal comparison never fires and every agy verdict
+    // falls through to unparsed.
+    expect(
+      interpretProbeOutput(`flags provided but not defined: -add-dir -${S.slice(2)}`, {
+        flag: "--add-dir",
+        sentinel: S,
+      })
+    ).toEqual({ kind: "absent" });
+  });
+
+  it("matches whole tokens, so --all does not match inside --allowed-tools", () => {
+    const output = `error: unexpected argument '${S}' found\n  --allowed-tools <TOOLS>`;
+    expect(interpretProbeOutput(output, { flag: "--all", sentinel: S }).kind).toBe("present");
+  });
+
+  it("names BOTH when the flag is genuinely absent", () => {
+    expect(
+      interpretProbeOutput(`flags provided but not defined: -nope -${S.slice(2)}`, {
+        flag: "--nope",
+        sentinel: S,
+      })
+    ).toEqual({ kind: "absent" });
+  });
+
+  it("a value-set message still outranks the naming rule", () => {
+    const output =
+      "error: invalid value 'ZZZ' for '--sandbox <MODE>'\n  [possible values: read-only, danger]";
+    expect(interpretProbeOutput(output, { flag: "--sandbox", sentinel: S })).toEqual({
+      kind: "present",
+      arity: "one",
+      values: ["read-only", "danger"],
+    });
+  });
+
+  it("Go reports a real boolean by complaining about the VALUE", () => {
+    expect(
+      interpretProbeOutput('invalid boolean value "ZZZ" for -sandbox', {
+        flag: "--sandbox",
+        sentinel: S,
+      })
+    ).toEqual({ kind: "present", arity: "none", values: null });
   });
 });

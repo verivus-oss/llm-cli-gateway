@@ -326,22 +326,50 @@ export type FlagProbeVerdict =
  * binary, so nothing is lost by declining to guess; inventing `arity: "one"`
  * for an unrecognised message loses the distinction the whole policy rests on.
  */
-export function interpretProbeOutput(stderr: string): FlagProbeVerdict {
+/**
+ * The one line that names a rejected flag.
+ *
+ * Read the LINE, never the whole output. Several binaries print their full help
+ * to stdout alongside the error, and that help lists every flag they have, so a
+ * naming test over the combined streams says "this message names the flag under
+ * test" for a flag that parsed perfectly. Measured: it turned 22 real grok flags
+ * into absent verdicts, which is a fabricated removal 22 times over.
+ */
+const REJECTION_LINE =
+  /^.*(?:unexpected argument|unrecognized arguments?:|flags? provided but not defined|unknown option).*$/im;
+
+/**
+ * Whether a line names this flag as a token.
+ *
+ * Both spellings, because Go's flag package prints `-add-dir` for what its own
+ * help calls `--add-dir`. Token-bounded, because a substring test lets `--all`
+ * match inside `--allowed-tools`.
+ */
+function namesToken(line: string, flag: string): boolean {
+  const bare = flag.replace(/^-+/u, "").replace(/[.*+?^${}()|[\]\\]/gu, "\\$&");
+  return new RegExp(`(^|[^\\w-])--?${bare}(?![\\w-])`, "u").test(line);
+}
+
+export interface ProbeContext {
+  /** The flag being asked about. */
+  readonly flag: string;
+  /** The sentinel flag, which is guaranteed not to exist on any binary. */
+  readonly sentinel: string;
+}
+
+/**
+ * `context` is REQUIRED. Every dialect's rejection message names a flag, and
+ * with a sentinel in the argv there is always one to name, so a reading that
+ * ignores WHICH flag was named calls every real flag absent. That mistake
+ * fabricates a removal, which is the one outcome this subsystem exists to
+ * prevent.
+ */
+export function interpretProbeOutput(stderr: string, context: ProbeContext): FlagProbeVerdict {
   const text = stderr.trim();
   if (!text) return { kind: "unparsed", reason: "probe produced no diagnostic output" };
-
-  // ABSENT: the parser rejected the flag itself.
-  //   clap       error: unexpected argument '--nope' found
-  //   argparse   vibe: error: unrecognized arguments: --nope=ZZZ
-  //   Go flag    flags provided but not defined: -nope
-  //   commander  error: unknown option '--nope'
-  if (
-    /unexpected argument/i.test(text) ||
-    /unrecognized arguments?:/i.test(text) ||
-    /flags? provided but not defined/i.test(text) ||
-    /unknown option/i.test(text)
-  )
-    return { kind: "absent" };
+  const rejectionLine = REJECTION_LINE.exec(text)?.[0] ?? "";
+  const namesFlag = namesToken(rejectionLine, context.flag);
+  const namesSentinel = namesToken(rejectionLine, context.sentinel);
 
   // PRESENT, ARITY NONE: the flag exists and takes no value, so supplying one
   // is itself the error. Only the inline `=` form surfaces this; see
@@ -368,22 +396,40 @@ export function interpretProbeOutput(stderr: string): FlagProbeVerdict {
   if (/invalid value/i.test(text) || /invalid choice/i.test(text))
     return { kind: "present", arity: "one", values: null };
 
-  // PRESENT: clap reached the ANCHOR, which under its left-to-right reporting
-  // means it already accepted the flag under test.
-  if (/a value is required for/i.test(text)) return { kind: "present", arity: "one", values: null };
+  // PRESENT, ARITY NONE, Go flag. A bool given a value complains about the
+  // value, which proves the flag exists.
+  //   Go flag    invalid boolean value "ZZZ" for -sandbox
+  if (/invalid boolean value/i.test(text)) return { kind: "present", arity: "none", values: null };
 
-  // UNPARSED: the other three dialects reached the anchor, which tells us
-  // nothing about the flag because they report unknown flags LAST. See the
-  // docstring; this is not a `present` in disguise.
-  if (
-    /expected one argument/i.test(text) ||
-    /flag needs an argument/i.test(text) ||
-    /argument missing/i.test(text)
-  )
-    return {
-      kind: "unparsed",
-      reason: "the anchor's own error surfaced first; this dialect reports unknown flags last",
-    };
+  // THE REJECTION MESSAGE, READ BY WHICH FLAG IT NAMES.
+  //   clap       error: unexpected argument '--nope' found
+  //   argparse   vibe: error: unrecognized arguments: --nope=ZZZ --sentinel
+  //   Go flag    flags provided but not defined: -nope -sentinel
+  //   commander  error: unknown option '--nope'
+  //
+  // Naming ONLY the sentinel means the parser accepted the flag under test and
+  // went on to reject the one we know does not exist.
+  const rejected = rejectionLine !== "";
+  // ARITY ONE, and this is an inference rather than a message. The flag under
+  // test was given `=VALUE` and the parser did not complain about it, so it
+  // takes a value: every dialect here rejects a value on a no-value flag, with
+  // "unexpected value" (clap), "ignored explicit argument" (argparse),
+  // "invalid boolean value" (Go) or "unknown option" (commander), all of which
+  // are handled above.
+  if (rejected && namesSentinel && !namesFlag)
+    return { kind: "present", arity: "one", values: null };
+  if (rejected && namesFlag) {
+    // COMMANDER IS AMBIGUOUS AND MUST NOT BE FORCED. claude and cursor-agent
+    // report a real BOOLEAN given `=value` as `unknown option '--continue=ZZZ'`,
+    // byte-identical to a flag that does not exist. Reading that as absent
+    // would fabricate a removal for every boolean flag claude has.
+    if (/unknown option/i.test(text))
+      return {
+        kind: "unparsed",
+        reason: "commander reports a real boolean given a value exactly like an absent flag",
+      };
+    return { kind: "absent" };
+  }
 
   return { kind: "unparsed", reason: "unrecognised diagnostic; declining to guess arity" };
 }
@@ -428,13 +474,31 @@ function splitValues(raw: string): string[] {
  * `anchorFlag` should require a value, so the invocation additionally fails on
  * the missing anchor value. That is defence in depth, not the primary guard.
  */
+/**
+ * A flag guaranteed not to exist on any binary, appended to every probe.
+ *
+ * d1c. It replaced a value-requiring ANCHOR read from help text, for two
+ * reasons. agy prints no value placeholder, so it yielded no anchor and its
+ * flags went unasked. And the anchor rests on a flag EXISTING and requiring a
+ * value, which is read off the binary and can be wrong; the sentinel rests on a
+ * flag NOT existing, which is a property we control.
+ *
+ * It is also what makes the probe unable to run: an argv containing a flag no
+ * parser knows cannot reach dispatch, whatever the flag under test turns out to
+ * be.
+ */
+export const PROBE_SENTINEL = "--zzz-gateway-probe-not-a-flag";
+
+/** Value handed to the flag under test. Never a real value for anything. */
+export const PROBE_SENTINEL_VALUE = "ZZZ_GATEWAY_PROBE";
+
 export function buildProbeArgv(
   flag: string,
-  anchorFlag: string,
-  sentinel = "ZZZ_GATEWAY_PROBE",
-  commandPath: readonly string[] = []
+  commandPath: readonly string[] = [],
+  sentinel: string = PROBE_SENTINEL,
+  sentinelValue: string = PROBE_SENTINEL_VALUE
 ): string[] {
-  const argv = [...commandPath, `${flag}=${sentinel}`, anchorFlag];
+  const argv = [...commandPath, `${flag}=${sentinelValue}`, sentinel];
   assertProbeArgvCannotRun(argv, commandPath);
   return argv;
 }
@@ -475,31 +539,18 @@ export function assertProbeArgvCannotRun(
 }
 
 // ---------------------------------------------------------------------------
-// SOURCE 3, part 2: choosing the anchor without typing one per provider.
+// SOURCE 3, part 2: which flags may be asked at all.
 //
-// The probe argv is `[--flag=ZZZ, --anchor]` and only works if the anchor
-// REQUIRES a value, so that omitting it guarantees a parse error and the CLI
-// cannot reach dispatch. Taking the anchor from `contract.flags` would be
-// hand-authored provider data by the back door, so it is read from the binary's
-// own help, which prints its own value placeholders.
+// The probe argv is `[--flag=ZZZ, --sentinel]`, and the sentinel is a flag no
+// parser knows. Every dialect therefore produces a rejection, and the rejection
+// NAMES a flag: only the sentinel when the flag under test parsed clean, both
+// when it did not. See interpretProbeOutput.
 //
-// Two shapes cover six of the seven installed binaries:
-//
-//   --agent <NAME>      clap, commander and claude. Angle brackets mean required.
-//   --agent NAME        argparse. A bare uppercase metavar, also required.
-//
-// SQUARE BRACKETS ARE EXCLUDED AND THAT IS THE WHOLE POINT. `--worktree [NAME]`
-// and argparse `nargs="?"` take an OPTIONAL value, so omitting it is legal and
-// the probe would run the CLI for real instead of failing at parse.
-//
-// agy prints no placeholder of either shape, so it yields no anchor and is
-// reported as unprobeable rather than probed with a guess. That matches what
-// interpretProbeOutput already found: Go's flag package reports an unknown flag
-// last, so agy probes return byte-identical stderr and cannot discriminate.
+// An earlier version anchored on a value-requiring flag scraped from help. It
+// was retired in d1c: agy prints no value placeholder, so it produced no anchor
+// and its flags went unasked, and an anchor rests on a flag EXISTING, which is
+// read off the binary and can be wrong.
 // ---------------------------------------------------------------------------
-
-const ANCHOR_ANGLE = /^\s{2,}(?:-[A-Za-z], )?(--[a-z0-9][a-z0-9-]*)[ =]+<[^>]+>/gmu;
-const ANCHOR_METAVAR = /^\s{2,}(?:-[A-Za-z], )?(--[a-z0-9][a-z0-9-]*) ([A-Z][A-Z0-9_]*)(?=\s|$)/gmu;
 
 /**
  * Flags never probed, because probing one could DO something.
@@ -511,28 +562,6 @@ const ANCHOR_METAVAR = /^\s{2,}(?:-[A-Za-z], )?(--[a-z0-9][a-z0-9-]*) ([A-Z][A-Z
  */
 const UNSAFE_TO_PROBE =
   /update|upgrade|install|login|logout|auth|reauth|uninstall|delete|remove|reset|publish|purge/iu;
-
-/**
- * Pick a value-requiring flag from help text to use as a probe anchor.
- *
- * Returns the first candidate in sorted order so the same help text always
- * yields the same anchor, and a regenerated seed is diffable.
- */
-export function deriveProbeAnchor(
-  helpText: string,
-  exclude: readonly string[] = []
-): string | null {
-  const excluded = new Set(exclude);
-  const found = new Set<string>();
-  for (const pattern of [ANCHOR_ANGLE, ANCHOR_METAVAR]) {
-    pattern.lastIndex = 0;
-    for (const match of helpText.matchAll(pattern)) {
-      const flag = match[1];
-      if (!excluded.has(flag) && !UNSAFE_TO_PROBE.test(flag)) found.add(flag);
-    }
-  }
-  return found.size === 0 ? null : [...found].sort()[0];
-}
 
 /** Whether this flag may be probed at all. See UNSAFE_TO_PROBE. */
 export function isProbeSafeFlag(flag: string): boolean {
