@@ -91,10 +91,10 @@ constraint = "surface:invariance:check is the control for anything beyond seed-o
 
 [[node]]
 id = "d4c.schema-derivation-reads-the-loader"
+status = "done 2026-08-19, fixture unchanged"
 depends_on = ["d4a.registration-reads-the-loader"]
-role = "deriveZodShapeFromGeneration still takes contract.flags for its enum source, so a tool SCHEMA cannot yet widen from the seed even though admission can."
-action = "Point it at the resolved surface. Verified safe in advance: zero enum differences between the surface and the live contract, so the site fixture should not move."
-constraint = "The published surface is the blast radius. site:generate:check plus surface:invariance:check are both controls here, and a fixture change means the derivation is not equivalent."
+role = "deriveZodShapeFromGeneration read contract.flags for its enum source, so admission could widen from the seed and a tool SCHEMA could not."
+outcome = "The lookup is INJECTED, so provider-codegen still imports no contract and no loader. Contract stays the fallback, so a surface that failed to load costs nothing. Proved live rather than silently falling back: with the surface reporting one extra enum value, site:generate:check fails."
 
 [[node]]
 id = "d4b.seed-records-short-flags"
