@@ -21,6 +21,7 @@ function observed(over: Partial<ObservedProvider> = {}): ObservedProvider {
     cli: "grok",
     executable: "grok",
     version: "1.0.4",
+    commandScope: "root",
     flags: [{ flag: "--effort", evidence: ["completions"] }],
     unreadSources: [],
     ...over,

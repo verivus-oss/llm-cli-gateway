@@ -28,6 +28,16 @@
 /** Which discovery source saw a flag. Distinct sources, not a confidence score. */
 export type SeedEvidence = "completions" | "help" | "probe";
 
+/**
+ * What the binary's own parser said about a flag.
+ *
+ * `unparsed` is not a soft `absent`. Three of the four dialects report an
+ * unknown flag AFTER the anchor's missing-value error, so their stderr is
+ * identical for a real flag and an invented one. Recording that as `absent`
+ * would fabricate a removal.
+ */
+export type ProbeVerdict = "absent" | "present" | "unparsed";
+
 /** One flag as the binaries have reported it over time. */
 export interface SeededFlag {
   readonly flag: string;
@@ -36,6 +46,13 @@ export interface SeededFlag {
   readonly arity?: "none" | "one";
   /** Set only when the binary printed its own value set. Never invented. */
   readonly values?: readonly string[];
+  /**
+   * Latest probe verdict and the version it was taken at. Recorded even when
+   * `absent`, because the seed is a record of what was asked and answered. A
+   * consumer decides what to do with it; this file never deletes on the strength
+   * of it.
+   */
+  readonly probe?: { readonly verdict: ProbeVerdict; readonly at: string };
   /** Binary version that first recorded this flag. */
   readonly firstSeen: string;
   /** Latest binary version that still advertised it. Frozen once it stops. */
@@ -47,6 +64,16 @@ export interface SeededProvider {
   readonly cli: string;
   readonly executable: string;
   readonly version: string;
+  /**
+   * Command the help scrape and probe addressed. Always "root" today.
+   *
+   * LOAD-BEARING. codex accepts `--ask-for-approval` at the root and NOT on
+   * `codex exec`, which is the command the gateway actually builds. A consumer
+   * that reads root-scope flags as the request surface would widen codex on the
+   * strength of a flag that is genuinely absent where it matters. Completions
+   * (source 1) do carry the whole tree; sources 2 and 3 do not.
+   */
+  readonly commandScope: "root";
   readonly flags: readonly SeededFlag[];
   /**
    * Sources that could not be read, by name. Load-bearing: a source that failed
@@ -76,11 +103,13 @@ export interface ObservedProvider {
   readonly cli: string;
   readonly executable: string;
   readonly version: string;
+  readonly commandScope: "root";
   readonly flags: readonly {
     readonly flag: string;
     readonly evidence: readonly SeedEvidence[];
     readonly arity?: "none" | "one";
     readonly values?: readonly string[];
+    readonly probe?: ProbeVerdict;
   }[];
   readonly unreadSources: readonly string[];
 }
@@ -113,6 +142,7 @@ function mergeFlag(
       ...(observed.values === undefined ? {} : { values: [...observed.values] }),
       firstSeen: version,
       lastSeen: version,
+      ...(observed.probe === undefined ? {} : { probe: { verdict: observed.probe, at: version } }),
     };
   }
   return {
@@ -125,6 +155,11 @@ function mergeFlag(
       : {}),
     firstSeen: previous.firstSeen,
     lastSeen: version,
+    ...(observed.probe === undefined
+      ? previous.probe === undefined
+        ? {}
+        : { probe: previous.probe }
+      : { probe: { verdict: observed.probe, at: version } }),
   };
 }
 
@@ -162,6 +197,7 @@ export function mergeSeed(
       cli: run.cli,
       executable: run.executable,
       version: run.version,
+      commandScope: run.commandScope,
       flags,
       unreadSources: [...run.unreadSources].sort(),
     });
@@ -225,6 +261,9 @@ export function validateSeed(value: unknown): { ok: boolean; errors: string[] } 
     return { ok: false, errors };
   }
   for (const provider of seed.providers) {
+    if (provider.commandScope !== "root") {
+      errors.push(`${provider.cli}: unsupported commandScope ${String(provider.commandScope)}`);
+    }
     if (!provider.cli || !provider.executable || !provider.version) {
       errors.push(`provider entry is incomplete: ${JSON.stringify(provider.cli ?? provider)}`);
     }

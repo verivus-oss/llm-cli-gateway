@@ -16,6 +16,8 @@ import {
   allFlags,
   assertProbeArgvCannotRun,
   buildProbeArgv,
+  deriveProbeAnchor,
+  isProbeSafeFlag,
   interpretProbeOutput,
   parseClapBashCompletion,
   scrapeCandidateFlags,
@@ -404,5 +406,61 @@ describe("probe interpretation across dialects", () => {
   it("declines to guess on a message it does not recognise", () => {
     // Fail-open still offers the flag; what it must not do is invent arity.
     expect(interpretProbeOutput("error: something entirely new").kind).toBe("unparsed");
+  });
+});
+
+describe("deriveProbeAnchor", () => {
+  it("takes an angle-bracket placeholder, which means the value is REQUIRED", () => {
+    expect(deriveProbeAnchor("  -m, --model <MODEL>   Pick one\n")).toBe("--model");
+  });
+
+  it("takes a bare uppercase metavar, which argparse also requires", () => {
+    expect(deriveProbeAnchor("  --agent NAME          Agent to use\n")).toBe("--agent");
+  });
+
+  it("REFUSES a square-bracket placeholder, whose value is optional", () => {
+    // `--worktree [NAME]` omitted is legal, so the probe would RUN the CLI.
+    expect(deriveProbeAnchor("  --worktree [NAME]     Run inside a worktree\n")).toBeNull();
+  });
+
+  it("does not mistake a capitalised description word for a metavar", () => {
+    // The real hazard is ONE space then a capitalised word, which is exactly how
+    // a metavar is spaced. Only the all-caps requirement separates them, so the
+    // input has to be single-spaced or the test proves nothing.
+    expect(deriveProbeAnchor("  --dry-run Perform a trial run\n")).toBeNull();
+    expect(deriveProbeAnchor("  --workdir DIR Change to this directory\n")).toBe("--workdir");
+  });
+
+  it("refuses an anchor that could DO something", () => {
+    expect(deriveProbeAnchor("  --login <TOKEN>   Sign in\n")).toBeNull();
+  });
+
+  it("excludes the flag under test, so a flag is never its own anchor", () => {
+    const help = "  --model <M>  x\n  --agent <A>  y\n";
+    expect(deriveProbeAnchor(help)).toBe("--agent");
+    expect(deriveProbeAnchor(help, ["--agent"])).toBe("--model");
+  });
+
+  it("returns null for help that prints no placeholder at all", () => {
+    // agy, a Go flag binary. No anchor means the provider is recorded as
+    // unprobeable, never probed with a guessed anchor.
+    expect(deriveProbeAnchor("  --effort   Reasoning effort\n  --model    Model\n")).toBeNull();
+  });
+
+  it("is deterministic, so a regenerated seed is diffable", () => {
+    const help = "  --zulu <Z>  z\n  --alpha <A>  a\n  --mike <M>  m\n";
+    expect(deriveProbeAnchor(help)).toBe("--alpha");
+  });
+});
+
+describe("isProbeSafeFlag", () => {
+  it("refuses action-class flags, because commander accepts and ignores a value", () => {
+    for (const flag of ["--update", "--logout", "--reauthenticate", "--uninstall", "--reset"]) {
+      expect(isProbeSafeFlag(flag), flag).toBe(false);
+    }
+  });
+
+  it("allows an ordinary flag", () => {
+    expect(isProbeSafeFlag("--output-format")).toBe(true);
   });
 });

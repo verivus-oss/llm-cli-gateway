@@ -456,3 +456,68 @@ export function assertProbeArgvCannotRun(argv: readonly string[]): void {
     }
   }
 }
+
+// ---------------------------------------------------------------------------
+// SOURCE 3, part 2: choosing the anchor without typing one per provider.
+//
+// The probe argv is `[--flag=ZZZ, --anchor]` and only works if the anchor
+// REQUIRES a value, so that omitting it guarantees a parse error and the CLI
+// cannot reach dispatch. Taking the anchor from `contract.flags` would be
+// hand-authored provider data by the back door, so it is read from the binary's
+// own help, which prints its own value placeholders.
+//
+// Two shapes cover six of the seven installed binaries:
+//
+//   --agent <NAME>      clap, commander and claude. Angle brackets mean required.
+//   --agent NAME        argparse. A bare uppercase metavar, also required.
+//
+// SQUARE BRACKETS ARE EXCLUDED AND THAT IS THE WHOLE POINT. `--worktree [NAME]`
+// and argparse `nargs="?"` take an OPTIONAL value, so omitting it is legal and
+// the probe would run the CLI for real instead of failing at parse.
+//
+// agy prints no placeholder of either shape, so it yields no anchor and is
+// reported as unprobeable rather than probed with a guess. That matches what
+// interpretProbeOutput already found: Go's flag package reports an unknown flag
+// last, so agy probes return byte-identical stderr and cannot discriminate.
+// ---------------------------------------------------------------------------
+
+const ANCHOR_ANGLE = /^\s{2,}(?:-[A-Za-z], )?(--[a-z0-9][a-z0-9-]*)[ =]+<[^>]+>/gmu;
+const ANCHOR_METAVAR = /^\s{2,}(?:-[A-Za-z], )?(--[a-z0-9][a-z0-9-]*) ([A-Z][A-Z0-9_]*)(?=\s|$)/gmu;
+
+/**
+ * Flags never probed, because probing one could DO something.
+ *
+ * A boolean flag given `=ZZZ` errors in clap, argparse and Go, but commander
+ * accepts and ignores a value, so `--update=ZZZ` can execute. This is a
+ * host-safety rule of the same kind as retained_enforcement, not a judgement
+ * about capability: these flags stay in the seed, they are simply not asked.
+ */
+const UNSAFE_TO_PROBE =
+  /update|upgrade|install|login|logout|auth|reauth|uninstall|delete|remove|reset|publish|purge/iu;
+
+/**
+ * Pick a value-requiring flag from help text to use as a probe anchor.
+ *
+ * Returns the first candidate in sorted order so the same help text always
+ * yields the same anchor, and a regenerated seed is diffable.
+ */
+export function deriveProbeAnchor(
+  helpText: string,
+  exclude: readonly string[] = []
+): string | null {
+  const excluded = new Set(exclude);
+  const found = new Set<string>();
+  for (const pattern of [ANCHOR_ANGLE, ANCHOR_METAVAR]) {
+    pattern.lastIndex = 0;
+    for (const match of helpText.matchAll(pattern)) {
+      const flag = match[1];
+      if (!excluded.has(flag) && !UNSAFE_TO_PROBE.test(flag)) found.add(flag);
+    }
+  }
+  return found.size === 0 ? null : [...found].sort()[0];
+}
+
+/** Whether this flag may be probed at all. See UNSAFE_TO_PROBE. */
+export function isProbeSafeFlag(flag: string): boolean {
+  return !UNSAFE_TO_PROBE.test(flag);
+}

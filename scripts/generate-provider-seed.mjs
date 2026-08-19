@@ -10,10 +10,10 @@
 //      difference between a pure emit and a billed call.
 //   2. help text, stdout AND stderr, because agy is a Go binary and writes
 //      usage to stderr; a stdout-only read reports a provider with no flags.
-//   3. the invalid-value probe, NOT YET WIRED. It needs a value-taking anchor
-//      flag per provider, and deriving that from help rather than typing it is
-//      the next slice. Until then every provider records "probe" as unread, so
-//      the absence of arity is visible as "not asked" and never as "none".
+//   3. the invalid-value probe, anchored on a value-requiring flag DERIVED from
+//      the same help text. A binary whose help prints no value placeholder
+//      (agy) yields no anchor and records "probe" as unread, so a missing arity
+//      reads as not asked and never as arity none.
 //
 // The executable and helpArgs come from the bundled contract because they are
 // gateway plumbing (which binary to run), not provider capability.
@@ -128,13 +128,38 @@ function gatherProvider(discovery, cli, contract) {
     else for (const flag of discovery.allFlags(commands)) record(flag, "completions");
   }
 
-  unread.push("probe");
+  const anchor = rootHelp.ok
+    ? discovery.deriveProbeAnchor(`${rootHelp.stdout}\n${rootHelp.stderr}`)
+    : null;
+  if (!anchor) {
+    unread.push("probe");
+  } else {
+    for (const entry of byFlag.values()) {
+      if (entry.flag === anchor || !discovery.isProbeSafeFlag(entry.flag)) continue;
+      const probeArgv = discovery.buildProbeArgv(entry.flag, anchor);
+      const result = run(executable, probeArgv);
+      if (!result.ok) continue;
+      const verdict = discovery.interpretProbeOutput(`${result.stderr}\n${result.stdout}`);
+      entry.probe = verdict.kind;
+      if (verdict.kind !== "present") continue;
+      entry.evidence.add("probe");
+      if (verdict.arity !== "unknown") entry.arity = verdict.arity;
+      if (verdict.values) entry.values = verdict.values;
+    }
+  }
   return {
     cli,
     executable,
     version,
+    commandScope: "root",
     flags: [...byFlag.values()]
-      .map(f => ({ flag: f.flag, evidence: [...f.evidence].sort() }))
+      .map(f => ({
+        flag: f.flag,
+        evidence: [...f.evidence].sort(),
+        ...(f.arity === undefined ? {} : { arity: f.arity }),
+        ...(f.values === undefined ? {} : { values: f.values }),
+        ...(f.probe === undefined ? {} : { probe: f.probe }),
+      }))
       .sort((a, b) => a.flag.localeCompare(b.flag)),
     unreadSources: unread,
   };
