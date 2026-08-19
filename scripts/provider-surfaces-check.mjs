@@ -42,7 +42,7 @@
 
 import { readdirSync, readFileSync, statSync } from "node:fs";
 import { fileURLToPath } from "node:url";
-import { dirname, join, relative } from "node:path";
+import { dirname, join, relative, resolve } from "node:path";
 
 const scriptDir = dirname(fileURLToPath(import.meta.url));
 const repoRoot = join(scriptDir, "..");
@@ -204,11 +204,11 @@ const PIPED_PROVIDER_PROSE = new RegExp(
 
 const HAND_AUTHORED_PROVIDER_DATA = [
   {
-    kind: "generation-table",
-    regex: /export const ([A-Z0-9_]+_FLAG_GENERATION)\b/g,
-    grandfathered: new Set(["GROK_FLAG_GENERATION"]),
+    kind: "hand-authored-provider-facts",
+    find: findHandAuthoredProviderFacts,
+    grandfathered: new Set(),
     guidance:
-      "A generation table is hand-authored provider data: it pins the flag set to whatever the author typed, which is wrong on any customer machine that differs. Discovery must produce this. See docs/plans/gateway-passthrough-policy.dag.toml (n2, n3).",
+      "A binding row said what the BINARY accepts. Its `values` or `arity` is a fact about the customer's installed CLI, and typing one here pins it to the author's machine. Bindings name GATEWAY data only: the request parameter, the emit rule, the description. Facts come from the resolved surface (src/provider-surface.ts), which deriveZodShapeFromGeneration already reads. See docs/plans/typed-parameter-derivation.dag.toml (t1).",
   },
   {
     kind: "provider-argv-builder",
@@ -232,14 +232,63 @@ const HAND_AUTHORED_PROVIDER_DATA = [
   },
 ];
 
+/**
+ * Binding rows that state a fact about the BINARY rather than about us.
+ *
+ * The rule this replaces forbade any `*_FLAG_GENERATION` const BY NAME. That was
+ * aimed slightly wrong: a binding row cannot carry a value set in the first
+ * place (`FlagGenerationMeta` has no `values` field, and provider-codegen.ts
+ * says the enum is read from the contract and never duplicated), and since d4c
+ * that read goes through the resolved surface. So the old gate forbade a SHAPE
+ * that was already incapable of the SIN, and the only way to convert a second
+ * provider looked like defeating the gate. Two people tried, one day apart.
+ *
+ * What must stay forbidden is the sin itself: a row that declares what the
+ * customer's CLI accepts. Detected by locating each `flag: "..."` and scanning
+ * its own object literal, so a `values` on an unrelated object is not a hit.
+ */
+export function findHandAuthoredProviderFacts(content) {
+  const hits = [];
+  for (const match of content.matchAll(/\bflag:\s*"(-{1,2}[^"]+)"/g)) {
+    const open = content.lastIndexOf("{", match.index);
+    if (open === -1) continue;
+    let depth = 0;
+    let close = open;
+    for (let i = open; i < content.length; i++) {
+      if (content[i] === "{") depth++;
+      else if (content[i] === "}") {
+        depth--;
+        if (depth === 0) {
+          close = i;
+          break;
+        }
+      }
+    }
+    const row = content.slice(open, close + 1);
+    // A KEY POSITION, not the word and not merely a line start. The first
+    // version matched "Known values:" inside a description string, which is
+    // prose telling a caller what the binary publishes and is what the policy
+    // asks a description to do. The second required a line start and so missed
+    // an inline `{ flag: "--x", values: [...] }` on one line. A key follows `{`
+    // or `,`; prose follows a word.
+    for (const fact of ["values", "arity"]) {
+      if (new RegExp(`(^|[{,])\\s*${fact}:`, "m").test(row))
+        hits.push(`${match[1]} declares ${fact}`);
+    }
+  }
+  return hits;
+}
+
 function censusHandAuthoredProviderData(files) {
   const problems = [];
   for (const entry of HAND_AUTHORED_PROVIDER_DATA) {
     const found = new Map();
     for (const { relPath, content } of files) {
       if (relPath.includes("__tests__")) continue;
-      for (const m of content.matchAll(entry.regex)) {
-        found.set(m[1], relPath);
+      if (entry.find) {
+        for (const name of entry.find(content)) found.set(name, relPath);
+      } else {
+        for (const m of content.matchAll(entry.regex)) found.set(m[1], relPath);
       }
     }
     for (const [name, relPath] of found) {
@@ -365,36 +414,45 @@ if (legacyHits.length > 0) {
   }
 }
 
-const censusProblems = censusHandAuthoredProviderData(scannedFiles);
-if (censusProblems.length > 0) {
-  log("");
-  log("  FAIL: hand-authored provider data (the flag set belongs to the customer's binary):");
-  for (const c of censusProblems) {
-    const verb = c.direction === "added" ? "NEW" : "GONE (update the set)";
-    log(`    ${verb} [${c.kind}] ${c.name}  ${c.relPath}`);
-    log(`      ${c.guidance}`);
+// Importing this file must not run the check: the test suite imports the
+// detector, and a top-level process.exit takes the runner down with it. The
+// same defect was fixed in generate-provider-seed.mjs earlier the same day.
+function main() {
+  const censusProblems = censusHandAuthoredProviderData(scannedFiles);
+  if (censusProblems.length > 0) {
+    log("");
+    log("  FAIL: hand-authored provider data (the flag set belongs to the customer's binary):");
+    for (const c of censusProblems) {
+      const verb = c.direction === "added" ? "NEW" : "GONE (update the set)";
+      log(`    ${verb} [${c.kind}] ${c.name}  ${c.relPath}`);
+      log(`      ${c.guidance}`);
+    }
+    log("");
+    log("  A hand-authored list of a provider's flags is wrong on any machine that");
+    log("  differs from the author's, which is every customer machine. Discovery");
+    log("  produces this data; the generic builder consumes it.");
+    process.exit(1);
   }
+
+  if (newViolations.length > 0) {
+    log("");
+    log("  FAIL: new provider-surface violations (add to the registry, not here):");
+    for (const v of newViolations) {
+      log(`    ${v.relPath}:${v.line} [${v.kind}] ${v.snippet}`);
+    }
+    log("");
+    log("  Every provider surface must derive from src/provider-definitions.ts");
+    log("  (or a projection in src/provider-surface-generator.ts). If this is a");
+    log("  not-yet-migrated legacy surface, add it to LEGACY_ALLOWLIST with the");
+    log("  phase that removes it.");
+    process.exit(1);
+  }
+
   log("");
-  log("  A hand-authored list of a provider's flags is wrong on any machine that");
-  log("  differs from the author's, which is every customer machine. Discovery");
-  log("  produces this data; the generic builder consumes it.");
-  process.exit(1);
+  log("  OK: no new hand-maintained provider surfaces.");
+  process.exit(0);
 }
 
-if (newViolations.length > 0) {
-  log("");
-  log("  FAIL: new provider-surface violations (add to the registry, not here):");
-  for (const v of newViolations) {
-    log(`    ${v.relPath}:${v.line} [${v.kind}] ${v.snippet}`);
-  }
-  log("");
-  log("  Every provider surface must derive from src/provider-definitions.ts");
-  log("  (or a projection in src/provider-surface-generator.ts). If this is a");
-  log("  not-yet-migrated legacy surface, add it to LEGACY_ALLOWLIST with the");
-  log("  phase that removes it.");
-  process.exit(1);
+if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
+  main();
 }
-
-log("");
-log("  OK: no new hand-maintained provider surfaces.");
-process.exit(0);
