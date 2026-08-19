@@ -600,3 +600,20 @@ describe("review findings: a diagnostic about another flag is not evidence about
     });
   });
 });
+
+describe("CODEX r2: a warning is not a diagnostic about a flag", () => {
+  it("anchors past a warning that merely contains the word error", () => {
+    // Verbatim shape from a codex probe under a read-only sandbox. Anchoring on
+    // "os error 30" put the real enum on line three, outside the window.
+    const output = [
+      "WARNING: could not write cache: Read-only file system (os error 30)",
+      "error: invalid value 'ZZZ' for '--sandbox <SANDBOX_MODE>'",
+      "  [possible values: read-only, workspace-write, danger-full-access]",
+    ].join("\n");
+    expect(interpretProbeOutput(output, { flag: "--sandbox", sentinel: PROBE_SENTINEL })).toEqual({
+      kind: "present",
+      arity: "one",
+      values: ["read-only", "workspace-write", "danger-full-access"],
+    });
+  });
+});

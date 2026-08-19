@@ -27,6 +27,17 @@ function input(
 const flagsOf = (r: ReturnType<typeof resolveProviderSurface>) =>
   r.providers[0].flags.map(f => f.flag);
 
+function observedGrok(flags: ObservedProvider["flags"]): ObservedProvider {
+  return {
+    cli: "grok",
+    executable: "grok",
+    version: "1.0.5",
+    commandScope: [],
+    flags,
+    unreadSources: [],
+  };
+}
+
 describe("precedence", () => {
   it("applies sources in the declared order whatever order they arrive in", () => {
     const overlay = input("overlay", [{ flag: "--x", arity: "none" }]);
@@ -427,5 +438,99 @@ describe("review findings: the merge cannot be talked out of the floor", () => {
       }),
     ]);
     expect(r.providers[0].flags).toEqual([]);
+  });
+});
+
+describe("CODEX r2: the floor cannot be impersonated or displaced", () => {
+  it("binds the source name, so a payload cannot claim to be the floor", () => {
+    // The reviewer had an overlay return `{ name: "retained" }` and inherit the
+    // floor's refusal authority, deleting --best-of-n.
+    const r = resolveWithSkips([
+      {
+        name: "retained",
+        load: () =>
+          retainedAsSurfaceInput({ grok: { flags: { "--best-of-n": { arity: "one" } } } }),
+      },
+      {
+        name: "overlay",
+        load: () => ({
+          name: "retained" as const,
+          providers: [{ cli: "grok", commandScope: [], flags: [], refused: ["--best-of-n"] }],
+        }),
+      },
+    ]);
+    expect(r.providers[0].flags.map(f => f.flag)).toEqual(["--best-of-n"]);
+  });
+
+  it("an EMPTY entry does not get to pin the command scope", () => {
+    // The reviewer put an empty root-scope duplicate ahead of the real ["exec"]
+    // floor; the floor was then skipped as the conflicting source and codex was
+    // left with no flags at all.
+    const r = resolveProviderSurface([
+      { name: "retained", providers: [{ cli: "codex", commandScope: [], flags: [] }] },
+      retainedAsSurfaceInput({
+        codex: { flags: { "--json": {} }, command: { requiredFirstArg: "exec" } },
+      }),
+    ]);
+    expect(r.providers[0].commandScope).toEqual(["exec"]);
+    expect(r.providers[0].flags.map(f => f.flag)).toEqual(["--json"]);
+    expect(r.skipped).toEqual([]);
+  });
+
+  it("a NON-EMPTY conflicting scope is still reported and not merged", () => {
+    const r = resolveProviderSurface([
+      {
+        name: "retained",
+        providers: [{ cli: "codex", commandScope: ["exec"], flags: [{ flag: "--json" }] }],
+      },
+      {
+        name: "overlay",
+        providers: [{ cli: "codex", commandScope: ["login"], flags: [{ flag: "--with-api-key" }] }],
+      },
+    ]);
+    expect(r.providers[0].flags.map(f => f.flag)).toEqual(["--json"]);
+    expect(r.skipped[0]?.name).toBe("overlay");
+  });
+
+  it("sameScope compares element by element, not just length", () => {
+    // The surviving mutant the reviewer named: a length-only comparison merges
+    // ["agent","stdio"] with ["agent","serve"], two different commands.
+    const r = resolveProviderSurface([
+      {
+        name: "retained",
+        providers: [{ cli: "grok", commandScope: ["agent", "stdio"], flags: [{ flag: "--a" }] }],
+      },
+      {
+        name: "overlay",
+        providers: [{ cli: "grok", commandScope: ["agent", "serve"], flags: [{ flag: "--b" }] }],
+      },
+    ]);
+    expect(r.providers[0].flags.map(f => f.flag)).toEqual(["--a"]);
+    expect(r.skipped).toHaveLength(1);
+  });
+
+  it("an ever-present flag keeps its FACTS, not just its name", () => {
+    // The reviewer's surviving mutant: retain the name after an absent verdict
+    // but discard arity and values, so the flag is offered without its shape.
+    const seed = mergeSeed(
+      null,
+      [
+        observedGrok([
+          {
+            flag: "--x",
+            evidence: ["help", "probe"],
+            probe: "absent",
+            arity: "one",
+            values: ["a"],
+          },
+        ]),
+      ],
+      PROV
+    );
+    expect(seedAsSurfaceInput(seed).providers[0].flags[0]).toMatchObject({
+      flag: "--x",
+      arity: "one",
+      values: ["a"],
+    });
   });
 });

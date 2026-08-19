@@ -3791,11 +3791,6 @@ export function resolvedFlagFacts(cli: CliType, flag: string): SurfaceFlag | und
   return surfaceFlags(cli).get(flag);
 }
 
-/** Test seam: drop the memo so a fixture can be resolved fresh. */
-export function resetResolvedSurface(): void {
-  resolvedSurface = undefined;
-}
-
 /**
  * A contract for a flag nobody declared, or undefined when nothing knows it.
  *
@@ -3807,9 +3802,14 @@ export function resetResolvedSurface(): void {
  * encoding is theirs: `true` emits the flag alone, anything else emits a value
  * after it. Their answer therefore wins over the surface.
  *
- * The SURFACE knows what the binaries ACCEPT. Its arity is used when the caller
- * has not spoken, and `optional` when even it cannot tell, which consumes a
- * following non-option token and leaves an option-shaped one alone.
+ * The SURFACE knows what the binaries ACCEPT, and its arity is used when the
+ * caller has not spoken.
+ *
+ * When NEITHER can tell, the flag consumes nothing. `optional` was used here and
+ * swallowed the following token, hiding it from the positional bound: a reviewer
+ * showed `-p --help value -- hi` passing on claude, where --help takes no value.
+ * Consuming nothing costs a caller nothing, since a caller who wants a value
+ * says so through providerFlags, and it lets the shape guard speak.
  *
  * The rest is gateway policy and is deliberately strict: inline `--flag=value`
  * is refused exactly as it is for most declared flags, and a value beginning
@@ -3832,7 +3832,7 @@ function undeclaredFlagContract(
     ? passthrough[flagName] === true
       ? "none"
       : "one"
-    : (surfaced?.arity ?? "optional");
+    : (surfaced?.arity ?? "none");
   return {
     arity,
     description: `Undeclared ${cli} flag admitted from ${namedByCaller ? "the caller" : "the resolved surface"}`,

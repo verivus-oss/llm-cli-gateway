@@ -181,17 +181,22 @@ describe("review findings: one validation path, several fact sources", () => {
     expect(result.ok).toBe(false);
   });
 
-  it("a surfaced flag of UNKNOWN arity consumes a value but never an option", () => {
-    // claude --help is seed-only and probes unparsed, so no arity is known.
-    // `optional` is the honest reading: take a plain token, leave an option.
-    expect(validateUpstreamCliArgs("claude", ["-p", "--help", "value", "--", "hi"]).ok).toBe(true);
-    // The discriminating half: with arity UNKNOWN we must not reject an
-    // option-shaped next token either. Treating unknown as "one" would demand a
-    // value that may not exist, which is the gateway refusing what the binary
-    // takes. `optional` declines to consume and says nothing.
-    expect(validateUpstreamCliArgs("claude", ["-p", "--help", "--verbose", "--", "hi"]).ok).toBe(
-      true
-    );
+  it("CODEX r2: a surfaced flag of UNKNOWN arity consumes NOTHING", () => {
+    // `optional` was the first answer and it swallowed the next token, hiding
+    // it from the positional bound. claude --help is a real no-value flag, so
+    // this argv carries a positional claude does not accept, and the guard has
+    // to be the thing that says so.
+    const result = validateUpstreamCliArgs("claude", ["-p", "--help", "value", "--", "hi"]);
+    expect(result.ok).toBe(false);
+    expect(result.violations.map(v => v.message).join("; ")).toMatch(/positional/);
+  });
+
+  it("a caller who wants a value says so, and then it is consumed", () => {
+    expect(
+      validateUpstreamCliArgs("claude", ["-p", "--help", "value", "--", "hi"], {
+        passthroughFlags: { "--help": "value" },
+      }).ok
+    ).toBe(true);
   });
 
   it("still admits what d4a set out to admit", () => {

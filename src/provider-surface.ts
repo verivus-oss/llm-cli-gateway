@@ -180,7 +180,15 @@ export function resolveProviderSurface(inputs: readonly SurfaceInput[]): Surface
       // --ask-for-approval and `codex exec` does not; unioning the two would
       // offer a flag on a command that rejects it. Reported rather than
       // silently dropped.
-      if (existing && !sameScope(existing.entry.commandScope, provider.commandScope)) {
+      // An entry with no flags has described nothing, so it does not get to
+      // pin the scope. A reviewer put an empty root-scope duplicate ahead of the
+      // real `["exec"]` floor and the floor was skipped as the conflicting one.
+      if (
+        existing &&
+        existing.flags.size > 0 &&
+        provider.flags.length > 0 &&
+        !sameScope(existing.entry.commandScope, provider.commandScope)
+      ) {
         scopeConflicts.push({
           name: input.name,
           reason:
@@ -191,6 +199,10 @@ export function resolveProviderSurface(inputs: readonly SurfaceInput[]): Surface
         continue;
       }
       const flags = existing?.flags ?? new Map<string, SurfaceFlag>();
+      const commandScope =
+        existing && existing.flags.size > 0 && provider.flags.length === 0
+          ? existing.entry.commandScope
+          : provider.commandScope;
       for (const flag of provider.flags) {
         flags.set(flag.flag, mergeFlag(flags.get(flag.flag), flag, input.name));
       }
@@ -216,7 +228,7 @@ export function resolveProviderSurface(inputs: readonly SurfaceInput[]): Surface
           // Scope is not merged. A later source describing a different command
           // is describing a different subject, and the highest-precedence
           // answer is the one that applies.
-          commandScope: [...provider.commandScope],
+          commandScope: [...commandScope],
           flags: [],
           sources,
         },
@@ -342,7 +354,11 @@ export function resolveWithSkips(
   const skipped: { name: SurfaceSourceName; reason: string }[] = [];
   for (const source of offered) {
     try {
-      inputs.push(source.load());
+      // BIND THE NAME. A reviewer had an overlay return `{ name: "retained" }`
+      // and inherit the floor's refusal authority. The name is the caller's
+      // declaration of which source this is, not the payload's claim about
+      // itself, and only one source is allowed to withdraw capability.
+      inputs.push({ ...source.load(), name: source.name });
     } catch (error) {
       skipped.push({
         name: source.name,

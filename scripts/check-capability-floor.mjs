@@ -38,23 +38,43 @@ const UPDATE = process.argv.includes("--update");
  * `surfaceFlags` is optional so the pure function stays testable without a
  * loader, but main() always passes it.
  */
-export function declaredFlags(contracts, flatten, surfaceFlags = {}) {
+export function declaredFlags(contracts, flatten, surfaceFacts = {}) {
   const declared = {};
   for (const [cli, contract] of Object.entries(contracts)) {
-    declared[cli] = [
-      ...new Set([...Object.keys(contract.flags), ...(surfaceFlags[cli] ?? [])]),
-    ].sort();
+    const entries = new Map();
+    for (const [flag, meta] of Object.entries(contract.flags))
+      entries.set(flag, factsOf(flag, meta));
+    for (const [flag, meta] of Object.entries(surfaceFacts[cli] ?? {}))
+      entries.set(flag, factsOf(flag, meta));
+    declared[cli] = [...entries.values()].sort();
     for (const sub of flatten(contract.subcommands)) {
-      declared[`${cli} ${sub.commandPath.join(" ")}`] = Object.keys(sub.flags ?? {}).sort();
+      declared[`${cli} ${sub.commandPath.join(" ")}`] = Object.entries(sub.flags ?? {})
+        .map(([flag, meta]) => factsOf(flag, meta))
+        .sort();
     }
   }
   return declared;
+}
+
+/**
+ * A flag and the facts that make it usable, as one comparable string.
+ *
+ * NAMES ALONE ARE NOT CAPABILITY. A reviewer removed "stream-json" from claude
+ * --output-format, leaving the flag name intact, and the gate stayed green while
+ * a previously accepted request became invalid. An arity change is the same
+ * blind spot. Encoding facts into the recorded token makes both fail here.
+ */
+export function factsOf(flag, meta = {}) {
+  const arity = meta.arity ? `:${meta.arity}` : "";
+  const values = meta.values?.length ? `:${[...meta.values].sort().join(",")}` : "";
+  return `${flag}${arity}${values}`;
 }
 
 /** Flags the floor records that the contract no longer declares. */
 export function withdrawn(floor, declared) {
   const lost = [];
   for (const [key, flags] of Object.entries(floor)) {
+    if (key === "__schema") continue;
     const present = new Set(declared[key] ?? []);
     const missing = flags.filter(flag => !present.has(flag));
     if (missing.length > 0) lost.push({ key, missing });
@@ -62,10 +82,20 @@ export function withdrawn(floor, declared) {
   return lost;
 }
 
+/** Legacy floors held bare names; compare like with like during the migration. */
+export function stripFacts(floor) {
+  return Object.fromEntries(
+    Object.entries(floor)
+      .filter(([key]) => key !== "__schema")
+      .map(([key, flags]) => [key, flags.map(f => String(f).split(":")[0])])
+  );
+}
+
 /** Union, so the floor only ever grows. */
 export function mergeFloor(floor, declared) {
   const merged = {};
   for (const key of new Set([...Object.keys(floor), ...Object.keys(declared)])) {
+    if (key === "__schema") continue;
     merged[key] = [...new Set([...(floor[key] ?? []), ...(declared[key] ?? [])])].sort();
   }
   return merged;
@@ -86,13 +116,27 @@ async function main() {
   for (const skipped of resolved.skipped) {
     console.error(`WARNING: surface source ${skipped.name} did not load: ${skipped.reason}`);
   }
-  const surfaceFlags = Object.fromEntries(
-    resolved.providers.map(provider => [provider.cli, provider.flags.map(flag => flag.flag)])
+  const surfaceFacts = Object.fromEntries(
+    resolved.providers.map(provider => [
+      provider.cli,
+      Object.fromEntries(provider.flags.map(flag => [flag.flag, flag])),
+    ])
   );
-  const declared = declaredFlags(UPSTREAM_CLI_CONTRACTS, flattenCliSubcommands, surfaceFlags);
+  const declared = declaredFlags(UPSTREAM_CLI_CONTRACTS, flattenCliSubcommands, surfaceFacts);
   const floor = existsSync(FLOOR) ? JSON.parse(readFileSync(FLOOR, "utf8")) : {};
 
-  const lost = withdrawn(floor, declared);
+  // MIGRATION, ONCE. The floor recorded bare names until 2026-08-19; it now
+  // records `flag:arity:values`, because a reviewer removed an enum value while
+  // leaving the name and the gate stayed green. Old entries are checked at NAME
+  // level, so a genuine withdrawal still fails during the migration, and are
+  // then rewritten in the richer form.
+  const legacy = !Array.isArray(floor.__schema);
+  const comparable = legacy
+    ? Object.fromEntries(
+        Object.entries(declared).map(([key, facts]) => [key, facts.map(f => f.split(":")[0])])
+      )
+    : declared;
+  const lost = withdrawn(legacy ? stripFacts(floor) : floor, comparable);
   if (lost.length > 0 && !UPDATE) {
     console.error(
       "capability floor breached: the gateway would stop offering flags it has offered."
@@ -107,13 +151,24 @@ async function main() {
     process.exit(1);
   }
 
+  if (legacy && lost.length === 0 && !UPDATE) {
+    console.error(
+      "capability floor is in the legacy name-only format; run npm run capability:floor:update"
+    );
+    process.exit(1);
+  }
+
   if (UPDATE) {
     if (lost.length > 0) {
       console.error("refusing to update: --update records NEW flags and never drops one.");
       for (const { key, missing } of lost) console.error(`  ${key}: ${missing.join(" ")}`);
       process.exit(1);
     }
-    writeFileSync(FLOOR, `${JSON.stringify(mergeFloor(floor, declared), null, 2)}\n`);
+    const merged = legacy ? declared : mergeFloor(floor, declared);
+    writeFileSync(
+      FLOOR,
+      `${JSON.stringify({ __schema: ["flag:arity:values"], ...merged }, null, 2)}\n`
+    );
     console.log(`capability floor updated: ${Object.keys(declared).length} surfaces`);
     return;
   }
