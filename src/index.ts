@@ -1018,8 +1018,9 @@ const PROVIDER_FLAGS_SHAPE = z
       "it supports, not the gateway. true emits the flag alone; a list REPEATS the flag once per " +
       "item (pass a joined string if your CLI wants a comma-separated value). Values may not " +
       "start with '-', and a flag the gateway is already emitting for this request is refused " +
-      "rather than duplicated. Remote HTTP/OAuth callers additionally cannot pass approval, " +
-      "sandbox, host-path or host-config flags; local stdio callers are unrestricted."
+      "rather than duplicated. LOCAL stdio callers only: remote HTTP/OAuth callers are refused " +
+      "every flag here and should use this tool's declared parameters, which carry their own " +
+      "host-path and approval gates."
   );
 // Token budgets can legitimately exceed the agent-turn cap by orders of
 // magnitude. Keep a finite operational guardrail while avoiding the 10k turn

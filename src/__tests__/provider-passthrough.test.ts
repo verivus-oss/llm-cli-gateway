@@ -7,11 +7,7 @@
  * supports something is the defect this subsystem exists to remove.
  */
 import { describe, expect, it } from "vitest";
-import {
-  buildPassthroughArgv,
-  deniedClassFor,
-  OFF_MACHINE_DENIED_CLASSES,
-} from "../provider-passthrough.js";
+import { buildPassthroughArgv, OFF_MACHINE_PASSTHROUGH_REFUSAL } from "../provider-passthrough.js";
 
 const LOCAL = { remote: false, provider: "grok", alreadyEmitted: [] as string[] };
 const REMOTE = { remote: true, provider: "grok", alreadyEmitted: [] as string[] };
@@ -129,44 +125,72 @@ describe("access mode is the whole posture", () => {
     }
   });
 
-  it("OFF-MACHINE: catches the spelling nobody has invented yet", () => {
-    // The reason the deny list is by CLASS. Every one of these is a real
-    // spelling in play across the installed binaries today, and they share no
-    // common substring an exact list would have generalised from. A list of
-    // spellings is per-provider data that goes stale on every upstream release,
-    // and a miss is a silent approval bypass rather than a visible error.
+  it("OFF-MACHINE: every raw flag is refused, whatever it is called", () => {
+    // The deny-list this replaces admitted seventeen flags reaching the same
+    // capabilities the H1 gate blocks as named fields. The table below is the
+    // reviewers' list verbatim, plus the ones the old classes did catch, so a
+    // return to name matching fails here rather than in someone's audit.
     for (const flag of [
+      // the old classes caught these
       "--yolo",
       "--always-approve",
-      "--auto-approve",
-      "--approve-for-me",
-      "--approve-mcps",
-      "--allow-dangerously-skip-permissions",
       "--dangerously-bypass-approvals-and-sandbox",
-      "--dangerously-bypass-hook-trust",
-      "--permission-mode",
-      "--approval-mode",
-      "--trust",
-      // Not a real flag anywhere: the point is that an unseen spelling in the
-      // same class is refused without anyone adding it.
-      "--disable-all-approvals",
+      "--sandbox",
+      "--mcp-config",
+      "--plugin-dir",
+      "--settings",
+      "--add-dir",
+      "--cwd",
+      // and missed every one of these
+      "-c",
+      "-s",
+      "-C",
+      "--cd",
+      "--workspace",
+      "--enable",
+      "--disable",
+      "--allow",
+      "--allowed-tools",
+      "--allowed",
+      "--force",
+      "--prompt-file",
+      "--system-prompt-file",
+      "--append-system-prompt-file",
+      "--debug-file",
+      "--output-last-message",
+      "--output-schema",
+      "--image",
+      "--rules",
+      "--agent",
+      "--leader-socket",
+      "--file",
+      // and an ordinary capability flag is refused too, which is the design
+      "--best-of-n",
+      "--effort",
+      "--model",
     ]) {
-      expect(deniedClassFor(flag), flag).not.toBeNull();
+      const result = buildPassthroughArgv(
+        { [flag]: "x" },
+        { remote: true, provider: "grok", alreadyEmitted: [] }
+      );
+      expect(result.args, flag).toEqual([]);
+      expect(result.rejected[0]?.reason, flag).toBe(OFF_MACHINE_PASSTHROUGH_REFUSAL);
     }
   });
 
-  it("OFF-MACHINE: an ordinary capability flag is NOT refused", () => {
-    // Over-refusal is the intended direction, but it has to stop somewhere or
-    // the remote surface is no surface at all.
-    for (const flag of ["--best-of-n", "--effort", "--model", "--max-turns", "--rules"]) {
-      expect(deniedClassFor(flag), flag).toBeNull();
+  it("LOCAL callers keep every one of them", () => {
+    for (const flag of ["--yolo", "-c", "--prompt-file", "--best-of-n"]) {
+      const result = buildPassthroughArgv(
+        { [flag]: "x" },
+        { remote: false, provider: "grok", alreadyEmitted: [] }
+      );
+      expect(result.rejected, flag).toEqual([]);
+      expect(result.args, flag).toEqual([flag, "x"]);
     }
   });
 
-  it("every deny class states why it is host safety, not capability", () => {
-    for (const cls of OFF_MACHINE_DENIED_CLASSES) {
-      expect(cls.id).toMatch(/^[a-z-]+$/);
-      expect(cls.reason.length).toBeGreaterThan(30);
-    }
+  it("the refusal says what to use instead, since it refuses everything", () => {
+    expect(OFF_MACHINE_PASSTHROUGH_REFUSAL).toMatch(/declared parameters/);
+    expect(OFF_MACHINE_PASSTHROUGH_REFUSAL).toMatch(/Local stdio callers are unaffected/);
   });
 });

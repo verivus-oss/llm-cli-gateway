@@ -76,8 +76,16 @@ describe.each(PROVIDERS)("$name pass-through", ({ prepare, op }) => {
     );
   });
 
-  it("REMOTE callers are refused the approval and host-path classes", () => {
-    for (const flag of ["--dangerously-skip-permissions", "--add-dir", "--sandbox"]) {
+  it("REMOTE callers are refused EVERY raw flag, not four pattern classes", () => {
+    // The deny-list this replaces admitted --cd, --prompt-file, -c and fourteen
+    // more. An ordinary capability flag is in this list on purpose.
+    for (const flag of [
+      "--dangerously-skip-permissions",
+      "--add-dir",
+      "--cd",
+      "-c",
+      "--best-of-n",
+    ]) {
       const res = runWithRequestContext(REMOTE, () => call({ [flag]: true }));
       expect(errorText(res), flag).toContain("refused for remote HTTP/OAuth callers");
     }

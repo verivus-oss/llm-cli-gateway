@@ -436,7 +436,7 @@
                 }
               ]
             },
-            "description": "Flags passed to the provider binary verbatim, keyed exactly as the binary spells them (e.g. {\"--best-of-n\": \"3\", \"--verbatim\": true, \"--rules\": [\"a\", \"b\"]}). Use this for any flag your installed CLI accepts that this schema does not name: the binary decides what it supports, not the gateway. true emits the flag alone; a list REPEATS the flag once per item (pass a joined string if your CLI wants a comma-separated value). Values may not start with '-', and a flag the gateway is already emitting for this request is refused rather than duplicated. Remote HTTP/OAuth callers additionally cannot pass approval, sandbox, host-path or host-config flags; local stdio callers are unrestricted."
+            "description": "Flags passed to the provider binary verbatim, keyed exactly as the binary spells them (e.g. {\"--best-of-n\": \"3\", \"--verbatim\": true, \"--rules\": [\"a\", \"b\"]}). Use this for any flag your installed CLI accepts that this schema does not name: the binary decides what it supports, not the gateway. true emits the flag alone; a list REPEATS the flag once per item (pass a joined string if your CLI wants a comma-separated value). Values may not start with '-', and a flag the gateway is already emitting for this request is refused rather than duplicated. LOCAL stdio callers only: remote HTTP/OAuth callers are refused every flag here and should use this tool's declared parameters, which carry their own host-path and approval gates."
           },
           "correlationId": {
             "type": "string",
@@ -834,7 +834,7 @@
                 }
               ]
             },
-            "description": "Flags passed to the provider binary verbatim, keyed exactly as the binary spells them (e.g. {\"--best-of-n\": \"3\", \"--verbatim\": true, \"--rules\": [\"a\", \"b\"]}). Use this for any flag your installed CLI accepts that this schema does not name: the binary decides what it supports, not the gateway. true emits the flag alone; a list REPEATS the flag once per item (pass a joined string if your CLI wants a comma-separated value). Values may not start with '-', and a flag the gateway is already emitting for this request is refused rather than duplicated. Remote HTTP/OAuth callers additionally cannot pass approval, sandbox, host-path or host-config flags; local stdio callers are unrestricted."
+            "description": "Flags passed to the provider binary verbatim, keyed exactly as the binary spells them (e.g. {\"--best-of-n\": \"3\", \"--verbatim\": true, \"--rules\": [\"a\", \"b\"]}). Use this for any flag your installed CLI accepts that this schema does not name: the binary decides what it supports, not the gateway. true emits the flag alone; a list REPEATS the flag once per item (pass a joined string if your CLI wants a comma-separated value). Values may not start with '-', and a flag the gateway is already emitting for this request is refused rather than duplicated. LOCAL stdio callers only: remote HTTP/OAuth callers are refused every flag here and should use this tool's declared parameters, which carry their own host-path and approval gates."
           },
           "correlationId": {
             "type": "string",
@@ -1177,7 +1177,7 @@
                 }
               ]
             },
-            "description": "Flags passed to the provider binary verbatim, keyed exactly as the binary spells them (e.g. {\"--best-of-n\": \"3\", \"--verbatim\": true, \"--rules\": [\"a\", \"b\"]}). Use this for any flag your installed CLI accepts that this schema does not name: the binary decides what it supports, not the gateway. true emits the flag alone; a list REPEATS the flag once per item (pass a joined string if your CLI wants a comma-separated value). Values may not start with '-', and a flag the gateway is already emitting for this request is refused rather than duplicated. Remote HTTP/OAuth callers additionally cannot pass approval, sandbox, host-path or host-config flags; local stdio callers are unrestricted."
+            "description": "Flags passed to the provider binary verbatim, keyed exactly as the binary spells them (e.g. {\"--best-of-n\": \"3\", \"--verbatim\": true, \"--rules\": [\"a\", \"b\"]}). Use this for any flag your installed CLI accepts that this schema does not name: the binary decides what it supports, not the gateway. true emits the flag alone; a list REPEATS the flag once per item (pass a joined string if your CLI wants a comma-separated value). Values may not start with '-', and a flag the gateway is already emitting for this request is refused rather than duplicated. LOCAL stdio callers only: remote HTTP/OAuth callers are refused every flag here and should use this tool's declared parameters, which carry their own host-path and approval gates."
           },
           "correlationId": {
             "type": "string",
@@ -1514,7 +1514,7 @@
                 }
               ]
             },
-            "description": "Flags passed to the provider binary verbatim, keyed exactly as the binary spells them (e.g. {\"--best-of-n\": \"3\", \"--verbatim\": true, \"--rules\": [\"a\", \"b\"]}). Use this for any flag your installed CLI accepts that this schema does not name: the binary decides what it supports, not the gateway. true emits the flag alone; a list REPEATS the flag once per item (pass a joined string if your CLI wants a comma-separated value). Values may not start with '-', and a flag the gateway is already emitting for this request is refused rather than duplicated. Remote HTTP/OAuth callers additionally cannot pass approval, sandbox, host-path or host-config flags; local stdio callers are unrestricted."
+            "description": "Flags passed to the provider binary verbatim, keyed exactly as the binary spells them (e.g. {\"--best-of-n\": \"3\", \"--verbatim\": true, \"--rules\": [\"a\", \"b\"]}). Use this for any flag your installed CLI accepts that this schema does not name: the binary decides what it supports, not the gateway. true emits the flag alone; a list REPEATS the flag once per item (pass a joined string if your CLI wants a comma-separated value). Values may not start with '-', and a flag the gateway is already emitting for this request is refused rather than duplicated. LOCAL stdio callers only: remote HTTP/OAuth callers are refused every flag here and should use this tool's declared parameters, which carry their own host-path and approval gates."
           },
           "correlationId": {
             "type": "string",
@@ -2066,7 +2066,7 @@
                 }
               ]
             },
-            "description": "Flags passed to the provider binary verbatim, keyed exactly as the binary spells them (e.g. {\"--best-of-n\": \"3\", \"--verbatim\": true, \"--rules\": [\"a\", \"b\"]}). Use this for any flag your installed CLI accepts that this schema does not name: the binary decides what it supports, not the gateway. true emits the flag alone; a list REPEATS the flag once per item (pass a joined string if your CLI wants a comma-separated value). Values may not start with '-', and a flag the gateway is already emitting for this request is refused rather than duplicated. Remote HTTP/OAuth callers additionally cannot pass approval, sandbox, host-path or host-config flags; local stdio callers are unrestricted."
+            "description": "Flags passed to the provider binary verbatim, keyed exactly as the binary spells them (e.g. {\"--best-of-n\": \"3\", \"--verbatim\": true, \"--rules\": [\"a\", \"b\"]}). Use this for any flag your installed CLI accepts that this schema does not name: the binary decides what it supports, not the gateway. true emits the flag alone; a list REPEATS the flag once per item (pass a joined string if your CLI wants a comma-separated value). Values may not start with '-', and a flag the gateway is already emitting for this request is refused rather than duplicated. LOCAL stdio callers only: remote HTTP/OAuth callers are refused every flag here and should use this tool's declared parameters, which carry their own host-path and approval gates."
           },
           "correlationId": {
             "type": "string",
@@ -2231,7 +2231,7 @@
                 }
               ]
             },
-            "description": "Flags passed to the provider binary verbatim, keyed exactly as the binary spells them (e.g. {\"--best-of-n\": \"3\", \"--verbatim\": true, \"--rules\": [\"a\", \"b\"]}). Use this for any flag your installed CLI accepts that this schema does not name: the binary decides what it supports, not the gateway. true emits the flag alone; a list REPEATS the flag once per item (pass a joined string if your CLI wants a comma-separated value). Values may not start with '-', and a flag the gateway is already emitting for this request is refused rather than duplicated. Remote HTTP/OAuth callers additionally cannot pass approval, sandbox, host-path or host-config flags; local stdio callers are unrestricted."
+            "description": "Flags passed to the provider binary verbatim, keyed exactly as the binary spells them (e.g. {\"--best-of-n\": \"3\", \"--verbatim\": true, \"--rules\": [\"a\", \"b\"]}). Use this for any flag your installed CLI accepts that this schema does not name: the binary decides what it supports, not the gateway. true emits the flag alone; a list REPEATS the flag once per item (pass a joined string if your CLI wants a comma-separated value). Values may not start with '-', and a flag the gateway is already emitting for this request is refused rather than duplicated. LOCAL stdio callers only: remote HTTP/OAuth callers are refused every flag here and should use this tool's declared parameters, which carry their own host-path and approval gates."
           },
           "correlationId": {
             "type": "string",
@@ -2392,7 +2392,7 @@
                 }
               ]
             },
-            "description": "Flags passed to the provider binary verbatim, keyed exactly as the binary spells them (e.g. {\"--best-of-n\": \"3\", \"--verbatim\": true, \"--rules\": [\"a\", \"b\"]}). Use this for any flag your installed CLI accepts that this schema does not name: the binary decides what it supports, not the gateway. true emits the flag alone; a list REPEATS the flag once per item (pass a joined string if your CLI wants a comma-separated value). Values may not start with '-', and a flag the gateway is already emitting for this request is refused rather than duplicated. Remote HTTP/OAuth callers additionally cannot pass approval, sandbox, host-path or host-config flags; local stdio callers are unrestricted."
+            "description": "Flags passed to the provider binary verbatim, keyed exactly as the binary spells them (e.g. {\"--best-of-n\": \"3\", \"--verbatim\": true, \"--rules\": [\"a\", \"b\"]}). Use this for any flag your installed CLI accepts that this schema does not name: the binary decides what it supports, not the gateway. true emits the flag alone; a list REPEATS the flag once per item (pass a joined string if your CLI wants a comma-separated value). Values may not start with '-', and a flag the gateway is already emitting for this request is refused rather than duplicated. LOCAL stdio callers only: remote HTTP/OAuth callers are refused every flag here and should use this tool's declared parameters, which carry their own host-path and approval gates."
           },
           "correlationId": {
             "type": "string",
@@ -2574,7 +2574,7 @@
                 }
               ]
             },
-            "description": "Flags passed to the provider binary verbatim, keyed exactly as the binary spells them (e.g. {\"--best-of-n\": \"3\", \"--verbatim\": true, \"--rules\": [\"a\", \"b\"]}). Use this for any flag your installed CLI accepts that this schema does not name: the binary decides what it supports, not the gateway. true emits the flag alone; a list REPEATS the flag once per item (pass a joined string if your CLI wants a comma-separated value). Values may not start with '-', and a flag the gateway is already emitting for this request is refused rather than duplicated. Remote HTTP/OAuth callers additionally cannot pass approval, sandbox, host-path or host-config flags; local stdio callers are unrestricted."
+            "description": "Flags passed to the provider binary verbatim, keyed exactly as the binary spells them (e.g. {\"--best-of-n\": \"3\", \"--verbatim\": true, \"--rules\": [\"a\", \"b\"]}). Use this for any flag your installed CLI accepts that this schema does not name: the binary decides what it supports, not the gateway. true emits the flag alone; a list REPEATS the flag once per item (pass a joined string if your CLI wants a comma-separated value). Values may not start with '-', and a flag the gateway is already emitting for this request is refused rather than duplicated. LOCAL stdio callers only: remote HTTP/OAuth callers are refused every flag here and should use this tool's declared parameters, which carry their own host-path and approval gates."
           },
           "correlationId": {
             "type": "string",
@@ -2812,7 +2812,7 @@
                 }
               ]
             },
-            "description": "Flags passed to the provider binary verbatim, keyed exactly as the binary spells them (e.g. {\"--best-of-n\": \"3\", \"--verbatim\": true, \"--rules\": [\"a\", \"b\"]}). Use this for any flag your installed CLI accepts that this schema does not name: the binary decides what it supports, not the gateway. true emits the flag alone; a list REPEATS the flag once per item (pass a joined string if your CLI wants a comma-separated value). Values may not start with '-', and a flag the gateway is already emitting for this request is refused rather than duplicated. Remote HTTP/OAuth callers additionally cannot pass approval, sandbox, host-path or host-config flags; local stdio callers are unrestricted."
+            "description": "Flags passed to the provider binary verbatim, keyed exactly as the binary spells them (e.g. {\"--best-of-n\": \"3\", \"--verbatim\": true, \"--rules\": [\"a\", \"b\"]}). Use this for any flag your installed CLI accepts that this schema does not name: the binary decides what it supports, not the gateway. true emits the flag alone; a list REPEATS the flag once per item (pass a joined string if your CLI wants a comma-separated value). Values may not start with '-', and a flag the gateway is already emitting for this request is refused rather than duplicated. LOCAL stdio callers only: remote HTTP/OAuth callers are refused every flag here and should use this tool's declared parameters, which carry their own host-path and approval gates."
           },
           "correlationId": {
             "type": "string",
@@ -3086,7 +3086,7 @@
                 }
               ]
             },
-            "description": "Flags passed to the provider binary verbatim, keyed exactly as the binary spells them (e.g. {\"--best-of-n\": \"3\", \"--verbatim\": true, \"--rules\": [\"a\", \"b\"]}). Use this for any flag your installed CLI accepts that this schema does not name: the binary decides what it supports, not the gateway. true emits the flag alone; a list REPEATS the flag once per item (pass a joined string if your CLI wants a comma-separated value). Values may not start with '-', and a flag the gateway is already emitting for this request is refused rather than duplicated. Remote HTTP/OAuth callers additionally cannot pass approval, sandbox, host-path or host-config flags; local stdio callers are unrestricted."
+            "description": "Flags passed to the provider binary verbatim, keyed exactly as the binary spells them (e.g. {\"--best-of-n\": \"3\", \"--verbatim\": true, \"--rules\": [\"a\", \"b\"]}). Use this for any flag your installed CLI accepts that this schema does not name: the binary decides what it supports, not the gateway. true emits the flag alone; a list REPEATS the flag once per item (pass a joined string if your CLI wants a comma-separated value). Values may not start with '-', and a flag the gateway is already emitting for this request is refused rather than duplicated. LOCAL stdio callers only: remote HTTP/OAuth callers are refused every flag here and should use this tool's declared parameters, which carry their own host-path and approval gates."
           },
           "correlationId": {
             "type": "string",
@@ -3457,7 +3457,7 @@
                 }
               ]
             },
-            "description": "Flags passed to the provider binary verbatim, keyed exactly as the binary spells them (e.g. {\"--best-of-n\": \"3\", \"--verbatim\": true, \"--rules\": [\"a\", \"b\"]}). Use this for any flag your installed CLI accepts that this schema does not name: the binary decides what it supports, not the gateway. true emits the flag alone; a list REPEATS the flag once per item (pass a joined string if your CLI wants a comma-separated value). Values may not start with '-', and a flag the gateway is already emitting for this request is refused rather than duplicated. Remote HTTP/OAuth callers additionally cannot pass approval, sandbox, host-path or host-config flags; local stdio callers are unrestricted."
+            "description": "Flags passed to the provider binary verbatim, keyed exactly as the binary spells them (e.g. {\"--best-of-n\": \"3\", \"--verbatim\": true, \"--rules\": [\"a\", \"b\"]}). Use this for any flag your installed CLI accepts that this schema does not name: the binary decides what it supports, not the gateway. true emits the flag alone; a list REPEATS the flag once per item (pass a joined string if your CLI wants a comma-separated value). Values may not start with '-', and a flag the gateway is already emitting for this request is refused rather than duplicated. LOCAL stdio callers only: remote HTTP/OAuth callers are refused every flag here and should use this tool's declared parameters, which carry their own host-path and approval gates."
           },
           "sessionId": {
             "type": "string",
@@ -3733,7 +3733,7 @@
                 }
               ]
             },
-            "description": "Flags passed to the provider binary verbatim, keyed exactly as the binary spells them (e.g. {\"--best-of-n\": \"3\", \"--verbatim\": true, \"--rules\": [\"a\", \"b\"]}). Use this for any flag your installed CLI accepts that this schema does not name: the binary decides what it supports, not the gateway. true emits the flag alone; a list REPEATS the flag once per item (pass a joined string if your CLI wants a comma-separated value). Values may not start with '-', and a flag the gateway is already emitting for this request is refused rather than duplicated. Remote HTTP/OAuth callers additionally cannot pass approval, sandbox, host-path or host-config flags; local stdio callers are unrestricted."
+            "description": "Flags passed to the provider binary verbatim, keyed exactly as the binary spells them (e.g. {\"--best-of-n\": \"3\", \"--verbatim\": true, \"--rules\": [\"a\", \"b\"]}). Use this for any flag your installed CLI accepts that this schema does not name: the binary decides what it supports, not the gateway. true emits the flag alone; a list REPEATS the flag once per item (pass a joined string if your CLI wants a comma-separated value). Values may not start with '-', and a flag the gateway is already emitting for this request is refused rather than duplicated. LOCAL stdio callers only: remote HTTP/OAuth callers are refused every flag here and should use this tool's declared parameters, which carry their own host-path and approval gates."
           },
           "sessionId": {
             "type": "string",
@@ -4477,7 +4477,7 @@
                 }
               ]
             },
-            "description": "Flags passed to the provider binary verbatim, keyed exactly as the binary spells them (e.g. {\"--best-of-n\": \"3\", \"--verbatim\": true, \"--rules\": [\"a\", \"b\"]}). Use this for any flag your installed CLI accepts that this schema does not name: the binary decides what it supports, not the gateway. true emits the flag alone; a list REPEATS the flag once per item (pass a joined string if your CLI wants a comma-separated value). Values may not start with '-', and a flag the gateway is already emitting for this request is refused rather than duplicated. Remote HTTP/OAuth callers additionally cannot pass approval, sandbox, host-path or host-config flags; local stdio callers are unrestricted."
+            "description": "Flags passed to the provider binary verbatim, keyed exactly as the binary spells them (e.g. {\"--best-of-n\": \"3\", \"--verbatim\": true, \"--rules\": [\"a\", \"b\"]}). Use this for any flag your installed CLI accepts that this schema does not name: the binary decides what it supports, not the gateway. true emits the flag alone; a list REPEATS the flag once per item (pass a joined string if your CLI wants a comma-separated value). Values may not start with '-', and a flag the gateway is already emitting for this request is refused rather than duplicated. LOCAL stdio callers only: remote HTTP/OAuth callers are refused every flag here and should use this tool's declared parameters, which carry their own host-path and approval gates."
           },
           "correlationId": {
             "type": "string",
@@ -4730,7 +4730,7 @@
                 }
               ]
             },
-            "description": "Flags passed to the provider binary verbatim, keyed exactly as the binary spells them (e.g. {\"--best-of-n\": \"3\", \"--verbatim\": true, \"--rules\": [\"a\", \"b\"]}). Use this for any flag your installed CLI accepts that this schema does not name: the binary decides what it supports, not the gateway. true emits the flag alone; a list REPEATS the flag once per item (pass a joined string if your CLI wants a comma-separated value). Values may not start with '-', and a flag the gateway is already emitting for this request is refused rather than duplicated. Remote HTTP/OAuth callers additionally cannot pass approval, sandbox, host-path or host-config flags; local stdio callers are unrestricted."
+            "description": "Flags passed to the provider binary verbatim, keyed exactly as the binary spells them (e.g. {\"--best-of-n\": \"3\", \"--verbatim\": true, \"--rules\": [\"a\", \"b\"]}). Use this for any flag your installed CLI accepts that this schema does not name: the binary decides what it supports, not the gateway. true emits the flag alone; a list REPEATS the flag once per item (pass a joined string if your CLI wants a comma-separated value). Values may not start with '-', and a flag the gateway is already emitting for this request is refused rather than duplicated. LOCAL stdio callers only: remote HTTP/OAuth callers are refused every flag here and should use this tool's declared parameters, which carry their own host-path and approval gates."
           },
           "correlationId": {
             "type": "string",

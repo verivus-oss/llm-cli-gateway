@@ -71,41 +71,40 @@ export type PassthroughFlags = Readonly<Record<string, PassthroughValue>>;
 const FLAG_NAME = /^--?[A-Za-z0-9][A-Za-z0-9-]*$/;
 
 /**
- * Classes refused for OFF-MACHINE callers only, each with the reason it is a
- * host-safety rule rather than a capability judgement.
+ * OFF-MACHINE CALLERS GET NO RAW PASS-THROUGH. Decided 2026-08-19.
  *
- * Matched against the flag name with dashes normalised, so `--dangerouslySkip`
- * and `--dangerously-skip` are the same class.
+ * This was a deny-list of four pattern classes, on the reasoning that matching a
+ * CLASS survives an upstream release that invents a new spelling. Two reviewers
+ * took it apart in one pass and produced SEVENTEEN admitted flags reaching the
+ * same capabilities the H1 gate blocks as named fields:
+ *
+ *   -c  -s  -C          codex short aliases; the long forms were all denied
+ *   --cd --workspace    a working root and a workspace root, neither named "dir"
+ *   --enable --disable  documented equivalents of `-c features.<name>=...`
+ *   --allow --allowed-tools --force   approval capability, no "approve" in the name
+ *   --prompt-file --system-prompt-file --append-system-prompt-file
+ *   --debug-file --output-last-message --output-schema --image --rules @file
+ *   --agent --leader-socket --file    host paths, none of them spelled "directory"
+ *
+ * A deny-list is the wrong shape for a boundary and this is the evidence. The
+ * gateway cannot know what an arbitrary flag does to its own host, and each miss
+ * is silent. So the rule is now the other way round: a remote caller may not
+ * name a raw flag at all.
+ *
+ * WHAT THIS COSTS: nothing anyone has. `providerFlags` has never shipped, so no
+ * customer loses a capability. Remote callers keep the whole curated parameter
+ * surface, where every host-reaching field already carries its own gate.
+ *
+ * WHY NOT AN ALLOWLIST OF NAMES: it fails closed rather than open, which is
+ * better, but it is the same brittleness and it would have to be maintained per
+ * provider per release, which is the hand-authored provider data the policy
+ * forbids. An operator-gated opt-in belongs behind explicit configuration if
+ * anyone ever needs it, not behind a pattern.
  */
-export const OFF_MACHINE_DENIED_CLASSES: readonly {
-  readonly id: string;
-  readonly pattern: RegExp;
-  readonly reason: string;
-}[] = [
-  {
-    id: "approval-bypass",
-    pattern: /yolo|dangerous|bypass|approve|approval|permission|trust/i,
-    reason:
-      "would let a remote caller disable the approval gate on a CLI running on the gateway host",
-  },
-  {
-    id: "sandbox",
-    pattern: /sandbox/i,
-    reason: "would let a remote caller weaken or disable the provider's own sandbox",
-  },
-  {
-    id: "host-code-and-config",
-    pattern: /mcp-?config|plugin|extension|setting|config|profile/i,
-    reason:
-      "would load code or configuration from the gateway host, which is the H1 host-path gate's whole subject",
-  },
-  {
-    id: "host-paths",
-    pattern: /add-?dir|^cwd$|workdir|working-?dir|worktree|directory/i,
-    reason:
-      "remote callers are confined to a registered workspace; a raw path flag reopens the host filesystem",
-  },
-];
+export const OFF_MACHINE_PASSTHROUGH_REFUSAL =
+  "providerFlags is refused for remote HTTP/OAuth callers: the gateway cannot tell what an " +
+  "arbitrary provider flag does to its own host. Use the tool's declared parameters, which " +
+  "carry their own host-path and approval gates. Local stdio callers are unaffected.";
 
 /** Why a flag was refused, in a form a caller can act on. */
 export interface PassthroughRejection {
@@ -183,12 +182,8 @@ export function buildPassthroughArgv(
       });
       continue;
     }
-    const denied = options.remote ? deniedClassFor(flag) : null;
-    if (denied) {
-      rejected.push({
-        flag,
-        reason: `refused for remote HTTP/OAuth callers (${denied.id}): ${denied.reason}. Local stdio callers are unaffected.`,
-      });
+    if (options.remote) {
+      rejected.push({ flag, reason: OFF_MACHINE_PASSTHROUGH_REFUSAL });
       continue;
     }
 
@@ -214,18 +209,6 @@ export function buildPassthroughArgv(
     emitted.add(flag);
   }
   return { args, rejected };
-}
-
-/** The deny class a flag falls into for a remote caller, or null. */
-export function deniedClassFor(flag: string): (typeof OFF_MACHINE_DENIED_CLASSES)[number] | null {
-  const normalised = flag
-    .replace(/^-+/, "")
-    .replace(/[_\s]+/g, "-")
-    .toLowerCase();
-  for (const cls of OFF_MACHINE_DENIED_CLASSES) {
-    if (cls.pattern.test(normalised)) return cls;
-  }
-  return null;
 }
 
 /**

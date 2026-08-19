@@ -95,8 +95,16 @@ describe("grok pass-through, end to end", () => {
     expect(args).toContain("--dangerously-skip-permissions");
   });
 
-  it("REMOTE callers are refused the approval and host-path classes", () => {
-    for (const flag of ["--dangerously-skip-permissions", "--add-dir", "--sandbox"]) {
+  it("REMOTE callers are refused EVERY raw flag, not four pattern classes", () => {
+    // The deny-list this replaces admitted --cd, --prompt-file, -c and fourteen
+    // more. An ordinary capability flag is in this list on purpose.
+    for (const flag of [
+      "--dangerously-skip-permissions",
+      "--add-dir",
+      "--cd",
+      "-c",
+      "--best-of-n",
+    ]) {
       const res = runWithRequestContext(REMOTE, () =>
         prepareGrokRequest({ ...BASE, providerFlags: { [flag]: true } } as never)
       );
@@ -104,9 +112,9 @@ describe("grok pass-through, end to end", () => {
     }
   });
 
-  it("REMOTE callers keep ordinary capability flags", () => {
-    const args = runWithRequestContext(REMOTE, () =>
-      argvOf(prepareGrokRequest({ ...BASE, providerFlags: { "--best-of-n": "3" } } as never))
+  it("LOCAL callers keep ordinary capability flags, which is where they belong", () => {
+    const args = argvOf(
+      prepareGrokRequest({ ...BASE, providerFlags: { "--best-of-n": "3" } } as never)
     );
     expect(args.join(" ")).toContain("--best-of-n 3");
   });
