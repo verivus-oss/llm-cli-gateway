@@ -49,11 +49,11 @@ constraint = "Only codex has a request subcommand today. A provider that grows o
 
 [[node]]
 id = "d2.gates-pin-the-seed"
-critical = true
+status = "done 2026-08-19, by enforcing the property rather than adding a mode"
 depends_on = ["d1.seed-is-generated-not-written"]
-role = "site:generate:check, site:validate and the schema goldens all derive from the LIVE tool surface, so they flap the moment the surface varies by host."
-action = "Give them an explicit seed-only mode: generate and validate against the bundled seed, never against whatever this machine happens to expose."
-constraint = "LARGEST PIECE OF WORK HERE AND NOT OPTIONAL. Shipping any later node without it turns npm run check into a per-host lottery."
+role = "The gates derive from the LIVE tool surface, so they flap the moment it varies by host."
+outcome = "surface:invariance:check reruns site:generate:check under six hostile environments and requires identical output. The config axis already held; this makes it fail if it stops. A seed-only FLAG was the plan and is worse: a flag is forgotten at the next call site, an environment is not, and varying the host also catches a dependency nobody anticipated."
+constraint = "The seed is deliberately not varied: it is a committed artefact and the surface is meant to follow it. Proof the gate discriminates: with a HOME leak and a regenerated fixture, site:generate:check PASSES and this gate fails only the HOME scenarios."
 
 [[node]]
 id = "d3.generation-covers-seven-providers"
