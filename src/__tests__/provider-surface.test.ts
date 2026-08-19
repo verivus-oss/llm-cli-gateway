@@ -112,7 +112,7 @@ describe("seedAsSurfaceInput", () => {
     unreadSources: [],
   });
 
-  it("drops a help-only candidate the probe found absent, which was never capability", () => {
+  it("drops a candidate the probe found absent, which the binary will refuse anyway", () => {
     const seed = mergeSeed(
       null,
       [
@@ -126,15 +126,30 @@ describe("seedAsSurfaceInput", () => {
     expect(seedAsSurfaceInput(seed).providers[0].flags.map(f => f.flag)).toEqual(["--real"]);
   });
 
-  it("KEEPS a flag that probed absent but completions also saw", () => {
-    // Absence is not subtractive. Completions cover the whole command tree, so
-    // absent-on-this-command is a scope fact, not a removal.
+  it("does NOT add a flag the binary rejected on this command", () => {
+    // Not subtractive: the retained floor carries everything the gateway
+    // already offered, so nothing a customer had is lost here. Adding it would
+    // only admit argv the CLI then refuses, and would silently reverse
+    // deliberate refusals such as codex --ask-for-approval on exec.
     const seed = mergeSeed(
       null,
       [observed([{ flag: "--tree-only", evidence: ["completions", "help"], probe: "absent" }])],
       PROV
     );
-    expect(seedAsSurfaceInput(seed).providers[0].flags.map(f => f.flag)).toEqual(["--tree-only"]);
+    expect(seedAsSurfaceInput(seed).providers[0].flags).toEqual([]);
+  });
+
+  it("the FLOOR is what protects a retained flag the binary now rejects", () => {
+    const seed = mergeSeed(
+      null,
+      [observed([{ flag: "--best-of-n", evidence: ["help"], probe: "absent" }])],
+      PROV
+    );
+    const r = resolveProviderSurface([
+      retainedAsSurfaceInput({ grok: { flags: { "--best-of-n": {} } } }),
+      seedAsSurfaceInput(seed),
+    ]);
+    expect(r.providers[0].flags.map(f => f.flag)).toEqual(["--best-of-n"]);
   });
 
   it("keeps an UNPARSED flag, because we could not tell", () => {
@@ -230,5 +245,70 @@ describe("ACCEPTANCE: the three capabilities a release once removed", () => {
     const resolved = surface.resolveProviderSurface([surface.loadBundledSeed()]);
     const grok = resolved.providers.find(p => p.cli === "grok");
     expect(grok?.flags.some(f => f.flag === "--best-of-n")).toBe(false);
+  });
+});
+
+describe("the floor carries facts, not just names", () => {
+  it("keeps an enum only the contract knows", () => {
+    // commander tells a probe nothing about enums, so claude's five effort
+    // levels exist only in the contract. A floor of bare names would drop
+    // twelve enums the moment anything read the surface instead.
+    const r = resolveProviderSurface([
+      retainedAsSurfaceInput({
+        claude: { flags: { "--effort": { arity: "one", values: ["low", "high"] } } },
+      }),
+      {
+        name: "seed",
+        providers: [{ cli: "claude", commandScope: [], flags: [{ flag: "--effort" }] }],
+      },
+    ]);
+    expect(r.providers[0].flags[0]).toMatchObject({ arity: "one", values: ["low", "high"] });
+  });
+
+  it("still lets a source that CAN see the binary refine the floor", () => {
+    const r = resolveProviderSurface([
+      retainedAsSurfaceInput({ grok: { flags: { "--mode": { values: ["stale"] } } } }),
+      {
+        name: "discovery",
+        providers: [
+          { cli: "grok", commandScope: [], flags: [{ flag: "--mode", values: ["real"] }] },
+        ],
+      },
+    ]);
+    expect(r.providers[0].flags[0].values).toEqual(["real"]);
+    expect(r.providers[0].flags[0].factsFrom).toBe("discovery");
+  });
+});
+
+describe("a declared refusal outranks evidence", () => {
+  it("removes a flag the contract acknowledges but will not emit", () => {
+    // vibe --auto-approve and claude --background are real flags recorded
+    // precisely so the gateway does not emit them. A seed proving they exist is
+    // not news and must not reverse the decision.
+    const r = resolveProviderSurface([
+      retainedAsSurfaceInput({
+        mistral: { flags: {}, acknowledgedUpstreamFlags: ["--auto-approve"] },
+      }),
+      {
+        name: "seed",
+        providers: [
+          { cli: "mistral", commandScope: [], flags: [{ flag: "--auto-approve", arity: "none" }] },
+        ],
+      },
+    ]);
+    expect(r.providers[0].flags.map(f => f.flag)).toEqual([]);
+  });
+
+  it("is a DECLARATION, not an omission: an unmentioned flag still survives", () => {
+    const r = resolveProviderSurface([
+      retainedAsSurfaceInput({
+        mistral: { flags: {}, acknowledgedUpstreamFlags: ["--auto-approve"] },
+      }),
+      {
+        name: "seed",
+        providers: [{ cli: "mistral", commandScope: [], flags: [{ flag: "--other" }] }],
+      },
+    ]);
+    expect(r.providers[0].flags.map(f => f.flag)).toEqual(["--other"]);
   });
 });

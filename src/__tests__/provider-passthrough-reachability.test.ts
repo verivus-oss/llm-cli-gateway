@@ -113,3 +113,29 @@ describe("retained_enforcement is bounded", () => {
     expect(result.ok).toBe(true);
   });
 });
+
+describe("d4a: admission consults the resolved surface, not just the typed table", () => {
+  it("admits a flag the SEED evidenced and no human declared", () => {
+    // grok --client-identifier is in the generated seed, probed present with
+    // arity one, and is not in contract.flags. Before d4a it was rejected as an
+    // unsupported flag, which is the gateway refusing what the customer's own
+    // binary accepts.
+    const result = validateUpstreamCliArgs("grok", ["-p=hi", "--client-identifier", "x"]);
+    expect(result.ok, result.violations.map(v => v.message).join("; ")).toBe(true);
+  });
+
+  it("consumes that flag's value, so it is not counted as a positional", () => {
+    const result = validateUpstreamCliArgs("grok", ["-p=hi", "--client-identifier", "x"]);
+    expect(result.violations.map(v => v.message).join("; ")).not.toMatch(/positional/);
+  });
+
+  it("still refuses a flag NO source evidenced", () => {
+    const result = validateUpstreamCliArgs("grok", ["-p=hi", "--not-a-flag-anywhere"]);
+    expect(result.ok).toBe(false);
+    expect(result.violations[0]?.message).toMatch(/Unsupported grok CLI flag/);
+  });
+
+  it("still refuses a flag the contract DECLARES it will not emit", () => {
+    expect(validateUpstreamCliArgs("mistral", ["-p", "hello", "--auto-approve"]).ok).toBe(false);
+  });
+});

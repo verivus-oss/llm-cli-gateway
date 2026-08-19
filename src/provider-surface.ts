@@ -58,6 +58,27 @@ export interface SurfaceProviderInput {
   readonly cli: string;
   readonly commandScope: readonly string[];
   readonly flags: readonly SurfaceFlagInput[];
+  /**
+   * Flags this source DECLARES it will not emit, which no evidence overturns.
+   *
+   * The one place the merge removes anything, and it is not an absence. An
+   * omission means a source said nothing; a refusal means the contract said
+   * "we know this exists, and no": vibe's --auto-approve and claude's
+   * --background are both real flags recorded precisely so the gateway does not
+   * emit them. A seed proving they exist is not news, and must not reverse the
+   * decision. Callers still reach them through providerFlags, where the remote
+   * class deny-list applies.
+   */
+  readonly refused?: readonly string[];
+}
+
+/** The shape of a bundled contract this module needs; it imports no contract. */
+export interface RetainedContract {
+  readonly flags: Readonly<
+    Record<string, { readonly arity?: string; readonly values?: readonly string[] }>
+  >;
+  /** Real upstream flags the gateway declares it does not emit. See `refused`. */
+  readonly acknowledgedUpstreamFlags?: readonly string[];
 }
 
 export interface SurfaceInput {
@@ -133,12 +154,18 @@ function mergeFlag(
  */
 export function resolveProviderSurface(inputs: readonly SurfaceInput[]): SurfaceResolution {
   const providers = new Map<string, { entry: ProviderSurface; flags: Map<string, SurfaceFlag> }>();
+  const refused = new Map<string, Set<string>>();
   for (const input of orderInputs(inputs)) {
     for (const provider of input.providers) {
       const existing = providers.get(provider.cli);
       const flags = existing?.flags ?? new Map<string, SurfaceFlag>();
       for (const flag of provider.flags) {
         flags.set(flag.flag, mergeFlag(flags.get(flag.flag), flag, input.name));
+      }
+      for (const flag of provider.refused ?? []) {
+        const set = refused.get(provider.cli) ?? new Set<string>();
+        set.add(flag);
+        refused.set(provider.cli, set);
       }
       const sources = existing?.entry.sources.includes(input.name)
         ? existing.entry.sources
@@ -161,7 +188,9 @@ export function resolveProviderSurface(inputs: readonly SurfaceInput[]): Surface
     providers: [...providers.values()]
       .map(({ entry, flags }) => ({
         ...entry,
-        flags: [...flags.values()].sort((a, b) => a.flag.localeCompare(b.flag)),
+        flags: [...flags.values()]
+          .filter(flag => !refused.get(entry.cli)?.has(flag.flag))
+          .sort((a, b) => a.flag.localeCompare(b.flag)),
       }))
       .sort((a, b) => a.cli.localeCompare(b.cli)),
     skipped: [],
@@ -176,7 +205,7 @@ export function resolveProviderSurface(inputs: readonly SurfaceInput[]): Surface
  * see the binary describes it.
  */
 export function retainedAsSurfaceInput(
-  contracts: Readonly<Record<string, { flags: Readonly<Record<string, unknown>> }>>,
+  contracts: Readonly<Record<string, RetainedContract>>,
   scopes: Readonly<Record<string, readonly string[]>> = {}
 ): SurfaceInput {
   return {
@@ -184,7 +213,18 @@ export function retainedAsSurfaceInput(
     providers: Object.entries(contracts).map(([cli, contract]) => ({
       cli,
       commandScope: scopes[cli] ?? [],
-      flags: Object.keys(contract.flags).map(flag => ({ flag })),
+      // Carry the FACTS, not just the names. The floor is the only source that
+      // knows claude's five effort levels or cursor's sandbox modes, because
+      // commander tells a probe nothing; contributing bare names would drop
+      // twelve enums the moment anything reads the surface instead.
+      flags: Object.entries(contract.flags).map(([flag, meta]) => ({
+        flag,
+        ...(meta.arity === "none" || meta.arity === "one" ? { arity: meta.arity } : {}),
+        ...(meta.values && meta.values.length > 0 ? { values: meta.values } : {}),
+      })),
+      ...(contract.acknowledgedUpstreamFlags
+        ? { refused: contract.acknowledgedUpstreamFlags }
+        : {}),
     })),
   };
 }
@@ -196,19 +236,14 @@ export function seedAsSurfaceInput(seed: ProviderSeed): SurfaceInput {
     providers: seed.providers.map(provider => ({
       cli: provider.cli,
       commandScope: provider.commandScope,
-      // An `absent` verdict is recorded, never acted on. It lowers confidence in
-      // a flag the seed still carries; absence-is-never-subtractive means it may
-      // not remove one. Flags whose ONLY evidence is the help scrape and which
-      // probed absent are scrape artefacts and were never capability.
+      // The seed ADDS what the binary demonstrably has. A flag the binary
+      // rejected on this command is not added, and that is not subtractive:
+      // the retained floor still carries everything the gateway already
+      // offered, so nothing a customer had can be lost here. Adding it back
+      // would only admit argv the CLI then refuses, and would silently reverse
+      // deliberate refusals such as codex --ask-for-approval on exec.
       flags: provider.flags
-        .filter(
-          flag =>
-            !(
-              flag.probe?.verdict === "absent" &&
-              flag.evidence.length === 1 &&
-              flag.evidence[0] === "help"
-            )
-        )
+        .filter(flag => flag.probe?.verdict !== "absent")
         .map(flag => ({
           flag: flag.flag,
           ...(flag.arity === undefined ? {} : { arity: flag.arity }),

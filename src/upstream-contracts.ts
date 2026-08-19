@@ -9,6 +9,12 @@ import {
   type CliType,
 } from "./provider-definitions.js";
 import { envWithExtendedPath, getExtendedPath, resolveCommandForSpawn } from "./executor.js";
+import {
+  loadBundledSeed,
+  resolveWithSkips,
+  retainedAsSurfaceInput,
+  type SurfaceFlag,
+} from "./provider-surface.js";
 
 /**
  * `optional` (slice κ): consumes the next token as the flag's value
@@ -3739,6 +3745,45 @@ export const UPSTREAM_CLI_CONTRACTS: Record<CliType, CliContract> = {
   },
 };
 
+/**
+ * The merged surface, computed once.
+ *
+ * d4a. The bundled contract is the floor and the generated seed adds what the
+ * binaries demonstrably accept, which is 167 flags becoming 266. A flag the
+ * seed evidences is therefore admitted even though no human typed it into
+ * `flags`, which is p1: the installed binary decides, and we are never the
+ * thing that refuses what it would take.
+ *
+ * SEED ONLY. Discovery and overlay are host state and would make the published
+ * tool surface vary by machine, which `surface:invariance:check` exists to
+ * prevent. They arrive with d7 and d8, behind their own gate.
+ *
+ * A seed that fails to load leaves the floor, which is exactly today's
+ * behaviour, so a corrupt artefact costs capability rather than availability.
+ */
+let resolvedSurface: Map<CliType, Map<string, SurfaceFlag>> | undefined;
+
+function surfaceFlags(cli: CliType): Map<string, SurfaceFlag> {
+  if (!resolvedSurface) {
+    const resolution = resolveWithSkips([
+      { name: "retained", load: () => retainedAsSurfaceInput(UPSTREAM_CLI_CONTRACTS) },
+      { name: "seed", load: () => loadBundledSeed() },
+    ]);
+    resolvedSurface = new Map(
+      resolution.providers.map(provider => [
+        provider.cli as CliType,
+        new Map(provider.flags.map(flag => [flag.flag, flag])),
+      ])
+    );
+  }
+  return resolvedSurface.get(cli) ?? new Map();
+}
+
+/** Test seam: drop the memo so a fixture can be resolved fresh. */
+export function resetResolvedSurface(): void {
+  resolvedSurface = undefined;
+}
+
 export function validateUpstreamCliArgs(
   cli: CliType,
   args: readonly string[],
@@ -3797,6 +3842,18 @@ export function validateUpstreamCliArgs(
     if (!flag) {
       if (arg === contract.stdinPromptMarker || !arg.startsWith("-")) {
         positionals.push(arg);
+        continue;
+      }
+      // d4a: the RESOLVED surface, not just the hand-typed table. A flag the
+      // seed evidenced is known even though nobody declared it, which is the
+      // whole point of generating the seed.
+      const surfaced = surfaceFlags(cli).get(flagName);
+      if (surfaced) {
+        unknownFlagCount += 1;
+        if (inlineValue === undefined && surfaced.arity !== "none") {
+          const next = args[i + 1];
+          if (next !== undefined && next !== "--" && !next.startsWith("-")) i += 1;
+        }
         continue;
       }
       // p1 / unparseable_capability = fail_open, but ONLY for a flag the caller
