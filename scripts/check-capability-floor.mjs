@@ -26,11 +26,24 @@ const REPO = resolve(HERE, "..");
 const FLOOR = join(REPO, "seed", "capability-floor.json");
 const UPDATE = process.argv.includes("--update");
 
-/** Every declared flag, keyed by provider and by subcommand path. */
-export function declaredFlags(contracts, flatten) {
+/**
+ * Every flag the gateway currently offers, keyed by provider and subcommand.
+ *
+ * MEASURED ON THE RESOLVED SURFACE, not on contract.flags. A reviewer found the
+ * hole: grok --client-identifier lives only in the generated seed, so a
+ * regeneration that recorded it absent withdrew it while this gate stayed green,
+ * because the gate was reading the one source that never mentioned it. What the
+ * gateway offers is the merged view, so that is what the floor has to measure.
+ *
+ * `surfaceFlags` is optional so the pure function stays testable without a
+ * loader, but main() always passes it.
+ */
+export function declaredFlags(contracts, flatten, surfaceFlags = {}) {
   const declared = {};
   for (const [cli, contract] of Object.entries(contracts)) {
-    declared[cli] = Object.keys(contract.flags).sort();
+    declared[cli] = [
+      ...new Set([...Object.keys(contract.flags), ...(surfaceFlags[cli] ?? [])]),
+    ].sort();
     for (const sub of flatten(contract.subcommands)) {
       declared[`${cli} ${sub.commandPath.join(" ")}`] = Object.keys(sub.flags ?? {}).sort();
     }
@@ -65,7 +78,18 @@ async function main() {
     process.exit(1);
   }
   const { UPSTREAM_CLI_CONTRACTS, flattenCliSubcommands } = await import(`file://${dist}`);
-  const declared = declaredFlags(UPSTREAM_CLI_CONTRACTS, flattenCliSubcommands);
+  const surface = await import(`file://${join(REPO, "dist", "provider-surface.js")}`);
+  const resolved = surface.resolveWithSkips([
+    { name: "retained", load: () => surface.retainedAsSurfaceInput(UPSTREAM_CLI_CONTRACTS) },
+    { name: "seed", load: () => surface.loadBundledSeed() },
+  ]);
+  for (const skipped of resolved.skipped) {
+    console.error(`WARNING: surface source ${skipped.name} did not load: ${skipped.reason}`);
+  }
+  const surfaceFlags = Object.fromEntries(
+    resolved.providers.map(provider => [provider.cli, provider.flags.map(flag => flag.flag)])
+  );
+  const declared = declaredFlags(UPSTREAM_CLI_CONTRACTS, flattenCliSubcommands, surfaceFlags);
   const floor = existsSync(FLOOR) ? JSON.parse(readFileSync(FLOOR, "utf8")) : {};
 
   const lost = withdrawn(floor, declared);

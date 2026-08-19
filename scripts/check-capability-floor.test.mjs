@@ -4,6 +4,17 @@ import { declaredFlags, mergeFloor, withdrawn } from "./check-capability-floor.m
 const flatten = subs => Object.values(subs ?? {});
 
 describe("declaredFlags", () => {
+  it("includes flags that exist only on the resolved surface", () => {
+    // The reviewer's hole: grok --client-identifier lives only in the seed, so a
+    // gate reading contract.flags could not see it being withdrawn.
+    const declared = declaredFlags(
+      { grok: { flags: { "--effort": {} }, subcommands: {} } },
+      flatten,
+      { grok: ["--effort", "--client-identifier"] }
+    );
+    expect(declared.grok).toEqual(["--client-identifier", "--effort"]);
+  });
+
   it("keys subcommand surfaces separately from the root", () => {
     const declared = declaredFlags(
       {
@@ -51,6 +62,12 @@ describe("mergeFloor", () => {
 });
 
 describe("the committed floor", () => {
+  it("holds a flag that exists only in the seed", async () => {
+    const { readFileSync } = await import("node:fs");
+    const floor = JSON.parse(readFileSync("seed/capability-floor.json", "utf8"));
+    expect(floor.grok).toContain("--client-identifier");
+  });
+
   it("holds the three capabilities a release once removed", async () => {
     const { readFileSync } = await import("node:fs");
     const floor = JSON.parse(readFileSync("seed/capability-floor.json", "utf8"));

@@ -236,14 +236,23 @@ export function seedAsSurfaceInput(seed: ProviderSeed): SurfaceInput {
     providers: seed.providers.map(provider => ({
       cli: provider.cli,
       commandScope: provider.commandScope,
-      // The seed ADDS what the binary demonstrably has. A flag the binary
-      // rejected on this command is not added, and that is not subtractive:
-      // the retained floor still carries everything the gateway already
-      // offered, so nothing a customer had can be lost here. Adding it back
-      // would only admit argv the CLI then refuses, and would silently reverse
-      // deliberate refusals such as codex --ask-for-approval on exec.
+      // The seed ADDS what the binary demonstrably has, and NEVER TAKES BACK
+      // what it once demonstrated.
+      //
+      // An earlier version dropped every `absent` verdict, on the argument that
+      // the retained floor carries anything already offered. That holds only for
+      // flags the CONTRACT names. A seed-only flag such as grok
+      // --client-identifier has no floor under it, so the next regeneration that
+      // recorded it absent would have withdrawn it silently, which is the exact
+      // harm this programme exists to prevent.
+      //
+      // `evidence` carries the discriminator already: the generator adds "probe"
+      // only on a PRESENT verdict, so a flag that has ever been present says so
+      // permanently. Absent-and-never-present is a scrape or tree artefact that
+      // was never capability on this command, and dropping it keeps deliberate
+      // refusals such as codex --ask-for-approval on exec intact.
       flags: provider.flags
-        .filter(flag => flag.probe?.verdict !== "absent")
+        .filter(flag => flag.probe?.verdict !== "absent" || flag.evidence.includes("probe"))
         .map(flag => ({
           flag: flag.flag,
           ...(flag.arity === undefined ? {} : { arity: flag.arity }),

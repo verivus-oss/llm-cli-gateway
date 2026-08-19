@@ -126,6 +126,21 @@ describe("seedAsSurfaceInput", () => {
     expect(seedAsSurfaceInput(seed).providers[0].flags.map(f => f.flag)).toEqual(["--real"]);
   });
 
+  it("KEEPS a seed-only flag that was once present and now probes absent", () => {
+    // The defect a reviewer found: --client-identifier lives only in the seed,
+    // so no floor is under it. Dropping it on an absent verdict withdraws a
+    // capability, and capability:floor:check could not see it because that gate
+    // reads contract.flags.
+    const seed = mergeSeed(
+      null,
+      [observed([{ flag: "--client-identifier", evidence: ["help", "probe"], probe: "absent" }])],
+      PROV
+    );
+    expect(seedAsSurfaceInput(seed).providers[0].flags.map(f => f.flag)).toEqual([
+      "--client-identifier",
+    ]);
+  });
+
   it("does NOT add a flag the binary rejected on this command", () => {
     // Not subtractive: the retained floor carries everything the gateway
     // already offered, so nothing a customer had is lost here. Adding it would
