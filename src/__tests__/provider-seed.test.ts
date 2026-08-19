@@ -21,7 +21,7 @@ function observed(over: Partial<ObservedProvider> = {}): ObservedProvider {
     cli: "grok",
     executable: "grok",
     version: "1.0.4",
-    commandScope: "root",
+    commandScope: [],
     flags: [{ flag: "--effort", evidence: ["completions"] }],
     unreadSources: [],
     ...over,
@@ -152,5 +152,45 @@ describe("validateSeed", () => {
       providers: [{ ...good.providers[0], flags: [{ ...good.providers[0].flags[0], values: [] }] }],
     };
     expect(validateSeed(seed).ok).toBe(false);
+  });
+});
+
+describe("command scope", () => {
+  const rootRun = observed({
+    commandScope: [],
+    flags: [{ flag: "--root-only", evidence: ["help"] }],
+  });
+  const execRun = observed({
+    commandScope: ["exec"],
+    flags: [{ flag: "--exec-only", evidence: ["help"] }],
+  });
+
+  it("does NOT carry a root-scope fact into a request-scope entry", () => {
+    // Root codex reports --ask-for-approval present and --output-schema absent;
+    // `codex exec` reports the exact opposite. One entry cannot hold both.
+    const after = mergeSeed(mergeSeed(null, [rootRun], PROV), [execRun], PROV);
+    expect(after.providers[0].commandScope).toEqual(["exec"]);
+    expect(after.providers[0].flags.map(f => f.flag)).toEqual(["--exec-only"]);
+  });
+
+  it("still unions within the same scope", () => {
+    const before = mergeSeed(null, [execRun], PROV);
+    const after = mergeSeed(
+      before,
+      [observed({ commandScope: ["exec"], flags: [{ flag: "--another", evidence: ["help"] }] })],
+      PROV
+    );
+    expect(after.providers[0].flags.map(f => f.flag)).toEqual(["--another", "--exec-only"]);
+  });
+
+  it("treats a scope change as a correction, not a subtraction", () => {
+    const before = mergeSeed(null, [rootRun], PROV);
+    expect(() => assertSeedIsAdditive(before, mergeSeed(before, [execRun], PROV))).not.toThrow();
+  });
+
+  it("refuses a scope that holds a flag rather than a command name", () => {
+    const seed = mergeSeed(null, [execRun], PROV);
+    const bad = { ...seed, providers: [{ ...seed.providers[0], commandScope: ["--exec"] }] };
+    expect(validateSeed(bad).ok).toBe(false);
   });
 });

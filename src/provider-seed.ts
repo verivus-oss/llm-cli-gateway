@@ -65,15 +65,16 @@ export interface SeededProvider {
   readonly executable: string;
   readonly version: string;
   /**
-   * Command the help scrape and probe addressed. Always "root" today.
+   * Command the help scrape and probe addressed, as the gateway launches it.
+   * `[]` is the root command, `["exec"]` is `codex exec`.
    *
    * LOAD-BEARING. codex accepts `--ask-for-approval` at the root and NOT on
-   * `codex exec`, which is the command the gateway actually builds. A consumer
-   * that reads root-scope flags as the request surface would widen codex on the
-   * strength of a flag that is genuinely absent where it matters. Completions
-   * (source 1) do carry the whole tree; sources 2 and 3 do not.
+   * `codex exec`. Probing the root would have reported it available on a
+   * surface where it is genuinely absent. Completions (source 1) still carry
+   * the whole tree, so a tree flag that is not on this command probes `absent`
+   * and a consumer can tell the two apart.
    */
-  readonly commandScope: "root";
+  readonly commandScope: readonly string[];
   readonly flags: readonly SeededFlag[];
   /**
    * Sources that could not be read, by name. Load-bearing: a source that failed
@@ -103,7 +104,7 @@ export interface ObservedProvider {
   readonly cli: string;
   readonly executable: string;
   readonly version: string;
-  readonly commandScope: "root";
+  readonly commandScope: readonly string[];
   readonly flags: readonly {
     readonly flag: string;
     readonly evidence: readonly SeedEvidence[];
@@ -121,6 +122,10 @@ const PROVENANCE_KEYS: readonly (keyof SeedProvenance)[] = [
   "platform",
   "nodeVersion",
 ];
+
+function sameScope(a: readonly string[], b: readonly string[]): boolean {
+  return a.length === b.length && a.every((part, index) => part === b[index]);
+}
 
 function mergeEvidence(
   a: readonly SeedEvidence[],
@@ -176,7 +181,14 @@ export function mergeSeed(
 ): ProviderSeed {
   const byCli = new Map((previous?.providers ?? []).map(p => [p.cli, p]));
   for (const run of observed) {
-    const prior = byCli.get(run.cli);
+    const existing = byCli.get(run.cli);
+    // A seed entry describes one COMMAND. When the scope changes, the previous
+    // entry described a different subject and its probe verdicts do not carry:
+    // root codex reports --output-schema absent and --ask-for-approval present,
+    // and `codex exec` reports the exact opposite. Keeping both under one entry
+    // would state a root fact about the request surface.
+    const prior =
+      existing && sameScope(existing.commandScope, run.commandScope) ? existing : undefined;
     if (run.flags.length === 0 && run.unreadSources.length > 0) continue;
     const observedByFlag = new Map(run.flags.map(f => [f.flag, f]));
     const flags: SeededFlag[] = [];
@@ -197,7 +209,7 @@ export function mergeSeed(
       cli: run.cli,
       executable: run.executable,
       version: run.version,
-      commandScope: run.commandScope,
+      commandScope: [...run.commandScope],
       flags,
       unreadSources: [...run.unreadSources].sort(),
     });
@@ -223,6 +235,9 @@ export function assertSeedIsAdditive(previous: ProviderSeed | null, next: Provid
       lost.push(`${before.cli}: entire provider`);
       continue;
     }
+    // A scope change is a correction to WHICH command we were describing, not a
+    // claim that a capability went away, so it is not a subtraction.
+    if (!sameScope(before.commandScope, after.commandScope)) continue;
     const has = new Set(after.flags.map(f => f.flag));
     for (const flag of before.flags)
       if (!has.has(flag.flag)) lost.push(`${before.cli} ${flag.flag}`);
@@ -261,8 +276,10 @@ export function validateSeed(value: unknown): { ok: boolean; errors: string[] } 
     return { ok: false, errors };
   }
   for (const provider of seed.providers) {
-    if (provider.commandScope !== "root") {
-      errors.push(`${provider.cli}: unsupported commandScope ${String(provider.commandScope)}`);
+    if (!Array.isArray(provider.commandScope)) {
+      errors.push(`${provider.cli}: commandScope must be a command path array`);
+    } else if (provider.commandScope.some((part: string) => part.startsWith("-"))) {
+      errors.push(`${provider.cli}: commandScope must hold command names, not flags`);
     }
     if (!provider.cli || !provider.executable || !provider.version) {
       errors.push(`provider entry is incomplete: ${JSON.stringify(provider.cli ?? provider)}`);

@@ -113,7 +113,12 @@ function gatherProvider(discovery, cli, contract) {
   else
     for (const flag of discovery.scrapeCandidateFlags(helpTexts.join("\n"))) record(flag, "help");
 
-  const rootHelp = run(executable, ["--help"]);
+  // The command the gateway actually launches. codex is `codex exec`; every
+  // other provider is the root command. Read from the contract because which
+  // command we launch is gateway plumbing, not provider capability.
+  const commandPath = contract.command?.requiredFirstArg ? [contract.command.requiredFirstArg] : [];
+  const requestHelp = run(executable, [...commandPath, "--help"]);
+  const rootHelp = commandPath.length === 0 ? requestHelp : run(executable, ["--help"]);
   const subcommand = rootHelp.ok
     ? advertisedCompletionSubcommand(`${rootHelp.stdout}\n${rootHelp.stderr}`)
     : null;
@@ -128,15 +133,18 @@ function gatherProvider(discovery, cli, contract) {
     else for (const flag of discovery.allFlags(commands)) record(flag, "completions");
   }
 
-  const anchor = rootHelp.ok
-    ? discovery.deriveProbeAnchor(`${rootHelp.stdout}\n${rootHelp.stderr}`)
+  // Anchored on the REQUEST command's own help, so the anchor is a flag that
+  // command accepts. A root-derived anchor can be absent here, which turns every
+  // verdict into the anchor's own error.
+  const anchor = requestHelp.ok
+    ? discovery.deriveProbeAnchor(`${requestHelp.stdout}\n${requestHelp.stderr}`)
     : null;
   if (!anchor) {
     unread.push("probe");
   } else {
     for (const entry of byFlag.values()) {
       if (entry.flag === anchor || !discovery.isProbeSafeFlag(entry.flag)) continue;
-      const probeArgv = discovery.buildProbeArgv(entry.flag, anchor);
+      const probeArgv = discovery.buildProbeArgv(entry.flag, anchor, undefined, commandPath);
       const result = run(executable, probeArgv);
       if (!result.ok) continue;
       const verdict = discovery.interpretProbeOutput(`${result.stderr}\n${result.stdout}`);
@@ -151,7 +159,7 @@ function gatherProvider(discovery, cli, contract) {
     cli,
     executable,
     version,
-    commandScope: "root",
+    commandScope: commandPath,
     flags: [...byFlag.values()]
       .map(f => ({
         flag: f.flag,

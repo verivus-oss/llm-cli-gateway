@@ -3,7 +3,7 @@
   "provenance": {
     "generator": "generate-provider-seed",
     "generatorVersion": "3.1.0-rc.8",
-    "generatedAt": "2026-08-19T00:14:34.683Z",
+    "generatedAt": "2026-08-19T00:26:45.434Z",
     "platform": "linux",
     "nodeVersion": "v24.15.0"
   },
@@ -12,7 +12,7 @@
       "cli": "claude",
       "executable": "claude",
       "version": "2.1.235",
-      "commandScope": "root",
+      "commandScope": [],
       "flags": [
         {
           "flag": "--add-dir",
@@ -799,7 +799,9 @@
       "cli": "codex",
       "executable": "codex",
       "version": "0.147.0",
-      "commandScope": "root",
+      "commandScope": [
+        "exec"
+      ],
       "flags": [
         {
           "flag": "--add-dir",
@@ -877,19 +879,12 @@
         {
           "flag": "--ask-for-approval",
           "evidence": [
-            "completions",
-            "probe"
-          ],
-          "arity": "one",
-          "values": [
-            "untrusted",
-            "on-request",
-            "never"
+            "completions"
           ],
           "firstSeen": "0.147.0",
           "lastSeen": "0.147.0",
           "probe": {
-            "verdict": "present",
+            "verdict": "absent",
             "at": "0.147.0"
           }
         },
@@ -1008,12 +1003,19 @@
           "flag": "--color",
           "evidence": [
             "completions",
-            "help"
+            "help",
+            "probe"
+          ],
+          "arity": "one",
+          "values": [
+            "always",
+            "never",
+            "auto"
           ],
           "firstSeen": "0.147.0",
           "lastSeen": "0.147.0",
           "probe": {
-            "verdict": "absent",
+            "verdict": "present",
             "at": "0.147.0"
           }
         },
@@ -1176,12 +1178,14 @@
           "flag": "--ephemeral",
           "evidence": [
             "completions",
-            "help"
+            "help",
+            "probe"
           ],
+          "arity": "none",
           "firstSeen": "0.147.0",
           "lastSeen": "0.147.0",
           "probe": {
-            "verdict": "absent",
+            "verdict": "present",
             "at": "0.147.0"
           }
         },
@@ -1276,12 +1280,14 @@
           "flag": "--ignore-rules",
           "evidence": [
             "completions",
-            "help"
+            "help",
+            "probe"
           ],
+          "arity": "none",
           "firstSeen": "0.147.0",
           "lastSeen": "0.147.0",
           "probe": {
-            "verdict": "absent",
+            "verdict": "present",
             "at": "0.147.0"
           }
         },
@@ -1289,12 +1295,14 @@
           "flag": "--ignore-user-config",
           "evidence": [
             "completions",
-            "help"
+            "help",
+            "probe"
           ],
+          "arity": "none",
           "firstSeen": "0.147.0",
           "lastSeen": "0.147.0",
           "probe": {
-            "verdict": "absent",
+            "verdict": "present",
             "at": "0.147.0"
           }
         },
@@ -1341,12 +1349,14 @@
           "flag": "--json",
           "evidence": [
             "completions",
-            "help"
+            "help",
+            "probe"
           ],
+          "arity": "none",
           "firstSeen": "0.147.0",
           "lastSeen": "0.147.0",
           "probe": {
-            "verdict": "absent",
+            "verdict": "present",
             "at": "0.147.0"
           }
         },
@@ -1444,14 +1454,12 @@
         {
           "flag": "--no-alt-screen",
           "evidence": [
-            "completions",
-            "probe"
+            "completions"
           ],
-          "arity": "none",
           "firstSeen": "0.147.0",
           "lastSeen": "0.147.0",
           "probe": {
-            "verdict": "present",
+            "verdict": "absent",
             "at": "0.147.0"
           }
         },
@@ -1526,12 +1534,14 @@
           "flag": "--output-last-message",
           "evidence": [
             "completions",
-            "help"
+            "help",
+            "probe"
           ],
+          "arity": "one",
           "firstSeen": "0.147.0",
           "lastSeen": "0.147.0",
           "probe": {
-            "verdict": "absent",
+            "verdict": "present",
             "at": "0.147.0"
           }
         },
@@ -1539,12 +1549,14 @@
           "flag": "--output-schema",
           "evidence": [
             "completions",
-            "help"
+            "help",
+            "probe"
           ],
+          "arity": "one",
           "firstSeen": "0.147.0",
           "lastSeen": "0.147.0",
           "probe": {
-            "verdict": "absent",
+            "verdict": "present",
             "at": "0.147.0"
           }
         },
@@ -1640,14 +1652,12 @@
         {
           "flag": "--remote",
           "evidence": [
-            "completions",
-            "probe"
+            "completions"
           ],
-          "arity": "one",
           "firstSeen": "0.147.0",
           "lastSeen": "0.147.0",
           "probe": {
-            "verdict": "present",
+            "verdict": "absent",
             "at": "0.147.0"
           }
         },
@@ -1766,14 +1776,12 @@
         {
           "flag": "--search",
           "evidence": [
-            "completions",
-            "probe"
+            "completions"
           ],
-          "arity": "none",
           "firstSeen": "0.147.0",
           "lastSeen": "0.147.0",
           "probe": {
-            "verdict": "present",
+            "verdict": "absent",
             "at": "0.147.0"
           }
         },
@@ -1793,12 +1801,14 @@
           "flag": "--skip-git-repo-check",
           "evidence": [
             "completions",
-            "help"
+            "help",
+            "probe"
           ],
+          "arity": "none",
           "firstSeen": "0.147.0",
           "lastSeen": "0.147.0",
           "probe": {
-            "verdict": "absent",
+            "verdict": "present",
             "at": "0.147.0"
           }
         },
@@ -2047,7 +2057,7 @@
       "cli": "cursor",
       "executable": "cursor-agent",
       "version": "2026.08.11-e8db854",
-      "commandScope": "root",
+      "commandScope": [],
       "flags": [
         {
           "flag": "--add-dir",
@@ -2366,7 +2376,7 @@
       "cli": "devin",
       "executable": "devin",
       "version": "3000.4.25",
-      "commandScope": "root",
+      "commandScope": [],
       "flags": [
         {
           "flag": "--config",
@@ -2543,7 +2553,7 @@
       "cli": "gemini",
       "executable": "agy",
       "version": "1.1.14",
-      "commandScope": "root",
+      "commandScope": [],
       "flags": [
         {
           "flag": "--add-dir",
@@ -2715,7 +2725,7 @@
       "cli": "grok",
       "executable": "grok",
       "version": "1.0.5",
-      "commandScope": "root",
+      "commandScope": [],
       "flags": [
         {
           "flag": "----reauthenticate",
@@ -4299,7 +4309,7 @@
       "cli": "mistral",
       "executable": "vibe",
       "version": "2.24.1",
-      "commandScope": "root",
+      "commandScope": [],
       "flags": [
         {
           "flag": "--add-dir",

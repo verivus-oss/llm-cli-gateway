@@ -431,10 +431,11 @@ function splitValues(raw: string): string[] {
 export function buildProbeArgv(
   flag: string,
   anchorFlag: string,
-  sentinel = "ZZZ_GATEWAY_PROBE"
+  sentinel = "ZZZ_GATEWAY_PROBE",
+  commandPath: readonly string[] = []
 ): string[] {
-  const argv = [`${flag}=${sentinel}`, anchorFlag];
-  assertProbeArgvCannotRun(argv);
+  const argv = [...commandPath, `${flag}=${sentinel}`, anchorFlag];
+  assertProbeArgvCannotRun(argv, commandPath);
   return argv;
 }
 
@@ -446,8 +447,24 @@ export function buildProbeArgv(
  * Enforced here rather than trusted to the caller, because the failure mode is
  * a billed model call and a possible side effect, not a wrong answer.
  */
-export function assertProbeArgvCannotRun(argv: readonly string[]): void {
-  for (const token of argv) {
+export function assertProbeArgvCannotRun(
+  argv: readonly string[],
+  commandPath: readonly string[] = []
+): void {
+  // The declared subcommand path is the ONLY bare token allowed, and it must
+  // match position for position. `codex exec` has to be reachable or the probe
+  // reads the root command, where codex accepts flags `exec` does not. Allowing
+  // an arbitrary bare token instead would restore exactly the hazard this guard
+  // exists for: one consumed as a prompt.
+  for (const [index, expected] of commandPath.entries()) {
+    if (argv[index] !== expected) {
+      throw new Error(
+        `unsafe probe argv: expected declared command token ${JSON.stringify(expected)} at ` +
+          `position ${index}, found ${JSON.stringify(argv[index])}`
+      );
+    }
+  }
+  for (const token of argv.slice(commandPath.length)) {
     if (!token.startsWith("-")) {
       throw new Error(
         `unsafe probe argv: token ${JSON.stringify(token)} is not option-shaped and could be ` +

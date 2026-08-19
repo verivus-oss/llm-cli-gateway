@@ -464,3 +464,37 @@ describe("isProbeSafeFlag", () => {
     expect(isProbeSafeFlag("--output-format")).toBe(true);
   });
 });
+
+describe("probing a request subcommand", () => {
+  it("puts the declared command path first", () => {
+    expect(buildProbeArgv("--sandbox", "--add-dir", "ZZZ", ["exec"])).toEqual([
+      "exec",
+      "--sandbox=ZZZ",
+      "--add-dir",
+    ]);
+  });
+
+  it("REFUSES a bare token that is not the declared path, at the same position", () => {
+    // The hazard the guard exists for: any other bare token can be consumed as
+    // a prompt, and the probe becomes a billed invocation.
+    expect(() => assertProbeArgvCannotRun(["chat", "--x=Z", "--anchor"], ["exec"])).toThrow(
+      /expected declared command token/
+    );
+  });
+
+  it("REFUSES a bare token AFTER the declared path", () => {
+    expect(() => assertProbeArgvCannotRun(["exec", "hello", "--anchor"], ["exec"])).toThrow(
+      /not option-shaped/
+    );
+  });
+
+  it("REFUSES a longer path than was declared", () => {
+    expect(() => assertProbeArgvCannotRun(["exec", "resume", "--x=Z"], ["exec"])).toThrow(
+      /not option-shaped/
+    );
+  });
+
+  it("still refuses every bare token when no path is declared", () => {
+    expect(() => assertProbeArgvCannotRun(["exec", "--x=Z"])).toThrow(/not option-shaped/);
+  });
+});
