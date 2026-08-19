@@ -349,7 +349,7 @@ const REJECTION_LINE =
  * begins.
  */
 const DIAGNOSTIC_ANCHOR =
-  /^.*(?:error:|invalid (?:value|choice|boolean value)|unexpected (?:argument|value)|unrecognized arguments?:|flags? provided but not defined|unknown option|ignored explicit argument).*$/im;
+  /^[ \t]*(?:[\w.-]+:[ \t]*)?(?:error:|invalid (?:value|choice|boolean value)|unexpected (?:argument|value)|unrecognized arguments?:|flags? provided but not defined|unknown option|ignored explicit argument).*$/im;
 
 function diagnosticBlock(text: string): string {
   const match = DIAGNOSTIC_ANCHOR.exec(text);

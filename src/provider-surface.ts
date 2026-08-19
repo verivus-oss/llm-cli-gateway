@@ -183,10 +183,22 @@ export function resolveProviderSurface(inputs: readonly SurfaceInput[]): Surface
       // An entry with no flags has described nothing, so it does not get to
       // pin the scope. A reviewer put an empty root-scope duplicate ahead of the
       // real `["exec"]` floor and the floor was skipped as the conflicting one.
+      // Count flags that SURVIVE refusal. A reviewer emptied an entry through
+      // its own `refused` list, leaving one flag that is removed at the end, and
+      // the now-empty entry still pinned the scope: the original defect back
+      // through a different door.
+      const refusedHere = new Set([
+        ...(refused.get(provider.cli) ?? []),
+        ...(provider.refused ?? []),
+      ]);
+      const incomingLive = provider.flags.filter(flag => !refusedHere.has(flag.flag)).length;
+      const existingLive = [...(existing?.flags.keys() ?? [])].filter(
+        flag => !refusedHere.has(flag)
+      ).length;
       if (
         existing &&
-        existing.flags.size > 0 &&
-        provider.flags.length > 0 &&
+        existingLive > 0 &&
+        incomingLive > 0 &&
         !sameScope(existing.entry.commandScope, provider.commandScope)
       ) {
         scopeConflicts.push({
@@ -200,7 +212,7 @@ export function resolveProviderSurface(inputs: readonly SurfaceInput[]): Surface
       }
       const flags = existing?.flags ?? new Map<string, SurfaceFlag>();
       const commandScope =
-        existing && existing.flags.size > 0 && provider.flags.length === 0
+        existing && existingLive > 0 && incomingLive === 0
           ? existing.entry.commandScope
           : provider.commandScope;
       for (const flag of provider.flags) {

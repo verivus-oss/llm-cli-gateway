@@ -78,11 +78,11 @@ describe("the committed floor", () => {
   });
 });
 
-describe("CODEX r2: names alone are not capability", () => {
-  it("records arity and values, so narrowing an enum is a withdrawal", () => {
+describe("names alone are not capability", () => {
+  it("records values individually, so narrowing an enum is a withdrawal", () => {
     // The reviewer removed "stream-json" from claude --output-format, left the
-    // name intact, and the gate stayed green while a previously valid request
-    // became invalid.
+    // name intact, and a name-only floor stayed green while a previously valid
+    // request became invalid.
     const before = declaredFlags(
       { claude: { flags: { "--output-format": { arity: "one", values: ["text", "json"] } } } },
       () => []
@@ -92,8 +92,23 @@ describe("CODEX r2: names alone are not capability", () => {
       () => []
     );
     expect(withdrawn(before, after)).toEqual([
-      { key: "claude", missing: ["--output-format:one:json,text"] },
+      { key: "claude", missing: ["--output-format=json"] },
     ]);
+  });
+
+  it("WIDENING an enum is free, which the joined form got wrong", () => {
+    // A single joined token made adding a value read as a withdrawal, because
+    // the old combined token vanished. That would have made the gate fight every
+    // legitimate upstream addition.
+    const before = declaredFlags(
+      { claude: { flags: { "--output-format": { arity: "one", values: ["text"] } } } },
+      () => []
+    );
+    const after = declaredFlags(
+      { claude: { flags: { "--output-format": { arity: "one", values: ["text", "json"] } } } },
+      () => []
+    );
+    expect(withdrawn(before, after)).toEqual([]);
   });
 
   it("treats an arity change as a withdrawal too", () => {
@@ -102,16 +117,17 @@ describe("CODEX r2: names alone are not capability", () => {
     expect(withdrawn(before, after)).toHaveLength(1);
   });
 
-  it("factsOf is stable under value reordering, so a reorder is not a breach", () => {
-    expect(factsOf("--x", { arity: "one", values: ["b", "a"] })).toBe(
-      factsOf("--x", { arity: "one", values: ["a", "b"] })
+  it("factsOf emits one token per fact, and is order-independent", () => {
+    expect(factsOf("--x", { arity: "one", values: ["b", "a"] }).sort()).toEqual(
+      factsOf("--x", { arity: "one", values: ["a", "b"] }).sort()
     );
+    expect(factsOf("--x", { arity: "one", values: ["a"] })).toEqual(["--x:one", "--x=a"]);
   });
 
   it("the committed floor records facts, not bare names", async () => {
     const { readFileSync } = await import("node:fs");
     const floor = JSON.parse(readFileSync("seed/capability-floor.json", "utf8"));
-    expect(floor.__schema).toEqual(["flag:arity:values"]);
-    expect(floor.claude.some(f => f.startsWith("--output-format:one:"))).toBe(true);
+    expect(floor.__schema).toEqual(["flag:arity", "flag=value"]);
+    expect(floor.claude).toContain("--output-format=stream-json");
   });
 });

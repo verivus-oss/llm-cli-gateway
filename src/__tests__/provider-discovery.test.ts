@@ -617,3 +617,30 @@ describe("CODEX r2: a warning is not a diagnostic about a flag", () => {
     });
   });
 });
+
+describe("CODEX r3: the marker must start the line, not merely appear on it", () => {
+  it("a warning that CONTAINS 'error:' does not steal the window", () => {
+    // The first fix caught "os error 30"; the reviewer then defeated it with a
+    // warning whose text contains the marker itself.
+    const output = [
+      "WARNING: wrapper reported error: retry follows",
+      "error: invalid value 'ZZZ' for '--sandbox <SANDBOX_MODE>'",
+      "  [possible values: read-only, workspace-write, danger-full-access]",
+    ].join("\n");
+    expect(interpretProbeOutput(output, { flag: "--sandbox", sentinel: PROBE_SENTINEL })).toEqual({
+      kind: "present",
+      arity: "one",
+      values: ["read-only", "workspace-write", "danger-full-access"],
+    });
+  });
+
+  it("still accepts the one program-name prefix these dialects use", () => {
+    // argparse writes `vibe: error: ...`; that prefix is real and must anchor.
+    const output = "vibe: error: argument --output: invalid choice: 'ZZZ' (choose from 'text')";
+    expect(interpretProbeOutput(output, { flag: "--output", sentinel: PROBE_SENTINEL })).toEqual({
+      kind: "present",
+      arity: "one",
+      values: ["text"],
+    });
+  });
+});

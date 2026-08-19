@@ -46,49 +46,44 @@ export function declaredFlags(contracts, flatten, surfaceFacts = {}) {
       entries.set(flag, factsOf(flag, meta));
     for (const [flag, meta] of Object.entries(surfaceFacts[cli] ?? {}))
       entries.set(flag, factsOf(flag, meta));
-    declared[cli] = [...entries.values()].sort();
+    declared[cli] = [...new Set([...entries.values()].flat())].sort();
     for (const sub of flatten(contract.subcommands)) {
-      declared[`${cli} ${sub.commandPath.join(" ")}`] = Object.entries(sub.flags ?? {})
-        .map(([flag, meta]) => factsOf(flag, meta))
-        .sort();
+      declared[`${cli} ${sub.commandPath.join(" ")}`] = [
+        ...new Set(Object.entries(sub.flags ?? {}).flatMap(([flag, meta]) => factsOf(flag, meta))),
+      ].sort();
     }
   }
   return declared;
 }
 
 /**
- * A flag and the facts that make it usable, as one comparable string.
+ * A flag's facts, as one token per fact.
  *
  * NAMES ALONE ARE NOT CAPABILITY. A reviewer removed "stream-json" from claude
- * --output-format, leaving the flag name intact, and the gate stayed green while
- * a previously accepted request became invalid. An arity change is the same
- * blind spot. Encoding facts into the recorded token makes both fail here.
+ * --output-format, leaving the name intact, and a name-only floor stayed green
+ * while a previously valid request became invalid.
+ *
+ * ONE TOKEN PER VALUE, not one joined token for the whole set. The joined form
+ * made ADDING a value read as a withdrawal, because the old combined token
+ * vanished, which contradicts "adding is free" and would have made this gate
+ * fight every legitimate upstream addition.
  */
 export function factsOf(flag, meta = {}) {
-  const arity = meta.arity ? `:${meta.arity}` : "";
-  const values = meta.values?.length ? `:${[...meta.values].sort().join(",")}` : "";
-  return `${flag}${arity}${values}`;
+  const facts = [meta.arity ? `${flag}:${meta.arity}` : flag];
+  for (const value of meta.values ?? []) facts.push(`${flag}=${value}`);
+  return facts;
 }
 
-/** Flags the floor records that the contract no longer declares. */
+/** Facts the floor records that the contract no longer declares. */
 export function withdrawn(floor, declared) {
   const lost = [];
-  for (const [key, flags] of Object.entries(floor)) {
+  for (const [key, facts] of Object.entries(floor)) {
     if (key === "__schema") continue;
     const present = new Set(declared[key] ?? []);
-    const missing = flags.filter(flag => !present.has(flag));
+    const missing = facts.filter(fact => !present.has(fact));
     if (missing.length > 0) lost.push({ key, missing });
   }
   return lost;
-}
-
-/** Legacy floors held bare names; compare like with like during the migration. */
-export function stripFacts(floor) {
-  return Object.fromEntries(
-    Object.entries(floor)
-      .filter(([key]) => key !== "__schema")
-      .map(([key, flags]) => [key, flags.map(f => String(f).split(":")[0])])
-  );
 }
 
 /** Union, so the floor only ever grows. */
@@ -125,18 +120,13 @@ async function main() {
   const declared = declaredFlags(UPSTREAM_CLI_CONTRACTS, flattenCliSubcommands, surfaceFacts);
   const floor = existsSync(FLOOR) ? JSON.parse(readFileSync(FLOOR, "utf8")) : {};
 
-  // MIGRATION, ONCE. The floor recorded bare names until 2026-08-19; it now
-  // records `flag:arity:values`, because a reviewer removed an enum value while
-  // leaving the name and the gate stayed green. Old entries are checked at NAME
-  // level, so a genuine withdrawal still fails during the migration, and are
-  // then rewritten in the richer form.
-  const legacy = !Array.isArray(floor.__schema);
-  const comparable = legacy
-    ? Object.fromEntries(
-        Object.entries(declared).map(([key, facts]) => [key, facts.map(f => f.split(":")[0])])
-      )
-    : declared;
-  const lost = withdrawn(legacy ? stripFacts(floor) : floor, comparable);
+  // The one-time name-level migration that produced this format is DELETED, not
+  // disabled. A reviewer showed it could ratify a withdrawal: comparing legacy
+  // names against richer facts sees a narrowed enum as unchanged, then writes
+  // the narrowed form as the floor permanently. It ran once, against a contract
+  // verified to have narrowed nothing, and a path that can bless a withdrawal
+  // must not survive its single use.
+  const lost = withdrawn(floor, declared);
   if (lost.length > 0 && !UPDATE) {
     console.error(
       "capability floor breached: the gateway would stop offering flags it has offered."
@@ -151,20 +141,13 @@ async function main() {
     process.exit(1);
   }
 
-  if (legacy && lost.length === 0 && !UPDATE) {
-    console.error(
-      "capability floor is in the legacy name-only format; run npm run capability:floor:update"
-    );
-    process.exit(1);
-  }
-
   if (UPDATE) {
     if (lost.length > 0) {
       console.error("refusing to update: --update records NEW flags and never drops one.");
       for (const { key, missing } of lost) console.error(`  ${key}: ${missing.join(" ")}`);
       process.exit(1);
     }
-    const merged = legacy ? declared : mergeFloor(floor, declared);
+    const merged = mergeFloor(floor, declared);
     writeFileSync(
       FLOOR,
       `${JSON.stringify({ __schema: ["flag:arity:values"], ...merged }, null, 2)}\n`

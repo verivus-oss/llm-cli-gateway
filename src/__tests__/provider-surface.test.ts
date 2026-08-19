@@ -534,3 +534,49 @@ describe("CODEX r2: the floor cannot be impersonated or displaced", () => {
     });
   });
 });
+
+describe("CODEX r3: an entry emptied BY REFUSAL cannot pin scope either", () => {
+  it("counts flags that survive refusal, not flags declared", () => {
+    // The reviewer emptied an entry through its own `refused` list. Refusals are
+    // applied at the end, so the scope decision has to anticipate them or the
+    // original defect returns through a different door.
+    const r = resolveProviderSurface([
+      {
+        name: "retained",
+        providers: [
+          {
+            cli: "codex",
+            commandScope: [],
+            flags: [{ flag: "--ask-for-approval" }],
+            refused: ["--ask-for-approval"],
+          },
+        ],
+      },
+      {
+        name: "retained",
+        providers: [{ cli: "codex", commandScope: ["exec"], flags: [{ flag: "--json" }] }],
+      },
+    ]);
+    expect(r.providers[0].commandScope).toEqual(["exec"]);
+    expect(r.providers[0].flags.map(f => f.flag)).toEqual(["--json"]);
+    expect(r.skipped).toEqual([]);
+  });
+
+  it("an INCOMING entry emptied by refusal raises no conflict either", () => {
+    // The other half. The first test only exercises the existing side; counting
+    // declared rather than surviving flags on the INCOMING side invents a scope
+    // conflict against an entry that contributes nothing.
+    const r = resolveProviderSurface([
+      {
+        name: "retained",
+        providers: [{ cli: "codex", commandScope: ["exec"], flags: [{ flag: "--json" }] }],
+      },
+      {
+        name: "retained",
+        providers: [{ cli: "codex", commandScope: [], flags: [{ flag: "--x" }], refused: ["--x"] }],
+      },
+    ]);
+    expect(r.providers[0].commandScope).toEqual(["exec"]);
+    expect(r.skipped).toEqual([]);
+  });
+});
