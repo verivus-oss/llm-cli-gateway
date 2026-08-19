@@ -82,11 +82,19 @@ constraint = "Merge is union, precedence is a module constant rather than an arg
 
 [[node]]
 id = "d4a.registration-reads-the-loader"
+status = "admission done 2026-08-19, seed-only. Schema derivation is d4c."
 critical = true
 depends_on = ["d4.surface-loader-and-precedence"]
-role = "Nothing consumes the resolver yet. Tool registration and argv admission still read UPSTREAM_CLI_CONTRACTS directly."
-action = "Point them at the resolved surface, seed-only by default so the published surface stays reproducible."
-constraint = "surface:invariance:check is the control and will fail the moment discovery or overlay reaches the site capture. That is the gate working, not a bug to route around."
+role = "Argv admission read UPSTREAM_CLI_CONTRACTS directly, so a flag the seed evidenced was still refused."
+outcome = "167 declared flags become 266 admissible. Two corrections the wiring forced: the floor now carries FACTS not just names, or twelve contract-only enums would have been dropped; and a DECLARED refusal outranks evidence, so vibe --auto-approve and claude --background stay refused."
+constraint = "surface:invariance:check is the control for anything beyond seed-only, and will fail the moment discovery or overlay reaches the site capture."
+
+[[node]]
+id = "d4c.schema-derivation-reads-the-loader"
+depends_on = ["d4a.registration-reads-the-loader"]
+role = "deriveZodShapeFromGeneration still takes contract.flags for its enum source, so a tool SCHEMA cannot yet widen from the seed even though admission can."
+action = "Point it at the resolved surface. Verified safe in advance: zero enum differences between the surface and the live contract, so the site fixture should not move."
+constraint = "The published surface is the blast radius. site:generate:check plus surface:invariance:check are both controls here, and a fixture change means the derivation is not equivalent."
 
 [[node]]
 id = "d4b.seed-records-short-flags"
