@@ -34,11 +34,18 @@ constraint = "The artefact names its generator, platform and probe time and NOT 
 
 [[node]]
 id = "d1a.probe-needs-a-derived-anchor"
-critical = true
+status = "done 2026-08-19"
 depends_on = ["d1.seed-is-generated-not-written"]
-role = "Source 3 gives arity and real value sets, and is the only source that can retire an invented enum. It is unwired because the probe argv needs a value-taking anchor flag per provider."
-action = "Derive the anchor from help text, a flag printed with its own value placeholder. Taking it from contract.flags would be hand-authored provider data by the back door."
-constraint = "Until it lands every provider records probe as unread, so absent arity reads as NOT ASKED. Never let it read as arity none."
+role = "Source 3 gives arity and real value sets, and is the only source that can retire an invented enum."
+outcome = "Anchor derived from help via two placeholder shapes, square brackets excluded because an optional value lets the probe RUN the CLI. 321 flags probed, 104 with arity, 6 with a value set the binary printed. agy yields no anchor and is recorded unprobeable."
+
+[[node]]
+id = "d1b.probe-the-request-subcommand"
+critical = true
+depends_on = ["d1a.probe-needs-a-derived-anchor"]
+role = "Sources 2 and 3 address the ROOT command, but the gateway builds `codex exec`. codex accepts --ask-for-approval at the root and NOT on exec."
+action = "Probe the command each provider's request path actually launches, and record commandScope per entry rather than the single root value the schema allows today."
+constraint = "Until this lands a consumer MUST NOT read root-scope flags as the request surface. The codex fixture that refuses --ask-for-approval on exec is correct, and a naive widening would have broken it."
 
 [[node]]
 id = "d2.gates-pin-the-seed"
