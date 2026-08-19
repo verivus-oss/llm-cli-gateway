@@ -333,6 +333,7 @@ import { resolveLocalReviewRepositoryRoot } from "./review-scope.js";
 import { currentCaller, resolveValidationReceipt } from "./validation-receipt.js";
 import {
   assertUpstreamCliArgs,
+  resolvedFlagFacts,
   assertUpstreamCliSubcommandArgs,
   assertUpstreamCliEnv,
   buildProviderSubcommandsCompactCatalog,
@@ -986,7 +987,12 @@ type GrokGeneratedField =
 // come from the contract-derived shape (proven equivalent by the schema golden).
 const GROK_GENERATED_SHAPE = deriveZodShapeFromGeneration(
   UPSTREAM_CLI_CONTRACTS.grok,
-  GROK_FLAG_GENERATION
+  GROK_FLAG_GENERATION,
+  // d4c: enums come from the merged surface, so a seed or a pack can correct one
+  // without a release. Today it resolves identically to the contract, which is
+  // the point: the fixture must not move on a change that only relocates a
+  // source of truth.
+  flag => resolvedFlagFacts("grok", flag)
 ) as unknown as Record<GrokGeneratedField, z.ZodTypeAny>;
 
 /**

@@ -82,6 +82,13 @@ export interface FlagGenerationMeta {
  * table. Emits in table order; the grok table is ordered to match the
  * hand-written `prepareGrokRequest` emission sequence, so output is byte-equal.
  */
+/**
+ * Reads the merged provider surface for one flag. Injected rather than imported
+ * so this module keeps importing no contract and no loader, and so a test can
+ * derive a shape from a fixture.
+ */
+export type FlagFactsLookup = (flag: string) => { readonly values?: readonly string[] } | undefined;
+
 export function buildArgvFromGeneration(
   contract: CliContract,
   generation: readonly FlagGenerationMeta[],
@@ -163,11 +170,15 @@ export function buildArgvFromGeneration(
  */
 export function deriveZodShapeFromGeneration(
   contract: CliContract,
-  generation: readonly FlagGenerationMeta[]
+  generation: readonly FlagGenerationMeta[],
+  facts?: FlagFactsLookup
 ): Record<string, z.ZodTypeAny> {
   const shape: Record<string, z.ZodTypeAny> = {};
   for (const gen of generation) {
-    const flagContract = contract.flags[gen.flag];
+    // d4c: the MERGED surface when one is supplied, so an enum can widen from a
+    // seed or a pack without a release. The contract remains the fallback and
+    // the floor, so a surface that failed to load costs nothing.
+    const flagContract = facts?.(gen.flag) ?? contract.flags[gen.flag];
     if (!flagContract) {
       throw new Error(
         `provider-codegen: generation references flag '${gen.flag}' absent from ${contract.cli} contract.flags`

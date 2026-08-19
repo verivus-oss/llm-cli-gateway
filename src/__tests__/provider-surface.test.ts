@@ -312,3 +312,51 @@ describe("a declared refusal outranks evidence", () => {
     expect(r.providers[0].flags.map(f => f.flag)).toEqual(["--other"]);
   });
 });
+
+describe("d4c: schema derivation reads the resolver", () => {
+  it("takes an enum from the injected surface, not the contract", async () => {
+    const { deriveZodShapeFromGeneration } = await import("../provider-codegen.js");
+    const { UPSTREAM_CLI_CONTRACTS } = await import("../upstream-contracts.js");
+    const shape = deriveZodShapeFromGeneration(
+      UPSTREAM_CLI_CONTRACTS.grok,
+      [
+        {
+          flag: "--permission-mode",
+          requestParameter: "permissionMode",
+          emit: "value_if_present",
+          inputType: "string",
+        },
+      ],
+      () => ({ values: ["only-this"] })
+    );
+    expect(JSON.stringify(shape.permissionMode)).toContain("only-this");
+  });
+
+  it("falls back to the contract when the surface knows nothing", async () => {
+    const { deriveZodShapeFromGeneration } = await import("../provider-codegen.js");
+    const { UPSTREAM_CLI_CONTRACTS } = await import("../upstream-contracts.js");
+    // A surface that failed to load must cost nothing: the contract is the floor
+    // in the resolver and the fallback here for the same reason.
+    const shape = deriveZodShapeFromGeneration(
+      UPSTREAM_CLI_CONTRACTS.grok,
+      [
+        {
+          flag: "--permission-mode",
+          requestParameter: "permissionMode",
+          emit: "value_if_present",
+          inputType: "string",
+        },
+      ],
+      () => undefined
+    );
+    expect(JSON.stringify(shape.permissionMode)).toContain("bypassPermissions");
+  });
+
+  it("the live derivation and the live contract agree, so relocating the source moved nothing", async () => {
+    const { resolvedFlagFacts, UPSTREAM_CLI_CONTRACTS } = await import("../upstream-contracts.js");
+    for (const [flag, meta] of Object.entries(UPSTREAM_CLI_CONTRACTS.grok.flags)) {
+      const facts = resolvedFlagFacts("grok", flag);
+      expect(facts?.values ?? null, flag).toEqual(meta.values ?? null);
+    }
+  });
+});

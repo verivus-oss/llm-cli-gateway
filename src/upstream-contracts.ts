@@ -3779,6 +3779,18 @@ function surfaceFlags(cli: CliType): Map<string, SurfaceFlag> {
   return resolvedSurface.get(cli) ?? new Map();
 }
 
+/**
+ * What the merged surface knows about one flag.
+ *
+ * d4c. Exported so schema derivation reads the same merged view admission does,
+ * rather than a second opinion assembled at another call site. Returns
+ * undefined when nothing knows the flag, which callers treat as their own
+ * integrity failure rather than as a fact about the binary.
+ */
+export function resolvedFlagFacts(cli: CliType, flag: string): SurfaceFlag | undefined {
+  return surfaceFlags(cli).get(flag);
+}
+
 /** Test seam: drop the memo so a fixture can be resolved fresh. */
 export function resetResolvedSurface(): void {
   resolvedSurface = undefined;
