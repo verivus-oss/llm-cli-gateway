@@ -57,10 +57,11 @@ constraint = "The seed is deliberately not varied: it is a committed artefact an
 
 [[node]]
 id = "d3.generation-covers-seven-providers"
+status = "scoped by measurement 2026-08-19: gemini, then mistral, then devin. claude, codex and cursor deferred."
 depends_on = ["d1.seed-is-generated-not-written"]
-role = "Only grok has a generation table. The other six emit flags by hand inside their prepare functions."
-action = "Extract ONLY the flag-emitting part. Measured: 76 of 1,853 non-blank prepare lines mention a flag literal, 4%. The other 96% is admission, isolation, session, MCP and prompt assembly and must not move."
-constraint = "This is not n3. n3 proposed deleting the prepare functions and was refuted by its own pilot. This moves 76 lines of data out of them and leaves them in place."
+role = "Only grok has a generation table. The other six emit flags by hand across their prepare and handle paths."
+action = "Extract ONLY the flag-emitting part: 106 of 6,000 non-blank lines, 1.8%. The rest is admission, isolation, session, MCP and prompt assembly and must not move. Order and evidence in docs/evidence/gateway-passthrough-2026-08-19.md."
+constraint = "This is not n3. Marginal cost is 8.6 table lines per flag, not the 16 that refutation implied: 281 of provider-codegen's 529 lines are generic consumers already paid for. gemini first because it is the ONLY provider whose churn is dominated by removals, the class that caused the capability-removal incidents."
 
 [[node]]
 id = "d4.surface-loader-and-precedence"

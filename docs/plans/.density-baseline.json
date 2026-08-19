@@ -22,7 +22,7 @@
   "provider-contract-removal-autoapply.dag.toml": 330,
   "provider-owned-sessions.dag.toml": 328,
   "provider-subcommands-scope-expansion.dag.toml": 514,
-  "provider-surface-distribution.dag.toml": 125,
+  "provider-surface-distribution.dag.toml": 126,
   "provider-tool-capabilities-full-coverage.dag.toml": 803,
   "provider-workflow-assets.dag.toml": 213,
   "remote-connector-oauth-workspaces.dag.toml": 471,
