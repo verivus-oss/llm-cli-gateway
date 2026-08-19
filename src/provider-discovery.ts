@@ -339,6 +339,26 @@ const REJECTION_LINE =
   /^.*(?:unexpected argument|unrecognized arguments?:|flags? provided but not defined|unknown option).*$/im;
 
 /**
+ * The diagnostic, which is the error line and the one after it. Nothing else.
+ *
+ * The same defect as REJECTION_LINE, one rule further down, and a reviewer found
+ * it after I fixed the first half: `[possible values:]` was read from the WHOLE
+ * output, so a binary that reprints its help on error donates another flag's
+ * enum to whatever was under test. The following line is included because clap
+ * wraps the value set onto it, and nothing beyond, because that is where help
+ * begins.
+ */
+const DIAGNOSTIC_ANCHOR =
+  /^.*(?:(?:^|\s)error\b|invalid boolean value|flags? provided but not defined|unrecognized arguments?:).*$/im;
+
+function diagnosticBlock(text: string): string {
+  const match = DIAGNOSTIC_ANCHOR.exec(text);
+  if (!match) return "";
+  const lines = text.slice(match.index).split("\n");
+  return lines.slice(0, 2).join("\n");
+}
+
+/**
  * Whether a line names this flag as a token.
  *
  * Both spellings, because Go's flag package prints `-add-dir` for what its own
@@ -370,13 +390,21 @@ export function interpretProbeOutput(stderr: string, context: ProbeContext): Fla
   const rejectionLine = REJECTION_LINE.exec(text)?.[0] ?? "";
   const namesFlag = namesToken(rejectionLine, context.flag);
   const namesSentinel = namesToken(rejectionLine, context.sentinel);
+  // Every PRESENT verdict below reads this and requires the diagnostic to name
+  // the flag under test. A message about some other flag is evidence about that
+  // flag, and reading it as evidence about this one invents a capability.
+  const diagnostic = diagnosticBlock(text);
+  const diagnosticNamesFlag = namesToken(diagnostic, context.flag);
 
   // PRESENT, ARITY NONE: the flag exists and takes no value, so supplying one
   // is itself the error. Only the inline `=` form surfaces this; see
   // buildProbeArgv.
   //   clap       unexpected value 'ZZZ' for '--always-approve' found; no more were expected
   //   argparse   argument --auto-approve/--yolo: ignored explicit argument 'ZZZ'
-  if (/unexpected value/i.test(text) || /ignored explicit argument/i.test(text))
+  if (
+    diagnosticNamesFlag &&
+    (/unexpected value/i.test(diagnostic) || /ignored explicit argument/i.test(diagnostic))
+  )
     return { kind: "present", arity: "none", values: null };
 
   // PRESENT, ARITY ONE, WITH A REAL VALUE SET. This is the verdict that matters
@@ -385,21 +413,29 @@ export function interpretProbeOutput(stderr: string, context: ProbeContext): Fla
   //   clap       invalid value 'ZZZ' for '--mode <MODE>'
   //                [possible values: a, b]
   //   argparse   argument --output: invalid choice: 'ZZZ' (choose from 'text', 'json')
-  const clapValues = /\[possible values:\s*([^\]]+)\]/i.exec(text);
+  const clapValues = diagnosticNamesFlag
+    ? /\[possible values:\s*([^\]]+)\]/i.exec(diagnostic)
+    : null;
   if (clapValues) return { kind: "present", arity: "one", values: splitValues(clapValues[1]) };
-  const argparseValues = /choose from\s*\(?([^)]+)\)/i.exec(text);
+  const argparseValues = diagnosticNamesFlag
+    ? /choose from\s*\(?([^)]+)\)/i.exec(diagnostic)
+    : null;
   if (argparseValues)
     return { kind: "present", arity: "one", values: splitValues(argparseValues[1]) };
 
   // PRESENT, ARITY ONE, SET UNDISCLOSED. An invalid-value complaint with no
   // enumeration still proves the flag exists and constrains its value.
-  if (/invalid value/i.test(text) || /invalid choice/i.test(text))
+  if (
+    diagnosticNamesFlag &&
+    (/invalid value/i.test(diagnostic) || /invalid choice/i.test(diagnostic))
+  )
     return { kind: "present", arity: "one", values: null };
 
   // PRESENT, ARITY NONE, Go flag. A bool given a value complains about the
   // value, which proves the flag exists.
   //   Go flag    invalid boolean value "ZZZ" for -sandbox
-  if (/invalid boolean value/i.test(text)) return { kind: "present", arity: "none", values: null };
+  if (diagnosticNamesFlag && /invalid boolean value/i.test(diagnostic))
+    return { kind: "present", arity: "none", values: null };
 
   // THE REJECTION MESSAGE, READ BY WHICH FLAG IT NAMES.
   //   clap       error: unexpected argument '--nope' found

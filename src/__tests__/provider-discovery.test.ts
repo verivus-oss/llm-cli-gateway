@@ -68,7 +68,8 @@ _codex() {
 }
 `;
 
-const CTX = { flag: "--probe-target", sentinel: PROBE_SENTINEL };
+const ctxFor = (flag: string) => ({ flag, sentinel: PROBE_SENTINEL });
+const CTX = ctxFor("--probe-target");
 
 describe("completions parsing", () => {
   it("extracts the root command's flags and subcommands", () => {
@@ -155,7 +156,7 @@ describe("invalid-value probe", () => {
   });
 
   it("recovers the real value set when the binary enumerates one", () => {
-    const v = interpretProbeOutput(ENUM, CTX);
+    const v = interpretProbeOutput(ENUM, ctxFor("--permission-mode"));
     expect(v.kind).toBe("present");
     expect(v.kind === "present" && v.arity).toBe("one");
     expect(v.kind === "present" && v.values).toEqual([
@@ -182,11 +183,14 @@ describe("invalid-value probe", () => {
     // byte-identical stderr and arity is unrecoverable. Verbatim from grok 1.0.4.
     const BOOLEAN =
       "error: unexpected value 'ZZZ' for '--always-approve' found; no more were expected";
-    expect(interpretProbeOutput(BOOLEAN, CTX)).toEqual({
+    expect(interpretProbeOutput(BOOLEAN, ctxFor("--always-approve"))).toEqual({
       kind: "present",
       arity: "none",
       values: null,
     });
+    // And the same message says NOTHING about a different flag. A diagnostic
+    // about --always-approve is evidence about --always-approve.
+    expect(interpretProbeOutput(BOOLEAN, ctxFor("--something-else")).kind).toBe("unparsed");
   });
 
   it("SAFETY: probe argv contains no bare token that could become a prompt", () => {
@@ -213,7 +217,7 @@ describe("invalid-value probe", () => {
     // so for a constrained flag the enum message is what comes back. Without
     // this control, "an error was produced" would read as "the flag was
     // rejected", and every constrained flag would be misclassified as absent.
-    expect(interpretProbeOutput(ENUM, CTX).kind).toBe("present");
+    expect(interpretProbeOutput(ENUM, ctxFor("--permission-mode")).kind).toBe("present");
     expect(
       interpretProbeOutput(ABSENT, { flag: "--not-a-real-flag", sentinel: PROBE_SENTINEL }).kind
     ).toBe("absent");
@@ -236,7 +240,10 @@ describe("invalid-value probe", () => {
     // behavioural consequence is identical. The difference affects guidance
     // quality only, and inventing a distinction with no behavioural effect
     // would be modelling for its own sake.
-    const undisclosed = interpretProbeOutput("error: invalid value 'ZZZ' for '--x <X>'", CTX);
+    const undisclosed = interpretProbeOutput(
+      "error: invalid value 'ZZZ' for '--x <X>'",
+      ctxFor("--x")
+    );
     expect(undisclosed).toEqual({ kind: "present", arity: "one", values: null });
   });
 
@@ -349,7 +356,7 @@ describe("probe interpretation across dialects", () => {
     // vibe --output=ZZZ --agent
     const v = interpretProbeOutput(
       "vibe: error: argument --output: invalid choice: 'ZZZ' (choose from 'text', 'json', 'streaming')",
-      CTX
+      ctxFor("--output")
     );
     expect(v).toEqual({ kind: "present", arity: "one", values: ["text", "json", "streaming"] });
   });
@@ -359,7 +366,7 @@ describe("probe interpretation across dialects", () => {
     expect(
       interpretProbeOutput(
         "vibe: error: argument --auto-approve/--yolo: ignored explicit argument 'ZZZ'",
-        CTX
+        ctxFor("--auto-approve")
       )
     ).toEqual({ kind: "present", arity: "none", values: null });
   });
@@ -548,5 +555,48 @@ describe("the sentinel probe reads the REJECTION LINE, not the whole output", ()
         sentinel: S,
       })
     ).toEqual({ kind: "present", arity: "none", values: null });
+  });
+});
+
+describe("review findings: a diagnostic about another flag is not evidence about this one", () => {
+  const S = PROBE_SENTINEL;
+
+  it("CODEX: an unrelated error does not fabricate a present verdict", () => {
+    // Was: present/arity none, from a message naming neither the flag under
+    // test nor the sentinel. A startup or config error would have added a
+    // nonexistent flag to the seed and made admission offer it.
+    expect(
+      interpretProbeOutput("error: unexpected value 'bad' for '--config'", {
+        flag: "--does-not-exist",
+        sentinel: S,
+      }).kind
+    ).toBe("unparsed");
+  });
+
+  it("GROK: an enum is not stolen from help text reprinted after the error", () => {
+    // The same defect as the absence rule, one rule further down: [possible
+    // values:] was read from the whole output. grok --help carries that line
+    // today; the moment any dialect reprints help on error, every probe would
+    // have inherited another flag's value set.
+    const output = [
+      `error: unexpected argument '${S}' found`,
+      "",
+      "Usage: grok [OPTIONS] [PROMPT]",
+      "  --permission-mode <MODE>  [possible values: default, acceptEdits, bypassPermissions]",
+    ].join("\n");
+    expect(interpretProbeOutput(output, { flag: "--agents", sentinel: S })).toEqual({
+      kind: "present",
+      arity: "one",
+      values: null,
+    });
+  });
+
+  it("still reads a wrapped value set from the line clap puts it on", () => {
+    const output = "error: invalid value 'ZZZ' for '--mode <MODE>'\n  [possible values: plan, ask]";
+    expect(interpretProbeOutput(output, { flag: "--mode", sentinel: S })).toEqual({
+      kind: "present",
+      arity: "one",
+      values: ["plan", "ask"],
+    });
   });
 });

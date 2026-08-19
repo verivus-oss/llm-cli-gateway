@@ -93,12 +93,33 @@ describe("the merge never subtracts", () => {
 });
 
 describe("command scope", () => {
-  it("takes the highest-precedence answer rather than merging", () => {
+  it("REPORTS a source describing a different command, and does not merge it", () => {
+    // Root codex accepts --ask-for-approval and `codex exec` does not. Unioning
+    // the two offers a flag on a command that rejects it, so the conflicting
+    // source is skipped and named rather than silently absorbed.
     const r = resolveProviderSurface([
-      { name: "seed", providers: [{ cli: "codex", commandScope: [], flags: [] }] },
-      { name: "discovery", providers: [{ cli: "codex", commandScope: ["exec"], flags: [] }] },
+      {
+        name: "seed",
+        providers: [{ cli: "codex", commandScope: ["exec"], flags: [{ flag: "--json" }] }],
+      },
+      {
+        name: "discovery",
+        providers: [{ cli: "codex", commandScope: [], flags: [{ flag: "--ask-for-approval" }] }],
+      },
     ]);
     expect(r.providers[0].commandScope).toEqual(["exec"]);
+    expect(r.providers[0].flags.map(f => f.flag)).toEqual(["--json"]);
+    expect(r.skipped[0]?.name).toBe("discovery");
+    expect(r.skipped[0]?.reason).toMatch(/describes command/);
+  });
+
+  it("the floor derives its scope from the contract, so it agrees with the seed", () => {
+    const input = retainedAsSurfaceInput({
+      codex: { flags: { "--json": {} }, command: { requiredFirstArg: "exec" } },
+      grok: { flags: { "--effort": {} } },
+    });
+    expect(input.providers.find(p => p.cli === "codex")?.commandScope).toEqual(["exec"]);
+    expect(input.providers.find(p => p.cli === "grok")?.commandScope).toEqual([]);
   });
 });
 
@@ -373,5 +394,38 @@ describe("d4c: schema derivation reads the resolver", () => {
       const facts = resolvedFlagFacts("grok", flag);
       expect(facts?.values ?? null, flag).toEqual(meta.values ?? null);
     }
+  });
+});
+
+describe("review findings: the merge cannot be talked out of the floor", () => {
+  it("CODEX: a duplicate source name no longer replaces the first", () => {
+    // Was: the second `retained` input replaced the first and the floor vanished.
+    const r = resolveProviderSurface([
+      retainedAsSurfaceInput({ grok: { flags: { "--best-of-n": { arity: "one" } } } }),
+      { name: "retained", providers: [] },
+    ]);
+    expect(r.providers[0]?.flags.map(f => f.flag)).toEqual(["--best-of-n"]);
+  });
+
+  it("GROK: only the floor may refuse; a pack or overlay cannot delete one", () => {
+    // Was: `refused` was honoured from every source, so an overlay deleted a
+    // floor flag. A refusal is the gateway's declaration; a pack is data.
+    const r = resolveProviderSurface([
+      retainedAsSurfaceInput({ grok: { flags: { "--best-of-n": {} } } }),
+      {
+        name: "overlay",
+        providers: [{ cli: "grok", commandScope: [], flags: [], refused: ["--best-of-n"] }],
+      },
+    ]);
+    expect(r.providers[0].flags.map(f => f.flag)).toEqual(["--best-of-n"]);
+  });
+
+  it("the floor's own refusal still applies", () => {
+    const r = resolveProviderSurface([
+      retainedAsSurfaceInput({
+        mistral: { flags: { "--auto-approve": {} }, acknowledgedUpstreamFlags: ["--auto-approve"] },
+      }),
+    ]);
+    expect(r.providers[0].flags).toEqual([]);
   });
 });

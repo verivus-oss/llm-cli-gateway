@@ -79,6 +79,8 @@ export interface RetainedContract {
   >;
   /** Real upstream flags the gateway declares it does not emit. See `refused`. */
   readonly acknowledgedUpstreamFlags?: readonly string[];
+  /** The command the gateway launches, when it is not the root one. */
+  readonly command?: { readonly requiredFirstArg?: string };
 }
 
 export interface SurfaceInput {
@@ -109,11 +111,25 @@ export interface SurfaceResolution {
   readonly skipped: readonly { readonly name: SurfaceSourceName; readonly reason: string }[];
 }
 
+/**
+ * Order by precedence, and CONCATENATE same-named inputs rather than letting the
+ * last one win.
+ *
+ * A reviewer passed two `retained` inputs, the second empty, and the floor
+ * vanished. Keying a Map by source name silently discarded the first. Throwing
+ * on a duplicate would also have caught it, but this module's job is never to
+ * lose a flag, and a caller bug should not be able to take the gateway down at
+ * startup.
+ */
+function sameScope(a: readonly string[], b: readonly string[]): boolean {
+  return a.length === b.length && a.every((part, index) => part === b[index]);
+}
+
 function orderInputs(inputs: readonly SurfaceInput[]): SurfaceInput[] {
-  const byName = new Map(inputs.map(input => [input.name, input]));
   return SURFACE_PRECEDENCE.flatMap(name => {
-    const input = byName.get(name);
-    return input ? [input] : [];
+    const matching = inputs.filter(input => input.name === name);
+    if (matching.length === 0) return [];
+    return [{ name, providers: matching.flatMap(input => input.providers) }];
   });
 }
 
@@ -155,17 +171,40 @@ function mergeFlag(
 export function resolveProviderSurface(inputs: readonly SurfaceInput[]): SurfaceResolution {
   const providers = new Map<string, { entry: ProviderSurface; flags: Map<string, SurfaceFlag> }>();
   const refused = new Map<string, Set<string>>();
+  const scopeConflicts: { name: SurfaceSourceName; reason: string }[] = [];
   for (const input of orderInputs(inputs)) {
     for (const provider of input.providers) {
       const existing = providers.get(provider.cli);
+      // A source describing a DIFFERENT COMMAND is describing a different
+      // subject, so its flags are not merged in. Root codex accepts
+      // --ask-for-approval and `codex exec` does not; unioning the two would
+      // offer a flag on a command that rejects it. Reported rather than
+      // silently dropped.
+      if (existing && !sameScope(existing.entry.commandScope, provider.commandScope)) {
+        scopeConflicts.push({
+          name: input.name,
+          reason:
+            `${provider.cli}: source describes command ` +
+            `[${provider.commandScope.join(" ")}] but the surface is ` +
+            `[${existing.entry.commandScope.join(" ")}]`,
+        });
+        continue;
+      }
       const flags = existing?.flags ?? new Map<string, SurfaceFlag>();
       for (const flag of provider.flags) {
         flags.set(flag.flag, mergeFlag(flags.get(flag.flag), flag, input.name));
       }
-      for (const flag of provider.refused ?? []) {
-        const set = refused.get(provider.cli) ?? new Set<string>();
-        set.add(flag);
-        refused.set(provider.cli, set);
+      // ONLY THE FLOOR MAY REFUSE. A reviewer deleted --best-of-n with an
+      // overlay carrying `refused`. A refusal is the gateway's own declaration,
+      // recorded in the contract; a pack or an overlay is data, and data must
+      // never withdraw capability. This is the single subtracting rule in the
+      // module and it is now reachable from one source.
+      if (input.name === "retained") {
+        for (const flag of provider.refused ?? []) {
+          const set = refused.get(provider.cli) ?? new Set<string>();
+          set.add(flag);
+          refused.set(provider.cli, set);
+        }
       }
       const sources = existing?.entry.sources.includes(input.name)
         ? existing.entry.sources
@@ -193,7 +232,7 @@ export function resolveProviderSurface(inputs: readonly SurfaceInput[]): Surface
           .sort((a, b) => a.flag.localeCompare(b.flag)),
       }))
       .sort((a, b) => a.cli.localeCompare(b.cli)),
-    skipped: [],
+    skipped: scopeConflicts,
   };
 }
 
@@ -212,7 +251,13 @@ export function retainedAsSurfaceInput(
     name: "retained",
     providers: Object.entries(contracts).map(([cli, contract]) => ({
       cli,
-      commandScope: scopes[cli] ?? [],
+      // Derived from the contract rather than defaulted to the root, so the
+      // floor and the seed describe the SAME command. They disagreed for codex,
+      // `[]` against `["exec"]`, which the scope rule would otherwise report as
+      // a conflict and drop every codex seed flag.
+      commandScope:
+        scopes[cli] ??
+        (contract.command?.requiredFirstArg ? [contract.command.requiredFirstArg] : []),
       // Carry the FACTS, not just the names. The floor is the only source that
       // knows claude's five effort levels or cursor's sandbox modes, because
       // commander tells a probe nothing; contributing bare names would drop
@@ -305,5 +350,6 @@ export function resolveWithSkips(
       });
     }
   }
-  return { ...resolveProviderSurface(inputs), skipped };
+  const resolution = resolveProviderSurface(inputs);
+  return { ...resolution, skipped: [...skipped, ...resolution.skipped] };
 }
