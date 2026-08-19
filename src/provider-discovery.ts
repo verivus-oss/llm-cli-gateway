@@ -339,26 +339,6 @@ const REJECTION_LINE =
   /^.*(?:unexpected argument|unrecognized arguments?:|flags? provided but not defined|unknown option).*$/im;
 
 /**
- * The diagnostic, which is the error line and the one after it. Nothing else.
- *
- * The same defect as REJECTION_LINE, one rule further down, and a reviewer found
- * it after I fixed the first half: `[possible values:]` was read from the WHOLE
- * output, so a binary that reprints its help on error donates another flag's
- * enum to whatever was under test. The following line is included because clap
- * wraps the value set onto it, and nothing beyond, because that is where help
- * begins.
- */
-const DIAGNOSTIC_ANCHOR =
-  /^[ \t]*(?:[\w.-]+:[ \t]*)?(?:error:|invalid (?:value|choice|boolean value)|unexpected (?:argument|value)|unrecognized arguments?:|flags? provided but not defined|unknown option|ignored explicit argument).*$/im;
-
-function diagnosticBlock(text: string): string {
-  const match = DIAGNOSTIC_ANCHOR.exec(text);
-  if (!match) return "";
-  const lines = text.slice(match.index).split("\n");
-  return lines.slice(0, 2).join("\n");
-}
-
-/**
  * Whether a line names this flag as a token.
  *
  * Both spellings, because Go's flag package prints `-add-dir` for what its own
@@ -368,6 +348,30 @@ function diagnosticBlock(text: string): string {
 function namesToken(line: string, flag: string): boolean {
   const bare = flag.replace(/^-+/u, "").replace(/[.*+?^${}()|[\]\\]/gu, "\\$&");
   return new RegExp(`(^|[^\\w-])--?${bare}(?![\\w-])`, "u").test(line);
+}
+
+/**
+ * The diagnostic ABOUT THIS FLAG: the first marker line that names it, plus the
+ * line after, which is where clap wraps a value set.
+ *
+ * Three attempts got here. Reading the whole output let help text donate another
+ * flag's enum. Anchoring on any line containing "error" caught a
+ * "(os error 30)" warning. Anchoring on a marker at line start still caught
+ * Node's `Error: EROFS: ...` and `WARNING: invalid value for config key ...`,
+ * because a warning is allowed to look exactly like a diagnostic.
+ *
+ * So stop trying to recognise a diagnostic by its shape. The one we want is the
+ * one that MENTIONS THE FLAG WE ASKED ABOUT, and every rule below already
+ * requires that. If no marker line names it, there is no diagnostic about it and
+ * the naming rules downstream decide on the rejection line alone.
+ */
+const DIAGNOSTIC_MARKER =
+  /error:|invalid (?:value|choice|boolean value)|unexpected (?:argument|value)|unrecognized arguments?:|flags? provided but not defined|unknown option|ignored explicit argument/i;
+
+function diagnosticBlock(text: string, flag: string): string {
+  const lines = text.split("\n");
+  const index = lines.findIndex(line => DIAGNOSTIC_MARKER.test(line) && namesToken(line, flag));
+  return index === -1 ? "" : lines.slice(index, index + 2).join("\n");
 }
 
 export interface ProbeContext {
@@ -393,8 +397,8 @@ export function interpretProbeOutput(stderr: string, context: ProbeContext): Fla
   // Every PRESENT verdict below reads this and requires the diagnostic to name
   // the flag under test. A message about some other flag is evidence about that
   // flag, and reading it as evidence about this one invents a capability.
-  const diagnostic = diagnosticBlock(text);
-  const diagnosticNamesFlag = namesToken(diagnostic, context.flag);
+  const diagnostic = diagnosticBlock(text, context.flag);
+  const diagnosticNamesFlag = diagnostic !== "";
 
   // PRESENT, ARITY NONE: the flag exists and takes no value, so supplying one
   // is itself the error. Only the inline `=` form surfaces this; see

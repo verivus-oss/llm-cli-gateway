@@ -41,12 +41,16 @@ const UPDATE = process.argv.includes("--update");
 export function declaredFlags(contracts, flatten, surfaceFacts = {}) {
   const declared = {};
   for (const [cli, contract] of Object.entries(contracts)) {
-    const entries = new Map();
-    for (const [flag, meta] of Object.entries(contract.flags))
-      entries.set(flag, factsOf(flag, meta));
-    for (const [flag, meta] of Object.entries(surfaceFacts[cli] ?? {}))
-      entries.set(flag, factsOf(flag, meta));
-    declared[cli] = [...new Set([...entries.values()].flat())].sort();
+    // UNION, not overwrite. A reviewer narrowed a CONTRACT enum while the seed
+    // still carried the value; the surface won, the floor never moved, and the
+    // gate stayed green. Admission reads contract.flags for a declared flag, so
+    // that narrowing does refuse requests it used to accept. Both sources have
+    // to contribute, or the floor cannot see the half that admission uses.
+    const facts = [
+      ...Object.entries(contract.flags).flatMap(([flag, meta]) => factsOf(flag, meta)),
+      ...Object.entries(surfaceFacts[cli] ?? {}).flatMap(([flag, meta]) => factsOf(flag, meta)),
+    ];
+    declared[cli] = [...new Set(facts)].sort();
     for (const sub of flatten(contract.subcommands)) {
       declared[`${cli} ${sub.commandPath.join(" ")}`] = [
         ...new Set(Object.entries(sub.flags ?? {}).flatMap(([flag, meta]) => factsOf(flag, meta))),
@@ -80,7 +84,14 @@ export function withdrawn(floor, declared) {
   for (const [key, facts] of Object.entries(floor)) {
     if (key === "__schema") continue;
     const present = new Set(declared[key] ?? []);
-    const missing = facts.filter(fact => !present.has(fact));
+    // A BARE token records a flag whose facts were unknown. Learning its arity
+    // later is enrichment, not withdrawal: a reviewer showed that giving any of
+    // the bare entries an arity reported a loss and made --update refuse, so
+    // learning anything about them wedged the gate. A token WITH facts still
+    // has to match exactly, so an arity or value change is still caught.
+    const enriched = fact =>
+      !/[:=]/.test(fact) && [...present].some(p => p === fact || p.startsWith(`${fact}:`));
+    const missing = facts.filter(fact => !present.has(fact) && !enriched(fact));
     if (missing.length > 0) lost.push({ key, missing });
   }
   return lost;
@@ -150,7 +161,7 @@ async function main() {
     const merged = mergeFloor(floor, declared);
     writeFileSync(
       FLOOR,
-      `${JSON.stringify({ __schema: ["flag:arity:values"], ...merged }, null, 2)}\n`
+      `${JSON.stringify({ __schema: ["flag:arity", "flag=value"], ...merged }, null, 2)}\n`
     );
     console.log(`capability floor updated: ${Object.keys(declared).length} surfaces`);
     return;

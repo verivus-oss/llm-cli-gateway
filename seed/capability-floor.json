@@ -8,6 +8,7 @@
     "--agent:one",
     "--agents:one",
     "--allowed-tools:one",
+    "--allowed-tools:variadic",
     "--allowedTools:one",
     "--append-system-prompt-file:one",
     "--append-system-prompt:one",
@@ -15,8 +16,10 @@
     "--continue:none",
     "--debug-file:one",
     "--debug:one",
+    "--debug:optional",
     "--disable-slash-commands:none",
     "--disallowed-tools:one",
+    "--disallowed-tools:variadic",
     "--disallowedTools:one",
     "--effort:one",
     "--effort=high",
@@ -55,6 +58,7 @@
     "--plugin-url:one",
     "--replay-user-messages:none",
     "--resume:one",
+    "--resume:optional",
     "--safe-mode:none",
     "--session-id:one",
     "--setting-sources:one",
@@ -63,8 +67,10 @@
     "--system-prompt-file:one",
     "--system-prompt:one",
     "--tools:one",
+    "--tools:variadic",
     "--verbose:none",
-    "-p"
+    "-p",
+    "-p:optional"
   ],
   "claude agents": [
     "--add-dir:optional",
@@ -455,8 +461,10 @@
     "--model:one",
     "--new-project:none",
     "--print-timeout:one",
+    "--print:none",
     "--print:one",
     "--project:one",
+    "--prompt:none",
     "--prompt:one",
     "--sandbox:none",
     "-c:none",
@@ -545,6 +553,7 @@
     "--ref:one",
     "--restore-code:none",
     "--resume:one",
+    "--resume:optional",
     "--rules:one",
     "--sandbox:one",
     "--single:one",
@@ -559,6 +568,7 @@
     "--version:none",
     "--worktree-ref:one",
     "--worktree:one",
+    "--worktree:optional",
     "-p:one"
   ],
   "grok agent": [
@@ -690,7 +700,9 @@
     "--output=streaming",
     "--output=text",
     "--prompt:one",
+    "--prompt:optional",
     "--resume:one",
+    "--resume:optional",
     "--setup:none",
     "--trust:none",
     "--version:none",
@@ -704,6 +716,7 @@
     "--config:one",
     "--continue:none",
     "--export:one",
+    "--export:optional",
     "--help:none",
     "--model:one",
     "--permission-mode:one",
@@ -713,11 +726,13 @@
     "--permission-mode=smart",
     "--prompt-file:one",
     "--respect-workspace-trust:one",
+    "--respect-workspace-trust:optional",
     "--respect-workspace-trust=false",
     "--respect-workspace-trust=true",
     "--resume:one",
     "--sandbox:none",
-    "-p"
+    "-p",
+    "-p:optional"
   ],
   "devin acp": [
     "--agent-type:one"

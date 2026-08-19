@@ -131,3 +131,48 @@ describe("names alone are not capability", () => {
     expect(floor.claude).toContain("--output-format=stream-json");
   });
 });
+
+describe("GROK r3: the floor sees both sources, and enrichment is not loss", () => {
+  it("records CONTRACT facts even when the surface still carries the value", () => {
+    // The reviewer narrowed a contract enum the seed still had. The surface won,
+    // the floor never moved, and the gate stayed green while admission, which
+    // reads contract.flags, began refusing requests it used to accept.
+    const before = declaredFlags(
+      { grok: { flags: { "--mode": { arity: "one", values: ["a", "b"] } } } },
+      () => [],
+      { grok: { "--mode": { arity: "one", values: ["a", "b"] } } }
+    );
+    const afterNarrowedContract = declaredFlags(
+      { grok: { flags: { "--mode": { arity: "one", values: ["a"] } } } },
+      () => [],
+      { grok: { "--mode": { arity: "one", values: ["a", "b"] } } }
+    );
+    expect(withdrawn(before, afterNarrowedContract)).toEqual([]);
+    // and the reverse: narrowing BOTH is a withdrawal
+    const afterNarrowedBoth = declaredFlags(
+      { grok: { flags: { "--mode": { arity: "one", values: ["a"] } } } },
+      () => [],
+      { grok: { "--mode": { arity: "one", values: ["a"] } } }
+    );
+    expect(withdrawn(before, afterNarrowedBoth)).toEqual([{ key: "grok", missing: ["--mode=b"] }]);
+  });
+
+  it("LEARNING an arity for a bare token is enrichment, not withdrawal", () => {
+    // 17 bare tokens are in the committed floor. Under exact matching, learning
+    // anything about any of them reported a loss and made --update refuse, so
+    // the gate wedged on its own progress.
+    expect(withdrawn({ claude: ["--help"] }, { claude: ["--help:none"] })).toEqual([]);
+  });
+
+  it("but an arity CHANGE on a known token is still a withdrawal", () => {
+    expect(withdrawn({ claude: ["--help:one"] }, { claude: ["--help:none"] })).toEqual([
+      { key: "claude", missing: ["--help:one"] },
+    ]);
+  });
+
+  it("and a flag disappearing entirely is still a withdrawal", () => {
+    expect(withdrawn({ claude: ["--gone"] }, { claude: ["--other:none"] })).toEqual([
+      { key: "claude", missing: ["--gone"] },
+    ]);
+  });
+});

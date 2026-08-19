@@ -644,3 +644,42 @@ describe("CODEX r3: the marker must start the line, not merely appear on it", ()
     });
   });
 });
+
+describe("GROK r3: the diagnostic is the one that names the flag", () => {
+  const S = PROBE_SENTINEL;
+  const tail =
+    "error: invalid value 'ZZZ' for '--sandbox <SANDBOX_MODE>'\n" +
+    "  [possible values: read-only, workspace-write, danger-full-access]";
+
+  // Three attempts failed here. Reading the whole output let help text donate
+  // another flag's enum; anchoring on any line containing "error" caught
+  // "(os error 30)"; anchoring the marker to line start still caught Node's
+  // `Error:` and a warning whose own text contains "invalid value". A warning is
+  // allowed to look exactly like a diagnostic, so shape cannot be the test.
+  it.each([
+    ["Error: EROFS: read-only file system, open '/tmp/cache'"],
+    ["WARNING: PermissionError: [Errno 30] Read-only file system"],
+    ["WARNING: invalid value for config key cache_mode"],
+    ["WARNING: could not write cache: Read-only file system (os error 30)"],
+  ])("recovers the enum past %s", first => {
+    expect(interpretProbeOutput(`${first}\n${tail}`, { flag: "--sandbox", sentinel: S })).toEqual({
+      kind: "present",
+      arity: "one",
+      values: ["read-only", "workspace-write", "danger-full-access"],
+    });
+  });
+
+  it("still refuses an enum from help text, which names a DIFFERENT flag", () => {
+    const poisoned = [
+      `error: unexpected argument '${S}' found`,
+      "",
+      "Usage: grok [OPTIONS]",
+      "  --permission-mode <MODE>  [possible values: a, b]",
+    ].join("\n");
+    expect(interpretProbeOutput(poisoned, { flag: "--agents", sentinel: S })).toEqual({
+      kind: "present",
+      arity: "one",
+      values: null,
+    });
+  });
+});
