@@ -41,11 +41,11 @@ outcome = "Anchor derived from help via two placeholder shapes, square brackets 
 
 [[node]]
 id = "d1b.probe-the-request-subcommand"
-critical = true
+status = "done 2026-08-19"
 depends_on = ["d1a.probe-needs-a-derived-anchor"]
-role = "Sources 2 and 3 address the ROOT command, but the gateway builds `codex exec`. codex accepts --ask-for-approval at the root and NOT on exec."
-action = "Probe the command each provider's request path actually launches, and record commandScope per entry rather than the single root value the schema allows today."
-constraint = "Until this lands a consumer MUST NOT read root-scope flags as the request surface. The codex fixture that refuses --ask-for-approval on exec is correct, and a naive widening would have broken it."
+role = "Sources 2 and 3 addressed the ROOT command while the gateway builds `codex exec`."
+outcome = "Rescoping flipped 12 codex verdicts in BOTH directions: root probing called real exec flags absent and absent root flags real. A seed entry now describes one command, and a scope change is a correction rather than a subtraction. The result corroborates the codex fixtures instead of refuting them."
+constraint = "Only codex has a request subcommand today. A provider that grows one gets this for free from contract.command; a provider whose REQUEST path varies by parameter does not, and would need scope per request rather than per provider."
 
 [[node]]
 id = "d2.gates-pin-the-seed"
