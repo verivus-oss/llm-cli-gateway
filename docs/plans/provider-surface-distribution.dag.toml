@@ -6,7 +6,7 @@
 
 [meta]
 surface = "primary parameter surface: derivation, distribution, refresh"
-status = "designed 2026-08-19, nothing implemented"
+status = "d1/d1a/d1b/d2 shipped 2026-08-19; d1c next, then d4, then d3"
 release_gate = "d2 gates the next release only if any other node here ships. On its own this program is additive."
 absorbs = "gateway-passthrough-policy.dag.toml n4.seed-is-generated-not-written"
 
@@ -48,6 +48,14 @@ outcome = "Rescoping flipped 12 codex verdicts in BOTH directions: root probing 
 constraint = "Only codex has a request subcommand today. A provider that grows one gets this for free from contract.command; a provider whose REQUEST path varies by parameter does not, and would need scope per request rather than per provider."
 
 [[node]]
+id = "d1c.probe-with-a-guaranteed-unknown-sentinel"
+critical = true
+depends_on = ["d1b.probe-the-request-subcommand"]
+role = "The help-derived anchor leaves agy unprobed (no value placeholder) and 99 flags unparsed across claude, cursor and mistral. gemini, the provider with the highest churn, is the one discovery cannot describe."
+action = "Replace the anchor with a flag guaranteed NOT to exist. The discriminator is whether the not-defined list names the FLAG UNDER TEST or only the sentinel. Needs no help parsing, and is structurally safer: it relies on a flag not existing, which we control, rather than on one existing. Measurements in the evidence file."
+constraint = "COMMANDER IS ONLY HALF SOLVED. claude and cursor report a real BOOLEAN given =value identically to an absent flag. Sentinel named means present; flag-under-test named must stay UNPARSED, or every claude boolean is fabricated as a removal."
+
+[[node]]
 id = "d2.gates-pin-the-seed"
 status = "done 2026-08-19, by enforcing the property rather than adding a mode"
 depends_on = ["d1.seed-is-generated-not-written"]
@@ -56,17 +64,17 @@ outcome = "surface:invariance:check reruns site:generate:check under six hostile
 constraint = "The seed is deliberately not varied: it is a committed artefact and the surface is meant to follow it. Proof the gate discriminates: with a HOME leak and a regenerated fixture, site:generate:check PASSES and this gate fails only the HOME scenarios."
 
 [[node]]
-id = "d3.generation-covers-seven-providers"
-status = "scoped by measurement 2026-08-19: gemini, then mistral, then devin. claude, codex and cursor deferred."
-depends_on = ["d1.seed-is-generated-not-written"]
-role = "Only grok has a generation table. The other six emit flags by hand across their prepare and handle paths."
-action = "Extract ONLY the flag-emitting part: 106 of 6,000 non-blank lines, 1.8%. The rest is admission, isolation, session, MCP and prompt assembly and must not move. Order and evidence in docs/evidence/gateway-passthrough-2026-08-19.md."
-constraint = "This is not n3. Marginal cost is 8.6 table lines per flag, not the 16 that refutation implied: 281 of provider-codegen's 529 lines are generic consumers already paid for. gemini first because it is the ONLY provider whose churn is dominated by removals, the class that caused the capability-removal incidents."
+id = "d3.bindings-cover-seven-providers"
+status = "REORDERED 2026-08-19 to depend on d4. Attempted first and refused by provider:surfaces:check, correctly."
+depends_on = ["d4.surface-loader-and-precedence"]
+role = "Only grok has a generation table, and it is GRANDFATHERED in the ratchet, not sanctioned. The other six emit flags by hand across their prepare and handle paths."
+action = "A table holds two things. WHICH flags exist, their arity and their values is provider data and must be loaded. The MCP parameter name, the emit rule and the description are gateway data and are ours to write. Only the second half may be hand-authored, which is why this cannot precede the loader. Order and cost in docs/evidence/gateway-passthrough-2026-08-19.md."
+constraint = "Do NOT allowlist a new *_FLAG_GENERATION to get past the gate, and do not rename one to dodge its regex. The gemini attempt was clean, byte-identical fixture and all, and still wrong: it pinned the flag set to what the author typed. gemini is additionally blocked until d1c, because agy yields no arity today."
 
 [[node]]
 id = "d4.surface-loader-and-precedence"
 critical = true
-depends_on = ["d2.gates-pin-the-seed"]
+depends_on = ["d2.gates-pin-the-seed", "d1c.probe-with-a-guaranteed-unknown-sentinel"]
 role = "Resolve {contract, generation} per provider at startup from the p2 precedence chain instead of reading a module-level const."
 constraint = "Merge is union. A source that fails to load is skipped with a warning, never fatal: a broken pack must degrade to the seed, not to a dead gateway."
 
@@ -99,7 +107,7 @@ constraint = "Highest precedence and therefore the same trust boundary as d6. Re
 [[node]]
 id = "d9.n3b-dissolves"
 status = "conclusion, no work"
-depends_on = ["d3.generation-covers-seven-providers"]
+depends_on = ["d3.bindings-cover-seven-providers"]
 role = "n3b proposed deleting the 29 named grok parameters because providerFlags reaches them. Under this program they are not deleted, they stop being COMPILED."
 outcome = "No parameter disappears, so there is no breaking change and no 3.1.0-versus-4.0.0 decision. The version question n3b raised is withdrawn, not answered."
 
