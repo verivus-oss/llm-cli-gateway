@@ -30,8 +30,7 @@ rediscovery_trigger_why = "No watching, no polling. Cost paid once per process l
 # Invalidated, named so it cannot be quietly re-adopted.
 [[invalidates]]
 what = "provider-contract-removal-autoapply.dag.toml removal_policy = auto_apply"
-why = "Replaced wholesale. A flag our host stopped advertising is a version boundary to record, never a capability to delete."
-enforced_by = "Removal writers DELETED from the rebaseliner 2026-08-19; capability:floor:check catches any other route. Prose in three places lost to code for a day: run that day it still nominated all three n1 flags."
+why = "Replaced wholesale. A flag our host stopped advertising is a version boundary to record, never a capability to delete. ENFORCED 2026-08-19: removal writers deleted from the rebaseliner, capability:floor:check catches any other route. Prose in three places lost to code for a day; run that day it still nominated all three n1 flags."
 [[invalidates]]
 what = "UPSTREAM_CLI_CONTRACTS as the enforced authority"
 why = "assertUpstreamCliArgs throws against a const built from our dev host. Demotes to a SEED: first-start only, and fallback when discovery fails."
