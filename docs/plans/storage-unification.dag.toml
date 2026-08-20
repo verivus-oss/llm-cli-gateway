@@ -3,15 +3,12 @@
 
 [meta]
 surface = "FlightRecorder, JobStore and ISessionManager: 3 interfaces, 42 methods, 2 engines"
-status = "s1 and s2 done 2026-08-21 (325db73, 6f1f90e); s3 next"
+status = "s1, s2, s4 done and s3 part 1 done, 2026-08-21; s3 signatures then s5"
 
-# WHY THIS EXISTS
-#
-# `[persistence].backend` selects the job store and nothing else. The flight
-# recorder is always SQLite. On this host that means one request's two halves
-# live in two engines 15 ms apart, plus an abandoned 31,895-row `jobs` table
-# still answering queries in the file the recorder writes to. 2470e09 made that
-# visible in llm_process_health. This makes it untrue.
+# WHY: `[persistence].backend` selects the job store and nothing else, so one
+# request's two halves live in two engines 15 ms apart, beside an abandoned
+# 31,895-row `jobs` table still answering queries in the recorder's own file.
+# 2470e09 made that visible in llm_process_health. This makes it untrue.
 
 [facts]
 measured_2026_08_21 = "77 SQL statements across 10 SQLite-side modules; 50 of them bind `?` or `@name`, which Postgres does not accept"
@@ -50,6 +47,7 @@ affects = ["s3.define-the-async-port", "s7.flight-recorder-onto-the-port"]
 [[node]]
 id = "s3.define-the-async-port"
 critical = true
+status = "part 1 done: classes, roles, seam, inventory. Signatures follow s5."
 depends_on = ["s2.kill-the-raw-sql-read-path"]
 role = "Sync-over-async needs a worker thread; async-over-sync is free. The port must be async so Postgres drops postgres-job-store-worker.ts and SQLite becomes a resolved-promise adapter."
 action = "Define the storage port over all three subsystems' 42 operations. No PRAGMA, no VACUUM, no SQL string anywhere in the surface."
@@ -59,6 +57,7 @@ affects = ["s4.two-drivers", "s6.write-ordering"]
 [[node]]
 id = "s4.two-drivers"
 critical = true
+status = "done"
 depends_on = ["s3.define-the-async-port"]
 role = "Two implementations from the start, because a port with one driver only ever fits that driver."
 action = "SQLite driver over the existing node:sqlite code; Postgres driver with the per-role pool set and routing seam from design 3.1."
