@@ -13,7 +13,7 @@ import {
   STORAGE_ROLES,
   type StorageRole,
 } from "../storage/roles.js";
-import { STATE_INVENTORY } from "../storage/store.js";
+import { SQL_DRIVER_ENGINES, STATE_INVENTORY } from "../storage/store.js";
 
 const set = (...roles: StorageRole[]): ReadonlySet<StorageRole> => new Set(roles);
 
@@ -93,6 +93,13 @@ describe("state inventory", () => {
         expect(group.note, `${group.id} omitted without a recorded reason`).toBeTruthy();
       }
     }
+  });
+
+  it("keeps memory out of the SQL driver set, deliberately", () => {
+    // The design listed drivers/memory.ts beside the SQL engines. Memory has no
+    // statements to execute, so it implements the subsystem interfaces instead.
+    expect(SQL_DRIVER_ENGINES).toEqual(["sqlite", "postgres"]);
+    expect(SQL_DRIVER_ENGINES).not.toContain("memory");
   });
 
   it("carries the state the design's earlier revisions kept forgetting", () => {

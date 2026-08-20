@@ -18,6 +18,17 @@ import type { StorageOperationClass, StorageRole } from "./roles.js";
 
 export type StorageEngine = "sqlite" | "postgres" | "memory";
 
+/**
+ * Only the two SQL engines implement StorageDriver. The design listed
+ * `drivers/memory.ts` alongside them, but memory has no SQL, so it cannot
+ * implement a connection seam whose currency is statements; forcing it to would
+ * mean inventing a query language to interpret. Memory implements the
+ * subsystem interfaces directly instead, which is what MemoryJobStore already
+ * does. Recorded here because an unrecorded omission is how a subsystem keeps
+ * its own write path.
+ */
+export const SQL_DRIVER_ENGINES: readonly StorageEngine[] = ["sqlite", "postgres"];
+
 /** A connection already bound to the credential for some operation class. */
 export interface StorageConnection {
   query<T>(statement: string, params?: readonly unknown[]): Promise<T[]>;

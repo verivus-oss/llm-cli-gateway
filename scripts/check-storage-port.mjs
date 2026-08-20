@@ -34,6 +34,11 @@ const SQL_OWNERS = new Set([
   "sqlite-driver.ts",
   "migrate.ts",
   "db.ts",
+  // The storage port's own drivers. They exist to own engine SQL, so they are
+  // sanctioned by design here rather than passing because the shape detector
+  // happens not to match transaction-control statements.
+  "sqlite.ts",
+  "postgres.ts",
 ]);
 
 /** Only the recorder may use the caller-supplies-SQL read method. */
