@@ -69,3 +69,4 @@ docs/evidence
 
 # Review briefs: process, not product. Same reason as docs/audits.
 REVIEW-SPEC-*.md
+*-VERIFICATION-REPORT.md
