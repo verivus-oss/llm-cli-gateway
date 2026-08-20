@@ -1,0 +1,117 @@
+# One storage choice for every subsystem. Implements docs/plans/storage-unification.md.
+# Evidence: docs/evidence/storage-unification-audit-2026-08-21.md (host-local).
+
+[meta]
+surface = "FlightRecorder, JobStore and ISessionManager: 3 interfaces, 42 methods, 2 engines"
+status = "s1 done 2026-08-21; s2 next; nothing else started"
+design = "docs/plans/storage-unification.md (662 lines, revision 3, committed 84c2c2f)"
+
+# WHY THIS EXISTS
+#
+# `[persistence].backend` selects the job store and nothing else. The flight
+# recorder is always SQLite. On this host that means one request's two halves
+# live in two engines 15 ms apart, plus an abandoned 31,895-row `jobs` table
+# still answering queries in the file the recorder writes to. 2470e09 made that
+# visible in llm_process_health. This makes it untrue.
+
+[facts]
+measured_2026_08_21 = "77 SQL statements across 10 SQLite-side modules; 50 of them bind `?` or `@name`, which Postgres does not accept"
+driver_internal = "PRAGMA x12 and VACUUM x2 must be UNREACHABLE from the port, not translated"
+already_portable = "ON CONFLICT, RETURNING, COALESCE, CREATE INDEX, ALTER TABLE ADD COLUMN, LENGTH. More than the design assumed."
+schema_gap = "`requests` and `gateway_metadata` exist ONLY in SQLite. The Postgres transcript schema is new authorship, not a migration."
+schema_dupes = "jobs, validation_runs, validation_run_jobs, validation_receipts, gateway_instances, kit_attempt_fences are each declared twice: migrations/*.sql AND job-store.ts"
+the_leak = "queryRequests(sql, ...params) takes RAW CALLER SQL. 7 production sites: cache-stats.ts:173,290,378,616,787, lcr-priors.ts:432, resources.ts:374"
+the_choke_point = "every inline flight write funnels through ONE sync class, FlightOwnership at index.ts:2587, whose started/managerOwnsCompletion flags are idempotence fences"
+
+[non_goals]
+no_postgres_mandate = "Decided 2026-08-13. SQLite stays as a driver. 'Postgres only' is a deployment property via config, never a package property via removal; the 2.0.0 node:sqlite move exists to keep zero-config npm installs working."
+no_transcript_move_yet = "Bodies do NOT enter Postgres until postgres-security-hardening.md section 6 is complete through step 8. It is at step 2 of 10. Moving 1.2 GB of plaintext prompts into a store one superuser role reads in cleartext is a regression over a 0600 file."
+no_behaviour_change_before_s5 = "s2 through s4 are refactors. If any of them changes what is written or read, the slice is wrong."
+
+[[node]]
+id = "s1.inventory-and-call-surface"
+critical = true
+status = "done"
+depends_on = []
+role = "The design cannot be costed without it: section 6 step 1 and two of the six section 9 deliverables."
+action = "Classify every SQL construct per engine; audit the three interfaces by type and by caller."
+constraint = "Measured, not estimated. Caller counts by AST (sqry direct_callers), not grep, because a string match cannot tell a call from a mention."
+affects = ["s2.kill-the-raw-sql-read-path"]
+
+[[node]]
+id = "s2.kill-the-raw-sql-read-path"
+critical = true
+depends_on = ["s1.inventory-and-call-surface"]
+role = "A port cannot abstract an engine behind a method whose argument IS that engine's dialect. queryRequests is not a missing seam, it is an anti-seam, and every later node is blocked on it."
+action = "Replace the 7 raw-SQL call sites with named typed read operations on the recorder. queryRequests becomes private to the SQLite implementation."
+constraint = "Pure refactor. Identical rows out, asserted against the existing tests before the signature changes. Add a ratchet that fails on a new caller-supplied SQL string, with the ADD-form negative control the design's section 9 requires."
+affects = ["s3.define-the-async-port", "s7.flight-recorder-onto-the-port"]
+
+[[node]]
+id = "s3.define-the-async-port"
+critical = true
+depends_on = ["s2.kill-the-raw-sql-read-path"]
+role = "Sync-over-async needs a worker thread; async-over-sync is free. The port must be async so Postgres drops postgres-job-store-worker.ts and SQLite becomes a resolved-promise adapter."
+action = "Define the storage port over all three subsystems' 42 operations. No PRAGMA, no VACUUM, no SQL string anywhere in the surface."
+constraint = "The port is types only until s4 and s5 give it two implementations. Do not land it with one."
+affects = ["s4.two-drivers", "s6.write-ordering"]
+
+[[node]]
+id = "s4.two-drivers"
+critical = true
+depends_on = ["s3.define-the-async-port"]
+role = "Two implementations from the start, because a port with one driver only ever fits that driver."
+action = "SQLite driver over the existing node:sqlite code; Postgres driver with the per-role pool set and routing seam from design 3.1."
+constraint = "Placeholder translation lives in the driver, never in a caller. The 50 `?`/`@name` bindings must not become 50 conditionals."
+affects = ["s5.job-store-first"]
+
+[[node]]
+id = "s5.job-store-first"
+critical = true
+depends_on = ["s4.two-drivers"]
+role = "It already has both engines, so the *-pg suites prove the port against real dual-engine behaviour before anything irreversible."
+action = "Move JobStore onto the port; delete the worker-thread sync-over-async shim."
+constraint = "npm run test:pg must pass unchanged. A green suite that needed edits proves the edits, not the port."
+affects = ["s6.write-ordering", "s8.sessions"]
+
+[[node]]
+id = "s6.write-ordering"
+critical = true
+depends_on = ["s3.define-the-async-port", "s5.job-store-first"]
+role = "Design 3.4, and revision 1 got this wrong: a per-correlation in-process queue does NOT cover crash between start and complete, nor orphan completion by a different instance."
+action = "Specify and test ordering across every 3.4 failure mode, including cross-process orphan completion and crash-restart."
+constraint = "FlightOwnership's fences are the failure site. Awaiting inside a state machine whose idempotence is a boolean makes the boolean a race."
+affects = ["s7.flight-recorder-onto-the-port"]
+
+[[node]]
+id = "s7.flight-recorder-onto-the-port"
+critical = true
+depends_on = ["s2.kill-the-raw-sql-read-path", "s6.write-ordering"]
+role = "Closes the original defect: the recorder starts obeying [persistence].backend."
+action = "Author the Postgres transcript schema (new, not a migration), move the recorder onto the port, convert FlightOwnership to async."
+constraint = "HARD GATE: transcript BODIES do not enter Postgres until postgres-security-hardening.md section 6 is complete through step 8, inheriting that sequence in full rather than naming a cut-off that can drift."
+affects = ["s9.one-selector"]
+
+[[node]]
+id = "s8.sessions"
+depends_on = ["s5.job-store-first"]
+role = "The third split subsystem, selected by DATABASE_URL and disconnected from [persistence] entirely."
+action = "Collapse FileSessionManager and session-manager-pg onto the port."
+constraint = "migrate-sessions.ts already implements a transactional sessions.json to Postgres move with rollback. Reuse it; do not re-author it."
+affects = ["s9.one-selector"]
+
+[[node]]
+id = "s9.one-selector"
+depends_on = ["s7.flight-recorder-onto-the-port", "s8.sessions"]
+role = "The point of the whole exercise: one config value that actually moves everything."
+action = "Demote DATABASE_URL and LLM_GATEWAY_LOGS_DB from selectors to deprecated compatibility inputs, asymmetrically per design 3.3."
+constraint = "DATABASE_URL is a DSN and today emits NO deprecation warning, unlike LLM_GATEWAY_LOGS_DB. Conflicts must be a startup error, never a silent precedence rule."
+affects = ["s10.cutover"]
+
+[[node]]
+id = "s10.cutover"
+critical = true
+depends_on = ["s9.one-selector"]
+role = "The last cutover abandoned 31,895 rows in place rather than migrating them. That is the precedent to not repeat."
+action = "Lossless restartable backfill with reconciliation output, rehearsed against a copy first."
+constraint = "npm run migrate is DDL-only. Backfill is NOT optional and is not the same thing. Removing the superseded SQLite tables is part of the cutover, or the stale copy returns."
