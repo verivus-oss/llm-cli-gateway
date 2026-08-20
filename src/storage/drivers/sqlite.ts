@@ -14,6 +14,7 @@
  */
 import { openDatabase, openReadOnly, type GatewayDatabase } from "../../sqlite-driver.js";
 import { resolveStorageRole, type StorageOperationClass, type StorageRole } from "../roles.js";
+import { isTransactionControl, transactionControlRefusal } from "../statements.js";
 import type { StorageConnection, StorageDriver, StorageEngine } from "../store.js";
 
 /** Operation classes that may use the read-only connection. */
@@ -24,15 +25,27 @@ const READ_ONLY_OPERATIONS: ReadonlySet<StorageOperationClass> = new Set([
 
 // `async` deliberately: node:sqlite throws synchronously, and an async surface
 // that sometimes throws instead of rejecting cannot be handled with .catch().
-function connectionOver(db: GatewayDatabase): StorageConnection {
+//
+// `transactionControl` is granted only to the connection `transaction()` builds.
+// A caller-issued BEGIN would otherwise bypass the `queue` below, on a
+// connection that cannot nest one. Same rule as the Postgres driver, for a
+// different engine reason.
+function connectionOver(db: GatewayDatabase, transactionControl: boolean): StorageConnection {
+  const guard = (statement: string): void => {
+    if (!transactionControl && isTransactionControl(statement)) {
+      throw transactionControlRefusal(statement);
+    }
+  };
   return {
     async query<T>(statement: string, params: readonly unknown[] = []): Promise<T[]> {
+      guard(statement);
       return db.prepare(statement).all(...params) as T[];
     },
     async execute(
       statement: string,
       params: readonly unknown[] = []
     ): Promise<{ rowsAffected: number }> {
+      guard(statement);
       return { rowsAffected: db.prepare(statement).run(...params).changes };
     },
   };
@@ -55,12 +68,17 @@ export class SqliteStorageDriver implements StorageDriver {
    * read fails at the engine (SQLITE_READONLY) rather than on trust. Same
    * control the flight recorder already relies on.
    */
-  private connectionFor(operation: StorageOperationClass): StorageConnection {
+  private connectionFor(
+    operation: StorageOperationClass,
+    transactionControl = false
+  ): StorageConnection {
     if (this.closed) throw new Error("storage: sqlite driver is closed");
     resolveStorageRole(operation, this.roles);
-    if (!READ_ONLY_OPERATIONS.has(operation)) return connectionOver(this.writable);
+    if (!READ_ONLY_OPERATIONS.has(operation)) {
+      return connectionOver(this.writable, transactionControl);
+    }
     this.readable ??= openReadOnly(this.dbPath);
-    return connectionOver(this.readable);
+    return connectionOver(this.readable, transactionControl);
   }
 
   async withConnection<T>(
@@ -91,7 +109,7 @@ export class SqliteStorageDriver implements StorageDriver {
       );
     }
     const run = async (): Promise<T> => {
-      const connection = this.connectionFor(operation);
+      const connection = this.connectionFor(operation, true);
       await connection.execute("BEGIN IMMEDIATE");
       try {
         const result = await fn(connection);

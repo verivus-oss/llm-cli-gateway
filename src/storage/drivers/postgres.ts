@@ -11,7 +11,17 @@
  * tested without a server.
  */
 import { resolveStorageRole, type StorageOperationClass, type StorageRole } from "../roles.js";
+import { isTransactionControl, transactionControlRefusal } from "../statements.js";
 import type { StorageConnection, StorageDriver, StorageEngine } from "../store.js";
+
+/** The slice of `pg.PoolClient` this driver uses: one pinned backend. */
+export interface PgClientLike {
+  query(
+    text: string,
+    values?: readonly unknown[]
+  ): Promise<{ rows: unknown[]; rowCount: number | null }>;
+  release(err?: Error): void;
+}
 
 /** The slice of `pg.Pool` this driver uses. */
 export interface PgPoolLike {
@@ -19,6 +29,12 @@ export interface PgPoolLike {
     text: string,
     values?: readonly unknown[]
   ): Promise<{ rows: unknown[]; rowCount: number | null }>;
+  /**
+   * Check out one backend. Required, not optional: a transaction that cannot
+   * pin a connection is the defect this interface exists to prevent, and an
+   * optional method would let a fake pool omit it and pass anyway.
+   */
+  connect(): Promise<PgClientLike>;
   end(): Promise<void>;
 }
 
@@ -83,18 +99,35 @@ export function toDollarPlaceholders(statement: string): string {
   return out;
 }
 
-function connectionOver(pool: PgPoolLike): StorageConnection {
+/**
+ * Wrap something that can run a statement.
+ *
+ * `transactionControl` is granted ONLY to the client `transaction()` checks
+ * out. A pool-backed connection refuses it, so a transaction can never be
+ * spread across whatever backends the pool happens to hand out.
+ */
+function connectionOver(
+  handle: Pick<PgPoolLike, "query">,
+  transactionControl: boolean
+): StorageConnection {
+  const run = async (
+    statement: string,
+    params: readonly unknown[]
+  ): Promise<{ rows: unknown[]; rowCount: number | null }> => {
+    if (!transactionControl && isTransactionControl(statement)) {
+      throw transactionControlRefusal(statement);
+    }
+    return handle.query(toDollarPlaceholders(statement), params);
+  };
   return {
     async query<T>(statement: string, params: readonly unknown[] = []): Promise<T[]> {
-      const result = await pool.query(toDollarPlaceholders(statement), params);
-      return result.rows as T[];
+      return (await run(statement, params)).rows as T[];
     },
     async execute(
       statement: string,
       params: readonly unknown[] = []
     ): Promise<{ rowsAffected: number }> {
-      const result = await pool.query(toDollarPlaceholders(statement), params);
-      return { rowsAffected: result.rowCount ?? 0 };
+      return { rowsAffected: (await run(statement, params)).rowCount ?? 0 };
     },
   };
 }
@@ -131,9 +164,18 @@ export class PostgresStorageDriver implements StorageDriver {
     operation: StorageOperationClass,
     fn: (connection: StorageConnection) => Promise<T>
   ): Promise<T> {
-    return fn(connectionOver(this.poolFor(operation)));
+    return fn(connectionOver(this.poolFor(operation), false));
   }
 
+  /**
+   * Run the whole body on ONE checked-out backend.
+   *
+   * Every statement, including the terminator, goes through the client. Issuing
+   * them through the pool instead would let `BEGIN`, the writes and `COMMIT`
+   * land on different connections, which also silently voids `SET LOCAL`,
+   * `pg_advisory_xact_lock` and `FOR UPDATE`: all three are scoped to the
+   * connection and transaction that issued them.
+   */
   async transaction<T>(
     operation: StorageOperationClass,
     fn: (connection: StorageConnection) => Promise<T>
@@ -141,15 +183,28 @@ export class PostgresStorageDriver implements StorageDriver {
     if (operation === "transcript_read" || operation === "analytics_read") {
       throw new Error(`storage: ${operation} is a read class and cannot open a transaction`);
     }
-    const connection = connectionOver(this.poolFor(operation));
-    await connection.execute("BEGIN");
+    const client = await this.poolFor(operation).connect();
+    // A client whose ROLLBACK itself failed may still be inside a transaction.
+    // `release(err)` destroys it instead of returning it to the pool, so the
+    // next checkout cannot inherit an open transaction.
+    let discard: Error | undefined;
     try {
-      const result = await fn(connection);
-      await connection.execute("COMMIT");
-      return result;
-    } catch (error) {
-      await connection.execute("ROLLBACK");
-      throw error;
+      const connection = connectionOver(client, true);
+      await connection.execute("BEGIN");
+      try {
+        const result = await fn(connection);
+        await connection.execute("COMMIT");
+        return result;
+      } catch (error) {
+        try {
+          await connection.execute("ROLLBACK");
+        } catch (rollbackError) {
+          discard = rollbackError instanceof Error ? rollbackError : new Error(String(rollbackError));
+        }
+        throw error;
+      }
+    } finally {
+      client.release(discard);
     }
   }
 

@@ -165,6 +165,23 @@ describe("SqliteStorageDriver", () => {
     );
   });
 
+  it("refuses transaction control on a connection from withConnection", async () => {
+    // Different engine reason, same rule: a caller-issued BEGIN would bypass
+    // the queue that transaction() serialises on, on a connection that cannot
+    // nest one.
+    for (const statement of ["BEGIN", "begin immediate", "COMMIT", "ROLLBACK"]) {
+      await expect(driver.withConnection("write", c => c.execute(statement))).rejects.toThrow(
+        /transaction control/
+      );
+    }
+
+    // The driver's own transaction still works, so the guard is scoped to the
+    // pooled/unpinned path and has not simply disabled transactions.
+    await driver.transaction("write", c => c.execute("INSERT INTO t VALUES (?, ?)", ["ok", "1"]));
+    const rows = await driver.withConnection("write", c => c.query("SELECT id FROM t"));
+    expect(rows).toEqual([{ id: "ok" }]);
+  });
+
   it("refuses work after close", async () => {
     await driver.close();
     await expect(driver.withConnection("write", c => c.query("SELECT 1"))).rejects.toThrow(
@@ -174,18 +191,50 @@ describe("SqliteStorageDriver", () => {
 });
 
 describe("PostgresStorageDriver", () => {
-  function fakePool(seen: Array<{ role: StorageRole; text: string; values: unknown[] }>) {
-    return (role: StorageRole): PgPoolLike => ({
-      query(text: string, values: readonly unknown[] = []) {
-        seen.push({ role, text, values: [...values] });
-        return Promise.resolve({ rows: [], rowCount: 0 });
-      },
-      end: () => Promise.resolve(),
-    });
+  interface Seen {
+    role: StorageRole;
+    text: string;
+    values: unknown[];
+    /** Which backend ran it. "pool" means an unpinned per-query checkout. */
+    backend: string;
+  }
+
+  /**
+   * A fake that models the property that matters: a `pg.Pool` checks out a
+   * connection PER QUERY, so two `pool.query` calls need not share a backend,
+   * while `connect()` pins one until it is released.
+   *
+   * The previous fake was a single object serving both, which is exactly why
+   * the split-transaction defect passed s4: no assertion over it could tell a
+   * pool from a client.
+   */
+  function fakePool(seen: Seen[], released: string[] = []) {
+    return (role: StorageRole): PgPoolLike => {
+      let nextBackend = 0;
+      return {
+        query(text: string, values: readonly unknown[] = []) {
+          nextBackend += 1;
+          seen.push({ role, text, values: [...values], backend: `pool-${nextBackend}` });
+          return Promise.resolve({ rows: [], rowCount: 0 });
+        },
+        connect() {
+          nextBackend += 1;
+          const backend = `client-${nextBackend}`;
+          return Promise.resolve({
+            query(text: string, values: readonly unknown[] = []) {
+              seen.push({ role, text, values: [...values], backend });
+              return Promise.resolve({ rows: [], rowCount: 0 });
+            },
+            release: () => released.push(backend),
+          });
+        },
+        end: () => Promise.resolve(),
+      };
+    };
   }
 
   it("routes each operation class to its own pool", async () => {
-    const seen: Array<{ role: StorageRole; text: string; values: unknown[] }> = [];
+    const seen: Seen[] = [];
     const driver = new PostgresStorageDriver(
       { app: "a", reader: "r", analytics: "n", retention: "t" },
       fakePool(seen)
@@ -202,7 +251,7 @@ describe("PostgresStorageDriver", () => {
   });
 
   it("degrades to app when only app is configured, and says so", async () => {
-    const seen: Array<{ role: StorageRole; text: string; values: unknown[] }> = [];
+    const seen: Seen[] = [];
     const driver = new PostgresStorageDriver({ app: "a" }, fakePool(seen));
 
     await driver.withConnection("transcript_read", c => c.query("SELECT prompt FROM requests"));
@@ -213,7 +262,7 @@ describe("PostgresStorageDriver", () => {
   });
 
   it("translates placeholders on the way to the pool", async () => {
-    const seen: Array<{ role: StorageRole; text: string; values: unknown[] }> = [];
+    const seen: Seen[] = [];
     const driver = new PostgresStorageDriver({ app: "a" }, fakePool(seen));
 
     await driver.withConnection("write", c =>
@@ -226,7 +275,7 @@ describe("PostgresStorageDriver", () => {
   });
 
   it("wraps a transaction in BEGIN and COMMIT, and ROLLBACK on failure", async () => {
-    const seen: Array<{ role: StorageRole; text: string; values: unknown[] }> = [];
+    const seen: Seen[] = [];
     const driver = new PostgresStorageDriver({ app: "a" }, fakePool(seen));
 
     await driver.transaction("write", c => c.execute("INSERT INTO t VALUES (?)", [1]));
@@ -242,6 +291,75 @@ describe("PostgresStorageDriver", () => {
     await driver.close();
   });
 
+  it("runs BEGIN, the body and COMMIT on ONE checked-out backend", async () => {
+    // The defect this replaces: BEGIN, the writes and COMMIT each went through
+    // pool.query, and a pg.Pool checks out a connection per query. The
+    // transaction then spans however many backends the pool handed out, which
+    // also silently voids SET LOCAL, pg_advisory_xact_lock and FOR UPDATE.
+    const seen: Seen[] = [];
+    const driver = new PostgresStorageDriver({ app: "a" }, fakePool(seen));
+
+    await driver.transaction("write", async c => {
+      await c.execute("INSERT INTO t VALUES (?)", [1]);
+      await c.execute("UPDATE t SET v = ?", [2]);
+    });
+
+    expect(seen.map(s => s.text)).toEqual([
+      "BEGIN",
+      "INSERT INTO t VALUES ($1)",
+      "UPDATE t SET v = $1",
+      "COMMIT",
+    ]);
+    expect(new Set(seen.map(s => s.backend)).size).toBe(1);
+    expect(seen.every(s => s.backend.startsWith("client-"))).toBe(true);
+    await driver.close();
+  });
+
+  it("releases the client even when the body throws", async () => {
+    const seen: Seen[] = [];
+    const released: string[] = [];
+    const driver = new PostgresStorageDriver({ app: "a" }, fakePool(seen, released));
+
+    await expect(
+      driver.transaction("write", async () => {
+        throw new Error("body failed");
+      })
+    ).rejects.toThrow("body failed");
+
+    // Without the finally, a pool with a bounded size is exhausted by N
+    // failures and every later transaction blocks forever on connect().
+    expect(released).toHaveLength(1);
+    expect(seen.map(s => s.text)).toEqual(["BEGIN", "ROLLBACK"]);
+    expect(new Set(seen.map(s => s.backend)).size).toBe(1);
+    await driver.close();
+  });
+
+  it("refuses transaction control on a connection from withConnection", async () => {
+    // Structural, not advisory: a pooled connection cannot carry a transaction,
+    // so opening one there is made unrepresentable rather than merely absent.
+    const seen: Seen[] = [];
+    const driver = new PostgresStorageDriver({ app: "a" }, fakePool(seen));
+
+    for (const statement of ["BEGIN", "commit", " ROLLBACK", "SAVEPOINT s1", "END"]) {
+      await expect(
+        driver.withConnection("write", c => c.execute(statement))
+      ).rejects.toThrow(/transaction control/);
+    }
+    expect(seen).toEqual([]);
+    await driver.close();
+  });
+
+  it("does not mistake a leading comment for the statement keyword", async () => {
+    const seen: Seen[] = [];
+    const driver = new PostgresStorageDriver({ app: "a" }, fakePool(seen));
+
+    await driver.withConnection("write", c => c.execute("/* BEGIN */ INSERT INTO t VALUES (1)"));
+    await driver.withConnection("write", c => c.execute("-- COMMIT\nSELECT 1"));
+
+    expect(seen).toHaveLength(2);
+    await driver.close();
+  });
+
   it("refuses to construct with no app credential", () => {
     expect(() => new PostgresStorageDriver({}, fakePool([]))).toThrow(/at least an .app. DSN/);
   });
@@ -250,6 +368,11 @@ describe("PostgresStorageDriver", () => {
     const ended: StorageRole[] = [];
     const driver = new PostgresStorageDriver({ app: "a", reader: "r" }, (role): PgPoolLike => ({
       query: () => Promise.resolve({ rows: [], rowCount: 0 }),
+      connect: () =>
+        Promise.resolve({
+          query: () => Promise.resolve({ rows: [], rowCount: 0 }),
+          release: () => undefined,
+        }),
       end: () => {
         ended.push(role);
         return Promise.resolve();
