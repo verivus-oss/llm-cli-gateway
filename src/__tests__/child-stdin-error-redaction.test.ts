@@ -66,7 +66,25 @@ class CapturingFlightRecorder implements FlightRecorderLike {
     this.completes.push({ correlationId, result });
   }
 
-  queryRequests<T = Record<string, unknown>>(_sql: string, ..._params: unknown[]): T[] {
+  readCacheRowsBySession(): [] {
+    return [];
+  }
+  readCacheRowsByPrefix(): [] {
+    return [];
+  }
+  readCacheRowsGlobal(): [] {
+    return [];
+  }
+  readRequestById(): null {
+    return null;
+  }
+  listRequestSummaries(): [] {
+    return [];
+  }
+  readLcrPriorRows(): [] {
+    return [];
+  }
+  readRoutingDecisions(): [] {
     return [];
   }
 

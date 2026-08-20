@@ -4,7 +4,7 @@
  *
  * Pure, read-only sibling of `cache-stats.ts`. It READS flight-recorder rows
  * (the `requests` + `gateway_metadata` tables) through the SAME
- * `FlightRecorderQuery.queryRequests` read path the cache aggregates use, and
+ * `FlightRecorderQuery` typed read path the cache aggregates use, and
  * computes ANONYMIZED MODEL-LEVEL economics only. It NEVER writes the DB, spawns
  * a process, or uses `Math.random`; it is deterministic over its input rows.
  *
@@ -37,7 +37,10 @@
  * cross-principal identity can leak by construction.
  */
 
-import type { FlightRecorderQuery } from "./flight-recorder.js";
+import type {
+  FlightRecorderQuery,
+  LcrPriorSourceRow as LcrPriorRawRow,
+} from "./flight-recorder.js";
 import type { Confidence } from "./least-cost-types.js";
 import { estimateInputTokensFromDerived } from "./token-estimator.js";
 import type { ContentType } from "./token-estimator.js";
@@ -383,26 +386,9 @@ export function computeLcrPriors(rows: LcrPriorRow[], opts: ComputeLcrPriorsOpti
 }
 
 /** Raw joined row shape returned by the flight-recorder read query. */
-interface LcrPriorRawRow {
-  cli: string;
-  model: string;
-  derived_prompt_chars: number | null;
-  derived_content_class: string | null;
-  input_tokens: number | null;
-  output_tokens: number | null;
-  cache_read_tokens: number | null;
-  cache_creation_tokens: number | null;
-  cost_basis: string | null;
-  owner_principal: string | null;
-  session_id: string | null;
-  datetime_utc: string;
-  cost_usd: number | null;
-  route_est_cost_usd: number | null;
-}
-
 /**
  * Load LCR prior rows from the live flight recorder, using the SAME read path
- * (`FlightRecorderQuery.queryRequests`) that `cache-stats.ts` uses. Pure
+ * (`FlightRecorderQuery.readLcrPriorRows`) that `cache-stats.ts` uses. Pure
  * read-only: a single parameterless SELECT over `requests` LEFT JOIN
  * `gateway_metadata`, ordered by time so the mistral session-continued marker can
  * be derived deterministically.
@@ -429,17 +415,7 @@ function toDerivation(row: LcrPriorRawRow): LcrPriorRow["derivation"] {
 }
 
 export function loadLcrPriorRows(db: FlightRecorderQuery): LcrPriorRow[] {
-  const raw = db.queryRequests<LcrPriorRawRow>(
-    // NOTE: deliberately does not select r.prompt. See LcrPriorRow.derivation.
-    `SELECT r.cli, r.model, r.derived_prompt_chars, r.derived_content_class,
-            r.input_tokens, r.output_tokens,
-            r.cache_read_tokens, r.cache_creation_tokens,
-            r.cost_basis, r.owner_principal, r.session_id, r.datetime_utc,
-            m.cost_usd, m.route_est_cost_usd
-     FROM requests r
-     LEFT JOIN gateway_metadata m ON m.request_id = r.id
-     ORDER BY r.datetime_utc ASC`
-  );
+  const raw = db.readLcrPriorRows();
 
   const seenMistralSessions = new Set<string>();
 

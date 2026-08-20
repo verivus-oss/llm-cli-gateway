@@ -2,7 +2,11 @@ import { describe, it, expect, beforeEach, afterEach } from "vitest";
 import { mkdtempSync, rmSync } from "fs";
 import os from "os";
 import path from "path";
-import { FlightRecorder, NoopFlightRecorder } from "../flight-recorder.js";
+import {
+  FlightRecorder,
+  NoopFlightRecorder,
+  type PersistedRequestSummaryRow,
+} from "../flight-recorder.js";
 import {
   listPersistedRequests,
   PERSISTED_REQUEST_LIST_MAX_LIMIT,
@@ -64,7 +68,6 @@ describe("listPersistedRequests", () => {
     });
     // datetime_utc is stamped by logStart; overwrite it so ordering and the
     // `since` bound are asserted against known values rather than wall clock.
-    rec.queryRequests("SELECT 1");
     (rec as unknown as { db: { prepare: (s: string) => { run: (...a: unknown[]) => void } } }).db
       .prepare("UPDATE requests SET datetime_utc = ? WHERE id = ?")
       .run(opts.when, opts.id);
@@ -208,7 +211,13 @@ describe("listPersistedRequests", () => {
       // is the exact failure the second layer exists to absorb. Without it this
       // control is never executed in both states by any other test here.
       const ignoresTheWhereClause = {
-        queryRequests: <T>(): T[] =>
+        readCacheRowsBySession: () => [],
+        readCacheRowsByPrefix: () => [],
+        readCacheRowsGlobal: () => [],
+        readRequestById: () => null,
+        readLcrPriorRows: () => [],
+        readRoutingDecisions: () => [],
+        listRequestSummaries: () =>
           [
             {
               id: "theirs",
@@ -240,7 +249,7 @@ describe("listPersistedRequests", () => {
               exit_code: 0,
               provider_session_id: null,
             },
-          ] as unknown as T[],
+          ] as unknown as PersistedRequestSummaryRow[],
       };
 
       expect(
@@ -251,7 +260,13 @@ describe("listPersistedRequests", () => {
 
       // And the legacy-unowned arm, which has its own predicate branch.
       const legacyRow = {
-        queryRequests: <T>(): T[] =>
+        readCacheRowsBySession: () => [],
+        readCacheRowsByPrefix: () => [],
+        readCacheRowsGlobal: () => [],
+        readRequestById: () => null,
+        readLcrPriorRows: () => [],
+        readRoutingDecisions: () => [],
+        listRequestSummaries: () =>
           [
             {
               id: "legacy",
@@ -268,7 +283,7 @@ describe("listPersistedRequests", () => {
               exit_code: 0,
               provider_session_id: null,
             },
-          ] as unknown as T[],
+          ] as unknown as PersistedRequestSummaryRow[],
       };
       expect(listPersistedRequests(legacyRow, { callerPrincipal: "user:bob" })).toEqual([]);
       expect(listPersistedRequests(legacyRow, { callerPrincipal: "local" })).toHaveLength(1);

@@ -33,7 +33,25 @@ class CapturingFlightRecorder implements FlightRecorderLike {
   logComplete(correlationId: string, result: FlightLogResult): void {
     this.completes.push({ correlationId, result });
   }
-  queryRequests<T = Record<string, unknown>>(_sql: string, ..._params: unknown[]): T[] {
+  readCacheRowsBySession(): [] {
+    return [];
+  }
+  readCacheRowsByPrefix(): [] {
+    return [];
+  }
+  readCacheRowsGlobal(): [] {
+    return [];
+  }
+  readRequestById(): null {
+    return null;
+  }
+  listRequestSummaries(): [] {
+    return [];
+  }
+  readLcrPriorRows(): [] {
+    return [];
+  }
+  readRoutingDecisions(): [] {
     return [];
   }
   flush(): void {}
@@ -55,7 +73,25 @@ class FlakyOnceFlightRecorder implements FlightRecorderLike {
     }
     this.completes.push({ correlationId, result });
   }
-  queryRequests<T = Record<string, unknown>>(_sql: string, ..._params: unknown[]): T[] {
+  readCacheRowsBySession(): [] {
+    return [];
+  }
+  readCacheRowsByPrefix(): [] {
+    return [];
+  }
+  readCacheRowsGlobal(): [] {
+    return [];
+  }
+  readRequestById(): null {
+    return null;
+  }
+  listRequestSummaries(): [] {
+    return [];
+  }
+  readLcrPriorRows(): [] {
+    return [];
+  }
+  readRoutingDecisions(): [] {
     return [];
   }
   flush(): void {}

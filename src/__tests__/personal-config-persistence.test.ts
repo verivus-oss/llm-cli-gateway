@@ -1265,7 +1265,13 @@ describe("Personal Agent Config Kit persistence", () => {
       logComplete: (_correlationId: string, result: FlightLogResult) => {
         flightComplete = result;
       },
-      queryRequests: () => [],
+      readCacheRowsBySession: () => [],
+      readCacheRowsByPrefix: () => [],
+      readCacheRowsGlobal: () => [],
+      readRequestById: () => null,
+      listRequestSummaries: () => [],
+      readLcrPriorRows: () => [],
+      readRoutingDecisions: () => [],
       flush: () => {},
       close: () => {},
     } as unknown as FlightRecorderLike;

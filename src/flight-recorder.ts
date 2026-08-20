@@ -24,7 +24,7 @@ import path from "path";
 import { openDatabase, openReadOnly } from "./sqlite-driver.js";
 import type { GatewayDatabase } from "./sqlite-driver.js";
 import { redactSecrets, isRedactionEnabled } from "./secret-redaction.js";
-import { getRequestContext, resolveOwnerPrincipal } from "./request-context.js";
+import { getRequestContext, principalScopeSql, resolveOwnerPrincipal } from "./request-context.js";
 import { derivePromptSignals } from "./token-estimator.js";
 import type { ProviderType } from "./session-manager.js";
 
@@ -831,6 +831,141 @@ export class FlightRecorder {
     return this.readOnlyDb.prepare(sql).all(...params) as T[];
   }
 
+  // ---- Typed read surface (FlightRecorderQuery) -------------------------
+  // s2 of storage-unification: each of these replaced a caller-supplied SQL
+  // string. The SQL now lives beside the schema it reads, which is what makes
+  // a second driver implementable. All route through queryRequests, so they
+  // inherit its dedicated read-only connection.
+
+  readCacheRowsBySession(sessionId: string): CacheAggregateRow[] {
+    return this.queryRequests<CacheAggregateRow>(
+      `SELECT cli, model,
+              COALESCE(cache_read_tokens, 0) AS cache_read_tokens,
+              COALESCE(cache_creation_tokens, 0) AS cache_creation_tokens,
+              stable_prefix_hash,
+              datetime_utc,
+              cache_control_blocks,
+              cache_control_ttl_seconds
+       FROM requests
+       WHERE session_id = ?
+       ORDER BY datetime_utc DESC`,
+      sessionId
+    );
+  }
+
+  readCacheRowsByPrefix(stablePrefixHash: string): CacheAggregateRow[] {
+    // No cache_control_* columns: the pre-s2 query did not select them, and
+    // adding them here would silently change prefix aggregates.
+    return this.queryRequests<CacheAggregateRow>(
+      `SELECT cli, model,
+              COALESCE(cache_read_tokens, 0) AS cache_read_tokens,
+              COALESCE(cache_creation_tokens, 0) AS cache_creation_tokens,
+              stable_prefix_hash,
+              datetime_utc
+       FROM requests
+       WHERE stable_prefix_hash = ?
+       ORDER BY datetime_utc ASC`,
+      stablePrefixHash
+    );
+  }
+
+  readCacheRowsGlobal(sinceIso?: string): CacheAggregateRow[] {
+    const select = `SELECT cli, model,
+              COALESCE(cache_read_tokens, 0) AS cache_read_tokens,
+              COALESCE(cache_creation_tokens, 0) AS cache_creation_tokens,
+              stable_prefix_hash,
+              datetime_utc,
+              cache_control_blocks,
+              cache_control_ttl_seconds
+       FROM requests`;
+    return sinceIso
+      ? this.queryRequests<CacheAggregateRow>(`${select} WHERE datetime_utc >= ?`, sinceIso)
+      : this.queryRequests<CacheAggregateRow>(select);
+  }
+
+  readRequestById(correlationId: string): PersistedRequestRow | null {
+    const [row] = this.queryRequests<PersistedRequestRow>(
+      `SELECT r.id, r.cli, r.model, r.prompt, r.response, r.session_id,
+              r.datetime_utc, r.duration_ms, r.input_tokens, r.output_tokens,
+              r.cache_read_tokens, r.cache_creation_tokens, r.owner_principal,
+              m.retry_count, m.circuit_breaker_state, m.cost_usd,
+              m.exit_code, m.error_message, m.async_job_id, m.provider_session_id, m.status,
+              m.thinking_blocks
+       FROM requests r
+       LEFT JOIN gateway_metadata m ON m.request_id = r.id
+       WHERE r.id = ?
+       LIMIT 1`,
+      correlationId
+    );
+    return row ?? null;
+  }
+
+  listRequestSummaries(filter: RequestSummaryFilter): PersistedRequestSummaryRow[] {
+    // The ownership fragment bounds LIMIT to rows the caller may see; the
+    // caller still re-checks every row with principalCanAccess, which is the
+    // control. See src/request-context.ts.
+    const scope = principalScopeSql("r.owner_principal", filter.ownerPrincipal);
+    const where: string[] = [scope.sql];
+    const params: unknown[] = [...scope.params];
+
+    if (filter.sinceIso) {
+      where.push("r.datetime_utc >= ?");
+      params.push(filter.sinceIso);
+    }
+    if (filter.cli) {
+      where.push("r.cli = ?");
+      params.push(filter.cli);
+    }
+    if (filter.sessionId) {
+      where.push("r.session_id = ?");
+      params.push(filter.sessionId);
+    }
+
+    return this.queryRequests<PersistedRequestSummaryRow>(
+      `SELECT r.id, r.cli, r.model, r.session_id, r.datetime_utc, r.duration_ms,
+              r.owner_principal,
+              LENGTH(r.prompt) AS prompt_chars,
+              LENGTH(r.response) AS response_chars,
+              m.async_job_id, m.status, m.exit_code, m.provider_session_id
+       FROM requests r
+       LEFT JOIN gateway_metadata m ON m.request_id = r.id
+       WHERE ${where.join(" AND ")}
+       ORDER BY r.datetime_utc DESC
+       LIMIT ?`,
+      ...params,
+      filter.limit
+    );
+  }
+
+  readLcrPriorRows(): LcrPriorSourceRow[] {
+    // Deliberately does not select r.prompt: the derived_* columns exist so
+    // this reader need not bulk-read prompt bodies.
+    return this.queryRequests<LcrPriorSourceRow>(
+      `SELECT r.cli, r.model, r.derived_prompt_chars, r.derived_content_class,
+              r.input_tokens, r.output_tokens,
+              r.cache_read_tokens, r.cache_creation_tokens,
+              r.cost_basis, r.owner_principal, r.session_id, r.datetime_utc,
+              m.cost_usd, m.route_est_cost_usd
+       FROM requests r
+       LEFT JOIN gateway_metadata m ON m.request_id = r.id
+       ORDER BY r.datetime_utc ASC`
+    );
+  }
+
+  readRoutingDecisions(limit: number): RoutingDecisionRow[] {
+    return this.queryRequests<RoutingDecisionRow>(
+      `SELECT r.cli, r.model, r.datetime_utc, r.cost_basis,
+              m.route_est_cost_usd, m.route_est_confidence, m.route_reason,
+              m.route_considered, m.route_reroutes
+       FROM requests r
+       LEFT JOIN gateway_metadata m ON m.request_id = r.id
+       WHERE m.routed = 1
+       ORDER BY r.datetime_utc DESC
+       LIMIT ?`,
+      limit
+    );
+  }
+
   flush(): void {
     // No-op: node:sqlite (DatabaseSync) writes synchronously.
   }
@@ -853,19 +988,173 @@ export class NoopFlightRecorder {
   queryRequests<T = Record<string, unknown>>(_sql: string, ..._params: unknown[]): T[] {
     return [];
   }
+  readCacheRowsBySession(_sessionId: string): CacheAggregateRow[] {
+    return [];
+  }
+  readCacheRowsByPrefix(_stablePrefixHash: string): CacheAggregateRow[] {
+    return [];
+  }
+  readCacheRowsGlobal(_sinceIso?: string): CacheAggregateRow[] {
+    return [];
+  }
+  readRequestById(_correlationId: string): PersistedRequestRow | null {
+    return null;
+  }
+  listRequestSummaries(_filter: RequestSummaryFilter): PersistedRequestSummaryRow[] {
+    return [];
+  }
+  readLcrPriorRows(): LcrPriorSourceRow[] {
+    return [];
+  }
+  readRoutingDecisions(_limit: number): RoutingDecisionRow[] {
+    return [];
+  }
   flush(): void {}
   close(): void {}
 }
 
 export type FlightRecorderLike = FlightRecorder | NoopFlightRecorder;
 
+/** Projection behind the three cache-aggregate reads. */
+export interface CacheAggregateRow {
+  cli: string;
+  model: string;
+  cache_read_tokens: number | null;
+  cache_creation_tokens: number | null;
+  stable_prefix_hash: string | null;
+  datetime_utc: string;
+  /**
+   * Slice κ: number of caller-supplied content blocks the gateway emitted with
+   * an explicit `cache_control` marker. NULL on pre-v4 rows and on non-Claude /
+   * non-κ Claude rows. Absent from the by-prefix projection, which never
+   * selected it.
+   */
+  cache_control_blocks?: number | null;
+  cache_control_ttl_seconds?: number | null;
+}
+
+/** Projection behind `readRequestById`: one request joined to its metadata. */
+export interface PersistedRequestRow {
+  id: string;
+  cli: string;
+  model: string;
+  prompt: string | null;
+  response: string | null;
+  session_id: string | null;
+  datetime_utc: string;
+  duration_ms: number | null;
+  input_tokens: number | null;
+  output_tokens: number | null;
+  cache_read_tokens: number | null;
+  cache_creation_tokens: number | null;
+  retry_count: number | null;
+  circuit_breaker_state: string | null;
+  cost_usd: number | null;
+  exit_code: number | null;
+  error_message: string | null;
+  async_job_id: string | null;
+  provider_session_id: string | null;
+  status: string | null;
+  thinking_blocks: string | null;
+  owner_principal: string | null;
+}
+
+/** Projection behind `listRequestSummaries`. Carries no prompt or response text. */
+export interface PersistedRequestSummaryRow {
+  id: string;
+  cli: string;
+  model: string;
+  session_id: string | null;
+  datetime_utc: string;
+  duration_ms: number | null;
+  prompt_chars: number | null;
+  response_chars: number | null;
+  async_job_id: string | null;
+  status: string | null;
+  exit_code: number | null;
+  provider_session_id: string | null;
+  owner_principal: string | null;
+}
+
 /**
- * Read-only subset of FlightRecorder used by cache-stats / MCP resources /
- * doctor. Accepts either FlightRecorder or NoopFlightRecorder; the noop
- * returns `[]` from every query so downstream aggregation is empty by design.
+ * Projection behind `readLcrPriorRows`. Deliberately excludes `prompt`.
+ * Named `...SourceRow` because lcr-priors.ts has its own DOMAIN type called
+ * `LcrPriorRow`; two different shapes under one name, kept apart only by an
+ * import alias, is a trap for whoever edits this next.
+ */
+export interface LcrPriorSourceRow {
+  cli: string;
+  model: string;
+  derived_prompt_chars: number | null;
+  derived_content_class: string | null;
+  input_tokens: number | null;
+  output_tokens: number | null;
+  cache_read_tokens: number | null;
+  cache_creation_tokens: number | null;
+  cost_basis: string | null;
+  owner_principal: string | null;
+  session_id: string | null;
+  datetime_utc: string;
+  cost_usd: number | null;
+  route_est_cost_usd: number | null;
+}
+
+/** Projection behind `readRoutingDecisions`: routing economics only. */
+export interface RoutingDecisionRow {
+  cli: string;
+  model: string;
+  datetime_utc: string;
+  cost_basis: string | null;
+  route_est_cost_usd: number | null;
+  route_est_confidence: string | null;
+  route_reason: string | null;
+  route_considered: number | null;
+  route_reroutes: number | null;
+}
+
+/**
+ * Read-only surface of the flight recorder, used by cache-stats / lcr-priors /
+ * MCP resources / doctor. Accepts either FlightRecorder or NoopFlightRecorder;
+ * the noop returns `[]` (or `null`) from every read so downstream aggregation
+ * is empty by design.
+ *
+ * s2 of docs/plans/storage-unification.dag.toml: this used to be a single
+ * `queryRequests(sql, ...params)` method, i.e. the caller supplied the SQL.
+ * That is not a seam, it is an anti-seam: a port cannot abstract an engine
+ * behind a method whose argument IS that engine's dialect, and seven callers
+ * were passing SQLite `?` placeholders that PostgreSQL does not accept. Each
+ * of those queries is now a named operation whose SQL lives with the schema it
+ * belongs to, so a second driver has a finite, typed surface to implement.
+ *
+ * `queryRequests` still exists on the concrete class for its own internals and
+ * for tests inspecting the database directly. `scripts/check-storage-port.mjs`
+ * fails the build if any other production module reaches for it.
  */
 export interface FlightRecorderQuery {
-  queryRequests<T = Record<string, unknown>>(sql: string, ...params: unknown[]): T[];
+  /** Cache aggregate rows for one gateway session, newest first. */
+  readCacheRowsBySession(sessionId: string): CacheAggregateRow[];
+  /** Cache aggregate rows sharing one stable prefix hash, oldest first. */
+  readCacheRowsByPrefix(stablePrefixHash: string): CacheAggregateRow[];
+  /** Cache aggregate rows across all CLIs, optionally bounded below by an ISO timestamp. */
+  readCacheRowsGlobal(sinceIso?: string): CacheAggregateRow[];
+  /** One persisted request joined to its gateway metadata, or null. */
+  readRequestById(correlationId: string): PersistedRequestRow | null;
+  /** Persisted request summaries, newest first, scoped to one principal. */
+  listRequestSummaries(filter: RequestSummaryFilter): PersistedRequestSummaryRow[];
+  /** Least-cost-routing prior rows, oldest first. Never selects prompt text. */
+  readLcrPriorRows(): LcrPriorSourceRow[];
+  /** The most recent routed decisions, newest first. */
+  readRoutingDecisions(limit: number): RoutingDecisionRow[];
+}
+
+/** Filter for `listRequestSummaries`. `ownerPrincipal` is required by design. */
+export interface RequestSummaryFilter {
+  /** Rows visible to this principal only. No default: absent must never mean "all". */
+  ownerPrincipal: string;
+  limit: number;
+  sinceIso?: string;
+  cli?: string;
+  sessionId?: string;
 }
 
 export function createFlightRecorder(logger: LoggerLike): FlightRecorderLike {

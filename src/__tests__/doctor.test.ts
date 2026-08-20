@@ -1083,33 +1083,37 @@ describe("LCR phase_3 doctor least_cost block", () => {
   });
 
   // One flight-recorder row that yields a single (content-type, family)
-  // calibration bucket for the claude-sonnet family. queryRequests is the only
-  // method computeLcrPriorsFromDb touches.
+  // calibration bucket for the claude-sonnet family. readLcrPriorRows is the
+  // only method computeLcrPriorsFromDb touches.
   function fakeRecorderWithOneRow(): FlightRecorderQuery {
     return {
-      queryRequests<T = Record<string, unknown>>(): T[] {
-        return [
-          {
-            cli: "claude",
-            model: "sonnet",
-            // Migration v11: the routing path reads persisted signals, not the
-            // prompt body. Kept equivalent to the previous prose fixture.
-            derived_prompt_chars:
-              "please summarize the following text about routing economics and cost".length,
-            derived_content_class: "prose",
-            input_tokens: 120,
-            output_tokens: 60,
-            cache_read_tokens: 0,
-            cache_creation_tokens: 0,
-            cost_basis: "provider-reported",
-            owner_principal: null,
-            session_id: null,
-            datetime_utc: "2026-07-01T00:00:00Z",
-            cost_usd: 0.01,
-            route_est_cost_usd: 0.009,
-          },
-        ] as unknown as T[];
-      },
+      readCacheRowsBySession: () => [],
+      readCacheRowsByPrefix: () => [],
+      readCacheRowsGlobal: () => [],
+      readRequestById: () => null,
+      listRequestSummaries: () => [],
+      readRoutingDecisions: () => [],
+      readLcrPriorRows: () => [
+        {
+          cli: "claude",
+          model: "sonnet",
+          // Migration v11: the routing path reads persisted signals, not the
+          // prompt body. Kept equivalent to the previous prose fixture.
+          derived_prompt_chars:
+            "please summarize the following text about routing economics and cost".length,
+          derived_content_class: "prose",
+          input_tokens: 120,
+          output_tokens: 60,
+          cache_read_tokens: 0,
+          cache_creation_tokens: 0,
+          cost_basis: "provider-reported",
+          owner_principal: null,
+          session_id: null,
+          datetime_utc: "2026-07-01T00:00:00Z",
+          cost_usd: 0.01,
+          route_est_cost_usd: 0.009,
+        },
+      ],
     } as unknown as FlightRecorderQuery;
   }
 

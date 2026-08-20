@@ -9,7 +9,10 @@ import { CLI_TYPES, PROVIDER_TYPES, type CliType, type ProviderType } from "./se
 import { getRequestContext, principalCanAccess, resolveOwnerPrincipal } from "./request-context.js";
 import { PerformanceMetrics } from "./metrics.js";
 import { getAvailableCliInfo } from "./model-registry.js";
-import { FlightRecorderQuery } from "./flight-recorder.js";
+import { FlightRecorderQuery, NoopFlightRecorder } from "./flight-recorder.js";
+
+/** routing://decisions surfaces at most this many recent routed decisions. */
+const ROUTING_DECISIONS_LIMIT = 50;
 import {
   computeGlobalCacheStats,
   computePrefixCacheStats,
@@ -86,7 +89,7 @@ export class ResourceProvider {
     // Optional read access to the flight recorder. Used by cache-state
     // resources (slice 2). Falls back to a stub returning [] when not
     // injected so existing call sites continue to work without changes.
-    private flightRecorder: FlightRecorderQuery = { queryRequests: () => [] },
+    private flightRecorder: FlightRecorderQuery = new NoopFlightRecorder(),
     // Slice 3: optional cache-awareness config. When present, drives the
     // TTL policy applied to ttlRemainingMs on session-scoped reads.
     // When absent, the default Anthropic 5-min TTL applies (matches the
@@ -371,16 +374,7 @@ export class ResourceProvider {
    * rows.
    */
   private readRoutingDecisions(): RoutingDecision[] {
-    const rows = this.flightRecorder.queryRequests<RoutingDecisionRow>(
-      `SELECT r.cli, r.model, r.datetime_utc, r.cost_basis,
-              m.route_est_cost_usd, m.route_est_confidence, m.route_reason,
-              m.route_considered, m.route_reroutes
-       FROM requests r
-       LEFT JOIN gateway_metadata m ON m.request_id = r.id
-       WHERE m.routed = 1
-       ORDER BY r.datetime_utc DESC
-       LIMIT 50`
-    );
+    const rows = this.flightRecorder.readRoutingDecisions(ROUTING_DECISIONS_LIMIT);
     return rows.map(row => ({
       provider: row.cli,
       model: row.model,
@@ -680,18 +674,6 @@ export class ResourceProvider {
 }
 
 /** Raw joined row shape read by readRoutingDecisions (routed rows only). */
-interface RoutingDecisionRow {
-  cli: string;
-  model: string;
-  datetime_utc: string;
-  cost_basis: string | null;
-  route_est_cost_usd: number | null;
-  route_est_confidence: string | null;
-  route_reason: string | null;
-  route_considered: number | null;
-  route_reroutes: number | null;
-}
-
 /** One redacted routing decision surfaced by routing://decisions. */
 export interface RoutingDecision {
   provider: string;

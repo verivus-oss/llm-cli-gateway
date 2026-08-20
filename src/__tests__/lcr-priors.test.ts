@@ -304,9 +304,13 @@ describe("loadLcrPriorRows (flight-recorder read path)", () => {
   // Minimal FlightRecorderQuery stub returning fixed raw rows in datetime order.
   function stubDb(rawRows: Record<string, unknown>[]): FlightRecorderQuery {
     return {
-      queryRequests<T = Record<string, unknown>>(): T[] {
-        return rawRows as T[];
-      },
+      readLcrPriorRows: () => rawRows as unknown as LcrPriorRow[],
+      readCacheRowsBySession: () => [],
+      readCacheRowsByPrefix: () => [],
+      readCacheRowsGlobal: () => [],
+      readRequestById: () => null,
+      listRequestSummaries: () => [],
+      readRoutingDecisions: () => [],
     };
   }
 
@@ -353,7 +357,7 @@ describe("loadLcrPriorRows (flight-recorder read path)", () => {
     expect(rows[0].costUsd).toBeNull();
   });
 
-  it("computeLcrPriorsFromDb reads via queryRequests and aggregates", () => {
+  it("computeLcrPriorsFromDb reads via readLcrPriorRows and aggregates", () => {
     const db = stubDb([
       {
         cli: "codex",
