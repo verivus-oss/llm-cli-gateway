@@ -1933,5 +1933,15 @@
     "path",
     "path:described",
     "setDefault"
+  ],
+  "llm_request_list": [
+    "cli",
+    "cli:described",
+    "limit",
+    "limit:described",
+    "sessionId",
+    "sessionId:described",
+    "since",
+    "since:described"
   ]
 }

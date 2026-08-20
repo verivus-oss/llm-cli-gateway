@@ -289,7 +289,10 @@ import {
   computeSessionCacheStats,
   computeTtlRemaining,
   readPersistedRequest,
+  listPersistedRequests,
   PERSISTED_REQUEST_DEFAULT_MAX_CHARS,
+  PERSISTED_REQUEST_LIST_DEFAULT_LIMIT,
+  PERSISTED_REQUEST_LIST_MAX_LIMIT,
 } from "./cache-stats.js";
 import { getCliVersions, buildCliUpgradePlan, runCliUpgrade } from "./cli-updater.js";
 import { compareInstalledToTargets, summarizeVersionGuard } from "./provider-version-guard.js";
@@ -594,7 +597,7 @@ export function buildServerInstructions(
 
 Tools: ${syncRequestToolList}${apiToolsNote} (sync)${asyncToolsNote} | codex_fork_session (UNAVAILABLE: codex fork needs a terminal; use codex_request with a session UUID or resumeLatest instead)
 ${validationLine}${jobsLine}Sessions: session_create, session_list, session_set_active, session_get, session_delete, session_clear_all
-Other: list_models, provider_tool_capabilities, cli_versions, upstream_contracts, provider_subcommands_* (read-only subcommand contract/drift introspection), cli_upgrade, approval_list, llm_process_health, llm_request_result (read back any persisted request, sync or async, by correlationId)
+Other: list_models, provider_tool_capabilities, cli_versions, upstream_contracts, provider_subcommands_* (read-only subcommand contract/drift introspection), cli_upgrade, approval_list, llm_process_health, llm_request_result (read back any persisted request, sync or async, by correlationId), llm_request_list (find a request when you have NO correlationId; returns ids to pass to the two above)
 Workspaces: workspace_create, workspace_list, workspace_get, workspace_register_existing_repo (remote HTTP/OAuth workspace registry only; do not use workspace_* to fix stdio/local provider path access)
 
 Key behaviors:
@@ -22274,6 +22277,77 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
           {
             type: "text",
             text: JSON.stringify({ success: true, request: record }, null, 2),
+          },
+        ],
+      };
+    }
+  );
+
+  // Find a persisted request WITHOUT already knowing its correlation id.
+  //
+  // Every other flight-recorder read (llm_request_result, llm_job_*,
+  // validation_receipt) is keyed by an id handed out inline to the originating
+  // caller, so an agent that did not make the call, or whose context was
+  // compacted since, had no route in and went looking for the database file
+  // instead. This is that route. It projects metadata only; the bodies stay
+  // behind llm_request_result, which owns truncation and redaction.
+  server.tool(
+    "llm_request_list",
+    "List recent persisted requests (sync and async) newest-first WITHOUT a correlation id, to find one. Returns metadata only; pass a returned correlationId to llm_request_result for the prompt/response, or a returned asyncJobId to llm_job_status.",
+    {
+      limit: z
+        .number()
+        .int()
+        .min(1)
+        .max(PERSISTED_REQUEST_LIST_MAX_LIMIT)
+        .default(PERSISTED_REQUEST_LIST_DEFAULT_LIMIT)
+        .describe(`Max rows to return (1-${PERSISTED_REQUEST_LIST_MAX_LIMIT})`),
+      since: z
+        .string()
+        .min(1)
+        .optional()
+        .describe("ISO-8601 timestamp lower bound, e.g. 2026-08-21T00:00:00Z"),
+      cli: z
+        .string()
+        .min(1)
+        .optional()
+        .describe(
+          "Restrict to one provider as recorded (claude, codex, gemini, grok, mistral, devin, cursor, or an API provider id)"
+        ),
+      sessionId: z.string().min(1).optional().describe("Restrict to one gateway session id"),
+    },
+    {
+      title: "Persisted request listing",
+      readOnlyHint: true,
+      destructiveHint: false,
+      idempotentHint: true,
+      openWorldHint: false,
+    },
+    async ({ limit, since, cli, sessionId }) => {
+      const caller = resolveOwnerPrincipal(getRequestContext());
+      const requests = listPersistedRequests(flightRecorder, {
+        limit,
+        since,
+        cli,
+        sessionId,
+        callerPrincipal: caller,
+        redactProviderSessionId: callerIsRemote(),
+      });
+
+      return {
+        content: [
+          {
+            type: "text",
+            text: JSON.stringify(
+              {
+                success: true,
+                count: requests.length,
+                requests,
+                hint: "Pass correlationId to llm_request_result for prompt/response, or asyncJobId to llm_job_status. An empty list is not proof nothing ran: cross-LLM validation seats write no flight-recorder row, and flight recording can be disabled (LLM_GATEWAY_LOGS_DB=none).",
+              },
+              null,
+              2
+            ),
           },
         ],
       };

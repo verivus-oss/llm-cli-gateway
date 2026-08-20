@@ -206,7 +206,7 @@ docker compose -f docker/personal.compose.yml run --rm doctor
 
 ### Observability
 
-- **SQLite Flight Recorder**: Provider requests and responses are logged to `~/.llm-cli-gateway/logs.db` with correlation IDs, duration, and token usage where the provider emits it (today: claude on `stream-json`/`json`, codex, and the API providers; grok, gemini, mistral, devin and cursor emit no usage on their CLI wire). Two exclusions are worth knowing: **cross-LLM validation seats write no flight-recorder row at all**, so `llm_request_result` cannot read one back by correlation ID, and repository-review seats are additionally excluded by design so review evidence is not retained in a non-expiring table. The `retry_count` and `circuit_breaker_state` columns are constants on the async path, which is the production path; retry and circuit breaking apply only to the direct-execute fallback. Browse with [Datasette](https://datasette.io/): `datasette ~/.llm-cli-gateway/logs.db`
+- **SQLite Flight Recorder**: Provider requests and responses are logged to `~/.llm-cli-gateway/logs.db` with correlation IDs, duration, and token usage where the provider emits it (today: claude on `stream-json`/`json`, codex, and the API providers; grok, gemini, mistral, devin and cursor emit no usage on their CLI wire). Two exclusions are worth knowing: **cross-LLM validation seats write no flight-recorder row at all**, so `llm_request_result` cannot read one back by correlation ID, and repository-review seats are additionally excluded by design so review evidence is not retained in a non-expiring table. The `retry_count` and `circuit_breaker_state` columns are constants on the async path, which is the production path; retry and circuit breaking apply only to the direct-execute fallback. Read it back through the gateway: `llm_request_list` finds recent requests when you have no id, and `llm_request_result` returns the prompt and response for a `correlationId`. Agents should use those tools rather than opening the database, which bypasses ownership checks and assumes a backend that is configurable. For human browsing of a local SQLite deployment: `datasette ~/.llm-cli-gateway/logs.db`
 - **Structured Metadata**: Tool responses include machine-readable `structuredContent` (model, cli, correlationId, sessionId, durationMs, token counts)
 - **Cache observability resources**: `cache-state://global`, `cache-state://session/{id}`, and `cache-state://prefix/{hash}` MCP resources return aggregate cache hit/miss/savings — tokens and hashes only, no prompt text. `session_get` includes a `cacheState` block when the session has prior requests.
 - **Provider capability inventory**: `provider_tool_capabilities` and `provider-tools://catalog` expose the gateway request fields, supported/degraded provider controls, local skill/tool discovery, and safe config-surface hints for Claude Code, Codex CLI, Gemini/Antigravity, Grok CLI/API, Mistral Vibe, Cognition Devin, and Cursor Agent. `doctor --json` includes a compact `provider_capabilities` summary for setup assistants.
@@ -1337,9 +1337,20 @@ Read back any persisted request — sync or async — by its correlation ID. Eve
 - `maxChars` (number, optional): Max chars of the persisted response to return (1,000-2,000,000)
 - `includePrompt` (boolean, optional): Include the full persisted prompt text, default: false
 
+##### `llm_request_list`
+
+List recent persisted requests newest-first **without** a correlation ID, which is how you find one. Every other flight-recorder read is keyed by an id handed out inline to the caller that made the request, so an agent that did not make the call (or whose context was compacted since) starts here. Returns metadata only: pass a returned `correlationId` to `llm_request_result` for the bodies, or a returned `asyncJobId` to `llm_job_status`. A caller only ever sees its own requests. An empty list is not proof nothing ran: cross-LLM validation seats write no flight-recorder row, and flight recording can be disabled.
+
+**Parameters:**
+
+- `limit` (number, optional): Max rows, 1-200, default: 25
+- `since` (string, optional): ISO-8601 lower bound, e.g. `2026-08-21T00:00:00Z`
+- `cli` (string, optional): Restrict to one provider as recorded
+- `sessionId` (string, optional): Restrict to one gateway session id
+
 ##### `llm_process_health`
 
-Report gateway process health: async-job manager state plus the resolved persistence block (`backend`, `dbPath`, config sources). Use it to confirm which config file and SQLite paths the gateway is actually running under.
+Report gateway process health: async-job manager state plus the resolved persistence block (`backend`, `dbPath`, config sources). Use it to confirm which config file the gateway is running under and **which storage backend is actually in use** (`sqlite`, `postgres`, or `none`) before assuming any particular one.
 
 ##### `upstream_contracts`
 

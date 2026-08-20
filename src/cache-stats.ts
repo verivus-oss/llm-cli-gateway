@@ -19,6 +19,7 @@
 import type { FlightRecorderQuery } from "./flight-recorder.js";
 import { estimateCacheSavingsUsd } from "./pricing.js";
 import { redactKnownProviderSessionId } from "./provider-output-metadata.js";
+import { principalCanAccess, principalScopeSql } from "./request-context.js";
 
 export type CacheStatsCli = "claude" | "codex" | "gemini" | "grok" | "mistral";
 
@@ -682,4 +683,143 @@ export function readPersistedRequest(
   }
 
   return record;
+}
+
+/** Hard ceiling on `llm_request_list` page size, independent of the schema default. */
+export const PERSISTED_REQUEST_LIST_MAX_LIMIT = 200;
+/** Default page size when the caller does not ask for one. */
+export const PERSISTED_REQUEST_LIST_DEFAULT_LIMIT = 25;
+
+/**
+ * One row of the unkeyed request listing: enough to identify a request and
+ * bootstrap into `llm_request_result` / `llm_job_status`, and nothing more.
+ * Deliberately carries no prompt or response text; the bodies stay behind the
+ * keyed reader, which owns truncation and provider-session-id redaction.
+ */
+export interface PersistedRequestSummary {
+  correlationId: string;
+  /** NULL for sync requests; the job id to pass to `llm_job_*` for async rows. */
+  asyncJobId: string | null;
+  cli: string;
+  model: string;
+  sessionId: string | null;
+  datetimeUtc: string;
+  durationMs: number | null;
+  status: string | null;
+  exitCode: number | null;
+  /** Character lengths only. The text itself is not in this projection. */
+  promptChars: number;
+  responseChars: number;
+}
+
+export interface ListPersistedRequestsOptions {
+  /** Page size. Clamped to PERSISTED_REQUEST_LIST_MAX_LIMIT. */
+  limit?: number;
+  /** ISO-8601 lower bound on datetime_utc (inclusive). */
+  since?: string;
+  /** Restrict to one provider. */
+  cli?: string;
+  /** Restrict to one gateway session id. */
+  sessionId?: string;
+  /**
+   * Owning principal of the caller, from `resolveOwnerPrincipal`. Required:
+   * an absent principal must not mean "all rows", so this has no default.
+   */
+  callerPrincipal: string;
+  /** Redact provider session ids from caller-visible strings (remote callers). */
+  redactProviderSessionId?: boolean;
+}
+
+interface PersistedRequestSummaryRawRow {
+  id: string;
+  cli: string;
+  model: string;
+  session_id: string | null;
+  datetime_utc: string;
+  duration_ms: number | null;
+  prompt_chars: number | null;
+  response_chars: number | null;
+  async_job_id: string | null;
+  status: string | null;
+  exit_code: number | null;
+  provider_session_id: string | null;
+  owner_principal: string | null;
+}
+
+/**
+ * List persisted requests newest-first, without needing a correlation id.
+ *
+ * This is the bootstrap surface: every other flight-recorder read is keyed by
+ * an id that only the originating caller ever receives, so an agent that did
+ * not make the call (or whose context was compacted since) had no route in.
+ *
+ * Ownership: `principalScopeSql` bounds the SQL so LIMIT counts only rows the
+ * caller may see, and `principalCanAccess` then re-checks every row as the
+ * actual control. Under a NoopFlightRecorder (flight recording disabled) the
+ * query yields no rows and this returns `[]`.
+ */
+export function listPersistedRequests(
+  db: FlightRecorderQuery,
+  opts: ListPersistedRequestsOptions
+): PersistedRequestSummary[] {
+  const limit = Math.min(
+    Math.max(1, Math.floor(opts.limit ?? PERSISTED_REQUEST_LIST_DEFAULT_LIMIT)),
+    PERSISTED_REQUEST_LIST_MAX_LIMIT
+  );
+
+  const scope = principalScopeSql("r.owner_principal", opts.callerPrincipal);
+  const where: string[] = [scope.sql];
+  const params: unknown[] = [...scope.params];
+
+  if (opts.since) {
+    where.push("r.datetime_utc >= ?");
+    params.push(opts.since);
+  }
+  if (opts.cli) {
+    where.push("r.cli = ?");
+    params.push(opts.cli);
+  }
+  if (opts.sessionId) {
+    where.push("r.session_id = ?");
+    params.push(opts.sessionId);
+  }
+
+  const rows = db.queryRequests<PersistedRequestSummaryRawRow>(
+    `SELECT r.id, r.cli, r.model, r.session_id, r.datetime_utc, r.duration_ms,
+            r.owner_principal,
+            LENGTH(r.prompt) AS prompt_chars,
+            LENGTH(r.response) AS response_chars,
+            m.async_job_id, m.status, m.exit_code, m.provider_session_id
+     FROM requests r
+     LEFT JOIN gateway_metadata m ON m.request_id = r.id
+     WHERE ${where.join(" AND ")}
+     ORDER BY r.datetime_utc DESC
+     LIMIT ?`,
+    ...params,
+    limit
+  );
+
+  return (
+    rows
+      // The SQL scope is a prefilter; this is the control. A row the predicate
+      // rejects is dropped even if the fragment let it through.
+      .filter(row => principalCanAccess(row.owner_principal, opts.callerPrincipal))
+      .map(row => {
+        const redact = opts.redactProviderSessionId ? row.provider_session_id : null;
+        return {
+          correlationId: row.id,
+          asyncJobId: row.async_job_id,
+          cli: row.cli,
+          model: row.model,
+          sessionId:
+            row.session_id === null ? null : redactKnownProviderSessionId(row.session_id, redact),
+          datetimeUtc: row.datetime_utc,
+          durationMs: row.duration_ms,
+          status: row.status,
+          exitCode: row.exit_code,
+          promptChars: row.prompt_chars ?? 0,
+          responseChars: row.response_chars ?? 0,
+        };
+      })
+  );
 }

@@ -5,7 +5,7 @@
   "siteVersion": "3.0.0",
   "captureCommand": "node scripts/generate-site-discovery.mjs",
   "source": "runtime MCP tools/list from dist/index.js over in-memory MCP transport",
-  "toolCount": 64,
+  "toolCount": 65,
   "tools": [
     {
       "name": "approval_list",
@@ -4286,6 +4286,39 @@
       "inputSchema": {
         "type": "object",
         "properties": {},
+        "$schema": "http://json-schema.org/draft-07/schema#"
+      }
+    },
+    {
+      "name": "llm_request_list",
+      "description": "List recent persisted requests (sync and async) newest-first WITHOUT a correlation id, to find one. Returns metadata only; pass a returned correlationId to llm_request_result for the prompt/response, or a returned asyncJobId to llm_job_status.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "limit": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 200,
+            "default": 25,
+            "description": "Max rows to return (1-200)"
+          },
+          "since": {
+            "type": "string",
+            "minLength": 1,
+            "description": "ISO-8601 timestamp lower bound, e.g. 2026-08-21T00:00:00Z"
+          },
+          "cli": {
+            "type": "string",
+            "minLength": 1,
+            "description": "Restrict to one provider as recorded (claude, codex, gemini, grok, mistral, devin, cursor, or an API provider id)"
+          },
+          "sessionId": {
+            "type": "string",
+            "minLength": 1,
+            "description": "Restrict to one gateway session id"
+          }
+        },
+        "additionalProperties": false,
         "$schema": "http://json-schema.org/draft-07/schema#"
       }
     },

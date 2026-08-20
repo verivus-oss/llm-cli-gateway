@@ -73,15 +73,16 @@ For round 2+, prepend each reviewer's verbatim round-1 findings + your per-findi
 
 ## Gotchas (learned the hard way — do not re-discover these)
 
-1. **"orphaned" is transient, not terminal.** When polling the gateway's jobs table, jobs commonly transition orphaned → completed as a different gateway instance picks them up. Only treat `completed` or `failed` as done. Wait at least 5 minutes per job before assuming anything is wrong.
+1. **"orphaned" is transient, not terminal.** When polling job state with `llm_job_status`, jobs commonly transition orphaned → completed as a different gateway instance picks them up. Only treat `completed` or `failed` as done. Wait at least 5 minutes per job before assuming anything is wrong.
 
 2. **Multiple gateway instances may be running.** `ps aux | grep llm-cli-gateway` may show multiple node processes. Each tracks only its own children, which is why orphaning happens. Not a bug to fix here.
 
-3. **Sync MCP responses don't include the model output in the tool result** — they return only metadata `{cli, correlationId, durationMs, exitCode}`. The actual response is in the flight recorder. Read it via:
-    ```
-    node -e "const db = new (require('better-sqlite3'))(require('os').homedir() + '/.llm-cli-gateway/logs.db', {readonly: true}); console.log(db.prepare('SELECT response FROM requests WHERE id=?').get('<correlationId>').response);"
-    ```
-    Async job results: read `stdout` (or `stderr` if codex's recursion got stuck) from the `jobs` table by job id.
+3. **Sync MCP responses don't include the model output in the tool result** — they return only metadata `{cli, correlationId, durationMs, exitCode}`. The actual response is in the flight recorder. Read it back through the gateway, never through the database:
+    - `llm_request_result { correlationId }`: the persisted prompt and response for any request, sync or async.
+    - `llm_request_list { limit, since, cli, sessionId }`: when you do NOT have a correlation id, because you did not make the call or your context was compacted. It returns `correlationId` and `asyncJobId` to pass on.
+    - `llm_job_result { jobId }`: async stdout/stderr.
+
+    Do not open `logs.db` or connect to Postgres. The storage backend is configurable, the schema is not a contract, and a direct reader bypasses the ownership checks the tools enforce.
 
 4. **Polling cadence.** Use Monitor with a 90s sleep loop, exit only when all jobs are in {completed, failed}. Don't poll faster than 90s — gateway permission state isn't durable under rapid re-grants.
 

@@ -58,6 +58,7 @@
     "llm_job_status",
     "llm_job_watch",
     "llm_process_health",
+    "llm_request_list",
     "llm_request_result",
     "mistral_request",
     "mistral_request_async",

@@ -9,7 +9,7 @@ npm run site:generate
 ```
 
 - Public site version: `3.0.0`
-- Tool count: 64
+- Tool count: 65
 - Source: runtime MCP tools/list from dist/index.js over in-memory MCP transport
 - Capture command: `node scripts/generate-site-discovery.mjs`
 - Generated at: deterministic build output
@@ -97,4 +97,5 @@ npm run site:generate
 - `explain_effective_config` - Explain the selected Personal Agent Config release and context provenance without returning local paths or instruction text.
 - `list_models` - List models, aliases, and defaults for one provider (claude|codex|gemini|grok|mistral|devin|cursor, or an enabled API provider name), or omit cli to list all providers. API providers are returned under an `apiProviders` array.
 - `llm_process_health` - Report gateway process health: async-job manager state plus the resolved persistence configuration and paths.
+- `llm_request_list` - List recent persisted requests (sync and async) newest-first WITHOUT a correlation id, to find one. Returns metadata only; pass a returned correlationId to llm_request_result for the prompt/response, or a returned asyncJobId to llm_job_status.
 - `upstream_contracts` - Return the gateway's declared provider CLI contracts; with probeInstalled true, diff against installed --help surfaces to detect flag drift.
