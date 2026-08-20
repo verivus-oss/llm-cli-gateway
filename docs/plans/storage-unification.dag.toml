@@ -1,10 +1,9 @@
-# One storage choice for every subsystem. Implements docs/plans/storage-unification.md.
+# One storage choice for every subsystem. Implements docs/plans/storage-unification.md (rev 3, 84c2c2f).
 # Evidence: docs/evidence/storage-unification-audit-2026-08-21.md (host-local).
 
 [meta]
 surface = "FlightRecorder, JobStore and ISessionManager: 3 interfaces, 42 methods, 2 engines"
-status = "s1 done 2026-08-21; s2 next; nothing else started"
-design = "docs/plans/storage-unification.md (662 lines, revision 3, committed 84c2c2f)"
+status = "s1 and s2 done 2026-08-21 (325db73, 6f1f90e); s3 next"
 
 # WHY THIS EXISTS
 #
@@ -41,6 +40,7 @@ affects = ["s2.kill-the-raw-sql-read-path"]
 [[node]]
 id = "s2.kill-the-raw-sql-read-path"
 critical = true
+status = "done"
 depends_on = ["s1.inventory-and-call-surface"]
 role = "A port cannot abstract an engine behind a method whose argument IS that engine's dialect. queryRequests is not a missing seam, it is an anti-seam, and every later node is blocked on it."
 action = "Replace the 7 raw-SQL call sites with named typed read operations on the recorder. queryRequests becomes private to the SQLite implementation."
