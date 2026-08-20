@@ -82,7 +82,7 @@ For round 2+, prepend each reviewer's verbatim round-1 findings + your per-findi
     - `llm_request_list { limit, since, cli, sessionId }`: when you do NOT have a correlation id, because you did not make the call or your context was compacted. It returns `correlationId` and `asyncJobId` to pass on.
     - `llm_job_result { jobId }`: async stdout/stderr.
 
-    Do not open `logs.db` or connect to Postgres. The storage backend is configurable, the schema is not a contract, and a direct reader bypasses the ownership checks the tools enforce.
+    Do not open `logs.db` or connect to Postgres. `[persistence].backend` governs the job store only; the flight recorder is always SQLite. On this host that means live `requests` in `logs.db` and live `jobs` in PostgreSQL, plus an abandoned `jobs` table still sitting in `logs.db` that answers queries with rows frozen at the switchover. No single database holds a whole request, the schema is not a contract, and a direct reader bypasses the ownership checks the tools enforce.
 
 4. **Polling cadence.** Use Monitor with a 90s sleep loop, exit only when all jobs are in {completed, failed}. Don't poll faster than 90s — gateway permission state isn't durable under rapid re-grants.
 
