@@ -1352,7 +1352,7 @@ List recent persisted requests newest-first **without** a correlation ID, which 
 
 ##### `llm_process_health`
 
-Report gateway process health: async-job manager state plus the resolved persistence block (`backend`, `dbPath`, config sources). Use it to confirm which config file the gateway is running under and **which storage backend is actually in use** (`sqlite`, `postgres`, or `none`) before assuming any particular one.
+Report gateway process health: async-job manager state, the resolved job-store persistence block (`backend`, `dbPath`, config sources), and a separate `flightRecorder` block naming the recorder's own engine and path. Use it to confirm which config file the gateway is running under and **which storage backend each subsystem is actually on** before assuming they match: they are independent, and on any non-SQLite job store the `flightRecorder.warning` field says so explicitly.
 
 ##### `upstream_contracts`
 

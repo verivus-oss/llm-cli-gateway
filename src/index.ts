@@ -278,7 +278,12 @@ import {
   normalizeCliInputAdmissionError,
   planCodexStdinPrompt,
 } from "./cli-input-limits.js";
-import { createFlightRecorder, FlightRecorderLike } from "./flight-recorder.js";
+import {
+  createFlightRecorder,
+  NoopFlightRecorder,
+  resolveFlightRecorderDbPath,
+  FlightRecorderLike,
+} from "./flight-recorder.js";
 import {
   resolvePromptInput,
   PromptPartsSchema,
@@ -22356,7 +22361,7 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
 
   server.tool(
     "llm_process_health",
-    "Report gateway process health: async-job manager state plus the resolved persistence configuration and paths.",
+    "Report gateway process health: async-job manager state, the resolved job-store persistence configuration, and the flight recorder's separate engine and path (the two do NOT share a backend setting).",
     {},
     {
       title: "Gateway process health",
@@ -22393,6 +22398,32 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
             : !storeAttached
               ? `Async job persistence is configured (backend = '${persistence.backend}') but the durable job store failed to open, so *_request_async / llm_job_* tools are NOT registered on this gateway. Check gateway startup logs for the store-open error.`
               : "Async job persistence is attached but durable admission is temporarily disabled while its heartbeat lease recovers. Existing async tools fail closed until admission is restored.",
+      };
+      // The flight recorder is a SEPARATE subsystem from the job store and does
+      // NOT follow [persistence].backend: it is always SQLite, pathed from
+      // LLM_GATEWAY_LOGS_DB (see config.ts, which calls that variable "a
+      // variable named for the flight recorder, a different subsystem").
+      //
+      // Reporting only the job store is what makes the split invisible: on a
+      // postgres host this tool answered `backend: "postgres", dbPath: null`
+      // while every request body sat in a SQLite file it never mentioned, so a
+      // caller looking for request history went to Postgres and found none.
+      // docs/plans/storage-unification.md is the fix; until it lands, the split
+      // is at least stated rather than hidden.
+      const recorderEnabled = !(flightRecorder instanceof NoopFlightRecorder);
+      const flightRecorderBlock = {
+        engine: recorderEnabled ? ("sqlite" as const) : null,
+        path: recorderEnabled ? resolveFlightRecorderDbPath() : null,
+        enabled: recorderEnabled,
+        // Stated as a fact rather than implied, because the whole failure mode
+        // is a caller assuming one backend setting covers both subsystems.
+        followsPersistenceBackend: false,
+        holds: "requests (llm_request_list, llm_request_result)",
+        warning: !recorderEnabled
+          ? "Flight recording is disabled (LLM_GATEWAY_LOGS_DB=none). llm_request_list returns an empty list and llm_request_result finds nothing; this is not evidence that no request ran."
+          : persistence.backend === "sqlite" || persistence.backend === "none"
+            ? null
+            : `Storage is SPLIT: request history is in SQLite at ${resolveFlightRecorderDbPath()}, while the job store is '${persistence.backend}'. No single database holds a whole request. If this gateway previously ran on sqlite, that same file also still contains an abandoned 'jobs' table which is frozen at the switchover and will answer queries as though it were live. Read through llm_request_list / llm_request_result / llm_job_result, which span the split.`,
       };
       const outboundProviders = {
         xai: providers.xai
@@ -22519,6 +22550,7 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
                 ...health,
                 backpressure,
                 persistence: persistenceBlock,
+                flightRecorder: flightRecorderBlock,
                 outboundProviders,
                 leastCost: leastCostBlock,
               },
