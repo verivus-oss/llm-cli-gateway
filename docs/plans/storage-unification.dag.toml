@@ -3,26 +3,37 @@
 
 [meta]
 surface = "FlightRecorder, JobStore and ISessionManager: 3 interfaces, 42 methods, 2 engines"
-status = "s1, s2, s4 done and s3 part 1 done, 2026-08-21; s3 signatures then s5"
+status = "s1, s2, s4 done and s3 part 1 done, 2026-08-21; b1 and s5 next"
 
 # WHY: `[persistence].backend` selects the job store and nothing else, so one
 # request's two halves live in two engines 15 ms apart, beside an abandoned
 # 31,895-row `jobs` table still answering queries in the recorder's own file.
 # 2470e09 made that visible in llm_process_health. This makes it untrue.
 
+[decisions]
+# Operator, 2026-08-21. Recorded because a stopping point that is not written
+# down is indistinguishable from an abandonment.
+scope_0a = "Option A. b1, s3sig, s5, s6, s8, s9, s11 in full; s7 stops with the recorder on the port under the SQLite driver. Transcript bodies into Postgres and s10 are a separate human-supervised run: a plan-sanctioned stop, not a deferral."
+retirement_0b = "Superseded state is proposed per file and may be moved to a quarantine directory so it stops looking live. Nothing is deleted by this run."
+
 [facts]
-measured_2026_08_21 = "77 SQL statements across 10 SQLite-side modules; 50 of them bind `?` or `@name`, which Postgres does not accept"
+# Measurements live in the evidence file named above, not here.
 driver_internal = "PRAGMA x12 and VACUUM x2 must be UNREACHABLE from the port, not translated"
-already_portable = "ON CONFLICT, RETURNING, COALESCE, CREATE INDEX, ALTER TABLE ADD COLUMN, LENGTH. More than the design assumed."
 schema_gap = "`requests` and `gateway_metadata` exist ONLY in SQLite. The Postgres transcript schema is new authorship, not a migration."
-schema_dupes = "jobs, validation_runs, validation_run_jobs, validation_receipts, gateway_instances, kit_attempt_fences are each declared twice: migrations/*.sql AND job-store.ts"
-the_leak = "queryRequests(sql, ...params) takes RAW CALLER SQL. 7 production sites: cache-stats.ts:173,290,378,616,787, lcr-priors.ts:432, resources.ts:374"
 the_choke_point = "every inline flight write funnels through ONE sync class, FlightOwnership at index.ts:2587, whose started/managerOwnsCompletion flags are idempotence fences"
 
 [non_goals]
 no_postgres_mandate = "Decided 2026-08-13. SQLite stays as a driver. 'Postgres only' is a deployment property via config, never a package property via removal; the 2.0.0 node:sqlite move exists to keep zero-config npm installs working."
 no_transcript_move_yet = "Bodies do NOT enter Postgres until postgres-security-hardening.md section 6 is complete through step 8. It is at step 2 of 10. Moving 1.2 GB of plaintext prompts into a store one superuser role reads in cleartext is a regression over a 0600 file."
 no_behaviour_change_before_s5 = "s2 through s4 are refactors. If any of them changes what is written or read, the slice is wrong."
+
+[[node]]
+id = "b1.sqlite-async-benchmark"
+depends_on = []
+role = "Design section 9's outstanding deliverable. Until it exists, whether wrapping a synchronous engine in promises costs anything at the recorder's call rate is UNKNOWN, and the design says so."
+action = "Measure p50/p99 request latency, event-loop delay, WAL contention and shutdown drain on a representative 1.2 GB copy, at measured and worst-case rates."
+constraint = "Never against the live logs.db; use a snapshot. A result that says the overhead matters is a finding that reshapes s7, not a failure."
+affects = ["s7.flight-recorder-onto-the-port"]
 
 [[node]]
 id = "s1.inventory-and-call-surface"
@@ -49,7 +60,7 @@ id = "s3.define-the-async-port"
 critical = true
 status = "part 1 done: classes, roles, seam, inventory. Signatures follow s5."
 depends_on = ["s2.kill-the-raw-sql-read-path"]
-role = "Sync-over-async needs a worker thread; async-over-sync is free. The port must be async so Postgres drops postgres-job-store-worker.ts and SQLite becomes a resolved-promise adapter."
+role = "Sync-over-async needs a worker thread; async-over-sync does not. CORRECTION: the design withdrew 'async-over-sync is free', so this is a structural claim and b1 measures the cost."
 action = "Define the storage port over all three subsystems' 42 operations. No PRAGMA, no VACUUM, no SQL string anywhere in the surface."
 constraint = "The port is types only until s4 and s5 give it two implementations. Do not land it with one."
 affects = ["s4.two-drivers", "s6.write-ordering"]
@@ -71,12 +82,21 @@ depends_on = ["s4.two-drivers"]
 role = "It already has both engines, so the *-pg suites prove the port against real dual-engine behaviour before anything irreversible."
 action = "Move JobStore onto the port; delete the worker-thread sync-over-async shim."
 constraint = "npm run test:pg must pass unchanged. A green suite that needed edits proves the edits, not the port."
-affects = ["s6.write-ordering", "s8.sessions"]
+affects = ["s3sig.operation-signatures", "s6.write-ordering", "s8.sessions"]
+
+[[node]]
+id = "s3sig.operation-signatures"
+critical = true
+depends_on = ["s5.job-store-first"]
+role = "Deliberately after s5, so two real drivers and one migrated subsystem shape the signatures rather than being authored blind."
+action = "Author the per-subsystem operations across the inventory, and update STATE_INVENTORY where a determination changed."
+constraint = "PRAGMA and VACUUM must be UNREACHABLE from the surface, not translated. No SQL string in any signature."
+affects = ["s6.write-ordering", "s7.flight-recorder-onto-the-port"]
 
 [[node]]
 id = "s6.write-ordering"
 critical = true
-depends_on = ["s3.define-the-async-port", "s5.job-store-first"]
+depends_on = ["s3sig.operation-signatures"]
 role = "Design 3.4, and revision 1 got this wrong: a per-correlation in-process queue does NOT cover crash between start and complete, nor orphan completion by a different instance."
 action = "Specify and test ordering across every 3.4 failure mode, including cross-process orphan completion and crash-restart."
 constraint = "FlightOwnership's fences are the failure site. Awaiting inside a state machine whose idempotence is a boolean makes the boolean a race."
@@ -85,10 +105,11 @@ affects = ["s7.flight-recorder-onto-the-port"]
 [[node]]
 id = "s7.flight-recorder-onto-the-port"
 critical = true
-depends_on = ["s2.kill-the-raw-sql-read-path", "s6.write-ordering"]
+depends_on = ["s2.kill-the-raw-sql-read-path", "s6.write-ordering", "b1.sqlite-async-benchmark"]
 role = "Closes the original defect: the recorder starts obeying [persistence].backend."
 action = "Author the Postgres transcript schema (new, not a migration), move the recorder onto the port, convert FlightOwnership to async."
 constraint = "HARD GATE: transcript BODIES do not enter Postgres until postgres-security-hardening.md section 6 is complete through step 8, inheriting that sequence in full rather than naming a cut-off that can drift."
+scope_0a = "This run stops with the recorder on the port under the SQLite driver, and authors nothing that moves bodies. Security section 6 is at step 2 of 10."
 affects = ["s9.one-selector"]
 
 [[node]]
@@ -110,7 +131,16 @@ affects = ["s10.cutover"]
 [[node]]
 id = "s10.cutover"
 critical = true
+status = "HELD by operator decision 0a: a separate human-supervised run."
 depends_on = ["s9.one-selector"]
 role = "The last cutover abandoned 31,895 rows in place rather than migrating them. That is the precedent to not repeat."
 action = "Lossless restartable backfill with reconciliation output, rehearsed against a copy first."
 constraint = "npm run migrate is DDL-only. Backfill is NOT optional and is not the same thing. Removing the superseded SQLite tables is part of the cutover, or the stale copy returns."
+
+[[node]]
+id = "s11.retention"
+depends_on = ["s9.one-selector"]
+role = "Only `jobs` is bounded today. validation_runs has wedged rows and logs.db grows without limit, because retention belongs to a subsystem that is not the one growing."
+action = "Express retention once, over every subsystem the port carries."
+constraint = "Retention economics differ per engine: Postgres drops partitions, SQLite needs DELETE plus a VACUUM that takes a long exclusive lock on a 1.2 GB file. One policy, two terminations."
+affects = []
