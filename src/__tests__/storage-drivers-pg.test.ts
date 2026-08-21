@@ -13,6 +13,7 @@ import {
   type PgPoolLike,
   type PostgresRoleDsns,
 } from "../storage/drivers/postgres.js";
+import { StorageTransactionDeadlineError } from "../storage/deadline.js";
 import type { StorageRole } from "../storage/roles.js";
 
 const TEST_DATABASE_URL =
@@ -204,5 +205,155 @@ describe("PostgresStorageDriver against a real server", () => {
       c.query<{ v: string }>(`SELECT v FROM ${table} WHERE id = ?`, [1])
     );
     expect(rows[0].v).toBe("after");
+  });
+
+  /**
+   * s13: the whole-operation bound, against a real server.
+   *
+   * The blocking is real: a second connection holds a row lock and these pools
+   * set no `lock_timeout`, so the contended statement blocks for as long as the
+   * lock is held and the deadline is the only thing that can end it. Nothing
+   * sleeps waiting for a timeout to maybe fire.
+   *
+   * The assertions are about the DATABASE, not the caller. A caller-side
+   * rejection is what a `Promise.race` produces too, which is the shape the DAG
+   * forbids; only the row state can tell them apart.
+   */
+  async function backendAlive(pid: number): Promise<boolean> {
+    const rows = await driver.withConnection("write", c =>
+      c.query<{ n: string }>("SELECT count(*) AS n FROM pg_stat_activity WHERE pid = ?", [pid])
+    );
+    return Number(rows[0].n) > 0;
+  }
+
+  async function waitUntil(done: () => Promise<boolean>, what: string): Promise<void> {
+    const giveUpAt = Date.now() + 20_000;
+    while (Date.now() < giveUpAt) {
+      if (await done()) return;
+      await new Promise(resolve => setTimeout(resolve, 50));
+    }
+    throw new Error(`timed out waiting for ${what}`);
+  }
+
+  /** BEGIN plus a row lock on id 1, held until the returned release is called. */
+  async function holdRowLock(): Promise<() => Promise<void>> {
+    const blocker = new Pool({ connectionString: TEST_DATABASE_URL, max: 1 });
+    const held = await blocker.connect();
+    await held.query("BEGIN");
+    await held.query(`UPDATE ${table} SET v = 'held' WHERE id = 1`);
+    return async () => {
+      await held.query("COMMIT");
+      held.release();
+      await blocker.end();
+    };
+  }
+
+  it("destroys the connection on the bound, and the transaction cannot commit", async () => {
+    const bounded = new PostgresStorageDriver({ app: TEST_DATABASE_URL }, factory, {
+      transactionDeadlineMs: 500,
+    });
+    await driver.withConnection("write", c =>
+      c.execute(`INSERT INTO ${table} (id, v) VALUES (?, ?)`, [1, "start"])
+    );
+    const releaseLock = await holdRowLock();
+
+    let pid = 0;
+    const attempt = bounded
+      .transaction("write", async c => {
+        const backend = await c.query<{ pid: number }>("SELECT pg_backend_pid() AS pid");
+        pid = Number(backend[0].pid);
+        await c.execute(`INSERT INTO ${table} (id, v) VALUES (?, ?)`, [2, "inside"]);
+        await c.execute(`UPDATE ${table} SET v = 'racer' WHERE id = 1`);
+      })
+      .then<unknown, unknown>(
+        () => "landed",
+        (error: unknown) => error
+      );
+
+    expect(await attempt).toBeInstanceOf(StorageTransactionDeadlineError);
+    expect(pid).toBeGreaterThan(0);
+
+    // MEASURED rather than assumed, and it is the residual worth knowing:
+    // PostgreSQL does not notice a departed client while a statement is running
+    // unless client_connection_check_interval is set, which is 0 by default. So
+    // the backend is still there immediately after the destroy, and what bounds
+    // it from here is statement_timeout.
+    expect(await backendAlive(pid)).toBe(true);
+
+    await releaseLock();
+    // Freed, the backend completes its statement, cannot answer a dead socket
+    // and exits. THAT is what aborts the transaction.
+    await waitUntil(async () => !(await backendAlive(pid)), "the destroyed backend to exit");
+
+    const rows = await driver.withConnection("write", c =>
+      c.query<{ id: number; v: string }>(`SELECT id, v FROM ${table} ORDER BY id`)
+    );
+    expect(rows.map(r => Number(r.id))).toEqual([1]);
+    expect(rows[0].v).toBe("held");
+
+    await bounded.close();
+  });
+
+  it("shows why a race-shaped bound is worse than none: the write lands anyway", async () => {
+    // Not a test of the driver. It is the executable reason the driver destroys
+    // instead of racing: same scenario, same caller-visible rejection, and the
+    // mutation commits after the caller has been told it failed.
+    const unbounded = new PostgresStorageDriver({ app: TEST_DATABASE_URL }, factory, {
+      transactionDeadlineMs: 0,
+    });
+    await driver.withConnection("write", c =>
+      c.execute(`INSERT INTO ${table} (id, v) VALUES (?, ?)`, [1, "start"])
+    );
+    const releaseLock = await holdRowLock();
+
+    const work = unbounded.transaction("write", async c => {
+      await c.execute(`INSERT INTO ${table} (id, v) VALUES (?, ?)`, [3, "raced"]);
+      await c.execute(`UPDATE ${table} SET v = 'racer' WHERE id = 1`);
+    });
+    const raced = Promise.race([
+      work,
+      new Promise((_resolve, reject) => setTimeout(() => reject(new Error("deadline")), 500)),
+    ]).then<unknown, unknown>(
+      () => "landed",
+      (error: unknown) => error
+    );
+    expect(await raced).toMatchObject({ message: "deadline" });
+
+    await releaseLock();
+    await work;
+
+    const rows = await driver.withConnection("write", c =>
+      c.query<{ id: number; v: string }>(`SELECT id, v FROM ${table} ORDER BY id`)
+    );
+    expect(rows.map(r => Number(r.id))).toEqual([1, 3]);
+    expect(rows[0].v).toBe("racer");
+
+    await unbounded.close();
+  });
+
+  it("leaves an unbounded transaction's client in the pool, under a max:1 shape", async () => {
+    // Control for the destroy: a transaction that stays inside the bound must
+    // hand its backend back rather than have it thrown away. max: 1 makes that
+    // observable, because a reused client is the same backend pid.
+    const single = new PostgresStorageDriver(
+      { app: TEST_DATABASE_URL },
+      (_role, dsn) => {
+        const pool = new Pool({ connectionString: dsn, max: 1 });
+        pools.push(pool);
+        return pool as unknown as PgPoolLike;
+      },
+      { transactionDeadlineMs: 60_000 }
+    );
+
+    const pidOf = (): Promise<number> =>
+      single.transaction("write", async c => {
+        const rows = await c.query<{ pid: number }>("SELECT pg_backend_pid() AS pid");
+        return Number(rows[0].pid);
+      });
+
+    const first = await pidOf();
+    expect(await pidOf()).toBe(first);
+
+    await single.close();
   });
 });
