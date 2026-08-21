@@ -1420,6 +1420,36 @@ async function main() {
   const work = assertNotLiveState(join(dirname(options.source), "b1-bench-work.db"));
   mkdirSync(dirname(work), { recursive: true });
 
+  // The working path is DERIVED from the snapshot argument, so two concurrent
+  // invocations silently restore the same 1.21 GB file underneath each other.
+  // That happened once during development and was caught before it corrupted a
+  // measurement, which is luck rather than design. `wx` fails if the lock
+  // exists.
+  const lockPath = `${work}.lock`;
+  let lockFd;
+  try {
+    lockFd = openSync(lockPath, "wx");
+    writeFileSync(lockFd, `pid ${process.pid} started ${new Date().toISOString()}\n`);
+  } catch (error) {
+    if (error.code === "EEXIST") {
+      throw new Error(
+        `another benchmark run holds ${lockPath}. Concurrent runs share this ` +
+          `working copy and would corrupt each other. Remove the lock only if no run is active.`,
+        { cause: error }
+      );
+    }
+    throw error;
+  }
+  const releaseLock = () => {
+    try {
+      closeSync(lockFd);
+      rmSync(lockPath, { force: true });
+    } catch {
+      // Best effort: a stale lock is a loud failure next run, not a silent one.
+    }
+  };
+  process.on("exit", releaseLock);
+
   const modules = await loadModules();
   const columns = resolveColumns(modules.openReadOnly, options.source);
   const sql = sqlFor(columns);
@@ -1602,12 +1632,18 @@ async function main() {
   }
 
   results.meta.finishedAt = new Date().toISOString();
-  report(results, variantIds, options);
+  // Persist BEFORE reporting. The bootstrap is the most expensive and most
+  // failure-prone step in the program, and an earlier version ran it first, so
+  // a crash there would have destroyed a 47-minute run that had already been
+  // fully measured. Compute-then-persist is the defect class this benchmark
+  // exists to study; it was in the benchmark.
   if (options.json) {
     writeFileSync(options.json, JSON.stringify(results, null, 2));
-    console.log(`\nJSON written to ${options.json}`);
+    console.log(`JSON written to ${options.json}`);
   }
+  report(results, variantIds, options);
   for (const suffix of ["", "-wal", "-shm"]) rmSync(`${work}${suffix}`, { force: true });
+  releaseLock();
 }
 
 function pooled(results, scenario, variantId, key) {

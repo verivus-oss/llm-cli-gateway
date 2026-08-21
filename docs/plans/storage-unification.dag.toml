@@ -3,7 +3,7 @@
 
 [meta]
 surface = "FlightRecorder, JobStore and ISessionManager: 3 interfaces, 42 methods, 2 engines"
-status = "s1, s2, s4 done and s3 part 1 done, 2026-08-21; b1 and s5 next"
+status = "s1, s2, s4, b1 done and s3 part 1 done, 2026-08-21; s5 next"
 
 # WHY: `[persistence].backend` selects the job store and nothing else, so one
 # request's two halves live in two engines 15 ms apart, beside an abandoned
@@ -32,7 +32,7 @@ id = "b1.sqlite-async-benchmark"
 depends_on = []
 role = "Design section 9's outstanding deliverable. Until it exists, whether wrapping a synchronous engine in promises costs anything at the recorder's call rate is UNKNOWN, and the design says so."
 action = "Measure p50/p99 request latency, event-loop delay, WAL contention and shutdown drain on a representative 1.2 GB copy, at measured and worst-case rates."
-constraint = "Never against the live logs.db; use a snapshot. A result that says the overhead matters is a finding that reshapes s7, not a failure."
+status = "done 2026-08-21. Async wrapping measures ZERO (-0.001ms, sign-unstable over 3 processes); the whole +0.016ms delta is the driver's non-async choices, so s7 proceeds and the driver needs a statement cache. Buried twice: 10.8ms fsync/request and a 2x cold-start penalty at real rates. Shutdown is the real async cost: JobStore.close() is `void` so no caller can await a drain, and the 2s bound cannot fire because setTimeout never preempts the queue's microtask chain."
 affects = ["s7.flight-recorder-onto-the-port"]
 
 [[node]]
