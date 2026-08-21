@@ -1505,9 +1505,10 @@ export class SqliteJobStore implements JobStore, ValidationRunStore {
    * visible at the call site instead of being a parameter 40 other callers
    * silently leave at `write`.
    *
-   * On SQLite this changes nothing observable: `retention` is not a read class,
-   * so it resolves to the same writable handle, and the read-only-handle
-   * question that design 27.7 raises does not arise here.
+   * On SQLite this changes nothing observable: `READ_ONLY_OPERATIONS` in
+   * drivers/sqlite.ts is {transcript_read, analytics_read}, so `retention`
+   * resolves to the same writable handle and nothing here newly touches
+   * `openReadOnly`. Moving a READ class would be the different question.
    */
   private async execRetentionSql(
     sql: string,
