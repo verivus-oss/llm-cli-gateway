@@ -62,6 +62,12 @@ describe("toDollarPlaceholders", () => {
     // through the driver. Recorded here so the next author writing a jsonb
     // predicate finds the reason to spell it `jsonb_exists(metadata, 'kit')`,
     // which is the same operator by its function name.
+    //
+    // It is not free, and the cost is measured rather than assumed: with
+    // enable_seqscan off over 50,000 rows, the OPERATOR form takes a bitmap
+    // index scan on the GIN index and the FUNCTION form still sequential
+    // scans, because the planner matches indexes on operators. With seqscan
+    // ON, both sequential scan at that size, so nothing regresses today.
     expect(toDollarPlaceholders("SELECT 1 WHERE metadata ? 'kit'")).toBe(
       "SELECT 1 WHERE metadata $1 'kit'"
     );
