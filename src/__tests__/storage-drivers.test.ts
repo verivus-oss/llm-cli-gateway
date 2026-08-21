@@ -5,7 +5,7 @@
  * fits that driver. The Postgres pool is injected, so routing and translation
  * are tested without a server.
  */
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -15,6 +15,7 @@ import {
   toDollarPlaceholders,
   type PgPoolLike,
 } from "../storage/drivers/postgres.js";
+import { StorageTransactionDeadlineError } from "../storage/deadline.js";
 import { roleSeparationInForce, type StorageRole } from "../storage/roles.js";
 
 describe("toDollarPlaceholders", () => {
@@ -432,6 +433,102 @@ describe("SqliteStorageDriver", () => {
       /closed/
     );
   });
+
+  /**
+   * s13: the whole-operation bound.
+   *
+   * The clock is MOVED rather than waited on. That is not a convenience: the
+   * bound is deliberately a clock read at each statement boundary and not a
+   * timer, because `node:sqlite` holds the thread for the whole of a contended
+   * statement (measured: 5003 ms block, a 200 ms timer armed beforehand did not
+   * run until 5004 ms), so a timer would be starved by the work it bounds.
+   */
+  it("ends a transaction that outlives its bound, and the write does NOT land", async () => {
+    vi.useFakeTimers();
+    try {
+      const bounded = new SqliteStorageDriver(join(dir, "deadline.db"), {
+        transactionDeadlineMs: 1000,
+      });
+      await bounded.withConnection("write", c =>
+        c.execute("CREATE TABLE t (id INTEGER PRIMARY KEY)")
+      );
+
+      let seenInsideTransaction = -1;
+      await expect(
+        bounded.transaction("write", async c => {
+          await c.execute("INSERT INTO t VALUES (?)", [1]);
+          const inside = await c.query<{ n: number }>("SELECT count(*) AS n FROM t");
+          seenInsideTransaction = Number(inside[0].n);
+          vi.advanceTimersByTime(1500);
+          await c.execute("INSERT INTO t VALUES (?)", [2]);
+        })
+      ).rejects.toBeInstanceOf(StorageTransactionDeadlineError);
+
+      // The first write really did happen inside the transaction, so the zero
+      // below is a ROLLBACK and not an insert that never ran.
+      expect(seenInsideTransaction).toBe(1);
+      const rows = await bounded.withConnection("write", c =>
+        c.query<{ n: number }>("SELECT count(*) AS n FROM t")
+      );
+      expect(Number(rows[0].n)).toBe(0);
+      await bounded.close();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("commits a transaction that finishes inside its bound", async () => {
+    // Control. A bound that refused everything would satisfy the test above.
+    vi.useFakeTimers();
+    try {
+      const bounded = new SqliteStorageDriver(join(dir, "inside.db"), {
+        transactionDeadlineMs: 1000,
+      });
+      await bounded.withConnection("write", c =>
+        c.execute("CREATE TABLE t (id INTEGER PRIMARY KEY)")
+      );
+      await bounded.transaction("write", async c => {
+        await c.execute("INSERT INTO t VALUES (?)", [1]);
+        vi.advanceTimersByTime(900);
+        await c.execute("INSERT INTO t VALUES (?)", [2]);
+      });
+      const rows = await bounded.withConnection("write", c =>
+        c.query<{ n: number }>("SELECT count(*) AS n FROM t")
+      );
+      expect(Number(rows[0].n)).toBe(2);
+      await bounded.close();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("refuses to COMMIT when the bound expires during the last statement", async () => {
+    // The boundary case the check at the statement seam cannot see: the body
+    // finishes, and only then is the bound already past. Committing there would
+    // hand back a transaction that outran its bound.
+    vi.useFakeTimers();
+    try {
+      const bounded = new SqliteStorageDriver(join(dir, "atcommit.db"), {
+        transactionDeadlineMs: 1000,
+      });
+      await bounded.withConnection("write", c =>
+        c.execute("CREATE TABLE t (id INTEGER PRIMARY KEY)")
+      );
+      await expect(
+        bounded.transaction("write", async c => {
+          await c.execute("INSERT INTO t VALUES (?)", [1]);
+          vi.advanceTimersByTime(1500);
+        })
+      ).rejects.toBeInstanceOf(StorageTransactionDeadlineError);
+      const rows = await bounded.withConnection("write", c =>
+        c.query<{ n: number }>("SELECT count(*) AS n FROM t")
+      );
+      expect(Number(rows[0].n)).toBe(0);
+      await bounded.close();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
 });
 
 describe("PostgresStorageDriver", () => {
@@ -625,5 +722,107 @@ describe("PostgresStorageDriver", () => {
 
     await driver.close();
     expect(ended.sort()).toEqual(["app", "reader"]);
+  });
+
+  /**
+   * s13: the whole-operation bound, against a fake that models the one property
+   * that makes destroying different from abandoning. `pg` ends a client with a
+   * query in flight by destroying the socket, so the in-flight query rejects and
+   * nothing further can be sent on it, COMMIT included.
+   */
+  function parkingPool(shouldPark: (text: string) => boolean) {
+    const seen: string[] = [];
+    const releases: (Error | undefined)[] = [];
+    let destroy: ((error: Error) => void) | null = null;
+    let unpark: (() => void) | null = null;
+    let destroyed = false;
+    const factory = (): PgPoolLike => ({
+      query: () => Promise.resolve({ rows: [], rowCount: 0 }),
+      connect: () =>
+        Promise.resolve({
+          query(text: string) {
+            seen.push(text);
+            if (destroyed) return Promise.reject(new Error("Client was closed"));
+            if (!shouldPark(text)) return Promise.resolve({ rows: [], rowCount: 0 });
+            return new Promise<{ rows: unknown[]; rowCount: number | null }>((resolve, reject) => {
+              destroy = reject;
+              unpark = () => resolve({ rows: [], rowCount: 0 });
+            });
+          },
+          release(error?: Error) {
+            releases.push(error);
+            if (!error) return;
+            destroyed = true;
+            destroy?.(new Error("Connection terminated"));
+          },
+        }),
+      end: () => Promise.resolve(),
+    });
+    return { factory, seen, releases, unpark: (): void => unpark?.() };
+  }
+
+  it("bounds the whole transaction, destroys the client, and never issues COMMIT", async () => {
+    vi.useFakeTimers();
+    try {
+      const pool = parkingPool(text => text.includes("park"));
+      const driver = new PostgresStorageDriver({ app: "a" }, pool.factory, {
+        transactionDeadlineMs: 1000,
+      });
+
+      // The outcome handler is attached HERE, before the clock moves, so the
+      // rejection is never momentarily unhandled while timers advance.
+      const attempt = driver
+        .transaction("write", async c => {
+          await c.execute("UPDATE t SET v = 1");
+          await c.execute("UPDATE t SET v = 2 /* park */");
+        })
+        .then<unknown, unknown>(
+          () => "landed",
+          (error: unknown) => error
+        );
+      await vi.advanceTimersByTimeAsync(1500);
+
+      expect(await attempt).toBeInstanceOf(StorageTransactionDeadlineError);
+      // No COMMIT, and no ROLLBACK either: there is no connection left to roll
+      // back on, and attempting it would only replace the useful error.
+      expect(pool.seen).toEqual(["BEGIN", "UPDATE t SET v = 1", "UPDATE t SET v = 2 /* park */"]);
+      // Destroyed, exactly once. pg-pool throws on a second release and the
+      // `finally` releases too.
+      expect(pool.releases).toHaveLength(1);
+      expect(pool.releases[0]).toBeInstanceOf(StorageTransactionDeadlineError);
+      await driver.close();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("never lets the bound fire with COMMIT in flight", async () => {
+    // The one case where destroying WOULD manufacture the ambiguity this bound
+    // exists to remove: killing a connection mid-COMMIT leaves nobody able to
+    // say whether the write landed. So the bound is disarmed and checked in one
+    // synchronous block before COMMIT is issued, and a COMMIT that overruns is
+    // left to `statement_timeout` instead.
+    vi.useFakeTimers();
+    try {
+      const pool = parkingPool(text => text === "COMMIT");
+      const driver = new PostgresStorageDriver({ app: "a" }, pool.factory, {
+        transactionDeadlineMs: 1000,
+      });
+
+      const done = driver.transaction("write", async c => {
+        await c.execute("UPDATE t SET v = 1");
+      });
+      await vi.advanceTimersByTimeAsync(5000);
+      // Five times the bound, and the client is deliberately untouched.
+      expect(pool.releases).toEqual([]);
+
+      pool.unpark();
+      await expect(done).resolves.toBeUndefined();
+      expect(pool.seen).toEqual(["BEGIN", "UPDATE t SET v = 1", "COMMIT"]);
+      expect(pool.releases).toEqual([undefined]);
+      await driver.close();
+    } finally {
+      vi.useRealTimers();
+    }
   });
 });

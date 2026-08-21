@@ -19,6 +19,7 @@ import {
   type GatewayStatement,
 } from "../../sqlite-driver.js";
 import { resolveStorageRole, type StorageOperationClass, type StorageRole } from "../roles.js";
+import { STORAGE_TRANSACTION_DEADLINE_MS, StorageTransactionDeadlineError } from "../deadline.js";
 import { inTransactionOn, nestedConnectionRefusal, runInTransaction } from "../reentrancy.js";
 import { isTransactionControl, transactionControlRefusal } from "../statements.js";
 import type { StorageConnection, StorageDriver, StorageEngine } from "../store.js";
@@ -70,6 +71,16 @@ function preparedFor(db: GatewayDatabase, statement: string): GatewayStatement {
   return prepared;
 }
 
+/**
+ * The whole-operation deadline a transaction's statements are checked against,
+ * or null outside a bounded transaction.
+ */
+interface SqliteDeadline {
+  expiresAt: number;
+  operation: StorageOperationClass;
+  deadlineMs: number;
+}
+
 // `async` deliberately: node:sqlite throws synchronously, and an async surface
 // that sometimes throws instead of rejecting cannot be handled with .catch().
 //
@@ -77,11 +88,20 @@ function preparedFor(db: GatewayDatabase, statement: string): GatewayStatement {
 // A caller-issued BEGIN would otherwise bypass the `queue` below, on a
 // connection that cannot nest one. Same rule as the Postgres driver, for a
 // different engine reason.
-function connectionOver(db: GatewayDatabase, transactionControl: boolean): StorageConnection {
+function connectionOver(
+  db: GatewayDatabase,
+  transactionControl: boolean,
+  deadline: SqliteDeadline | null = null
+): StorageConnection {
   const guard = (statement: string): void => {
-    if (!transactionControl && isTransactionControl(statement)) {
-      throw transactionControlRefusal(statement);
-    }
+    const control = isTransactionControl(statement);
+    if (!transactionControl && control) throw transactionControlRefusal(statement);
+    // Checked BEFORE the statement is issued, never during one, and never
+    // against a terminator: `transaction()` decides for itself whether COMMIT
+    // may still be issued, and ROLLBACK must stay reachable precisely when the
+    // bound has expired.
+    if (control || deadline === null || Date.now() < deadline.expiresAt) return;
+    throw new StorageTransactionDeadlineError("sqlite", deadline.operation, deadline.deadlineMs);
   };
   return {
     async query<T>(statement: string, params: readonly unknown[] = []): Promise<T[]> {
@@ -118,6 +138,7 @@ export class SqliteStorageDriver implements StorageDriver {
   private closing = false;
   private closePromise: Promise<void> | null = null;
   private readonly drainTimeoutMs: number;
+  private readonly transactionDeadlineMs: number;
 
   /**
    * `drainTimeoutMs` bounds how long `close()` waits for already-queued
@@ -125,13 +146,16 @@ export class SqliteStorageDriver implements StorageDriver {
    * `executor.ts:454` SIGKILLs surviving process groups 3s after SIGTERM, so a
    * drain that outlives that is not a drain, it is a process that gets killed
    * mid-write. 2s leaves headroom. 0 disables draining.
+   *
+   * `transactionDeadlineMs` bounds one transaction as a whole. 0 disables it.
    */
   constructor(
     private readonly dbPath: string,
-    options: { drainTimeoutMs?: number } = {}
+    options: { drainTimeoutMs?: number; transactionDeadlineMs?: number } = {}
   ) {
     this.writable = openDatabase(dbPath);
     this.drainTimeoutMs = options.drainTimeoutMs ?? DEFAULT_DRAIN_TIMEOUT_MS;
+    this.transactionDeadlineMs = options.transactionDeadlineMs ?? STORAGE_TRANSACTION_DEADLINE_MS;
   }
 
   /**
@@ -141,15 +165,16 @@ export class SqliteStorageDriver implements StorageDriver {
    */
   private connectionFor(
     operation: StorageOperationClass,
-    transactionControl = false
+    transactionControl = false,
+    deadline: SqliteDeadline | null = null
   ): StorageConnection {
     if (this.closed) throw new Error("storage: sqlite driver is closed");
     resolveStorageRole(operation, this.roles);
     if (!READ_ONLY_OPERATIONS.has(operation)) {
-      return connectionOver(this.writable, transactionControl);
+      return connectionOver(this.writable, transactionControl, deadline);
     }
     this.readable ??= openReadOnly(this.dbPath);
-    return connectionOver(this.readable, transactionControl);
+    return connectionOver(this.readable, transactionControl, deadline);
   }
 
   async withConnection<T>(
@@ -216,6 +241,25 @@ export class SqliteStorageDriver implements StorageDriver {
     return started;
   }
 
+  /**
+   * BOUNDED AS A WHOLE, by a deadline the connection reads rather than a timer.
+   *
+   * The residual is real here and not only on Postgres. `job-store.ts` sets
+   * `PRAGMA busy_timeout = 5000` so that two gateway processes sharing one file
+   * wait for the write lock instead of failing (#139), and that wait is per
+   * statement: a body looping over its input has no aggregate bound. Measured
+   * on this engine, one contended statement blocks for 5003ms and a 200ms timer
+   * armed beforehand does not run until 5004ms, because `node:sqlite` is
+   * synchronous and holds the thread for the whole wait.
+   *
+   * That is why the check is a clock read at each statement boundary and not a
+   * `setTimeout`: the same starvation b1 measured on the drain bound applies
+   * here, and `node:sqlite` exposes no interrupt to cancel a statement with.
+   * Nothing is abandoned either, which is what makes it safe: the engine is
+   * in-process and synchronous, so at the moment of the check no statement is
+   * in flight, and refusing to issue the NEXT one leaves an ordinary ROLLBACK
+   * to run. The residual is one statement's `busy_timeout`.
+   */
   transaction<T>(
     operation: StorageOperationClass,
     fn: (connection: StorageConnection) => Promise<T>
@@ -243,10 +287,28 @@ export class SqliteStorageDriver implements StorageDriver {
             `the drain bound of ${this.drainTimeoutMs}ms elapsed and the write did NOT land`
         );
       }
-      const connection = this.connectionFor(operation, true);
+      // Armed when the transaction reaches the front of the queue, not when it
+      // was submitted: a bound that counted queue time would turn a backlog
+      // into a cascade of refusals rather than bounding anyone's own work.
+      const deadline: SqliteDeadline | null =
+        this.transactionDeadlineMs > 0
+          ? {
+              expiresAt: Date.now() + this.transactionDeadlineMs,
+              operation,
+              deadlineMs: this.transactionDeadlineMs,
+            }
+          : null;
+      const connection = this.connectionFor(operation, true, deadline);
       await connection.execute("BEGIN IMMEDIATE");
       try {
         const result = await runInTransaction(this, () => fn(connection));
+        if (deadline !== null && Date.now() >= deadline.expiresAt) {
+          throw new StorageTransactionDeadlineError(
+            "sqlite",
+            deadline.operation,
+            deadline.deadlineMs
+          );
+        }
         await connection.execute("COMMIT");
         return result;
       } catch (error) {
