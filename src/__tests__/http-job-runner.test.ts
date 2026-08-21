@@ -86,7 +86,7 @@ describe("Slice 1 — HttpJobRunner", () => {
 
   it("runs an http job start→complete (stdout=text, httpStatus, exitCode 0)", async () => {
     const provider = new OpenAiCompatibleProvider("ollama");
-    const { snapshot, deduped } = mgr.startHttpJob({
+    const { snapshot, deduped } = await mgr.startHttpJob({
       provider,
       apiRequest: apiReq(),
       correlationId: "c1",
@@ -105,7 +105,7 @@ describe("Slice 1 — HttpJobRunner", () => {
   });
 
   it("never persists the apiKey into the durable jobs payload (secret-leak guard)", async () => {
-    const { snapshot } = mgr.startHttpJob({
+    const { snapshot } = await mgr.startHttpJob({
       provider: new OpenAiCompatibleProvider("ollama"),
       apiRequest: apiReq({ apiKey: "sk-super-secret-value" }),
       correlationId: "c-secret",
@@ -120,8 +120,8 @@ describe("Slice 1 — HttpJobRunner", () => {
     expect(JSON.parse(row.payloadJson!).model).toBe("m1");
   });
 
-  it("never registers a pid / process for an http job", () => {
-    const { snapshot } = mgr.startHttpJob({
+  it("never registers a pid / process for an http job", async () => {
+    const { snapshot } = await mgr.startHttpJob({
       provider: new OpenAiCompatibleProvider("ollama"),
       apiRequest: apiReq(),
       correlationId: "c-guard",
@@ -133,7 +133,7 @@ describe("Slice 1 — HttpJobRunner", () => {
   it("maps an HTTP failure to exitCode 1 with the real httpStatus", async () => {
     control.status = 503;
     control.payload = JSON.stringify({ error: { message: "overloaded" } });
-    const { snapshot } = mgr.startHttpJob({
+    const { snapshot } = await mgr.startHttpJob({
       provider: new OpenAiCompatibleProvider("ollama"),
       apiRequest: apiReq(),
       correlationId: "c-fail",
@@ -152,7 +152,7 @@ describe("Slice 1 — HttpJobRunner", () => {
 
   it("cancels an in-flight http job via the AbortController", async () => {
     control.delayMs = 1000;
-    const { snapshot } = mgr.startHttpJob({
+    const { snapshot } = await mgr.startHttpJob({
       provider: new OpenAiCompatibleProvider("ollama"),
       apiRequest: apiReq(),
       correlationId: "c-cancel",

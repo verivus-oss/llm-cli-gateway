@@ -131,8 +131,8 @@ describe("issue #271: an unlisted provider is skipped, not fatal", () => {
     // perfectly well configured.
     const { report, started } = run(["claude", "codex", "cursor"], cwdResolver("cursor"));
     expect(started).toEqual(["claude", "codex"]);
-    expect(await statusOf(report, "claude").status).toBe("running");
-    expect(await statusOf(report, "codex").status).toBe("running");
+    expect((await statusOf(report, "claude")).status).toBe("running");
+    expect((await statusOf(report, "codex")).status).toBe("running");
   });
 
   it("marks the unlisted provider skipped, with the workspace reason", async () => {
@@ -144,7 +144,7 @@ describe("issue #271: an unlisted provider is skipped, not fatal", () => {
 
   it("tells the operator how to fix THAT provider", async () => {
     const { report } = run(["cursor"], cwdResolver("cursor"));
-    expect(await statusOf(report, "cursor").error).toMatch(/providers list/);
+    expect((await statusOf(report, "cursor")).error).toMatch(/providers list/);
   });
 
   it("does not offer the providers-list remedy for an unrelated workspace error", async () => {

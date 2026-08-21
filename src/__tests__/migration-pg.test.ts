@@ -464,8 +464,12 @@ describe("Session Migration", () => {
       await pool.query(`CREATE SCHEMA ${quoteIdentifier(schema)}`);
       schemaCreated = true;
       const env = { ...process.env, DATABASE_URL: schemaScopedDsn(schema) };
+      // Both bare, deliberately. An `await` on the first element would run it
+      // to completion before the second starts, which is the concurrency this
+      // test exists to exercise: the assertions below only mean something if
+      // the two migrate processes actually race for the advisory lock.
       const [first, second] = await Promise.all([
-        await execFileAsync(process.execPath, ["dist/migrate.js"], { cwd: process.cwd(), env }),
+        execFileAsync(process.execPath, ["dist/migrate.js"], { cwd: process.cwd(), env }),
         execFileAsync(process.execPath, ["dist/migrate.js"], { cwd: process.cwd(), env }),
       ]);
 
@@ -515,7 +519,7 @@ describe("Session Migration", () => {
         VALUES (12, 'wrong_async_job_response_compression');
       `);
 
-      const failure = await await execFileAsync(process.execPath, ["dist/migrate.js"], {
+      const failure = await execFileAsync(process.execPath, ["dist/migrate.js"], {
         cwd: process.cwd(),
         env: { ...process.env, DATABASE_URL: schemaScopedDsn(schema) },
       }).catch(error => error as { stderr?: string });
@@ -591,7 +595,7 @@ describe("Session Migration", () => {
       await pool.query(`CREATE SCHEMA ${quoteIdentifier(schema)}`);
       schemaCreated = true;
       const env = { ...process.env, DATABASE_URL: schemaScopedDsn(schema) };
-      execFileAsync(process.execPath, ["dist/migrate.js"], { cwd: process.cwd(), env });
+      await execFileAsync(process.execPath, ["dist/migrate.js"], { cwd: process.cwd(), env });
 
       client = await pool.connect();
       await client.query(`SET search_path TO ${quoteIdentifier(schema)}`);
@@ -1512,7 +1516,7 @@ describe("Session Migration", () => {
         id,
       ]);
 
-      const { stderr } = execFileAsync(process.execPath, ["dist/migrate.js"], {
+      const { stderr } = await execFileAsync(process.execPath, ["dist/migrate.js"], {
         cwd: process.cwd(),
         env: { ...process.env, DATABASE_URL: schemaScopedDsn(schema) },
       });

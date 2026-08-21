@@ -207,11 +207,21 @@ async function resultFor(
   return { status: found.status, error: found.error };
 }
 
-const withPlatform = (platform: string, run: () => void): void => {
+/**
+ * `run` is typed `() => Promise<void>` deliberately, not `() => void`.
+ *
+ * TypeScript accepts an async arrow in a `() => void` slot without a word, so
+ * the promise was dropped, the platform was restored before the body ran, and
+ * every assertion after the call ran before the body had done anything. Seven
+ * of the eight call sites here were in that state: the tests asserted a probe
+ * had not been consulted, which was true only because the work never happened.
+ * A synchronous thunk is now a compile error rather than a silent no-op.
+ */
+const withPlatform = async (platform: string, run: () => Promise<void>): Promise<void> => {
   const original = Object.getOwnPropertyDescriptor(process, "platform")!;
   Object.defineProperty(process, "platform", { value: platform, configurable: true });
   try {
-    run();
+    await run();
   } finally {
     Object.defineProperty(process, "platform", original);
   }
@@ -268,7 +278,7 @@ describe("issue #270: cursor trust", () => {
       registered: false,
       trustCursorWorkspace: true,
     });
-    expect(await resultFor(report, "cursor").status).not.toBe("skipped");
+    expect((await resultFor(report, "cursor")).status).not.toBe("skipped");
     expect(calls[0].args).toContain("--trust");
   });
 
@@ -300,7 +310,7 @@ describe("issue #270: cursor trust", () => {
         },
       }
     );
-    expect(await resultFor(report, "cursor").status).toBe("skipped");
+    expect((await resultFor(report, "cursor")).status).toBe("skipped");
     expect(fake.calls).toHaveLength(0);
   });
 
@@ -325,9 +335,9 @@ describe("issue #270: devin sandbox preflight", () => {
   it("skips only the devin seat when bwrap is absent, and still launches the rest", async () => {
     // The defect this replaces: throwing here aborted the entire roster,
     // because startReviewRun defers launches and rethrows admission errors.
-    withPlatform("linux", async () => {
+    await withPlatform("linux", async () => {
       const { report, calls } = await review(["claude", "devin", "cursor"], () => false);
-      expect(await resultFor(report, "devin").status).toBe("skipped");
+      expect((await resultFor(report, "devin")).status).toBe("skipped");
       expect(calls.map(c => c.cli)).toEqual(["claude", "cursor"]);
       expect((await report).success).toBe(true);
     });
@@ -337,7 +347,7 @@ describe("issue #270: devin sandbox preflight", () => {
     // The first attempt reused CliInvalidInputError, whose message is hard-coded
     // to "contains an embedded NUL byte", so a missing package was reported as a
     // malformed argument.
-    withPlatform("linux", async () => {
+    await withPlatform("linux", async () => {
       const { report } = await review(["devin"], () => false);
       const { error } = await resultFor(report, "devin");
       expect(error).toMatch(/bubblewrap/i);
@@ -348,9 +358,9 @@ describe("issue #270: devin sandbox preflight", () => {
   it("runs devin with --sandbox retained when bwrap is present", async () => {
     // Dropping --sandbox to make it run is the tempting wrong fix: a review that
     // asked for isolation and silently ran without it is the worse outcome.
-    withPlatform("linux", async () => {
+    await withPlatform("linux", async () => {
       const { report, calls } = await review(["devin"], () => true);
-      expect(await resultFor(report, "devin").status).not.toBe("skipped");
+      expect((await resultFor(report, "devin")).status).not.toBe("skipped");
       expect(calls[0].args).toContain("--sandbox");
     });
   });
@@ -358,9 +368,9 @@ describe("issue #270: devin sandbox preflight", () => {
   it("does not gate on bwrap off Linux, where devin uses a different sandbox", async () => {
     // `devin --help`: "macOS seatbelt / Linux bwrap+seccomp". Gating every
     // platform on bwrap refused every macOS review despite a working sandbox.
-    withPlatform("darwin", async () => {
+    await withPlatform("darwin", async () => {
       const { report, calls } = await review(["devin"], () => false);
-      expect(await resultFor(report, "devin").status).not.toBe("skipped");
+      expect((await resultFor(report, "devin")).status).not.toBe("skipped");
       expect(calls[0].args).toContain("--sandbox");
     });
   });
@@ -371,13 +381,13 @@ describe("issue #270: devin sandbox preflight", () => {
     // is now actually exercised, with devin, which is the only case where the
     // gate could wrongly fire.
     const probe = vi.fn(() => true);
-    withPlatform("linux", () => {
-      review(["claude", "cursor"], probe);
+    await withPlatform("linux", async () => {
+      await review(["claude", "cursor"], probe);
     });
     expect(probe).not.toHaveBeenCalled();
 
     const fake = makeManager();
-    withPlatform("linux", async () => {
+    await withPlatform("linux", async () => {
       await startValidationRun(
         {
           asyncJobManager: fake.manager as never,
@@ -420,7 +430,7 @@ describe("issue #270: devin sandbox preflight", () => {
         }
       );
     };
-    withPlatform("linux", async () => {
+    await withPlatform("linux", async () => {
       await runOnce();
       await runOnce();
       await runOnce();
@@ -508,7 +518,7 @@ describe("issue #270 round 3: the judge is a second dispatch site", () => {
   });
 
   it("skips a devin judge when bubblewrap is missing rather than failing at spawn", async () => {
-    withPlatform("linux", async () => {
+    await withPlatform("linux", async () => {
       const { synthesis, calls } = judge("devin", { hasBubblewrap: () => false });
       expect((await synthesis).status).toBe("skipped");
       expect((await synthesis).note).toMatch(/bubblewrap/i);
