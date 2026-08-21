@@ -17,6 +17,11 @@ import { resolveStorageRole, type StorageOperationClass, type StorageRole } from
 import { isTransactionControl, transactionControlRefusal } from "../statements.js";
 import type { StorageConnection, StorageDriver, StorageEngine } from "../store.js";
 
+/** Inside the 3s SIGTERM-to-SIGKILL window in `executor.ts:454`. */
+const DEFAULT_DRAIN_TIMEOUT_MS = 2000;
+
+const CLOSING_MESSAGE = "storage: sqlite driver is closing and is not accepting new work";
+
 /** Operation classes that may use the read-only connection. */
 const READ_ONLY_OPERATIONS: ReadonlySet<StorageOperationClass> = new Set([
   "transcript_read",
@@ -57,10 +62,26 @@ export class SqliteStorageDriver implements StorageDriver {
 
   private readonly writable: GatewayDatabase;
   private readable: GatewayDatabase | null = null;
+  /** Handles are shut. Anything still queued has lost. */
   private closed = false;
+  /** Draining: no NEW work is accepted, queued work still runs. */
+  private closing = false;
+  private closePromise: Promise<void> | null = null;
+  private readonly drainTimeoutMs: number;
 
-  constructor(private readonly dbPath: string) {
+  /**
+   * `drainTimeoutMs` bounds how long `close()` waits for already-queued
+   * transactions. It must stay inside the gateway's shutdown budget:
+   * `executor.ts:454` SIGKILLs surviving process groups 3s after SIGTERM, so a
+   * drain that outlives that is not a drain, it is a process that gets killed
+   * mid-write. 2s leaves headroom. 0 disables draining.
+   */
+  constructor(
+    private readonly dbPath: string,
+    options: { drainTimeoutMs?: number } = {}
+  ) {
     this.writable = openDatabase(dbPath);
+    this.drainTimeoutMs = options.drainTimeoutMs ?? DEFAULT_DRAIN_TIMEOUT_MS;
   }
 
   /**
@@ -85,6 +106,9 @@ export class SqliteStorageDriver implements StorageDriver {
     operation: StorageOperationClass,
     fn: (connection: StorageConnection) => Promise<T>
   ): Promise<T> {
+    // `closed` wins over `closing`: once the handles are shut the honest answer
+    // is "closed", and connectionFor already says so.
+    if (this.closing && !this.closed) throw new Error(CLOSING_MESSAGE);
     return fn(this.connectionFor(operation));
   }
 
@@ -108,7 +132,19 @@ export class SqliteStorageDriver implements StorageDriver {
         new Error(`storage: ${operation} is a read class and cannot open a transaction`)
       );
     }
+    // Refused at SUBMISSION once closing, so the queue cannot grow while the
+    // drain is trying to empty it.
+    if (this.closing && !this.closed) return Promise.reject(new Error(CLOSING_MESSAGE));
     const run = async (): Promise<T> => {
+      // Reached only when the drain expired with this transaction still queued.
+      // The caller learns its write did not land from THIS rejection: there is
+      // no logger here and a silent drop is the failure being fixed.
+      if (this.closed) {
+        throw new Error(
+          `storage: sqlite driver closed while this transaction was still queued; ` +
+            `the drain timed out after ${this.drainTimeoutMs}ms and the write did NOT land`
+        );
+      }
       const connection = this.connectionFor(operation, true);
       await connection.execute("BEGIN IMMEDIATE");
       try {
@@ -130,12 +166,43 @@ export class SqliteStorageDriver implements StorageDriver {
     return started;
   }
 
+  /**
+   * Drain, then close.
+   *
+   * The defect this replaces: `close()` shut both handles and resolved without
+   * ever awaiting `queue`, so every already-queued transaction then hit
+   * `connectionFor` and rejected with "driver is closed". Measured by TRACK B:
+   * 8 queued transactions, close() returned in 0.24ms, all 8 rejected, 0 rows
+   * landed. It also made the b1 "shutdown drain time" deliverable measure as
+   * instant, because there was no drain to time.
+   *
+   * The wait is BOUNDED. Work still queued when the bound expires is rejected,
+   * not silently dropped, and is not written after the handles shut.
+   */
   close(): Promise<void> {
-    if (!this.closed) {
-      this.closed = true;
-      if (this.readable) this.readable.close();
-      this.writable.close();
+    this.closePromise ??= this.performClose();
+    return this.closePromise;
+  }
+
+  private async performClose(): Promise<void> {
+    this.closing = true;
+    if (this.drainTimeoutMs > 0) {
+      let timer: ReturnType<typeof setTimeout> | undefined;
+      const expired = new Promise<void>(resolve => {
+        timer = setTimeout(resolve, this.drainTimeoutMs);
+        // Never hold the event loop open just to time a shutdown.
+        timer.unref?.();
+      });
+      try {
+        // `queue` is kept non-rejecting by the `catch` in transaction(), so
+        // settling it is enough; a failed transaction still counts as drained.
+        await Promise.race([this.queue, expired]);
+      } finally {
+        if (timer) clearTimeout(timer);
+      }
     }
-    return Promise.resolve();
+    this.closed = true;
+    if (this.readable) this.readable.close();
+    this.writable.close();
   }
 }

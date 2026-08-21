@@ -182,6 +182,88 @@ describe("SqliteStorageDriver", () => {
     expect(rows).toEqual([{ id: "ok" }]);
   });
 
+  it("DRAINS queued transactions on close instead of losing them", async () => {
+    // TRACK B's reproduction: 8 queued transactions, close() returned in
+    // 0.24ms, all 8 rejected with "driver is closed", 0 rows landed. close()
+    // shut both handles and resolved without ever awaiting `queue`.
+    const submitted = Array.from({ length: 8 }, (_unused, i) =>
+      driver.transaction("write", async c => {
+        // Yield, so every one of these is genuinely still queued when close()
+        // is called rather than having already run to completion.
+        await Promise.resolve();
+        await c.execute("INSERT INTO t VALUES (?, ?)", [`drain-${i}`, "kept"]);
+      })
+    );
+
+    await driver.close();
+
+    const settled = await Promise.allSettled(submitted);
+    expect(settled.filter(r => r.status === "rejected")).toEqual([]);
+
+    // Reopen and count: the assertion that matters is rows on disk, not that
+    // the promises resolved.
+    const reopened = new SqliteStorageDriver(join(dir, "t.db"));
+    const rows = await reopened.withConnection("write", c =>
+      c.query<{ id: string }>("SELECT id FROM t ORDER BY id")
+    );
+    await reopened.close();
+    expect(rows.map(r => r.id)).toEqual([
+      "drain-0",
+      "drain-1",
+      "drain-2",
+      "drain-3",
+      "drain-4",
+      "drain-5",
+      "drain-6",
+      "drain-7",
+    ]);
+  });
+
+  it("refuses NEW work while draining, so the queue cannot outrun close", async () => {
+    const queued = driver.transaction("write", async c => {
+      await Promise.resolve();
+      await c.execute("INSERT INTO t VALUES (?, ?)", ["first", "1"]);
+    });
+    const closing = driver.close();
+
+    await expect(
+      driver.transaction("write", c => c.execute("INSERT INTO t VALUES (?, ?)", ["late", "2"]))
+    ).rejects.toThrow(/not accepting new work/);
+
+    await closing;
+    await expect(queued).resolves.toBeUndefined();
+  });
+
+  it("bounds the drain, and tells the caller its write did not land", async () => {
+    // An unbounded wait is not an option: executor.ts SIGKILLs 3s after
+    // SIGTERM, so a drain that outlives that is a process killed mid-write.
+    const slow = new SqliteStorageDriver(join(dir, "slow.db"), { drainTimeoutMs: 25 });
+    await slow.withConnection("write", c => c.execute("CREATE TABLE t (id TEXT PRIMARY KEY)"));
+
+    let release = (): void => undefined;
+    const blocked = new Promise<void>(resolve => {
+      release = resolve;
+    });
+
+    const held = slow.transaction("write", async () => {
+      await blocked;
+    });
+    const stranded = slow.transaction("write", c =>
+      c.execute("INSERT INTO t VALUES (?)", ["stranded"])
+    );
+
+    const startedAt = Date.now();
+    await slow.close();
+    expect(Date.now() - startedAt).toBeGreaterThanOrEqual(20);
+
+    release();
+    await held.catch(() => undefined);
+
+    // Rejected, not silently dropped, and the message says the write is lost
+    // rather than leaving the caller to infer it.
+    await expect(stranded).rejects.toThrow(/did NOT land/);
+  });
+
   it("refuses work after close", async () => {
     await driver.close();
     await expect(driver.withConnection("write", c => c.query("SELECT 1"))).rejects.toThrow(
