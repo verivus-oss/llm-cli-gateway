@@ -3,7 +3,7 @@
 
 [meta]
 surface = "FlightRecorder, JobStore and ISessionManager: 3 interfaces, 42 methods, 2 engines"
-status = "2026-08-21. s1, s2, s4 done, s3 part 1 done. b1 measured, awaiting its results review. b1 and s5 DONE and merged. s3sig, s6, s7, s8, s12, s13 are unblocked; s10 held. s3sig, s6, s8 and s12 unblock when s5 lands."
+status = "2026-08-21. s1, s2, s4 done, s3 part 1 done. b1, s5 and s8 DONE and merged. s3sig, s6, s7, s12, s13 are unblocked; s10 held. s9 still needs s7."
 
 # WHY: `[persistence].backend` selects the job store and nothing else, so one
 # request's two halves live in two engines 15 ms apart, beside an abandoned
@@ -127,7 +127,7 @@ depends_on = ["s5.job-store-first"]
 role = "The third split subsystem, selected by DATABASE_URL and disconnected from [persistence] entirely."
 action = "Collapse FileSessionManager and session-manager-pg onto the port."
 constraint = "migrate-sessions.ts already implements a transactional sessions.json to Postgres move with rollback. Reuse it; do not re-author it."
-blocker = "migrations 001 and 003 carry FOUR hand-written CHECK (cli IN ...) lists missing `devin` and `cursor`, and carrying `grok-api`, which CLI_TYPES does not. Latent today because DATABASE_URL is unset so sessions are a file; s8 makes it live on a backend=postgres host. provider-surfaces-check.mjs does not scan .sql, so the DRY ratchet has a blind spot exactly here."
+status = "done 2026-08-21. Session store on PostgresStorageDriver: db.ts's second pool is gone, no `pg` import survives outside src/storage/drivers, and 12 hand-rolled transactions are the driver's. The BLOCKER is cleared and its consequence was wrong: the four hand-written CHECK (cli IN ...) lists drifted both ways, but migration 005 already drops both for a format guard, so a database at head admits devin and cursor, proven by applying the real migrations with the pre-005 rejection as the control. They cannot be corrected either, because POSTGRES_IMMUTABLE_MIGRATION_SHA256 pins each file and the runner refuses a mismatch: frozen with a pinned count in a gate that now scans .sql, domain asserted from PROVIDER_TYPES in a test. Suite set difference 0 removed / 8 added (4514 to 4522), pg 0 removed / 2 added (133 to 135), zero failures either side. Found by doing it: the driver's `?` to `$n` rewrite cannot tell a placeholder from jsonb's key-exists OPERATOR. Evidence: docs/evidence/storage-s8-2026-08-21.md."
 affects = ["s9.one-selector"]
 
 [[node]]
