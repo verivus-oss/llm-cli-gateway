@@ -212,6 +212,51 @@ export class PostgresStorageDriver implements StorageDriver {
     }
   }
 
+  /**
+   * Compatibility bootstrap DDL. NOT a routed runtime operation, deliberately.
+   *
+   * The DAG (`storage-unification.dag.toml`, s5 `bootstrap_ddl`) rules that
+   * this stays under `app` for now, because moving it is a grant change on a
+   * live host that operator decision 0a held. It also rules that it must NOT be
+   * dressed as one of the four operation classes: DDL is none of `write`,
+   * `transcript_read`, `analytics_read` or `retention`, and giving it a class
+   * is how a temporary arrangement becomes permanent, because once it has one
+   * it looks like it belongs.
+   *
+   * So it is a separate method with a name that says what it is, running on the
+   * `app` pool outside `resolveStorageRole`. A reader who greps for the
+   * operation classes will not find it, which is the point: its exceptional
+   * status is visible at the call site rather than hidden behind a class that
+   * makes it look routine.
+   */
+  async bootstrap<T>(fn: (connection: StorageConnection) => Promise<T>): Promise<T> {
+    if (this.closed) throw new Error("storage: postgres driver is closed");
+    const pool = this.pools.get("app");
+    if (!pool) throw new Error("storage: bootstrap DDL needs the `app` credential");
+    if (inTransactionOn(this)) throw nestedConnectionRefusal(this);
+    const client = await pool.connect();
+    let discard: Error | undefined;
+    try {
+      const connection = connectionOver(client, true);
+      await connection.execute("BEGIN");
+      try {
+        const result = await runInTransaction(this, () => fn(connection));
+        await connection.execute("COMMIT");
+        return result;
+      } catch (error) {
+        try {
+          await connection.execute("ROLLBACK");
+        } catch (rollbackError) {
+          discard =
+            rollbackError instanceof Error ? rollbackError : new Error(String(rollbackError));
+        }
+        throw error;
+      }
+    } finally {
+      client.release(discard);
+    }
+  }
+
   async close(): Promise<void> {
     this.closed = true;
     await Promise.all([...this.pools.values()].map(pool => pool.end()));
@@ -219,13 +264,76 @@ export class PostgresStorageDriver implements StorageDriver {
   }
 }
 
-/** Real `pg` pools, imported lazily so the optional peer stays optional. */
-export async function nodePostgresPoolFactory(): Promise<PgPoolFactory> {
+/**
+ * Pool settings carried over verbatim from the worker this driver replaces
+ * (postgres-job-store-worker.ts:310-324 at f68aef2). They are parity, not
+ * preference, and each one is load bearing:
+ *
+ * `max: 1` USED to be incidental. Under the worker the parent's JobStore
+ * interface was synchronous, so only one operation could be in flight and a
+ * larger pool bought nothing. After the port the parent is concurrent, so this
+ * is no longer incidental: it is the connection mutex that serialises store
+ * writes, and it must be carried as a STATED fence or replaced by an explicit
+ * equivalent. Raising it is a concurrency change, not a tuning change.
+ *
+ * The timeouts exist so PostgreSQL aborts a blocked or pathological operation
+ * rather than leaving the caller unsure whether its mutation landed.
+ */
+export const PG_POOL_MAX = 1;
+export const PG_IDLE_TIMEOUT_MS = 30_000;
+export const PG_STATEMENT_TIMEOUT_MS = 25_000;
+export const PG_LOCK_TIMEOUT_MS = 5_000;
+export const PG_QUERY_TIMEOUT_MS = 27_000;
+export const PG_CONNECTION_TIMEOUT_MS = 5_000;
+export const PG_APPLICATION_NAME = "llm-cli-gateway-job-store";
+
+interface PgPoolConfig {
+  connectionString: string;
+  max: number;
+  idleTimeoutMillis: number;
+  connectionTimeoutMillis: number;
+  statement_timeout: number;
+  lock_timeout: number;
+  query_timeout: number;
+  application_name: string;
+}
+
+/** A pool that can report asynchronous failures on an idle backend. */
+type PgPoolWithEvents = PgPoolLike & {
+  on?(event: "error", listener: (error: Error) => void): unknown;
+};
+
+/**
+ * Real `pg` pools, imported lazily so the optional peer stays optional.
+ *
+ * `onPoolError` is REQUIRED rather than optional. `pg` emits "error" on the
+ * pool when a backend fails while idle, and an EventEmitter with no "error"
+ * listener throws to the top of the process. The worker registered one
+ * (`:325`); losing it in the port would turn a recoverable idle-pool error into
+ * a crash, so the listener is attached here where the pool is built and cannot
+ * be forgotten at a call site.
+ */
+export async function nodePostgresPoolFactory(
+  onPoolError: (role: StorageRole, error: Error) => void
+): Promise<PgPoolFactory> {
   const pg = (await import("pg")) as unknown as {
-    default?: { Pool: new (config: { connectionString: string }) => PgPoolLike };
-    Pool?: new (config: { connectionString: string }) => PgPoolLike;
+    default?: { Pool: new (config: PgPoolConfig) => PgPoolLike };
+    Pool?: new (config: PgPoolConfig) => PgPoolLike;
   };
   const Pool = pg.Pool ?? pg.default?.Pool;
   if (!Pool) throw new Error("storage: the optional peer dependency `pg` is not installed");
-  return (_role, dsn) => new Pool({ connectionString: dsn });
+  return (role, dsn) => {
+    const pool = new Pool({
+      connectionString: dsn,
+      max: PG_POOL_MAX,
+      idleTimeoutMillis: PG_IDLE_TIMEOUT_MS,
+      connectionTimeoutMillis: PG_CONNECTION_TIMEOUT_MS,
+      statement_timeout: PG_STATEMENT_TIMEOUT_MS,
+      lock_timeout: PG_LOCK_TIMEOUT_MS,
+      query_timeout: PG_QUERY_TIMEOUT_MS,
+      application_name: PG_APPLICATION_NAME,
+    }) as PgPoolWithEvents;
+    pool.on?.("error", error => onPoolError(role, error));
+    return pool;
+  };
 }
