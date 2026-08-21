@@ -225,7 +225,7 @@ describe("Slice 2 — api provider request handlers (loopback)", () => {
       defaultModel: "qwen2.5",
       apiKey: "",
     };
-    const res = handleApiProviderRequestAsync(runtime, providerRuntime, { prompt: "go" });
+    const res = await handleApiProviderRequestAsync(runtime, providerRuntime, { prompt: "go" });
     const parsed = JSON.parse(res.content[0].text);
     expect(parsed.status).toBe("deferred");
     expect(parsed.jobId).toBeTruthy();

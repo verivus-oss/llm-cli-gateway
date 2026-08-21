@@ -49,7 +49,7 @@ async function waitForTerminal(
 ): Promise<void> {
   const deadline = Date.now() + timeoutMs;
   while (Date.now() < deadline) {
-    const snapshot = manager.getJobSnapshot(jobId);
+    const snapshot = await manager.getJobSnapshot(jobId);
     if (snapshot && !isAsyncJobInProgress(snapshot.status)) return;
     await new Promise(resolve => setTimeout(resolve, 10));
   }
@@ -289,7 +289,7 @@ describe("provider child stdin lifecycle", () => {
     const manager = new AsyncJobManager(noopLogger, undefined, store);
     try {
       const uncaught = await captureUncaught(async () => {
-        const started = manager.startJobWithDedup(
+        const started = await manager.startJobWithDedup(
           process.execPath as LlmCli,
           ["-e", EARLY_EXIT_SCRIPT],
           "stdin-early-exit",
@@ -297,19 +297,19 @@ describe("provider child stdin lifecycle", () => {
         );
         await waitForTerminal(manager, started.snapshot.id);
 
-        expect(manager.getJobSnapshot(started.snapshot.id)).toMatchObject({
+        expect(await manager.getJobSnapshot(started.snapshot.id)).toMatchObject({
           status: "failed",
           exitCode: CHILD_STDIN_INCOMPLETE_EXIT_CODE,
           error: CHILD_STDIN_INCOMPLETE_MESSAGE,
           retryable: false,
         });
-        expect(store.getById(started.snapshot.id)).toMatchObject({
+        expect(await store.getById(started.snapshot.id)).toMatchObject({
           status: "failed",
           exitCode: CHILD_STDIN_INCOMPLETE_EXIT_CODE,
           error: CHILD_STDIN_INCOMPLETE_MESSAGE,
           retryable: false,
         });
-        const result = manager.getJobResult(started.snapshot.id);
+        const result = await manager.getJobResult(started.snapshot.id);
         expect(result).toMatchObject({
           status: "failed",
           exitCode: CHILD_STDIN_INCOMPLETE_EXIT_CODE,
@@ -332,7 +332,7 @@ describe("provider child stdin lifecycle", () => {
     const store = new MemoryJobStore();
     const manager = new AsyncJobManager(noopLogger, undefined, store);
     try {
-      const started = manager.startJobWithDedup(
+      const started = await manager.startJobWithDedup(
         process.execPath as LlmCli,
         ["-e", EARLY_NONZERO_EXIT_SCRIPT],
         "stdin-early-nonzero-exit",
@@ -340,12 +340,12 @@ describe("provider child stdin lifecycle", () => {
       );
       await waitForTerminal(manager, started.snapshot.id);
 
-      expect(manager.getJobResult(started.snapshot.id)).toMatchObject({
+      expect(await manager.getJobResult(started.snapshot.id)).toMatchObject({
         status: "failed",
         exitCode: 42,
         error: null,
       });
-      expect(store.getById(started.snapshot.id)).toMatchObject({
+      expect(await store.getById(started.snapshot.id)).toMatchObject({
         status: "failed",
         exitCode: 42,
         error: null,
@@ -362,7 +362,7 @@ describe("provider child stdin lifecycle", () => {
     const manager = new AsyncJobManager(noopLogger, undefined, store);
     let jobId = "";
     try {
-      const started = manager.startJobWithDedup(
+      const started = await manager.startJobWithDedup(
         process.execPath as LlmCli,
         ["-e", EARLY_EXIT_SCRIPT],
         "stdin-persistence",
@@ -372,7 +372,7 @@ describe("provider child stdin lifecycle", () => {
       await waitForTerminal(manager, jobId);
 
       const durable = store.getById(jobId);
-      expect(durable).toMatchObject({
+      expect(await durable).toMatchObject({
         status: "failed",
         exitCode: CHILD_STDIN_INCOMPLETE_EXIT_CODE,
         error: CHILD_STDIN_INCOMPLETE_MESSAGE,
@@ -382,27 +382,27 @@ describe("provider child stdin lifecycle", () => {
       expect(JSON.stringify(durable)).not.toMatch(/EPIPE|ERR_STREAM_DESTROYED|ECONNRESET|x{64}/);
     } finally {
       await manager.dispose();
-      store.close();
+      await store.close();
     }
 
     try {
       const reopened = new SqliteJobStore(database, noopLogger);
       const restartedManager = new AsyncJobManager(noopLogger, undefined, reopened);
       try {
-        expect(reopened.getById(jobId)).toMatchObject({
+        expect(await reopened.getById(jobId)).toMatchObject({
           status: "failed",
           exitCode: CHILD_STDIN_INCOMPLETE_EXIT_CODE,
           error: CHILD_STDIN_INCOMPLETE_MESSAGE,
           retryable: false,
           payloadJson: null,
         });
-        expect(restartedManager.getJobSnapshot(jobId)).toMatchObject({
+        expect(await restartedManager.getJobSnapshot(jobId)).toMatchObject({
           status: "failed",
           exitCode: CHILD_STDIN_INCOMPLETE_EXIT_CODE,
           error: CHILD_STDIN_INCOMPLETE_MESSAGE,
           retryable: false,
         });
-        expect(restartedManager.getJobResult(jobId)).toMatchObject({
+        expect(await restartedManager.getJobResult(jobId)).toMatchObject({
           status: "failed",
           exitCode: CHILD_STDIN_INCOMPLETE_EXIT_CODE,
           error: CHILD_STDIN_INCOMPLETE_MESSAGE,
@@ -410,7 +410,7 @@ describe("provider child stdin lifecycle", () => {
         });
       } finally {
         await restartedManager.dispose();
-        reopened.close();
+        await reopened.close();
       }
     } finally {
       rmSync(root, { recursive: true, force: true });
@@ -422,21 +422,21 @@ describe("provider child stdin lifecycle", () => {
     const manager = new AsyncJobManager(noopLogger, undefined, store);
     try {
       const uncaught = await captureUncaught(async () => {
-        const started = manager.startJobWithDedup(
+        const started = await manager.startJobWithDedup(
           process.execPath as LlmCli,
           ["-e", BLOCKED_STDIN_SCRIPT],
           "stdin-cancel",
           { stdin: LARGE_STDIN, forceRefresh: true }
         );
         await new Promise(resolve => setTimeout(resolve, 20));
-        expect(manager.cancelJob(started.snapshot.id)).toEqual({ canceled: true });
+        expect(await manager.cancelJob(started.snapshot.id)).toEqual({ canceled: true });
         await waitForTerminal(manager, started.snapshot.id);
 
-        expect(manager.getJobResult(started.snapshot.id)).toMatchObject({
+        expect(await manager.getJobResult(started.snapshot.id)).toMatchObject({
           status: "canceled",
           error: null,
         });
-        expect(store.getById(started.snapshot.id)).toMatchObject({
+        expect(await store.getById(started.snapshot.id)).toMatchObject({
           status: "canceled",
           error: null,
         });
@@ -453,7 +453,7 @@ describe("provider child stdin lifecycle", () => {
     const manager = new AsyncJobManager(noopLogger, undefined, store);
     try {
       const uncaught = await captureUncaught(async () => {
-        const started = manager.startJobWithDedup(
+        const started = await manager.startJobWithDedup(
           process.execPath as LlmCli,
           ["-e", BLOCKED_STDIN_SCRIPT],
           "stdin-mid-drain-kill",
@@ -461,11 +461,11 @@ describe("provider child stdin lifecycle", () => {
         );
         await waitForTerminal(manager, started.snapshot.id);
 
-        expect(manager.getJobSnapshot(started.snapshot.id)).toMatchObject({
+        expect(await manager.getJobSnapshot(started.snapshot.id)).toMatchObject({
           status: "failed",
           exitCode: 125,
         });
-        expect(store.getById(started.snapshot.id)).toMatchObject({
+        expect(await store.getById(started.snapshot.id)).toMatchObject({
           status: "failed",
           exitCode: 125,
         });
@@ -483,19 +483,19 @@ describe("provider child stdin lifecycle", () => {
       const store = new MemoryJobStore();
       const manager = new AsyncJobManager(noopLogger, undefined, store);
       try {
-        const started = manager.startJobWithDedup(
+        const started = await manager.startJobWithDedup(
           process.execPath as LlmCli,
           ["-e", PROVIDER_WITH_DESCENDANT_SCRIPT],
           "stdin-descendant-fence",
           { stdin: LARGE_STDIN, idleTimeoutMs: 100 }
         );
         await waitForTerminal(manager, started.snapshot.id);
-        const result = manager.getJobResult(started.snapshot.id);
+        const result = await manager.getJobResult(started.snapshot.id);
         if (!result) throw new Error("missing async job result");
         const { parentPid, descendantPid } = parseProcessIds(result.stdout);
 
         expect(result).toMatchObject({ status: "failed", exitCode: 125 });
-        expect(store.getById(started.snapshot.id)).toMatchObject({
+        expect(await store.getById(started.snapshot.id)).toMatchObject({
           status: "failed",
           exitCode: 125,
         });

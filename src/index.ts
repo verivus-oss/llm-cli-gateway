@@ -214,6 +214,7 @@ import {
   type AsyncJobUsageExtractor,
   type AsyncJobErrorCategory,
   type AsyncJobSnapshot,
+  type StartJobOutcome,
 } from "./async-job-manager.js";
 import { createJobStore, type JobStore } from "./job-store.js";
 import {
@@ -1768,6 +1769,14 @@ async function awaitJobOrDefer(
   // jobId would be a dead end — run to completion instead. A null-store
   // manager would otherwise still accept in-memory jobs (safeStoreCall
   // tolerates store === null), making the mismatch reachable.
+  // Cross the manager's startup barrier before reading its admission snapshot.
+  // canAdmitDurableJobs() is SYNCHRONOUS by design and cannot wait for
+  // anything, so inside the startup window it answers false and this request
+  // silently takes a different path: no deferral, and for a Kit attempt a
+  // kit_busy refusal. main() awaits the same barrier before connecting a
+  // transport, but createGatewayServer is an exported entry point that any
+  // embedder can drive without going through main().
+  await runtime.asyncJobManager.whenStartupSettled();
   const deferralAvailable =
     runtime.persistence.backend !== "none" &&
     runtime.persistence.asyncJobsEnabled &&
@@ -1820,9 +1829,19 @@ async function awaitJobOrDefer(
     }
   }
 
-  let outcome;
+  // AWAITED INSIDE THE TRY, and that is the whole point. While
+  // startJobWithDedup was synchronous a pre-spawn failure threw here and this
+  // catch reclaimed onComplete. C3 made it async, so the failure became a
+  // rejection that surfaced at the `await` on the next line, OUTSIDE the try:
+  // the catch was dead, `onCompleteOwnedByCaller = false` ran unconditionally,
+  // and the contract documented above told the caller not to reclaim either.
+  // Three real rejection paths land here (throws before `this.jobs.set`, the
+  // JobSaturationError after `this.jobs.delete`, and recordStartOrFailClosed),
+  // so a fail-closed durable start leaked the outputSchema temp file, the
+  // Claude MCP artifact or the worktree that onComplete was to clean up.
+  let outcome: StartJobOutcome;
   try {
-    outcome = runtime.asyncJobManager.startJobWithDedup(cli, args, corrId, {
+    outcome = await runtime.asyncJobManager.startJobWithDedup(cli, args, corrId, {
       cwd,
       idleTimeoutMs,
       outputFormat,
@@ -1866,7 +1885,7 @@ async function awaitJobOrDefer(
   const deadline = Date.now() + SYNC_DEADLINE_MS;
 
   while (Date.now() < deadline) {
-    const snapshot = runtime.asyncJobManager.getJobSnapshot(job.id);
+    const snapshot = await runtime.asyncJobManager.getJobSnapshot(job.id);
     if (snapshot && !isAsyncJobInProgress(snapshot.status)) {
       // Terminal hooks own every durable Kit update. A terminal process can be
       // observed before its async hook finishes, so never expose an inline
@@ -1876,7 +1895,7 @@ async function awaitJobOrDefer(
         if (!finalized) throw new KitTerminalFinalizationError(job.id);
       }
       // Job finished within deadline — extract result
-      const result = runtime.asyncJobManager.getJobResult(job.id);
+      const result = await runtime.asyncJobManager.getJobResult(job.id);
       if (!result) {
         return { stdout: "", stderr: "Job result unavailable", code: 1, jobId: job.id };
       }
@@ -1965,6 +1984,14 @@ async function awaitApiJobOrDefer(
     }
   };
 
+  // Cross the manager's startup barrier before reading its admission snapshot.
+  // canAdmitDurableJobs() is SYNCHRONOUS by design and cannot wait for
+  // anything, so inside the startup window it answers false and this request
+  // silently takes a different path: no deferral, and for a Kit attempt a
+  // kit_busy refusal. main() awaits the same barrier before connecting a
+  // transport, but createGatewayServer is an exported entry point that any
+  // embedder can drive without going through main().
+  await runtime.asyncJobManager.whenStartupSettled();
   const deferralAvailable =
     runtime.persistence.backend !== "none" &&
     runtime.persistence.asyncJobsEnabled &&
@@ -2012,9 +2039,12 @@ async function awaitApiJobOrDefer(
     }
   }
 
-  let outcome;
+  // Awaited inside the try for the reason given at the CLI sibling above: an
+  // async startHttpJob delivers its failure as a rejection, which an unawaited
+  // assignment carries straight past this catch and out of the function.
+  let outcome: StartJobOutcome;
   try {
-    outcome = runtime.asyncJobManager.startHttpJob({
+    outcome = await runtime.asyncJobManager.startHttpJob({
       provider,
       apiRequest,
       correlationId: corrId,
@@ -2037,9 +2067,9 @@ async function awaitApiJobOrDefer(
   }
   const deadline = Date.now() + SYNC_DEADLINE_MS;
   while (Date.now() < deadline) {
-    const snapshot = runtime.asyncJobManager.getJobSnapshot(job.id);
+    const snapshot = await runtime.asyncJobManager.getJobSnapshot(job.id);
     if (snapshot && !isAsyncJobInProgress(snapshot.status)) {
-      const result = runtime.asyncJobManager.getJobResult(job.id);
+      const result = await runtime.asyncJobManager.getJobResult(job.id);
       if (!result) return { stdout: "", stderr: "Job result unavailable", code: 1 };
       return {
         stdout: result.stdout,
@@ -4805,7 +4835,7 @@ export function registerBaseResources(server: McpServer, runtime: GatewayServerR
           ? variables.validationId[0]
           : variables.validationId;
         runtime.logger.debug(`Reading validation-receipt://${validationId}`);
-        const result = resolveValidationReceipt(
+        const result = await resolveValidationReceipt(
           { asyncJobManager: runtime.asyncJobManager, validationRunStore: validationReceiptStore },
           String(validationId),
           { caller: currentCaller() }
@@ -8270,11 +8300,19 @@ function resolvePersonalKitContext(
   return { context };
 }
 
-function resolvePersonalKitRequest(
+/**
+ * Execution-mode Kit context. ASYNC solely to cross the job manager's startup
+ * barrier: `assertKitDurableAdmission` inside reads the deliberately
+ * SYNCHRONOUS `canAdmitDurableJobs()` snapshot, which answers false until
+ * startup settles, so a valid Kit request arriving early is refused `kit_busy`.
+ * The inspection wrapper stays synchronous because it never reaches that gate.
+ */
+async function resolvePersonalKitRequest(
   runtime: GatewayServerRuntime,
   provider: "claude" | "codex" | "mistral",
   params: Record<string, unknown>
-): PersonalKitRequestContext | null {
+): Promise<PersonalKitRequestContext | null> {
+  await runtime.asyncJobManager.whenStartupSettled();
   return resolvePersonalKitContext(runtime, provider, params, "execution");
 }
 
@@ -8597,7 +8635,7 @@ async function recoverOrRejectKitAttempt(input: {
     );
   }
 
-  const lookup = input.runtime.asyncJobManager.lookupJobSnapshot(activeAttempt.id);
+  const lookup = await input.runtime.asyncJobManager.lookupJobSnapshot(activeAttempt.id);
   if (lookup.state === "unavailable") {
     throw new PersonalConfigError(
       "kit_busy",
@@ -9100,7 +9138,7 @@ async function finalizeAndAcknowledgePersonalKitTerminal(input: {
   initialNativeSessionId?: string;
 }): Promise<void> {
   await finalizePersonalKitSessionOrThrow({ ...input, retainAttempt: true });
-  const marked = input.runtime.asyncJobManager.markKitTerminalFinalized(
+  const marked = await input.runtime.asyncJobManager.markKitTerminalFinalized(
     input.attemptId,
     input.gatewaySessionId
   );
@@ -9215,9 +9253,9 @@ async function releaseAcknowledgedPersonalKitAttempt(input: {
 const pendingKitFinalizationRuns = new WeakMap<GatewayServerRuntime, Promise<void>>();
 const personalKitMaintenanceTimers = new WeakMap<GatewayServerRuntime, NodeJS.Timeout>();
 
-function reapTerminalClaudeKitArtifacts(runtime: GatewayServerRuntime): void {
-  const removed = reapClaudeContextArtifacts(runtime.personalConfig.layout, jobId => {
-    const lookup = runtime.asyncJobManager.lookupJobSnapshot(jobId);
+async function reapTerminalClaudeKitArtifacts(runtime: GatewayServerRuntime): Promise<void> {
+  const removed = await reapClaudeContextArtifacts(runtime.personalConfig.layout, async jobId => {
+    const lookup = await runtime.asyncJobManager.lookupJobSnapshot(jobId);
     if (lookup.state === "unavailable") return "unavailable";
     if (lookup.state === "not_found") return "not_found";
     if (isAsyncJobInProgress(lookup.snapshot.status) || lookup.snapshot.status === "orphaned") {
@@ -9236,9 +9274,11 @@ function startPersonalKitMaintenance(runtime: GatewayServerRuntime): void {
       .catch(error =>
         runtime.logger.error("Personal Agent Config maintenance reconciliation failed", error)
       )
-      .finally(() => {
+      .finally(async () => {
         try {
-          reapTerminalClaudeKitArtifacts(runtime);
+          // AWAITED inside a callback the caller already fires and forgets:
+          // the outer `void` is the deliberate part, this catch is not.
+          await reapTerminalClaudeKitArtifacts(runtime);
         } catch (error) {
           runtime.logger.error("Personal Agent Config artifact maintenance failed", error);
         }
@@ -9318,8 +9358,11 @@ async function reconcilePendingPersonalKitFinalizations(
   if (!runtime.personalConfig.settings.enabled) return;
   const existing = pendingKitFinalizationRuns.get(runtime);
   if (existing) return existing;
+  // NOT awaited here: the WeakMap below stores this promise so a concurrent
+  // caller joins the in-flight reconciliation instead of starting a second one.
+  // Awaiting it into the map would store a resolved value and dedupe nothing.
   const run = (async () => {
-    for (const pending of runtime.asyncJobManager.getPendingKitFinalizations()) {
+    for (const pending of await runtime.asyncJobManager.getPendingKitFinalizations()) {
       if (pending.status === "orphaned") {
         // A stale lease is not proof that a remote or paused process died. Do
         // not release this native-session attempt until an operator or a later
@@ -9358,7 +9401,7 @@ async function reconcilePendingPersonalKitFinalizations(
         );
       }
     }
-    for (const acknowledged of runtime.asyncJobManager.getAcknowledgedKitAttemptReleases()) {
+    for (const acknowledged of await runtime.asyncJobManager.getAcknowledgedKitAttemptReleases()) {
       if (
         acknowledged.cli !== "claude" &&
         acknowledged.cli !== "codex" &&
@@ -9391,6 +9434,9 @@ async function reconcilePendingPersonalKitFinalizations(
       }
     }
   })();
+  // `run` stays a PROMISE in the map: concurrent callers join the in-flight
+  // reconciliation rather than starting a second one. Awaiting it into the map
+  // would store a resolved value and deduplicate nothing.
   pendingKitFinalizationRuns.set(runtime, run);
   try {
     await run;
@@ -10120,11 +10166,11 @@ export async function handleApiProviderRequest(
 }
 
 /** Async `api_<name>_request_async`: start the http job, return its jobId. */
-export function handleApiProviderRequestAsync(
+export async function handleApiProviderRequestAsync(
   runtimeArg: GatewayServerRuntime,
   providerRuntime: ApiProviderRuntime,
   params: ApiProviderToolParams
-): ExtendedToolResponse {
+): Promise<ExtendedToolResponse> {
   const toolName = `api_${providerRuntime.name}_request_async`;
   const corrId = params.correlationId ?? randomUUID();
   const kitError = rejectUnsupportedKitProvider(runtimeArg, providerRuntime.name, toolName, corrId);
@@ -10142,7 +10188,7 @@ export function handleApiProviderRequestAsync(
     // and the terminal logComplete (armed by writeFlightStart), populating usage
     // from the captured apiUsage. (optimizeResponse is N/A on the async path: the
     // response is collected later via llm_job_result.)
-    const outcome = runtimeArg.asyncJobManager.startHttpJob({
+    const outcome = await runtimeArg.asyncJobManager.startHttpJob({
       provider,
       apiRequest,
       correlationId: corrId,
@@ -10558,7 +10604,7 @@ export async function handleClaudeRequest(
     // session allocation, and all provider preparation. Their only safe
     // execution path is durable async admission.
     if (runtime.personalConfig.settings.enabled) assertKitSyncDeferralEnabled();
-    kit = resolvePersonalKitRequest(runtime, "claude", {
+    kit = await resolvePersonalKitRequest(runtime, "claude", {
       prompt,
       promptParts,
       systemPrompt,
@@ -11294,7 +11340,7 @@ export async function handleCodexRequest(
     // even Codex isolation probes are provider work and must not run for a
     // request that will fail closed before durable deferral.
     if (runtime.personalConfig.settings.enabled) assertKitSyncDeferralEnabled();
-    kit = resolvePersonalKitRequest(runtime, "codex", {
+    kit = await resolvePersonalKitRequest(runtime, "codex", {
       prompt,
       promptParts,
       fullAuto,
@@ -14741,7 +14787,7 @@ export async function handleMistralRequest(
   let kitEnvFragment: NodeJS.ProcessEnv | undefined;
   try {
     if (runtime.personalConfig.settings.enabled) assertKitSyncDeferralEnabled();
-    kit = resolvePersonalKitRequest(runtime, "mistral", {
+    kit = await resolvePersonalKitRequest(runtime, "mistral", {
       prompt: params.prompt,
       promptParts: params.promptParts,
       model: params.model,
@@ -15452,7 +15498,7 @@ export async function handleMistralRequestAsync(
       params.outputFormat,
       params.optimizePrompt
     );
-    const job = deps.asyncJobManager.startJob(
+    const job = await deps.asyncJobManager.startJob(
       "mistral",
       args,
       corrId,
@@ -15578,7 +15624,7 @@ export async function handleCodexRequestAsync(
   let kitSession: PersonalKitSessionResolution | null = null;
   let kitPrefix: string | undefined;
   try {
-    kit = resolvePersonalKitRequest(runtime, "codex", params as Record<string, unknown>);
+    kit = await resolvePersonalKitRequest(runtime, "codex", params as Record<string, unknown>);
   } catch (err) {
     kit?.artifact?.cleanup();
     return runtime.personalConfig.settings.enabled
@@ -16748,7 +16794,7 @@ async function dispatchRoutedCliAsync(
       outputFormat,
       params.optimizePrompt
     );
-    const job = runtime.asyncJobManager.startJob(
+    const job = await runtime.asyncJobManager.startJob(
       cli,
       args,
       corrId,
@@ -16892,6 +16938,13 @@ async function recoverUnadmittedPersonalKitAttempt(input: {
   attemptId: string;
   execution: KitExecutionRef;
 }): Promise<{ fence: "reserved" | "already_recovered" }> {
+  // Cross the startup barrier BEFORE the admission gate, for the same reason
+  // resolvePersonalKitRequest does. assertKitDurableAdmission reads the
+  // synchronous canAdmitDurableJobs() snapshot, so inside the startup window a
+  // valid recovery attempt is refused kit_busy. The barrier at
+  // lookupJobSnapshot further down cannot help: a later await does not protect
+  // an earlier read.
+  await input.runtime.asyncJobManager.whenStartupSettled();
   assertKitDurableAdmission(input.runtime);
   const manager = requireKitSessionManager(input.runtime);
   const session = await Promise.resolve(manager.getSession(input.sessionId));
@@ -16917,7 +16970,7 @@ async function recoverUnadmittedPersonalKitAttempt(input: {
       "A legacy non-durable Kit attempt has no durable fence and must remain retained"
     );
   }
-  const lookup = input.runtime.asyncJobManager.lookupJobSnapshot(attempt.id);
+  const lookup = await input.runtime.asyncJobManager.lookupJobSnapshot(attempt.id);
   if (lookup.state === "unavailable") {
     throw new PersonalConfigError(
       "kit_busy",
@@ -16932,7 +16985,7 @@ async function recoverUnadmittedPersonalKitAttempt(input: {
   }
   let fence: "reserved" | "already_recovered" | "conflict";
   try {
-    fence = input.runtime.asyncJobManager.fenceUnadmittedKitAttempt({
+    fence = await input.runtime.asyncJobManager.fenceUnadmittedKitAttempt({
       attemptId: attempt.id,
       cli: input.provider,
       kitExecution: input.execution,
@@ -19872,7 +19925,7 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
         let kit: PersonalKitRequestContext | null = null;
         let kitSession: PersonalKitSessionResolution | null = null;
         try {
-          kit = resolvePersonalKitRequest(runtime, "claude", {
+          kit = await resolvePersonalKitRequest(runtime, "claude", {
             prompt,
             promptParts,
             systemPrompt,
@@ -21764,14 +21817,14 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
         openWorldHint: false,
       },
       async ({ jobId, afterProgressSeq, progressLimit }) => {
-        const job = asyncJobManager.getJobSnapshot(jobId, {
+        const job = await asyncJobManager.getJobSnapshot(jobId, {
           afterProgressSeq,
           progressLimit,
         });
         // F3b: own-or-not-found. A job owned by another principal is reported as
         // "not found" — identical to an unknown jobId (no existence oracle).
         const caller = resolveOwnerPrincipal(getRequestContext());
-        if (!job || !principalCanAccess(asyncJobManager.getJobOwner(jobId), caller)) {
+        if (!job || !principalCanAccess(await asyncJobManager.getJobOwner(jobId), caller)) {
           return {
             content: [
               {
@@ -21827,10 +21880,10 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
       },
       async ({ jobId, afterProgressSeq, progressLimit, waitMs }, extra) => {
         const caller = resolveOwnerPrincipal(getRequestContext());
-        const accessible = (): boolean =>
-          principalCanAccess(asyncJobManager.getJobOwner(jobId), caller);
-        let job = accessible()
-          ? asyncJobManager.getJobSnapshot(jobId, { afterProgressSeq, progressLimit })
+        const accessible = async (): Promise<boolean> =>
+          principalCanAccess(await asyncJobManager.getJobOwner(jobId), caller);
+        let job = (await accessible())
+          ? await asyncJobManager.getJobSnapshot(jobId, { afterProgressSeq, progressLimit })
           : null;
         if (!job) {
           return {
@@ -21864,13 +21917,13 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
             };
             extra.signal.addEventListener("abort", abort, { once: true });
           });
-          job = accessible()
-            ? asyncJobManager.getJobSnapshot(jobId, { afterProgressSeq, progressLimit })
+          job = (await accessible())
+            ? await asyncJobManager.getJobSnapshot(jobId, { afterProgressSeq, progressLimit })
             : null;
           if (!job) break;
         }
 
-        if (!job || !accessible()) {
+        if (!job || !(await accessible())) {
           return {
             content: [
               {
@@ -21952,14 +22005,14 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
       },
       async ({ jobId, maxChars, stdoutOffsetChars, stderrOffsetChars, rawOutput }) => {
         const remoteCaller = callerIsRemote();
-        const result = asyncJobManager.getJobResult(jobId, maxChars, {
+        const result = await asyncJobManager.getJobResult(jobId, maxChars, {
           stdoutOffsetChars,
           stderrOffsetChars,
           redactProviderSessionIds: remoteCaller,
         });
         // F3b: own-or-not-found (no cross-principal readback of job output).
         const caller = resolveOwnerPrincipal(getRequestContext());
-        if (!result || !principalCanAccess(asyncJobManager.getJobOwner(jobId), caller)) {
+        if (!result || !principalCanAccess(await asyncJobManager.getJobOwner(jobId), caller)) {
           return {
             content: [
               {
@@ -22048,7 +22101,13 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
         // in the caller-facing (compressed) text.
         const compressJob =
           !rawOutput && asyncJobManager.getJobCompressResponse(jobId) && outputFormat !== "json";
-        const personalKitJob = Boolean(asyncJobManager.getJobKitExecution(jobId));
+        // AWAITED. getJobKitExecution became async with the store, and
+        // `Boolean(promise)` is always true, so this read silently claimed
+        // every job was a Kit job and suppressed compression telemetry for all
+        // of them. Boolean() is a coercion, not a condition, which is why
+        // check-promise-in-condition.mjs did not see it; the gate now visits
+        // coercion callees too.
+        const personalKitJob = Boolean(await asyncJobManager.getJobKitExecution(jobId));
         if (compressJob && result.stdout) {
           if (outputFormat === "stream-json" && parsed) {
             result.stdout = parsed.text;
@@ -22149,8 +22208,8 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
         // is reported as "not found" rather than cancelled.
         const caller = resolveOwnerPrincipal(getRequestContext());
         if (
-          asyncJobManager.getJobSnapshot(jobId) &&
-          !principalCanAccess(asyncJobManager.getJobOwner(jobId), caller)
+          (await asyncJobManager.getJobSnapshot(jobId)) &&
+          !principalCanAccess(await asyncJobManager.getJobOwner(jobId), caller)
         ) {
           return {
             content: [
@@ -22170,7 +22229,7 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
             isError: true,
           };
         }
-        const cancel = asyncJobManager.cancelJob(jobId);
+        const cancel = await asyncJobManager.cancelJob(jobId);
         if (!cancel.canceled) {
           return {
             content: [
@@ -22371,6 +22430,10 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
       openWorldHint: false,
     },
     async () => {
+      // Same barrier as the request paths: getDurableAdmissionHealth() reads the
+      // synchronous admission snapshot, and reporting "async jobs disabled"
+      // because startup has not settled is a false health answer, not a slow one.
+      await asyncJobManager.whenStartupSettled();
       const health = asyncJobManager.getJobHealth();
       // Report configured, attached, and currently admissible state separately.
       // A store can remain attached while its heartbeat circuit is fail-closed;
@@ -23704,6 +23767,7 @@ function registerHealthResource(server: McpServer): void {
     },
     async uri => {
       const manager = getAsyncJobManager();
+      await manager.whenStartupSettled();
       const health = manager.getJobHealth();
       return {
         contents: [
@@ -23769,7 +23833,16 @@ async function performShutdown(signal: string, exitCode: number): Promise<void> 
     }
 
     if (jobStore) {
-      jobStore.close();
+      // AWAITED, unlike every sibling close in this block, which were already
+      // awaited. Once the store became async an unawaited close let
+      // `process.exit()` below fire while the handle was still closing, and the
+      // log line on the next line asserted a completed close that had not
+      // happened: the system making an untrue statement about itself.
+      //
+      // It also matters ahead of s5's C5. When SqliteJobStore moves onto
+      // SqliteStorageDriver, that driver's bounded drain runs inside close(),
+      // and an unawaited call here would discard the drain entirely.
+      await jobStore.close();
       logger.info("Durable job store closed");
       jobStore = null;
       jobStoreInitialized = false;
@@ -23792,8 +23865,10 @@ async function performShutdown(signal: string, exitCode: number): Promise<void> 
   }
 }
 
-process.on("SIGTERM", () => shutdown("SIGTERM"));
-process.on("SIGINT", () => shutdown("SIGINT"));
+// `void`: a signal handler cannot be awaited, and shutdown() ends in
+// process.exit(), so nothing after it could observe the promise.
+process.on("SIGTERM", () => void shutdown("SIGTERM"));
+process.on("SIGINT", () => void shutdown("SIGINT"));
 
 //──────────────────────────────────────────────────────────────────────────────
 // Server Startup
@@ -24174,7 +24249,7 @@ function runWorkspaceCommand(args: string[]): void {
  * deliberately reloaded from the configured durable store instead of becoming
  * command-line authority.
  */
-function runMcpArtifactCommand(args: string[]): void {
+async function runMcpArtifactCommand(args: string[]): Promise<void> {
   const [action, jobId, acknowledgement] = args;
   if (
     action !== "recover" ||
@@ -24198,7 +24273,7 @@ function runMcpArtifactCommand(args: string[]): void {
     throw new Error("MCP artifact recovery could not open the configured durable job store");
   }
   try {
-    const result = recoverMcpArtifactCleanupPin({
+    const result = await recoverMcpArtifactCleanupPin({
       store,
       jobId,
       acknowledgement: MCP_ARTIFACT_RECOVERY_ACKNOWLEDGEMENT,
@@ -24206,7 +24281,7 @@ function runMcpArtifactCommand(args: string[]): void {
     printJsonLine(result);
     if (!result.ok) process.exitCode = 2;
   } finally {
-    store.close();
+    await store.close();
   }
 }
 
@@ -24272,7 +24347,9 @@ async function main() {
     return;
   }
   if (args[0] === "mcp-artifact") {
-    runMcpArtifactCommand(args.slice(1));
+    // Awaited: the command sets process.exitCode, and a floating promise lets
+    // main() return before that assignment happens.
+    await runMcpArtifactCommand(args.slice(1));
     return;
   }
   if (args[0] === "contracts") {
@@ -24334,6 +24411,26 @@ async function main() {
       `Configured ${persistence.backend} job store could not be opened; refusing to start without durable async persistence`
     );
   }
+
+  // Serve nothing until the manager's startup attempt has settled.
+  //
+  // While the job store was synchronous the constructor finished registering
+  // this instance and running the startup orphan sweep before it returned, so
+  // the first request always met a settled `durableAdmission`. An asynchronous
+  // store cannot be awaited in a constructor, and several fail-closed gates
+  // read that flag through the deliberately SYNCHRONOUS `canAdmitDurableJobs()`
+  // snapshot (`assertKitDurableAdmission`, the sync-deferral gate, the health
+  // surface). Without this line the first requests after boot are refused with
+  // `kit_busy` or told async jobs are disabled, purely because startup had not
+  // caught up. Awaiting here is cheap and once: it never rejects, and it runs
+  // before any transport is connected, so no caller can observe the window.
+  //
+  // This restores the PRE-CONVERSION behaviour exactly, including its failure
+  // mode: while the store was synchronous the same work ran in the constructor
+  // and blocked startup the same way. A durable store that cannot be reached
+  // therefore delays readiness rather than producing a server that connects and
+  // refuses everything, which is what the branch had accidentally introduced.
+  await runtimeAsyncJobManager.whenStartupSettled();
 
   const serverDeps: GatewayServerDeps = {
     sessionManager,

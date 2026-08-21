@@ -257,15 +257,15 @@ type VerifiedLinkedJob =
  * is immutable evidence, so legacy-unowned, cross-owner, mislinked, or partial
  * output is permanently unmintable rather than something the hash may bless.
  */
-function readVerifiedLinkedJob(
+async function readVerifiedLinkedJob(
   deps: ReceiptDeps,
   store: ValidationRunStore,
   run: ValidationRunRecord,
   link: ValidationRunLink
-): VerifiedLinkedJob {
+): Promise<VerifiedLinkedJob> {
   let jobOwner: string | null | undefined;
   try {
-    jobOwner = deps.asyncJobManager.getJobOwner(link.jobId);
+    jobOwner = await deps.asyncJobManager.getJobOwner(link.jobId);
   } catch {
     return { kind: "unmintable" };
   }
@@ -275,7 +275,7 @@ function readVerifiedLinkedJob(
 
   let linkedValidationId: string | null;
   try {
-    linkedValidationId = store.getValidationRunIdByJobId(link.jobId);
+    linkedValidationId = await store.getValidationRunIdByJobId(link.jobId);
   } catch {
     return { kind: "unmintable" };
   }
@@ -283,7 +283,7 @@ function readVerifiedLinkedJob(
 
   let result: AsyncJobResult | null;
   try {
-    result = deps.asyncJobManager.getJobResult(link.jobId, Number.MAX_SAFE_INTEGER);
+    result = await deps.asyncJobManager.getJobResult(link.jobId, Number.MAX_SAFE_INTEGER);
   } catch {
     return { kind: "unmintable" };
   }
@@ -311,7 +311,7 @@ function readVerifiedLinkedJob(
  * `verification_failed` instead (see `mintedResult`). The write is INSERT OR
  * IGNORE, so concurrent mints converge on one row.
  */
-function tryMint(deps: ReceiptDeps, run: ValidationRunRecord): MintOutcome {
+async function tryMint(deps: ReceiptDeps, run: ValidationRunRecord): Promise<MintOutcome> {
   const store = deps.validationRunStore;
   if (!store) return { kind: "pending" };
   if (run.status === "admitting" || run.status === "admission_failed") {
@@ -357,7 +357,7 @@ function tryMint(deps: ReceiptDeps, run: ValidationRunRecord): MintOutcome {
   const providerResults: Array<{ link: ValidationRunLink; result: NormalizedValidationResult }> =
     [];
   for (const link of run.providerLinks) {
-    const verified = readVerifiedLinkedJob(deps, store, run, link);
+    const verified = await readVerifiedLinkedJob(deps, store, run, link);
     if (verified.kind !== "terminal") return verified;
     providerResults.push({
       link,
@@ -367,7 +367,7 @@ function tryMint(deps: ReceiptDeps, run: ValidationRunRecord): MintOutcome {
 
   let judgeStatus: string | null = null;
   if (run.judgeLink) {
-    const verified = readVerifiedLinkedJob(deps, store, run, run.judgeLink);
+    const verified = await readVerifiedLinkedJob(deps, store, run, run.judgeLink);
     if (verified.kind !== "terminal") return verified;
     judgeStatus = verified.result.status;
   }
@@ -449,13 +449,13 @@ function tryMint(deps: ReceiptDeps, run: ValidationRunRecord): MintOutcome {
     hasMaterialDisagreement: structuredContent.disagreements.hasMaterialDisagreement,
     confidence: structuredContent.confidence,
   };
-  store.recordValidationReceipt(record);
+  await store.recordValidationReceipt(record);
   // Mark the run finalized now that a receipt exists (idempotent). This keeps
   // validation_runs.status authoritative (running -> finalized) rather than
   // leaving a minted run perpetually "running".
-  store.setValidationRunStatus(run.validationId, "finalized");
+  await store.setValidationRunStatus(run.validationId, "finalized");
   // Re-read so a concurrent winner's row (not ours) is what we return.
-  const stored = store.getValidationReceipt(run.validationId);
+  const stored = await store.getValidationReceipt(run.validationId);
   return { kind: "minted", record: stored ?? record };
 }
 
@@ -671,11 +671,11 @@ function verifiedReceiptEnvelope(
  * Absent for jobs that have been evicted or no longer expose a complete,
  * identity-matching output page.
  */
-function collectRawResponses(
+async function collectRawResponses(
   deps: ReceiptDeps,
   receipt: ValidationReceipt,
   caller: string
-): RawResponse[] {
+): Promise<RawResponse[]> {
   const out: RawResponse[] = [];
   const refs: Array<{ provider: string; jobId: string; correlationId: string }> = [];
   for (const output of receipt.report.perModelOutputs) {
@@ -699,8 +699,8 @@ function collectRawResponses(
     let owner: string | null | undefined;
     let jobResult: AsyncJobResult | null;
     try {
-      owner = deps.asyncJobManager.getJobOwner(ref.jobId);
-      jobResult = deps.asyncJobManager.getJobResult(ref.jobId, Number.MAX_SAFE_INTEGER);
+      owner = await deps.asyncJobManager.getJobOwner(ref.jobId);
+      jobResult = await deps.asyncJobManager.getJobResult(ref.jobId, Number.MAX_SAFE_INTEGER);
     } catch {
       continue;
     }
@@ -720,13 +720,13 @@ function collectRawResponses(
   return out;
 }
 
-function mintedResult(
+async function mintedResult(
   deps: ReceiptDeps,
   record: ValidationReceiptRecord,
   run: ValidationRunRecord,
   includeRawResponses: boolean,
   caller: string
-): ValidationReceiptResult {
+): Promise<ValidationReceiptResult> {
   const receipt = verifiedReceiptEnvelope(record, run);
   // A stored receipt that fails verification is a failure, not an absence:
   // report it as such rather than as `expired_unminted` ("never minted").
@@ -736,26 +736,35 @@ function mintedResult(
     validationId: record.validationId,
     receipt,
     mintedAt: record.mintedAt,
-    ...(includeRawResponses ? { rawResponses: collectRawResponses(deps, receipt, caller) } : {}),
+    ...(includeRawResponses
+      ? { rawResponses: await collectRawResponses(deps, receipt, caller) }
+      : {}),
   };
 }
 
-function runStateOf(deps: ReceiptDeps, run: ValidationRunRecord): ValidationRunState {
-  const snapStatus = (jobId: string): string =>
-    deps.asyncJobManager.getJobSnapshot(jobId)?.status ?? "evicted";
+async function runStateOf(
+  deps: ReceiptDeps,
+  run: ValidationRunRecord
+): Promise<ValidationRunState> {
+  const snapStatus = async (jobId: string): Promise<string> =>
+    (await deps.asyncJobManager.getJobSnapshot(jobId))?.status ?? "evicted";
   return {
     validationId: run.validationId,
     status: run.status,
-    providers: run.providerLinks.map(link => ({
-      provider: link.provider,
-      jobId: link.jobId,
-      status: snapStatus(link.jobId),
-    })),
+    // Promise.all, not `.map(async ...)`: the latter would put a promise in
+    // every `status` field and still type-check at the callback boundary.
+    providers: await Promise.all(
+      run.providerLinks.map(async link => ({
+        provider: link.provider,
+        jobId: link.jobId,
+        status: await snapStatus(link.jobId),
+      }))
+    ),
     judge: run.judgeLink
       ? {
           provider: run.judgeLink.provider,
           jobId: run.judgeLink.jobId,
-          status: snapStatus(run.judgeLink.jobId),
+          status: await snapStatus(run.judgeLink.jobId),
         }
       : null,
   };
@@ -766,20 +775,20 @@ function runStateOf(deps: ReceiptDeps, run: ValidationRunRecord): ValidationRunS
  * own-or-not-found: a run/receipt owned by another principal returns not_found,
  * never another principal's data.
  */
-export function resolveValidationReceipt(
+export async function resolveValidationReceipt(
   deps: ReceiptDeps,
   validationId: string,
   opts: { caller: string; includeRawResponses?: boolean }
-): ValidationReceiptResult {
+): Promise<ValidationReceiptResult> {
   const store = deps.validationRunStore;
   if (!store) return { status: "not_found", validationId };
 
-  const existing = store.getValidationReceipt(validationId);
+  const existing = await store.getValidationReceipt(validationId);
   if (existing) {
     // The run is the durable ownership authority. Authorizing from receipt
     // metadata before cross-checking it would let a corrupted receipt owner
     // transfer visibility without invalidating the report-only canonical hash.
-    const run = store.getValidationRun(validationId);
+    const run = await store.getValidationRun(validationId);
     if (
       !run ||
       run.validationId !== validationId ||
@@ -787,22 +796,28 @@ export function resolveValidationReceipt(
     ) {
       return { status: "not_found", validationId };
     }
-    return mintedResult(deps, existing, run, opts.includeRawResponses ?? false, opts.caller);
+    return await mintedResult(deps, existing, run, opts.includeRawResponses ?? false, opts.caller);
   }
 
-  const run = store.getValidationRun(validationId);
+  const run = await store.getValidationRun(validationId);
   if (!run || !principalCanAccess(run.ownerPrincipal, opts.caller)) {
     return { status: "not_found", validationId };
   }
 
-  const outcome = tryMint(deps, run);
+  const outcome = await tryMint(deps, run);
   if (outcome.kind === "minted") {
-    return mintedResult(deps, outcome.record, run, opts.includeRawResponses ?? false, opts.caller);
+    return await mintedResult(
+      deps,
+      outcome.record,
+      run,
+      opts.includeRawResponses ?? false,
+      opts.caller
+    );
   }
   if (outcome.kind === "unmintable") {
     return { status: "expired_unminted", validationId };
   }
-  return { status: "pending", validationId, run: runStateOf(deps, run) };
+  return { status: "pending", validationId, run: await runStateOf(deps, run) };
 }
 
 /**
@@ -810,14 +825,17 @@ export function resolveValidationReceipt(
  * Best-effort and side-effect-only (no owner check: this is a system action that
  * stamps the receipt with the RUN's owner, never the caller). Never throws.
  */
-export function eagerMintFromValidationId(deps: ReceiptDeps, validationId: string): void {
+export async function eagerMintFromValidationId(
+  deps: ReceiptDeps,
+  validationId: string
+): Promise<void> {
   const store = deps.validationRunStore;
   if (!store) return;
   try {
-    if (store.getValidationReceipt(validationId)) return;
-    const run = store.getValidationRun(validationId);
+    if (await store.getValidationReceipt(validationId)) return;
+    const run = await store.getValidationRun(validationId);
     if (!run) return;
-    tryMint(deps, run);
+    await tryMint(deps, run);
   } catch {
     // Best-effort: a mint failure must not break the collection/synthesis path.
   }
@@ -828,16 +846,16 @@ export function eagerMintFromValidationId(deps: ReceiptDeps, validationId: strin
  * collected. Resolves the owning run from the job id and mints if the run has
  * just become terminal. Best-effort: never throws into the collection path.
  */
-export function eagerMintFromJobId(deps: ReceiptDeps, jobId: string): void {
+export async function eagerMintFromJobId(deps: ReceiptDeps, jobId: string): Promise<void> {
   const store = deps.validationRunStore;
   if (!store) return;
   let validationId: string | null;
   try {
-    validationId = store.getValidationRunIdByJobId(jobId);
+    validationId = await store.getValidationRunIdByJobId(jobId);
   } catch {
     return;
   }
-  if (validationId) eagerMintFromValidationId(deps, validationId);
+  if (validationId) await eagerMintFromValidationId(deps, validationId);
 }
 
 /** Resolve the current request's owner principal (own-or-not-found callers). */

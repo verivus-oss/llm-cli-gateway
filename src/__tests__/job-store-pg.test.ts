@@ -2,7 +2,6 @@ import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { randomUUID } from "node:crypto";
-import type { Worker } from "node:worker_threads";
 import type { Pool } from "pg";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { AsyncJobManager } from "../async-job-manager.js";
@@ -60,17 +59,17 @@ describe("PostgresJobStore", () => {
     });
   });
 
-  afterEach(() => {
-    store.close();
+  afterEach(async () => {
+    await store.close();
     rmSync(tempDir, { recursive: true, force: true });
   });
 
-  it("reports whether the completion guard admitted the terminal write", () => {
+  it("reports whether the completion guard admitted the terminal write", async () => {
     // Postgres is the backend where this actually matters: it is the shared
     // store, so a wrong `true` here would let one gateway instance overwrite
     // another instance's terminal output through the unfenced recordOutput.
     const t = new Date().toISOString();
-    store.recordStart({
+    await store.recordStart({
       id: "pg-guard-job",
       correlationId: "pg-guard-corr",
       requestKey: computeRequestKey("claude", ["-p", "guard"]),
@@ -91,20 +90,20 @@ describe("PostgresJobStore", () => {
       finishedAt: t,
     };
 
-    expect(store.recordComplete(terminal)).toBe(true);
-    expect(store.recordComplete({ ...terminal, stdout: "LATER" })).toBe(false);
-    expect(store.getById("pg-guard-job")?.stdout).toBe("PARTIAL");
+    expect(await store.recordComplete(terminal)).toBe(true);
+    expect(await store.recordComplete({ ...terminal, stdout: "LATER" })).toBe(false);
+    expect((await store.getById("pg-guard-job"))?.stdout).toBe("PARTIAL");
 
     // A row that does not exist is also "not admitted".
-    expect(store.recordComplete({ ...terminal, id: "pg-no-such-row" })).toBe(false);
+    expect(await store.recordComplete({ ...terminal, id: "pg-no-such-row" })).toBe(false);
   });
 
-  it("round-trips a completed process job", () => {
+  it("round-trips a completed process job", async () => {
     const startedAt = new Date().toISOString();
     const finishedAt = new Date().toISOString();
     const requestKey = computeRequestKey("claude", ["-p", "postgres"]);
 
-    store.recordStart({
+    await store.recordStart({
       id: "pg-job-1",
       correlationId: "pg-corr-1",
       requestKey,
@@ -115,8 +114,8 @@ describe("PostgresJobStore", () => {
       pid: 123,
       ownerPrincipal: "alice@example.com",
     });
-    store.recordOutput("pg-job-1", "partial", "", false);
-    store.recordComplete({
+    await store.recordOutput("pg-job-1", "partial", "", false);
+    await store.recordComplete({
       id: "pg-job-1",
       status: "completed",
       exitCode: 0,
@@ -128,7 +127,7 @@ describe("PostgresJobStore", () => {
     });
 
     const row = store.getById("pg-job-1");
-    expect(row).toMatchObject({
+    expect(await row).toMatchObject({
       id: "pg-job-1",
       correlationId: "pg-corr-1",
       requestKey,
@@ -147,12 +146,12 @@ describe("PostgresJobStore", () => {
       httpStatus: null,
       payloadJson: null,
     });
-    expect(store.findByRequestKey(requestKey)?.id).toBe("pg-job-1");
+    expect((await store.findByRequestKey(requestKey))?.id).toBe("pg-job-1");
   });
 
-  it("round-trips async failure classification", () => {
+  it("round-trips async failure classification", async () => {
     const now = new Date().toISOString();
-    store.recordStart({
+    await store.recordStart({
       id: "pg-job-e2big",
       correlationId: "pg-corr-e2big",
       requestKey: computeRequestKey("codex", ["exec", "--", "-"]),
@@ -161,7 +160,7 @@ describe("PostgresJobStore", () => {
       startedAt: now,
       pid: null,
     });
-    store.recordComplete({
+    await store.recordComplete({
       id: "pg-job-e2big",
       status: "failed",
       exitCode: 126,
@@ -174,7 +173,7 @@ describe("PostgresJobStore", () => {
       finishedAt: now,
     });
 
-    expect(store.getById("pg-job-e2big")).toMatchObject({
+    expect(await store.getById("pg-job-e2big")).toMatchObject({
       status: "failed",
       exitCode: 126,
       errorCategory: "input_too_large",
@@ -184,7 +183,7 @@ describe("PostgresJobStore", () => {
 
   it("rejects Kit plus MCP provenance before writing a job or attempt fence", async () => {
     const id = "pg-kit-mcp-admission";
-    expect(() =>
+    await expect(
       store.recordStart({
         id,
         correlationId: "pg-kit-mcp-admission-correlation",
@@ -200,8 +199,8 @@ describe("PostgresJobStore", () => {
         kitExecution: kitExecution({ contextIdentity: "pg-kit-mcp-admission-context" }),
         kitSessionId: "pg-kit-mcp-admission-session",
       })
-    ).toThrow(/Kit jobs cannot carry Claude MCP artifact provenance/);
-    expect(store.getById(id)).toBeNull();
+    ).rejects.toThrow(/Kit jobs cannot carry Claude MCP artifact provenance/);
+    expect(await store.getById(id)).toBeNull();
     const fences = await pool.query(
       "SELECT attempt_id FROM kit_attempt_fences WHERE attempt_id = $1",
       [id]
@@ -209,7 +208,7 @@ describe("PostgresJobStore", () => {
     expect(fences.rows).toEqual([]);
   });
 
-  it("persists nullable response compression decisions across a worker restart", () => {
+  it("persists nullable response compression decisions across a worker restart", async () => {
     const startedAt = new Date().toISOString();
     const decisions: ReadonlyArray<readonly [string, boolean | undefined]> = [
       ["pg-compression-enabled", true],
@@ -218,7 +217,7 @@ describe("PostgresJobStore", () => {
     ];
 
     for (const [id, compressResponse] of decisions) {
-      store.recordStart({
+      await store.recordStart({
         id,
         correlationId: `${id}-corr`,
         requestKey: `${id}-key`,
@@ -229,7 +228,7 @@ describe("PostgresJobStore", () => {
         pid: null,
       });
     }
-    store.recordStart({
+    await store.recordStart({
       id: "pg-kit-compression-enabled",
       correlationId: "pg-kit-compression-enabled-corr",
       requestKey: "pg-kit-compression-enabled-key",
@@ -243,22 +242,22 @@ describe("PostgresJobStore", () => {
       ownerPrincipal: "local",
     });
 
-    store.close();
+    await store.close();
     const restarted = new PostgresJobStore(TEST_DATABASE_URL, undefined, {
       retentionMs: 60_000,
       dedupWindowMs: 60_000,
     });
     try {
-      expect(restarted.getById("pg-compression-enabled")?.compressResponse).toBe(true);
-      expect(restarted.getById("pg-compression-disabled")?.compressResponse).toBe(false);
-      expect(restarted.getById("pg-compression-legacy")?.compressResponse).toBeNull();
-      expect(restarted.getById("pg-kit-compression-enabled")?.compressResponse).toBe(true);
+      expect((await restarted.getById("pg-compression-enabled"))?.compressResponse).toBe(true);
+      expect((await restarted.getById("pg-compression-disabled"))?.compressResponse).toBe(false);
+      expect((await restarted.getById("pg-compression-legacy"))?.compressResponse).toBeNull();
+      expect((await restarted.getById("pg-kit-compression-enabled"))?.compressResponse).toBe(true);
     } finally {
-      restarted.close();
+      await restarted.close();
     }
   });
 
-  it("permanently fences recovered Kit attempts before normal durable admission", () => {
+  it("permanently fences recovered Kit attempts before normal durable admission", async () => {
     const execution = kitExecution({ contextIdentity: "pg-fenced-context" });
     const fence = {
       attemptId: "pg-fenced-attempt",
@@ -269,12 +268,12 @@ describe("PostgresJobStore", () => {
       fencedAt: new Date().toISOString(),
     };
 
-    expect(store.fenceUnadmittedKitAttempt(fence)).toBe("reserved");
-    expect(store.fenceUnadmittedKitAttempt(fence)).toBe("already_recovered");
-    expect(store.fenceUnadmittedKitAttempt({ ...fence, kitSessionId: "pg-other-session" })).toBe(
-      "conflict"
-    );
-    expect(() =>
+    expect(await store.fenceUnadmittedKitAttempt(fence)).toBe("reserved");
+    expect(await store.fenceUnadmittedKitAttempt(fence)).toBe("already_recovered");
+    expect(
+      await store.fenceUnadmittedKitAttempt({ ...fence, kitSessionId: "pg-other-session" })
+    ).toBe("conflict");
+    await expect(
       store.recordStart({
         id: fence.attemptId,
         correlationId: "pg-late-admission",
@@ -287,10 +286,10 @@ describe("PostgresJobStore", () => {
         kitSessionId: fence.kitSessionId,
         ownerPrincipal: "local",
       })
-    ).toThrow(/permanently recovered/);
-    expect(store.getById(fence.attemptId)).toBeNull();
+    ).rejects.toThrow(/permanently recovered/);
+    expect(await store.getById(fence.attemptId)).toBeNull();
 
-    store.recordStart({
+    await store.recordStart({
       id: "pg-admitted-attempt",
       correlationId: "pg-admitted-corr",
       requestKey: "pg-admitted-key",
@@ -303,7 +302,7 @@ describe("PostgresJobStore", () => {
       ownerPrincipal: "local",
     });
     expect(
-      store.fenceUnadmittedKitAttempt({
+      await store.fenceUnadmittedKitAttempt({
         ...fence,
         attemptId: "pg-admitted-attempt",
         kitSessionId: "pg-admitted-session",
@@ -322,19 +321,19 @@ describe("PostgresJobStore", () => {
       fencedAt: new Date().toISOString(),
     };
 
-    expect(store.fenceUnadmittedKitAttempt(fence)).toBe("reserved");
-    expect(store.fenceUnadmittedKitAttempt({ ...fence, ownerPrincipal: "local" })).toBe(
+    expect(await store.fenceUnadmittedKitAttempt(fence)).toBe("reserved");
+    expect(await store.fenceUnadmittedKitAttempt({ ...fence, ownerPrincipal: "local" })).toBe(
       "already_recovered"
     );
-    expect(store.fenceUnadmittedKitAttempt({ ...fence, ownerPrincipal: "remote-reviewer" })).toBe(
-      "conflict"
-    );
-    expect(store.fenceUnadmittedKitAttempt(fence)).toBe("conflict");
-    expect(store.fenceUnadmittedKitAttempt({ ...fence, ownerPrincipal: undefined })).toBe(
+    expect(
+      await store.fenceUnadmittedKitAttempt({ ...fence, ownerPrincipal: "remote-reviewer" })
+    ).toBe("conflict");
+    expect(await store.fenceUnadmittedKitAttempt(fence)).toBe("conflict");
+    expect(await store.fenceUnadmittedKitAttempt({ ...fence, ownerPrincipal: undefined })).toBe(
       "conflict"
     );
     expect(
-      store.fenceUnadmittedKitAttempt({
+      await store.fenceUnadmittedKitAttempt({
         ...fence,
         ownerPrincipal: 42 as unknown as string,
       })
@@ -355,7 +354,7 @@ describe("PostgresJobStore", () => {
       leaked: privateContext,
     } as unknown as KitExecutionRef;
 
-    store.recordStart({
+    await store.recordStart({
       id: "pg-canonical-kit-execution",
       correlationId: "pg-canonical-kit-execution-corr",
       requestKey: "pg-canonical-kit-execution-key",
@@ -367,8 +366,8 @@ describe("PostgresJobStore", () => {
       kitSessionId: "pg-canonical-kit-session",
     });
 
-    expect(store.getById("pg-canonical-kit-execution")?.kitExecution).toEqual(canonical);
-    expect(store.getById("pg-canonical-kit-execution")?.requestKey).toBe(
+    expect((await store.getById("pg-canonical-kit-execution"))?.kitExecution).toEqual(canonical);
+    expect((await store.getById("pg-canonical-kit-execution"))?.requestKey).toBe(
       "kit:pg-canonical-kit-execution"
     );
     const rows = await pool.query<{ kit_execution_json: string }>(
@@ -437,6 +436,12 @@ describe("PostgresJobStore", () => {
       dedupWindowMs: 60_000,
     });
     try {
+      // The scrub runs in init, which is now reached on the first store call
+      // rather than from the constructor: the driver needs a dynamic import of
+      // the optional `pg` peer and a constructor cannot await. No store
+      // operation can observe unscrubbed material, because every one of them
+      // awaits init first. This is that first call.
+      await reopened.getById("pg-worker-legacy-failed-kit");
       const row = await pool.query<{
         id: string;
         status: string;
@@ -515,10 +520,10 @@ describe("PostgresJobStore", () => {
         );
         expect(afterCleanRestart.rows).toEqual(beforeCleanRestart.rows);
       } finally {
-        cleanRestart.close();
+        await cleanRestart.close();
       }
     } finally {
-      reopened.close();
+      await reopened.close();
     }
   });
 
@@ -557,7 +562,7 @@ describe("PostgresJobStore", () => {
         retentionMs: 60_000,
         dedupWindowMs: 60_000,
       });
-      isolated.recordStart({
+      await isolated.recordStart({
         id: "dml-only-job",
         correlationId: "dml-only-corr",
         requestKey: "dml-only-key",
@@ -567,22 +572,22 @@ describe("PostgresJobStore", () => {
         pid: null,
         ownerInstance: "dml-only-instance",
       });
-      expect(isolated.getById("dml-only-job")).toMatchObject({
+      expect(await isolated.getById("dml-only-job")).toMatchObject({
         id: "dml-only-job",
         status: "queued",
         ownerInstance: "dml-only-instance",
       });
     } finally {
-      isolated?.close();
+      await isolated?.close();
       await pool.query(`DROP SCHEMA IF EXISTS ${schema} CASCADE`);
       await pool.query(`DROP ROLE IF EXISTS ${role}`);
     }
   });
 
-  it("persists and compare-and-sets pending Kit terminal finalization", () => {
+  it("persists and compare-and-sets pending Kit terminal finalization", async () => {
     const execution = kitExecution();
     const privateContext = "PRIVATE_PG_KIT_CONTEXT_SENTINEL";
-    store.recordStart({
+    await store.recordStart({
       id: "pg-kit-finalization",
       correlationId: "pg-kit-finalization-corr",
       requestKey: "pg-kit-finalization-key",
@@ -594,8 +599,8 @@ describe("PostgresJobStore", () => {
       kitExecution: execution,
       kitSessionId: "gateway-pg-kit-session",
     });
-    store.recordOutput("pg-kit-finalization", privateContext, privateContext, false);
-    store.recordComplete({
+    await store.recordOutput("pg-kit-finalization", privateContext, privateContext, false);
+    await store.recordComplete({
       id: "pg-kit-finalization",
       status: "completed",
       exitCode: 0,
@@ -610,8 +615,8 @@ describe("PostgresJobStore", () => {
       },
     });
 
-    expect(store.getPinnedKitReleaseIds?.()).toEqual(["release-pg-job"]);
-    expect(store.getPendingKitFinalizations()).toMatchObject([
+    expect(await store.getPinnedKitReleaseIds?.()).toEqual(["release-pg-job"]);
+    expect(await store.getPendingKitFinalizations()).toMatchObject([
       {
         jobId: "pg-kit-finalization",
         kitSessionId: "gateway-pg-kit-session",
@@ -619,30 +624,32 @@ describe("PostgresJobStore", () => {
         terminalMetadata: null,
       },
     ]);
-    expect(store.getById("pg-kit-finalization")).toMatchObject({
+    expect(await store.getById("pg-kit-finalization")).toMatchObject({
       argsJson: JSON.stringify(["[personal-config-kit arguments redacted]"]),
       stdout: "",
       stderr: "",
       error: null,
     });
     expect(JSON.stringify(store.getById("pg-kit-finalization"))).not.toContain(privateContext);
-    expect(store.markKitTerminalFinalized("pg-kit-finalization", "wrong-session")).toBe(false);
-    expect(store.markKitTerminalFinalized("pg-kit-finalization", "gateway-pg-kit-session")).toBe(
-      true
+    expect(await store.markKitTerminalFinalized("pg-kit-finalization", "wrong-session")).toBe(
+      false
     );
-    expect(store.markKitTerminalFinalized("pg-kit-finalization", "gateway-pg-kit-session")).toBe(
-      true
-    );
-    expect(store.getPendingKitFinalizations()).toEqual([]);
-    expect(store.getPinnedKitReleaseIds?.()).toEqual([]);
-    expect(store.getById("pg-kit-finalization")).toMatchObject({
+    expect(
+      await store.markKitTerminalFinalized("pg-kit-finalization", "gateway-pg-kit-session")
+    ).toBe(true);
+    expect(
+      await store.markKitTerminalFinalized("pg-kit-finalization", "gateway-pg-kit-session")
+    ).toBe(true);
+    expect(await store.getPendingKitFinalizations()).toEqual([]);
+    expect(await store.getPinnedKitReleaseIds?.()).toEqual([]);
+    expect(await store.getById("pg-kit-finalization")).toMatchObject({
       kitSessionId: "gateway-pg-kit-session",
       kitTerminalFinalized: true,
       kitTerminalFinalizedAt: expect.any(String),
     });
   });
 
-  it("uses in-memory worker replies when TMPDIR is unavailable and preserves a 50 MiB result", () => {
+  it("uses in-memory worker replies when TMPDIR is unavailable and preserves a 50 MiB result", async () => {
     const originalTmpdir = process.env.TMPDIR;
     process.env.TMPDIR = join(tempDir, "missing-runtime-dir");
     const isolated = new PostgresJobStore(TEST_DATABASE_URL, undefined, {
@@ -651,7 +658,7 @@ describe("PostgresJobStore", () => {
     });
     try {
       const stdout = "x".repeat(50 * 1024 * 1024);
-      isolated.recordStart({
+      await isolated.recordStart({
         id: "pg-message-port-large-result",
         correlationId: "pg-message-port-large-result-corr",
         requestKey: "pg-message-port-large-result-key",
@@ -660,7 +667,7 @@ describe("PostgresJobStore", () => {
         startedAt: new Date().toISOString(),
         pid: null,
       });
-      isolated.recordComplete({
+      await isolated.recordComplete({
         id: "pg-message-port-large-result",
         status: "completed",
         exitCode: 0,
@@ -671,17 +678,29 @@ describe("PostgresJobStore", () => {
         finishedAt: new Date().toISOString(),
       });
 
-      expect(isolated.getById("pg-message-port-large-result")?.stdout).toBe(stdout);
-      isolated.close();
-      expect(() => isolated.getById("pg-message-port-large-result")).toThrow(/closed/);
+      expect((await isolated.getById("pg-message-port-large-result"))?.stdout).toBe(stdout);
+      await isolated.close();
+      await expect(isolated.getById("pg-message-port-large-result")).rejects.toThrow(/closed/);
     } finally {
-      isolated.close();
+      await isolated.close();
       if (originalTmpdir === undefined) delete process.env.TMPDIR;
       else process.env.TMPDIR = originalTmpdir;
     }
   }, 30_000);
 
-  it("recreates a retired worker before accepting the next durable operation", async () => {
+  it("retries initialisation after a failure instead of poisoning every later call", async () => {
+    // SUCCESSOR to "recreates a retired worker before accepting the next
+    // durable operation". That test drove PostgresJobStore's private `worker`,
+    // `retireWorker` and `workerTerminationPending`, all of which s5 deleted
+    // with the worker thread, so its subject no longer exists.
+    //
+    // The property it protected does survive, and this asserts it: a store
+    // whose initialisation failed must RETRY on the next call rather than be
+    // permanently unusable. Under the worker that was achieved by retiring the
+    // failed worker so a later heartbeat built a fresh one. It is achieved now
+    // by clearing the memoised init promise on rejection, and memoising the
+    // rejection instead would poison every later call for the life of the
+    // process, which is worse than the behaviour being replaced.
     const errors: string[] = [];
     const isolated = new PostgresJobStore(
       TEST_DATABASE_URL,
@@ -697,45 +716,78 @@ describe("PostgresJobStore", () => {
       }
     );
     const internals = isolated as unknown as {
-      worker: Worker | null;
-      workerTerminationPending: boolean;
-      retireWorker: (worker: Worker | null) => void;
+      ops: { init: () => Promise<void>; op: (m: string, a: unknown[]) => Promise<unknown> } | null;
+      startupPromise: Promise<unknown> | null;
     };
-    const worker = internals.worker;
-    if (!worker) throw new Error("Expected PostgresJobStore to have a live worker");
-    const exited = new Promise<void>(resolve => worker.once("exit", () => resolve()));
 
     try {
-      // This is the same controlled-retirement path used after a bridge
-      // timeout. Waiting for exit proves the replacement cannot overlap a
-      // possibly still-running predecessor operation.
-      internals.retireWorker(worker);
-      await exited;
-      expect(internals.workerTerminationPending).toBe(false);
-      expect(errors).not.toContain("PostgresJobStore worker exited unexpectedly");
-
-      isolated.recordStart({
-        id: "pg-worker-recovery",
-        correlationId: "pg-worker-recovery-corr",
-        requestKey: "pg-worker-recovery-key",
+      // Let the REAL initialisation run first, so what follows drives the real
+      // ensureInit rather than a stub of it. An earlier version of this test
+      // replaced ensureInit outright and therefore asserted nothing about the
+      // production retry at all.
+      await isolated.recordStart({
+        id: "pg-init-retry-warm",
+        correlationId: "pg-init-retry-warm-corr",
+        requestKey: "pg-init-retry-warm-key",
         cli: "claude",
         args: [],
         startedAt: new Date().toISOString(),
         pid: null,
       });
-      expect(isolated.getById("pg-worker-recovery")?.status).toBe("queued");
+
+      // Now make the NEXT initialisation fail exactly once, and force a
+      // re-init. Everything from here runs through the real ensureInit.
+      const realOps = internals.ops!;
+      let alreadyFailed = false;
+      internals.ops = {
+        init: async () => {
+          if (!alreadyFailed) {
+            alreadyFailed = true;
+            throw new Error("simulated bootstrap failure");
+          }
+          return realOps.init();
+        },
+        op: (method, args) => realOps.op(method, args),
+      };
+      internals.startupPromise = null;
+
+      await expect(
+        isolated.recordStart({
+          id: "pg-init-retry-first",
+          correlationId: "pg-init-retry-first-corr",
+          requestKey: "pg-init-retry-first-key",
+          cli: "claude",
+          args: [],
+          startedAt: new Date().toISOString(),
+          pid: null,
+        })
+      ).rejects.toThrow(/simulated bootstrap failure/);
+
+      // THE PROPERTY: the second call gets through. It can only do so if the
+      // rejected init promise was cleared rather than memoised.
+      await isolated.recordStart({
+        id: "pg-init-retry",
+        correlationId: "pg-init-retry-corr",
+        requestKey: "pg-init-retry-key",
+        cli: "claude",
+        args: [],
+        startedAt: new Date().toISOString(),
+        pid: null,
+      });
+      expect((await isolated.getById("pg-init-retry"))?.status).toBe("queued");
+      expect(errors).toEqual([]);
     } finally {
-      isolated.close();
+      await isolated.close();
     }
   });
 
-  it("round-trips an HTTP job without persisting an API key", () => {
+  it("round-trips an HTTP job without persisting an API key", async () => {
     const payloadJson = JSON.stringify({
       baseUrl: "https://api.openai.com/v1",
       model: "gpt-4o-mini",
       messages: [{ role: "user", content: "hello" }],
     });
-    store.recordStart({
+    await store.recordStart({
       id: "pg-http-1",
       correlationId: "pg-http-corr",
       requestKey: "http-key",
@@ -746,7 +798,7 @@ describe("PostgresJobStore", () => {
       transport: "http",
       payloadJson,
     });
-    store.recordComplete({
+    await store.recordComplete({
       id: "pg-http-1",
       status: "failed",
       exitCode: 1,
@@ -758,14 +810,14 @@ describe("PostgresJobStore", () => {
       httpStatus: 401,
     });
 
-    const row = store.getById("pg-http-1");
+    const row = await store.getById("pg-http-1");
     expect(row?.transport).toBe("http");
     expect(row?.payloadJson).toBe(payloadJson);
     expect(row?.payloadJson).not.toContain("apiKey");
     expect(row?.httpStatus).toBe(401);
   });
 
-  it("marks lease-expired (dead-owner) rows orphaned on startup (#139 lease shim)", () => {
+  it("marks lease-expired (dead-owner) rows orphaned on startup (#139 lease shim)", async () => {
     // #139: markOrphanedOnStartup is now a lease shim. Simulate a dead owner by
     // constructing the store with an already-expired lease so recordStart writes
     // lease_deadline in the past; the shim then orphans it.
@@ -776,7 +828,7 @@ describe("PostgresJobStore", () => {
     });
     try {
       const startedAt = new Date().toISOString();
-      dead.recordStart({
+      await dead.recordStart({
         id: "pg-running",
         correlationId: "pg-running-corr",
         requestKey: "running-key",
@@ -786,7 +838,7 @@ describe("PostgresJobStore", () => {
         pid: null,
       });
 
-      const result = dead.markOrphanedOnStartup();
+      const result = await dead.markOrphanedOnStartup();
       expect(result.count).toBe(1);
       expect(result.orphaned[0]).toMatchObject({
         id: "pg-running",
@@ -796,15 +848,15 @@ describe("PostgresJobStore", () => {
         stderr: "",
         transport: "process",
       });
-      expect(dead.getById("pg-running")?.status).toBe("orphaned");
-      expect(dead.getById("pg-running")?.error).toContain("no longer alive");
+      expect((await dead.getById("pg-running"))?.status).toBe("orphaned");
+      expect((await dead.getById("pg-running"))?.error).toContain("no longer alive");
     } finally {
-      dead.close();
+      await dead.close();
     }
   });
 
-  it("#139: does NOT orphan a fresh-lease running job; DOES after the lease expires", () => {
-    store.recordStart({
+  it("#139: does NOT orphan a fresh-lease running job; DOES after the lease expires", async () => {
+    await store.recordStart({
       id: "pg-live",
       correlationId: "c",
       requestKey: "k-live",
@@ -814,12 +866,12 @@ describe("PostgresJobStore", () => {
       pid: null,
       ownerInstance: "inst-A",
     });
-    store.markRunning("pg-live", { pid: 4321 });
-    expect(store.getById("pg-live")?.status).toBe("running");
-    expect(store.getById("pg-live")?.pid).toBe(4321);
+    await store.markRunning("pg-live", { pid: 4321 });
+    expect((await store.getById("pg-live"))?.status).toBe("running");
+    expect((await store.getById("pg-live"))?.pid).toBe(4321);
     // Fresh lease: not swept.
-    expect(store.recoverStaleJobs(90_000, 300_000)).toHaveLength(0);
-    expect(store.getById("pg-live")?.status).toBe("running");
+    expect(await store.recoverStaleJobs(90_000, 300_000)).toHaveLength(0);
+    expect((await store.getById("pg-live"))?.status).toBe("running");
 
     // A separate dead-owner store writes an expired-lease row that IS swept.
     const dead = new PostgresJobStore(TEST_DATABASE_URL, undefined, {
@@ -828,7 +880,7 @@ describe("PostgresJobStore", () => {
       leaseTtlMs: -60_000,
     });
     try {
-      dead.recordStart({
+      await dead.recordStart({
         id: "pg-dead",
         correlationId: "c2",
         requestKey: "k-dead",
@@ -838,10 +890,10 @@ describe("PostgresJobStore", () => {
         pid: null,
         ownerInstance: "inst-B",
       });
-      const orphaned = dead.recoverStaleJobs(90_000, 300_000);
+      const orphaned = await dead.recoverStaleJobs(90_000, 300_000);
       expect(orphaned.map(o => o.id)).toContain("pg-dead");
       // completion wins over the mistaken orphan (guarded recordComplete)
-      dead.recordComplete({
+      await dead.recordComplete({
         id: "pg-dead",
         status: "completed",
         exitCode: 0,
@@ -851,24 +903,24 @@ describe("PostgresJobStore", () => {
         error: null,
         finishedAt: new Date().toISOString(),
       });
-      expect(dead.getById("pg-dead")?.status).toBe("completed");
+      expect((await dead.getById("pg-dead"))?.status).toBe("completed");
     } finally {
-      dead.close();
+      await dead.close();
     }
     // the live job remained running throughout
-    expect(store.getById("pg-live")?.status).toBe("running");
+    expect((await store.getById("pg-live"))?.status).toBe("running");
   });
 
   it("#139: selects a durable same-host orphan after gateway-instance GC", async () => {
     const ownerInstance = "pg-owner-hostname-instance";
     const ownerHostname = "pg-owner-hostname";
-    store.registerInstance({
+    await store.registerInstance({
       instanceId: ownerInstance,
       role: "gateway",
       hostname: ownerHostname,
       pid: 1234,
     });
-    store.recordStart({
+    await store.recordStart({
       id: "pg-owner-hostname-orphan",
       correlationId: "pg-owner-hostname-corr",
       requestKey: "pg-owner-hostname-key",
@@ -883,12 +935,12 @@ describe("PostgresJobStore", () => {
       "pg-owner-hostname-orphan",
     ]);
 
-    expect(store.recoverStaleJobs(90_000, 300_000).map(row => row.id)).toContain(
+    expect((await store.recoverStaleJobs(90_000, 300_000)).map(row => row.id)).toContain(
       "pg-owner-hostname-orphan"
     );
-    expect(store.gcInstances(-1)).toBe(1);
+    expect(await store.gcInstances(-1)).toBe(1);
 
-    expect(store.selectOrphanedProcessCandidates(ownerHostname)).toEqual([
+    expect(await store.selectOrphanedProcessCandidates(ownerHostname)).toEqual([
       {
         id: "pg-owner-hostname-orphan",
         pid: null,
@@ -897,7 +949,7 @@ describe("PostgresJobStore", () => {
         hostname: ownerHostname,
       },
     ]);
-    expect(store.selectOrphanedProcessCandidates("other-host")).toEqual([]);
+    expect(await store.selectOrphanedProcessCandidates("other-host")).toEqual([]);
   });
 
   it("retains a pending Claude MCP artifact until the exact origin-host acknowledgement", async () => {
@@ -907,7 +959,7 @@ describe("PostgresJobStore", () => {
     const artifactPath =
       "/home/gateway/.llm-cli-gateway/claude-mcp/request.123.11111111-1111-4111-8111-111111111111.json";
     const pgStore = store as PostgresJobStore;
-    store.recordStart({
+    await store.recordStart({
       id: "pg-mcp-pending",
       correlationId: "pg-mcp-pending-corr",
       requestKey: "pg-mcp-pending-key",
@@ -921,13 +973,15 @@ describe("PostgresJobStore", () => {
       mcpArtifactScope: artifactScope,
     });
     await pool.query("UPDATE jobs SET lease_deadline = 1 WHERE id = $1", ["pg-mcp-pending"]);
-    expect(store.recoverStaleJobs(90_000, 300_000).map(row => row.id)).toContain("pg-mcp-pending");
+    expect((await store.recoverStaleJobs(90_000, 300_000)).map(row => row.id)).toContain(
+      "pg-mcp-pending"
+    );
     await pool.query("UPDATE jobs SET expires_at = '2000-01-01T00:00:00.000Z' WHERE id = $1", [
       "pg-mcp-pending",
     ]);
 
-    expect(store.evictExpired()).toBe(0);
-    expect(pgStore.selectPendingMcpArtifactCleanups(ownerHostname)).toEqual([
+    expect(await store.evictExpired()).toBe(0);
+    expect(await pgStore.selectPendingMcpArtifactCleanups(ownerHostname)).toEqual([
       {
         id: "pg-mcp-pending",
         ownerInstance,
@@ -937,7 +991,7 @@ describe("PostgresJobStore", () => {
       },
     ]);
     expect(
-      pgStore.acknowledgeMcpArtifactCleanup(
+      await pgStore.acknowledgeMcpArtifactCleanup(
         "pg-mcp-pending",
         "other-host",
         artifactScope,
@@ -945,7 +999,7 @@ describe("PostgresJobStore", () => {
       )
     ).toBe(false);
     expect(
-      pgStore.acknowledgeMcpArtifactCleanup(
+      await pgStore.acknowledgeMcpArtifactCleanup(
         "pg-mcp-pending",
         ownerHostname,
         "other-installation:2:2",
@@ -953,19 +1007,19 @@ describe("PostgresJobStore", () => {
       )
     ).toBe(false);
     expect(
-      pgStore.acknowledgeMcpArtifactCleanup(
+      await pgStore.acknowledgeMcpArtifactCleanup(
         "pg-mcp-pending",
         ownerHostname,
         artifactScope,
         artifactPath
       )
     ).toBe(true);
-    expect(store.evictExpired()).toBe(1);
+    expect(await store.evictExpired()).toBe(1);
   });
 
-  it("persists validation runs and receipts", () => {
+  it("persists validation runs and receipts", async () => {
     expect(isValidationRunStore(store)).toBe(true);
-    store.recordValidationRun({
+    await store.recordValidationRun({
       validationId: "val-pg-1",
       ownerPrincipal: "alice",
       intent: "review",
@@ -975,7 +1029,7 @@ describe("PostgresJobStore", () => {
       judgeLink: null,
       status: "admitting",
     });
-    store.recordStart({
+    await store.recordStart({
       id: "job-openai",
       correlationId: "corr-openai",
       requestKey: "request-openai",
@@ -987,7 +1041,7 @@ describe("PostgresJobStore", () => {
       transport: "http",
       validationAdmission: { validationId: "val-pg-1", provider: "openai" },
     });
-    expect(() =>
+    await expect(
       store.recordStart({
         id: "job-rejected",
         correlationId: "corr-rejected",
@@ -999,18 +1053,18 @@ describe("PostgresJobStore", () => {
         ownerPrincipal: "mallory",
         validationAdmission: { validationId: "val-pg-1", provider: "codex" },
       })
-    ).toThrow(/missing or owned by another principal/);
-    expect(store.getById("job-rejected")).toBeNull();
-    expect(store.transitionValidationRunStatus("val-pg-1", "alice", "admitting", "running")).toBe(
-      true
-    );
-    store.setValidationJudgeLink("val-pg-1", {
+    ).rejects.toThrow(/missing or owned by another principal/);
+    expect(await store.getById("job-rejected")).toBeNull();
+    expect(
+      await store.transitionValidationRunStatus("val-pg-1", "alice", "admitting", "running")
+    ).toBe(true);
+    await store.setValidationJudgeLink("val-pg-1", {
       provider: "anthropic",
       jobId: "job-judge",
       correlationId: "corr-judge",
     });
-    store.setValidationRunStatus("val-pg-1", "finalized");
-    store.recordValidationReceipt({
+    await store.setValidationRunStatus("val-pg-1", "finalized");
+    await store.recordValidationReceipt({
       validationId: "val-pg-1",
       ownerPrincipal: "alice",
       mintedAt: new Date().toISOString(),
@@ -1025,15 +1079,15 @@ describe("PostgresJobStore", () => {
       confidence: "high",
     });
 
-    expect(store.getValidationRun("val-pg-1")).toMatchObject({
+    expect(await store.getValidationRun("val-pg-1")).toMatchObject({
       validationId: "val-pg-1",
       ownerPrincipal: "alice",
       status: "finalized",
       judgeLink: { provider: "anthropic", jobId: "job-judge", correlationId: "corr-judge" },
     });
-    expect(store.getValidationRunIdByJobId("job-openai")).toBe("val-pg-1");
-    expect(store.getValidationRunIdByJobId("job-judge")).toBe("val-pg-1");
-    expect(store.getValidationReceipt("val-pg-1")).toMatchObject({
+    expect(await store.getValidationRunIdByJobId("job-openai")).toBe("val-pg-1");
+    expect(await store.getValidationRunIdByJobId("job-judge")).toBe("val-pg-1");
+    expect(await store.getValidationReceipt("val-pg-1")).toMatchObject({
       validationId: "val-pg-1",
       models: ["openai", "anthropic"],
       hasMaterialDisagreement: false,
@@ -1048,7 +1102,7 @@ describe("PostgresJobStore", () => {
     "fails closed when durable PostgreSQL %s is malformed despite a surviving reverse link",
     async (column, reverseJobId, expectedError) => {
       const validationId = `val-pg-malformed-${column}`;
-      store.recordValidationRun({
+      await store.recordValidationRun({
         validationId,
         ownerPrincipal: "alice",
         intent: "validate",
@@ -1062,7 +1116,7 @@ describe("PostgresJobStore", () => {
         status: "running",
       });
       if (column === "judge_link") {
-        store.setValidationJudgeLink(validationId, {
+        await store.setValidationJudgeLink(validationId, {
           provider: "codex",
           jobId: reverseJobId,
           correlationId: "corr-judge",
@@ -1074,22 +1128,22 @@ describe("PostgresJobStore", () => {
         validationId,
       ]);
 
-      expect(store.getValidationRunIdByJobId(reverseJobId)).toBe(validationId);
-      expect(() => store.getValidationRun(validationId)).toThrow(expectedError);
-      eagerMintFromJobId(
+      expect(await store.getValidationRunIdByJobId(reverseJobId)).toBe(validationId);
+      await expect(store.getValidationRun(validationId)).rejects.toThrow(expectedError);
+      await eagerMintFromJobId(
         { validationRunStore: store, asyncJobManager: {} as AsyncJobManager },
         reverseJobId
       );
-      expect(store.getValidationReceipt(validationId)).toBeNull();
+      expect(await store.getValidationReceipt(validationId)).toBeNull();
     }
   );
 
-  it("atomically admits the planned review judge once and rolls back rejected claims", () => {
+  it("atomically admits the planned review judge once and rolls back rejected claims", async () => {
     const requestJson = JSON.stringify({
       judgeProvider: "judge-api",
       reviewAuthorization: { judgeProvider: "judge-api" },
     });
-    store.recordValidationRun({
+    await store.recordValidationRun({
       validationId: "val-pg-judge",
       ownerPrincipal: "alice",
       intent: "review",
@@ -1099,7 +1153,7 @@ describe("PostgresJobStore", () => {
       judgeLink: null,
       status: "running",
     });
-    store.recordStart({
+    await store.recordStart({
       id: "pg-judge-job",
       correlationId: "pg-judge-correlation",
       requestKey: "pg-judge-request",
@@ -1115,19 +1169,19 @@ describe("PostgresJobStore", () => {
         role: "judge",
       },
     });
-    expect(store.getValidationRun("val-pg-judge")?.judgeLink).toEqual({
+    expect((await store.getValidationRun("val-pg-judge"))?.judgeLink).toEqual({
       provider: "judge-api",
       jobId: "pg-judge-job",
       correlationId: "pg-judge-correlation",
     });
-    expect(store.getValidationRunIdByJobId("pg-judge-job")).toBe("val-pg-judge");
+    expect(await store.getValidationRunIdByJobId("pg-judge-job")).toBe("val-pg-judge");
 
     for (const [id, provider, owner] of [
       ["pg-judge-duplicate", "judge-api", "alice"],
       ["pg-judge-wrong-plan", "other-judge", "alice"],
       ["pg-judge-wrong-owner", "judge-api", "mallory"],
     ] as const) {
-      expect(() =>
+      await expect(
         store.recordStart({
           id,
           correlationId: `corr-${id}`,
@@ -1143,13 +1197,13 @@ describe("PostgresJobStore", () => {
             role: "judge",
           },
         })
-      ).toThrow();
-      expect(store.getById(id)).toBeNull();
+      ).rejects.toThrow();
+      expect(await store.getById(id)).toBeNull();
     }
   });
 
-  it("owner-scopes review admission transitions and atomically records a skipped judge", () => {
-    store.recordValidationRun({
+  it("owner-scopes review admission transitions and atomically records a skipped judge", async () => {
+    await store.recordValidationRun({
       validationId: "val-pg-transition",
       ownerPrincipal: "alice",
       intent: "review",
@@ -1163,13 +1217,23 @@ describe("PostgresJobStore", () => {
       status: "admitting",
     });
     expect(
-      store.transitionValidationRunStatus("val-pg-transition", "mallory", "admitting", "running")
+      await store.transitionValidationRunStatus(
+        "val-pg-transition",
+        "mallory",
+        "admitting",
+        "running"
+      )
     ).toBe(false);
     expect(
-      store.transitionValidationRunStatus("val-pg-transition", "alice", "admitting", "running")
+      await store.transitionValidationRunStatus(
+        "val-pg-transition",
+        "alice",
+        "admitting",
+        "running"
+      )
     ).toBe(true);
-    store.skipValidationJudge("val-pg-transition", "judge-api", "alice");
-    expect(store.getValidationRun("val-pg-transition")?.status).toBe("judge_skipped");
+    await store.skipValidationJudge("val-pg-transition", "judge-api", "alice");
+    expect((await store.getValidationRun("val-pg-transition"))?.status).toBe("judge_skipped");
   });
 
   it("registers and serves validation_receipt through a postgres-backed gateway", async () => {
@@ -1178,7 +1242,7 @@ describe("PostgresJobStore", () => {
       ["pg-v-claude", "claude"],
       ["pg-v-codex", "codex"],
     ] as const) {
-      store.recordStart({
+      await store.recordStart({
         id,
         correlationId: `corr-${id}`,
         requestKey: `key-${id}`,
@@ -1188,7 +1252,7 @@ describe("PostgresJobStore", () => {
         pid: null,
         ownerPrincipal: "local",
       });
-      store.recordComplete({
+      await store.recordComplete({
         id,
         status: "completed",
         exitCode: 0,
@@ -1199,7 +1263,7 @@ describe("PostgresJobStore", () => {
         finishedAt: now,
       });
     }
-    store.recordValidationRun({
+    await store.recordValidationRun({
       validationId: "val-pg-tool",
       ownerPrincipal: "local",
       intent: "validate",
@@ -1215,7 +1279,7 @@ describe("PostgresJobStore", () => {
       judgeLink: null,
       status: "running",
     });
-    store.setValidationRunStatus("val-pg-tool", "finalized");
+    await store.setValidationRunStatus("val-pg-tool", "finalized");
 
     const flight = new FlightRecorder(join(tempDir, "logs.db"));
     try {

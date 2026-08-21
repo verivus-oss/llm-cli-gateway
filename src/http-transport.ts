@@ -329,6 +329,7 @@ export async function startHttpGateway(options: HttpTransportOptions): Promise<H
     return payload;
   }
 
+  // eslint-disable-next-line @typescript-eslint/no-misused-promises -- node:http does not await its request handler; the handler owns its own errors
   const httpServer = createServer(async (req, res) => {
     try {
       const url = new URL(req.url || "/", `http://${req.headers.host || `${host}:${port}`}`);
@@ -339,6 +340,13 @@ export async function startHttpGateway(options: HttpTransportOptions): Promise<H
         oauthServer && oauthOrigin ? oauthServer.resourceMetadataUrl(oauthOrigin) : undefined;
 
       if (url.pathname === "/healthz") {
+        // healthPayload() reads getDurableAdmissionHealth(), a synchronous
+        // snapshot, so inside the startup window it reports admitting:true
+        // between `durableAdmission = true` and the startup orphan sweep, or
+        // admitting:false before either. main() awaits the same barrier before
+        // startHttpGateway, so production never sees it; an embedder that
+        // starts the HTTP gateway directly can, and this route is async.
+        await options.deps?.asyncJobManager?.whenStartupSettled();
         res.writeHead(200, { "content-type": "application/json" });
         // Issue #130: prompt-free operational metrics (session caps/ages, job
         // limiter saturation, parent-process memory). No prompt text, response

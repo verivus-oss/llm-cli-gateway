@@ -33,6 +33,18 @@ export const SQL_DRIVER_ENGINES: readonly StorageEngine[] = ["sqlite", "postgres
 export interface StorageConnection {
   query<T>(statement: string, params?: readonly unknown[]): Promise<T[]>;
   execute(statement: string, params?: readonly unknown[]): Promise<{ rowsAffected: number }>;
+  /**
+   * Run a MULTI-STATEMENT script. Schema bootstrap only, never a routed read or
+   * write, and it takes no parameters by design.
+   *
+   * It exists because `execute` cannot do this and fails in the worst possible
+   * way if you assume it can: node:sqlite's `prepare()` compiles exactly ONE
+   * statement, so a semicolon-separated DDL batch put through `execute` creates
+   * the first table and silently discards the rest. No error at the call site;
+   * the failure surfaces much later as "no such table". `db.exec()` is the
+   * engine's own multi-statement entry point, and this is the seam for it.
+   */
+  executeScript(script: string): Promise<void>;
 }
 
 export interface StorageDriver {

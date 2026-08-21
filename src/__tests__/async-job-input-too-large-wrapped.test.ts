@@ -29,7 +29,7 @@ describe("AsyncJobManager wrapped E2BIG classification", () => {
     const store = new MemoryJobStore();
     const manager = new AsyncJobManager(noopLogger, undefined, store);
     try {
-      const started = manager.startJob("codex", ["exec", "--", "-"], "corr-wrapped-e2big");
+      const started = await manager.startJob("codex", ["exec", "--", "-"], "corr-wrapped-e2big");
 
       expect(started).toMatchObject({
         status: "failed",
@@ -38,11 +38,11 @@ describe("AsyncJobManager wrapped E2BIG classification", () => {
         retryable: false,
       });
       expect(started.error).toContain("will not truncate");
-      expect(manager.getJobResult(started.id)).toMatchObject({
+      expect(await manager.getJobResult(started.id)).toMatchObject({
         errorCategory: CLI_INPUT_TOO_LARGE_CATEGORY,
         retryable: false,
       });
-      expect(store.getById(started.id)).toMatchObject({
+      expect(await store.getById(started.id)).toMatchObject({
         status: "failed",
         errorCategory: CLI_INPUT_TOO_LARGE_CATEGORY,
         retryable: false,

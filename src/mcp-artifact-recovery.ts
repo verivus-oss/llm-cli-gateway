@@ -61,9 +61,9 @@ function refused(jobId: string, reason: RecoveryRefusalReason): McpArtifactRecov
  * lifecycle cleanup. The final acknowledgement is the JobStore's exact
  * compare-and-set over id, host, scope, path, terminal state, and pending bit.
  */
-export function recoverMcpArtifactCleanupPin(
+export async function recoverMcpArtifactCleanupPin(
   options: RecoverMcpArtifactCleanupPinOptions
-): McpArtifactRecoveryResult {
+): Promise<McpArtifactRecoveryResult> {
   const { store, jobId, acknowledgement } = options;
   const hostname = localHostname();
   if (!JOB_ID.test(jobId)) return refused(jobId, "invalid_job_id");
@@ -76,7 +76,7 @@ export function recoverMcpArtifactCleanupPin(
     return refused(jobId, "store_does_not_support_exact_acknowledgement");
   }
 
-  const row = store.getById(jobId);
+  const row = await store.getById(jobId);
   if (!row) return refused(jobId, "not_found");
   if (!isTerminalClaudeProcessArtifactPin(row)) {
     return refused(jobId, "not_terminal_claude_process_job");
@@ -106,7 +106,9 @@ export function recoverMcpArtifactCleanupPin(
     return refused(jobId, "artifact_not_safely_recoverable");
   }
 
-  const acknowledged = acknowledge.call(
+  // `.call()` through the duck-typed alias: the closure cannot follow it and
+  // the compiler will not flag a dropped promise, so it is awaited explicitly.
+  const acknowledged = await acknowledge.call(
     store,
     row.id,
     hostname,

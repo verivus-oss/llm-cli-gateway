@@ -353,7 +353,7 @@ describe("createJobStore", () => {
     expect(store).toBeInstanceOf(MemoryJobStore);
   });
 
-  it("returns SqliteJobStore for backend=sqlite", () => {
+  it("returns SqliteJobStore for backend=sqlite", async () => {
     const tempDir = mkdtempSync(join(tmpdir(), "cjs-sqlite-"));
     try {
       const store = createJobStore({
@@ -368,7 +368,7 @@ describe("createJobStore", () => {
         sources: { configFile: null, envOverrides: [] },
       });
       expect(store).toBeInstanceOf(SqliteJobStore);
-      store?.close();
+      await store?.close();
     } finally {
       rmSync(tempDir, { recursive: true, force: true });
     }
@@ -396,9 +396,9 @@ describe("createJobStore", () => {
 });
 
 describe("MemoryJobStore", () => {
-  it("round-trips a job record through start → output → complete → getById", () => {
+  it("round-trips a job record through start → output → complete → getById", async () => {
     const store = new MemoryJobStore();
-    store.recordStart({
+    await store.recordStart({
       id: "j1",
       correlationId: "c1",
       requestKey: "k1",
@@ -407,8 +407,8 @@ describe("MemoryJobStore", () => {
       startedAt: new Date().toISOString(),
       pid: 1234,
     });
-    store.recordOutput("j1", "stdout-here", "stderr-here", false);
-    store.recordComplete({
+    await store.recordOutput("j1", "stdout-here", "stderr-here", false);
+    await store.recordComplete({
       id: "j1",
       status: "completed",
       exitCode: 0,
@@ -419,16 +419,16 @@ describe("MemoryJobStore", () => {
       finishedAt: new Date().toISOString(),
     });
     const row = store.getById("j1");
-    expect(row).not.toBeNull();
-    expect(row!.status).toBe("completed");
-    expect(row!.stdout).toBe("final-stdout");
-    expect(row!.cli).toBe("claude");
+    expect(await row).not.toBeNull();
+    expect((await row!).status).toBe("completed");
+    expect((await row!).stdout).toBe("final-stdout");
+    expect((await row!).cli).toBe("claude");
   });
 
-  it("findByRequestKey returns the most recent matching job within the dedup window", () => {
+  it("findByRequestKey returns the most recent matching job within the dedup window", async () => {
     const store = new MemoryJobStore({ dedupWindowMs: 60_000 });
     const t0 = new Date(Date.now() - 10_000).toISOString();
-    store.recordStart({
+    await store.recordStart({
       id: "old",
       correlationId: "c",
       requestKey: "same-key",
@@ -437,7 +437,7 @@ describe("MemoryJobStore", () => {
       startedAt: t0,
       pid: null,
     });
-    store.recordStart({
+    await store.recordStart({
       id: "new",
       correlationId: "c",
       requestKey: "same-key",
@@ -446,13 +446,13 @@ describe("MemoryJobStore", () => {
       startedAt: new Date().toISOString(),
       pid: null,
     });
-    const found = store.findByRequestKey("same-key");
+    const found = await store.findByRequestKey("same-key");
     expect(found?.id).toBe("new");
   });
 
-  it("findByRequestKey ignores jobs outside the dedup window", () => {
+  it("findByRequestKey ignores jobs outside the dedup window", async () => {
     const store = new MemoryJobStore({ dedupWindowMs: 1 });
-    store.recordStart({
+    await store.recordStart({
       id: "stale",
       correlationId: "c",
       requestKey: "k",
@@ -461,12 +461,12 @@ describe("MemoryJobStore", () => {
       startedAt: new Date(Date.now() - 1_000_000).toISOString(),
       pid: null,
     });
-    expect(store.findByRequestKey("k")).toBeNull();
+    expect(await store.findByRequestKey("k")).toBeNull();
   });
 
-  it("evictExpired removes completed rows whose expiresAt has passed", () => {
+  it("evictExpired removes completed rows whose expiresAt has passed", async () => {
     const store = new MemoryJobStore({ retentionMs: 1 });
-    store.recordStart({
+    await store.recordStart({
       id: "j",
       correlationId: "c",
       requestKey: "k",
@@ -475,7 +475,7 @@ describe("MemoryJobStore", () => {
       startedAt: new Date().toISOString(),
       pid: null,
     });
-    store.recordComplete({
+    await store.recordComplete({
       id: "j",
       status: "completed",
       exitCode: 0,
@@ -485,13 +485,13 @@ describe("MemoryJobStore", () => {
       error: null,
       finishedAt: new Date(Date.now() - 1000).toISOString(),
     });
-    expect(store.evictExpired()).toBe(1);
-    expect(store.getById("j")).toBeNull();
+    expect(await store.evictExpired()).toBe(1);
+    expect(await store.getById("j")).toBeNull();
   });
 
-  it("markOrphanedOnStartup is a no-op for memory stores", () => {
+  it("markOrphanedOnStartup is a no-op for memory stores", async () => {
     const store = new MemoryJobStore();
-    expect(store.markOrphanedOnStartup()).toEqual({ count: 0, orphaned: [] });
+    expect(await store.markOrphanedOnStartup()).toEqual({ count: 0, orphaned: [] });
   });
 });
 
@@ -745,8 +745,8 @@ describe("createGatewayServer — structural invariant on async tool registratio
       completedJobMemoryTtlMs: 60 * 60 * 1000,
       maxJobOutputBytes: 50 * 1024 * 1024,
     });
-    const running = manager.startJob("sleep" as any, ["2"], "corr-running");
-    const queued = manager.startJob("sleep" as any, ["3"], "corr-queued");
+    const running = await manager.startJob("sleep" as any, ["2"], "corr-running");
+    const queued = await manager.startJob("sleep" as any, ["3"], "corr-queued");
     const server = createGatewayServer({
       asyncJobManager: manager,
       persistence: mkPersistence({ backend: "memory", acknowledgeEphemeral: true }),
@@ -759,8 +759,8 @@ describe("createGatewayServer — structural invariant on async tool registratio
       expect(health.backpressure.jobs.queued).toBe(1);
       expect(health.backpressure.jobs.saturated).toBe(true);
     } finally {
-      manager.cancelJob(queued.id);
-      manager.cancelJob(running.id);
+      await manager.cancelJob(queued.id);
+      await manager.cancelJob(running.id);
     }
   });
 

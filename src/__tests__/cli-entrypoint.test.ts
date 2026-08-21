@@ -284,7 +284,7 @@ describe.skipIf(!existsSync(entrypoint))("CLI MCP artifact recovery", () => {
     for (const dir of dirs.splice(0)) rmSync(dir, { recursive: true, force: true });
   });
 
-  it("recovers only the exact persisted local artifact and does not print its path or scope", () => {
+  it("recovers only the exact persisted local artifact and does not print its path or scope", async () => {
     const home = mkdtempSync(join(tmpdir(), "cli-mcp-artifact-recovery-"));
     dirs.push(home);
     const dbPath = join(home, "jobs.db");
@@ -296,7 +296,7 @@ describe.skipIf(!existsSync(entrypoint))("CLI MCP artifact recovery", () => {
       const artifact = buildClaudeMcpConfig(["sqry"]);
       const store = new SqliteJobStore(dbPath);
       try {
-        store.recordStart({
+        await store.recordStart({
           id: jobId,
           correlationId: "cli-mcp-artifact-recovery",
           requestKey: "cli-mcp-artifact-recovery",
@@ -310,7 +310,7 @@ describe.skipIf(!existsSync(entrypoint))("CLI MCP artifact recovery", () => {
           mcpArtifactScope: artifact.artifactScope,
           transport: "process",
         });
-        store.recordComplete({
+        await store.recordComplete({
           id: jobId,
           status: "completed",
           exitCode: 0,
@@ -321,7 +321,7 @@ describe.skipIf(!existsSync(entrypoint))("CLI MCP artifact recovery", () => {
           finishedAt: new Date().toISOString(),
         });
       } finally {
-        store.close();
+        await store.close();
       }
       writeFileSync(
         gatewayConfigPath,
@@ -355,9 +355,9 @@ describe.skipIf(!existsSync(entrypoint))("CLI MCP artifact recovery", () => {
       expect(existsSync(artifact.path)).toBe(false);
       const verifiedStore = new SqliteJobStore(dbPath);
       try {
-        expect(verifiedStore.getById(jobId)?.mcpArtifactCleanupPending).toBe(false);
+        expect((await verifiedStore.getById(jobId))?.mcpArtifactCleanupPending).toBe(false);
       } finally {
-        verifiedStore.close();
+        await verifiedStore.close();
       }
     } finally {
       if (originalHome === undefined) {

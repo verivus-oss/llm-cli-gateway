@@ -53,15 +53,15 @@ const completedReviewEvidence = {
 
 const directories: string[] = [];
 
-function createStore(ownerPrincipal = "local"): {
+async function createStore(ownerPrincipal = "local"): Promise<{
   store: SqliteJobStore;
   validationId: string;
-} {
+}> {
   const directory = mkdtempSync(join(tmpdir(), "validation-admission-barrier-"));
   directories.push(directory);
   const store = new SqliteJobStore(join(directory, "jobs.db"));
   const validationId = `validation-${directories.length}`;
-  store.recordValidationRun({
+  await store.recordValidationRun({
     validationId,
     ownerPrincipal,
     intent: "review",
@@ -77,7 +77,7 @@ function createStore(ownerPrincipal = "local"): {
 async function waitForTerminal(manager: AsyncJobManager, jobId: string): Promise<void> {
   const deadline = Date.now() + 5_000;
   while (Date.now() < deadline) {
-    const status = manager.getJobSnapshot(jobId)?.status;
+    const status = (await manager.getJobSnapshot(jobId))?.status;
     if (status && status !== "queued" && status !== "running") return;
     await new Promise(resolve => setTimeout(resolve, 10));
   }
@@ -105,7 +105,7 @@ describe("validation roster durable admission barrier", () => {
     const marker = join(mkdtempSync(join(tmpdir(), "validation-no-store-")), "must-not-launch");
     directories.push(join(marker, ".."));
     try {
-      expect(() =>
+      await expect(
         noStoreManager.startJobWithDedup(
           "sh" as LlmCli,
           ["-c", `touch '${marker}'`],
@@ -116,8 +116,8 @@ describe("validation roster durable admission barrier", () => {
             validationAdmission: { validationId: "missing", provider: "codex" },
           }
         )
-      ).toThrow(/Durable job admission failed/);
-      expect(() =>
+      ).rejects.toThrow(/Durable job admission failed/);
+      await expect(
         memoryManager.startHttpJob({
           provider: new OpenAiCompatibleProvider("review-api"),
           apiRequest: {
@@ -131,7 +131,7 @@ describe("validation roster durable admission barrier", () => {
           deferLaunch: true,
           validationAdmission: { validationId: "missing", provider: "review-api" },
         })
-      ).toThrow(/Durable job admission failed/);
+      ).rejects.toThrow(/Durable job admission failed/);
       await new Promise(resolve => setTimeout(resolve, 25));
       expect(existsSync(marker)).toBe(false);
       expect(requests).toBe(0);
@@ -143,11 +143,11 @@ describe("validation roster durable admission barrier", () => {
   });
 
   it("holds a CLI process until its atomically linked queued job is released", async () => {
-    const { store, validationId } = createStore();
+    const { store, validationId } = await createStore();
     const manager = new AsyncJobManager(noopLogger, undefined, store);
     const marker = join(directories.at(-1)!, "cli-launched");
     try {
-      const outcome = manager.startJobWithDedup(
+      const outcome = await manager.startJobWithDedup(
         "sh" as LlmCli,
         ["-c", `touch '${marker}'`],
         "cli-barrier",
@@ -159,27 +159,27 @@ describe("validation roster durable admission barrier", () => {
       );
       expect(outcome.snapshot.status).toBe("queued");
       expect(existsSync(marker)).toBe(false);
-      expect(store.getById(outcome.snapshot.id)?.status).toBe("queued");
-      expect(store.getValidationRun(validationId)?.providerLinks).toEqual([
+      expect((await store.getById(outcome.snapshot.id))?.status).toBe("queued");
+      expect((await store.getValidationRun(validationId))?.providerLinks).toEqual([
         {
           provider: "codex",
           jobId: outcome.snapshot.id,
           correlationId: "cli-barrier",
         },
       ]);
-      expect(store.getValidationRunIdByJobId(outcome.snapshot.id)).toBe(validationId);
+      expect(await store.getValidationRunIdByJobId(outcome.snapshot.id)).toBe(validationId);
 
       outcome.deferredLaunch!.release();
       await waitForTerminal(manager, outcome.snapshot.id);
       expect(existsSync(marker)).toBe(true);
     } finally {
       await manager.dispose();
-      store.close();
+      await store.close();
     }
   });
 
   it("holds a permit granted later from the limiter queue until release", async () => {
-    const { store, validationId } = createStore();
+    const { store, validationId } = await createStore();
     const limits: JobLimitsConfig = {
       maxRunningJobs: 1,
       maxRunningJobsPerProvider: 1,
@@ -191,8 +191,8 @@ describe("validation roster durable admission barrier", () => {
     const manager = new AsyncJobManager(noopLogger, undefined, store, undefined, limits);
     const marker = join(directories.at(-1)!, "queued-cli-launched");
     try {
-      const blocker = manager.startJob("sleep" as LlmCli, ["5"], "barrier-blocker");
-      const outcome = manager.startJobWithDedup(
+      const blocker = await manager.startJob("sleep" as LlmCli, ["5"], "barrier-blocker");
+      const outcome = await manager.startJobWithDedup(
         "sh" as LlmCli,
         ["-c", `touch '${marker}'`],
         "queued-cli-barrier",
@@ -204,13 +204,13 @@ describe("validation roster durable admission barrier", () => {
       );
       expect(outcome.snapshot.status).toBe("queued");
       expect(manager.getLimiterSnapshot().queued).toBe(1);
-      manager.cancelJob(blocker.id);
+      await manager.cancelJob(blocker.id);
       const grantDeadline = Date.now() + 5_000;
       while (manager.getLimiterSnapshot().queued !== 0 && Date.now() < grantDeadline) {
         await new Promise(resolve => setTimeout(resolve, 10));
       }
       expect(manager.getLimiterSnapshot().queued).toBe(0);
-      expect(manager.getJobSnapshot(outcome.snapshot.id)?.status).toBe("queued");
+      expect((await manager.getJobSnapshot(outcome.snapshot.id))?.status).toBe("queued");
       expect(existsSync(marker)).toBe(false);
 
       outcome.deferredLaunch!.release();
@@ -218,28 +218,28 @@ describe("validation roster durable admission barrier", () => {
       expect(existsSync(marker)).toBe(true);
     } finally {
       await manager.dispose();
-      store.close();
+      await store.close();
     }
   });
 
   it("launches no CLI process when the atomic validation link is rejected", async () => {
-    const { store, validationId } = createStore("another-owner");
+    const { store, validationId } = await createStore("another-owner");
     const manager = new AsyncJobManager(noopLogger, undefined, store);
     const marker = join(directories.at(-1)!, "cli-must-not-launch");
     try {
-      expect(() =>
+      await expect(
         manager.startJobWithDedup("sh" as LlmCli, ["-c", `touch '${marker}'`], "cli-rejected", {
           forceRefresh: true,
           deferLaunch: true,
           validationAdmission: { validationId, provider: "codex" },
         })
-      ).toThrow(/Durable job admission failed/);
+      ).rejects.toThrow(/Durable job admission failed/);
       await new Promise(resolve => setTimeout(resolve, 25));
       expect(existsSync(marker)).toBe(false);
-      expect(store.getValidationRun(validationId)?.providerLinks).toEqual([]);
+      expect((await store.getValidationRun(validationId))?.providerLinks).toEqual([]);
     } finally {
       await manager.dispose();
-      store.close();
+      await store.close();
     }
   });
 
@@ -261,12 +261,12 @@ describe("validation roster durable admission barrier", () => {
       model: "m1",
       messages: [{ role: "user", content: "review" }],
     };
-    const accepted = createStore();
+    const accepted = await createStore();
     const acceptedManager = new AsyncJobManager(noopLogger, undefined, accepted.store);
-    const rejected = createStore("another-owner");
+    const rejected = await createStore("another-owner");
     const rejectedManager = new AsyncJobManager(noopLogger, undefined, rejected.store);
     try {
-      const outcome = acceptedManager.startHttpJob({
+      const outcome = await acceptedManager.startHttpJob({
         provider: new OpenAiCompatibleProvider("review-api"),
         apiRequest,
         correlationId: "http-barrier",
@@ -277,14 +277,14 @@ describe("validation roster durable admission barrier", () => {
       await new Promise(resolve => setTimeout(resolve, 25));
       expect(outcome.snapshot.status).toBe("queued");
       expect(requests).toBe(0);
-      expect(accepted.store.getValidationRunIdByJobId(outcome.snapshot.id)).toBe(
+      expect(await accepted.store.getValidationRunIdByJobId(outcome.snapshot.id)).toBe(
         accepted.validationId
       );
       outcome.deferredLaunch!.release();
       await waitForTerminal(acceptedManager, outcome.snapshot.id);
       expect(requests).toBe(1);
 
-      expect(() =>
+      await expect(
         rejectedManager.startHttpJob({
           provider: new OpenAiCompatibleProvider("review-api"),
           apiRequest,
@@ -296,15 +296,17 @@ describe("validation roster durable admission barrier", () => {
             provider: "review-api",
           },
         })
-      ).toThrow(/Durable job admission failed/);
+      ).rejects.toThrow(/Durable job admission failed/);
       await new Promise(resolve => setTimeout(resolve, 25));
       expect(requests).toBe(1);
-      expect(rejected.store.getValidationRun(rejected.validationId)?.providerLinks).toEqual([]);
+      expect((await rejected.store.getValidationRun(rejected.validationId))?.providerLinks).toEqual(
+        []
+      );
     } finally {
       await acceptedManager.dispose();
       await rejectedManager.dispose();
-      accepted.store.close();
-      rejected.store.close();
+      await accepted.store.close();
+      await rejected.store.close();
       await new Promise<void>(resolve => server.close(() => resolve()));
     }
   });
@@ -317,12 +319,12 @@ describe("validation roster durable admission barrier", () => {
       response.writeHead(200).end();
     });
     await new Promise<void>(resolve => server.listen(0, "127.0.0.1", resolve));
-    const { store } = createStore();
+    const { store } = await createStore();
     let validationId = "";
     const originalRecord = store.recordValidationRun.bind(store);
-    store.recordValidationRun = run => {
+    store.recordValidationRun = async run => {
       validationId = run.validationId;
-      originalRecord(run);
+      await originalRecord(run);
     };
     const manager = new AsyncJobManager(noopLogger, undefined, store);
     const reviewer = {
@@ -330,7 +332,7 @@ describe("validation roster durable admission barrier", () => {
       baseUrl: `http://127.0.0.1:${(server.address() as AddressInfo).port}/v1`,
     };
     try {
-      expect(() =>
+      await expect(
         startReviewRun(
           {
             asyncJobManager: manager,
@@ -361,17 +363,17 @@ describe("validation roster durable admission barrier", () => {
             },
           }
         )
-      ).toThrow(/too large/i);
+      ).rejects.toThrow(/too large/i);
       await new Promise(resolve => setTimeout(resolve, 25));
-      const run = store.getValidationRun(validationId)!;
+      const run = (await store.getValidationRun(validationId))!;
       expect(run.status).toBe("admission_failed");
       expect(run.providerLinks).toHaveLength(1);
-      expect(manager.getJobSnapshot(run.providerLinks[0].jobId)?.status).toBe("canceled");
+      expect((await manager.getJobSnapshot(run.providerLinks[0].jobId))?.status).toBe("canceled");
       expect(manager.getLimiterSnapshot()).toMatchObject({ running: 0, queued: 0 });
       expect(requests).toBe(0);
     } finally {
       await manager.dispose();
-      store.close();
+      await store.close();
       await new Promise<void>(resolve => server.close(() => resolve()));
     }
   });
@@ -384,7 +386,7 @@ describe("validation roster durable admission barrier", () => {
       response.writeHead(200).end();
     });
     await new Promise<void>(resolve => server.listen(0, "127.0.0.1", resolve));
-    const { store } = createStore();
+    const { store } = await createStore();
     const manager = new AsyncJobManager(noopLogger, undefined, store);
     const judge = {
       ...apiRuntime("judge-api"),
@@ -394,7 +396,7 @@ describe("validation roster durable admission barrier", () => {
       judgeProvider: "judge-api",
       reviewAuthorization: { judgeProvider: "judge-api" },
     });
-    store.recordValidationRun({
+    await store.recordValidationRun({
       validationId: "judge-wrong-owner",
       ownerPrincipal: "another-owner",
       intent: "review",
@@ -404,7 +406,7 @@ describe("validation roster durable admission barrier", () => {
       judgeLink: null,
       status: "running",
     });
-    store.recordValidationRun({
+    await store.recordValidationRun({
       validationId: "judge-closed",
       ownerPrincipal: "local",
       intent: "review",
@@ -414,7 +416,7 @@ describe("validation roster durable admission barrier", () => {
       judgeLink: null,
       status: "finalized",
     });
-    store.recordValidationRun({
+    await store.recordValidationRun({
       validationId: "judge-duplicate",
       ownerPrincipal: "local",
       intent: "review",
@@ -430,7 +432,7 @@ describe("validation roster durable admission barrier", () => {
     });
     try {
       for (const validationId of ["judge-wrong-owner", "judge-closed", "judge-duplicate"]) {
-        expect(() =>
+        await expect(
           startJudgeSynthesis(
             { asyncJobManager: manager, validationRunStore: store, apiProviders: [judge] },
             {
@@ -443,14 +445,14 @@ describe("validation roster durable admission barrier", () => {
               reviewEvidence: [completedReviewEvidence],
             }
           )
-        ).toThrow(ValidationRunPersistenceError);
+        ).rejects.toThrow(ValidationRunPersistenceError);
       }
       await new Promise(resolve => setTimeout(resolve, 25));
       expect(manager.getLimiterSnapshot()).toMatchObject({ running: 0, queued: 0 });
       expect(requests).toBe(0);
     } finally {
       await manager.dispose();
-      store.close();
+      await store.close();
       await new Promise<void>(resolve => server.close(() => resolve()));
     }
   });

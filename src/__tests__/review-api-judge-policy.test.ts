@@ -265,7 +265,7 @@ describe("review judge API-upload policy", () => {
     });
     const manager = {
       getLimiterSnapshot: () => ({ running: 0, queued: 0 }),
-      startJobWithDedup(
+      async startJobWithDedup(
         cli: string,
         _args: string[],
         correlationId: string,
@@ -277,8 +277,8 @@ describe("review judge API-upload policy", () => {
             validationId: string;
             provider: string;
           };
-          const existing = store.getValidationRun(admission.validationId)!;
-          store.setValidationProviderLinks(admission.validationId, [
+          const existing = (await store.getValidationRun(admission.validationId))!;
+          await store.setValidationProviderLinks(admission.validationId, [
             ...existing.providerLinks,
             { provider: admission.provider, jobId: prepared.id, correlationId },
           ]);
@@ -308,11 +308,11 @@ describe("review judge API-upload policy", () => {
             : {}),
         };
       },
-      startHttpJob(input: Record<string, any>) {
+      async startHttpJob(input: Record<string, any>) {
         httpStarts.push(input);
         const prepared = snapshot("ollama", input.correlationId);
         if (input.validationAdmission?.role === "judge") {
-          store.setValidationJudgeLink(input.validationAdmission.validationId, {
+          await store.setValidationJudgeLink(input.validationAdmission.validationId, {
             provider: input.validationAdmission.provider,
             jobId: prepared.id,
             correlationId: prepared.correlationId,
@@ -394,7 +394,7 @@ describe("review judge API-upload policy", () => {
       );
       expect(kickoff.structuredContent.success).toBe(true);
       const validationId = kickoff.structuredContent.report.validationId as string;
-      const storedRun = store.getValidationRun(validationId)!;
+      const storedRun = (await store.getValidationRun(validationId))!;
       expect(JSON.parse(storedRun.requestJson)).toMatchObject({
         reviewAuthorization: {
           schemaVersion: "review-run-authorization.v1",
@@ -405,7 +405,9 @@ describe("review judge API-upload policy", () => {
         },
       });
       expect(storedRun.providerLinks).toHaveLength(1);
-      expect(store.getValidationRunIdByJobId(storedRun.providerLinks[0].jobId)).toBe(validationId);
+      expect(await store.getValidationRunIdByJobId(storedRun.providerLinks[0].jobId)).toBe(
+        validationId
+      );
 
       const judgeInput = {
         question: "Judge the completed review",
@@ -424,7 +426,7 @@ describe("review judge API-upload policy", () => {
         validationId,
         workspace: "review",
       };
-      store.recordValidationRun({
+      await store.recordValidationRun({
         validationId: "review-without-consent",
         ownerPrincipal: "alice",
         intent: "review",
@@ -489,7 +491,7 @@ describe("review judge API-upload policy", () => {
         allowApiUpload: true,
       });
     } finally {
-      store.close();
+      await store.close();
     }
   });
 });

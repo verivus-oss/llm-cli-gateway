@@ -69,6 +69,26 @@ export function resolveStorageRole(
   operation: StorageOperationClass,
   configured: ReadonlySet<StorageRole>
 ): RoleResolution {
+  // An unrecognised class used to fall straight through: the lookup yielded
+  // undefined, `configured.has(undefined)` was false, and the result was
+  // `{ role: "app", degradedFrom: undefined }`. That routes to the WIDEST
+  // credential while reporting that separation is in force, which is the one
+  // answer this function must never give. Fail closed instead.
+  //
+  // `StorageOperationClass` is a closed union, so typed callers cannot reach
+  // this; it is reachable from untyped JavaScript, and s9 makes role
+  // separation something a health surface asserts on top of this primitive.
+  //
+  // `Object.hasOwn`, not `!== undefined`: a bare undefined-check still admits
+  // inherited keys, and `PREFERRED_ROLE["__proto__"]` evaluates to
+  // Object.prototype rather than undefined. That one walked straight past the
+  // first version of this guard.
+  if (!Object.hasOwn(PREFERRED_ROLE, operation)) {
+    throw new Error(
+      `storage: unknown operation class ${JSON.stringify(operation)}; ` +
+        `expected one of ${STORAGE_OPERATION_CLASSES.join(", ")}`
+    );
+  }
   const preferred = PREFERRED_ROLE[operation];
   if (configured.has(preferred)) return { role: preferred };
   if (configured.has("app")) return { role: "app", degradedFrom: preferred };

@@ -90,6 +90,14 @@ export default [
       "no-undef": "off",
       "no-console": ["error", { allow: ["error", "warn"] }],
       "prefer-const": "error",
+      // s5: the detector for the defect class the async storage port creates.
+      // Two hand-written censuses over the same code found 2 sites; these rules
+      // found 66 more, including a fail-closed admission gate that had inverted
+      // to fail-open, and seven conditions that had stopped being evaluated
+      // because `!promise` is always false. `npm run check` runs lint, so this
+      // is a ratchet rather than a convention.
+      "@typescript-eslint/no-floating-promises": "error",
+      "@typescript-eslint/no-misused-promises": "error",
       "no-var": "error",
       "security/detect-child-process": "off",
       "security/detect-non-literal-fs-filename": "warn",

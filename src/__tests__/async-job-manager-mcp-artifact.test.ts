@@ -21,11 +21,14 @@ import { SqliteJobStore } from "../job-store.js";
 import { noopLogger } from "../logger.js";
 import { openDatabase } from "../sqlite-driver.js";
 
-function waitFor(predicate: () => boolean, timeoutMs = 5000): Promise<void> {
+function waitFor(
+  predicate: () => boolean | Promise<boolean> | Promise<boolean>,
+  timeoutMs = 5000
+): Promise<void> {
   return new Promise((resolve, reject) => {
     const deadline = Date.now() + timeoutMs;
-    const check = (): void => {
-      if (predicate()) {
+    const check = async (): Promise<void> => {
+      if (await predicate()) {
         resolve();
         return;
       }
@@ -35,7 +38,7 @@ function waitFor(predicate: () => boolean, timeoutMs = 5000): Promise<void> {
       }
       setTimeout(check, 25);
     };
-    check();
+    void check();
   });
 }
 
@@ -57,18 +60,24 @@ describe("AsyncJobManager Claude MCP artifacts", () => {
   let store: SqliteJobStore;
   let manager: AsyncJobManager;
 
-  beforeEach(() => {
+  beforeEach(async () => {
     originalHome = process.env.HOME;
     testHome = mkdtempSync(join(tmpdir(), "async-mcp-artifact-home-"));
     process.env.HOME = testHome;
     dbPath = join(testHome, "jobs.db");
     store = new SqliteJobStore(dbPath);
     manager = new AsyncJobManager(noopLogger, undefined, store);
+    // Durable admission is restored asynchronously and Kit/durable paths refuse
+    // to start until it settles. C5 made the store's own initialisation genuinely
+    // async, so without this the test runs INSIDE the startup window that
+    // design section 4.1 describes, and the refusal it sees is correct behaviour
+    // rather than the thing under test.
+    await manager.whenStartupSettled();
   });
 
   afterEach(async () => {
     await manager?.dispose();
-    store?.close();
+    await store?.close();
     if (originalHome === undefined) {
       delete process.env.HOME;
     } else {
@@ -77,22 +86,22 @@ describe("AsyncJobManager Claude MCP artifacts", () => {
     rmSync(testHome, { recursive: true, force: true });
   });
 
-  function seedExpiredProcessRow(
+  async function seedExpiredProcessRow(
     id: string,
     args: string[],
     hostname: string | null,
     pid = deadPid(),
     mcpArtifactPath?: string,
     mcpArtifactScope?: string
-  ): string {
+  ): Promise<string> {
     const ownerInstance = `dead-owner-${id}`;
-    store.registerInstance({
+    await store.registerInstance({
       instanceId: ownerInstance,
       role: "gateway",
       hostname,
       pid,
     });
-    store.recordStart({
+    await store.recordStart({
       id,
       correlationId: `corr-${id}`,
       requestKey: `key-${id}`,
@@ -109,7 +118,7 @@ describe("AsyncJobManager Claude MCP artifacts", () => {
           : (mcpArtifactScope ?? getClaudeMcpArtifactScopeForPath(mcpArtifactPath)),
       transport: "process",
     });
-    expect(store.markRunning(id, { pid })).toBe(true);
+    expect(await store.markRunning(id, { pid })).toBe(true);
     const db = openDatabase(dbPath);
     try {
       db.prepare("UPDATE jobs SET lease_deadline = 1 WHERE id = ?").run(id);
@@ -119,21 +128,21 @@ describe("AsyncJobManager Claude MCP artifacts", () => {
     return ownerInstance;
   }
 
-  function seedExpiredQueuedRow(
+  async function seedExpiredQueuedRow(
     id: string,
     args: string[],
     hostname: string | null,
     mcpArtifactPath?: string,
     mcpArtifactScope?: string
-  ): void {
+  ): Promise<void> {
     const ownerInstance = `dead-owner-${id}`;
-    store.registerInstance({
+    await store.registerInstance({
       instanceId: ownerInstance,
       role: "gateway",
       hostname,
       pid: deadPid(),
     });
-    store.recordStart({
+    await store.recordStart({
       id,
       correlationId: `corr-${id}`,
       requestKey: `key-${id}`,
@@ -167,7 +176,7 @@ describe("AsyncJobManager Claude MCP artifacts", () => {
     }
   }
 
-  it("reclaims only a local, confirmed-orphan generated config", () => {
+  it("reclaims only a local, confirmed-orphan generated config", async () => {
     const valid = buildClaudeMcpConfig(["sqry"]);
     const queued = buildClaudeMcpConfig(["sqry"]);
     const remote = buildClaudeMcpConfig(["sqry"]);
@@ -182,33 +191,37 @@ describe("AsyncJobManager Claude MCP artifacts", () => {
     const symlinkArtifact = join(symlinkArtifactDirectory, "config.json");
     symlinkSync(sentinel, symlinkArtifact);
 
-    seedExpiredProcessRow(
+    await seedExpiredProcessRow(
       "valid",
       ["-p", "review", "--mcp-config", valid.path],
       os.hostname(),
       deadPid(),
       valid.path
     );
-    seedExpiredQueuedRow(
+    await seedExpiredQueuedRow(
       "queued",
       ["-p", "review", "--mcp-config", queued.path],
       os.hostname(),
       queued.path
     );
-    seedExpiredProcessRow("outside", ["-p", "review", "--mcp-config", sentinel], os.hostname());
-    seedExpiredProcessRow(
+    await seedExpiredProcessRow(
+      "outside",
+      ["-p", "review", "--mcp-config", sentinel],
+      os.hostname()
+    );
+    await seedExpiredProcessRow(
       "symlink",
       ["-p", "review", "--mcp-config", symlinkArtifact],
       os.hostname()
     );
-    seedExpiredProcessRow(
+    await seedExpiredProcessRow(
       "remote",
       ["-p", "review", "--mcp-config", remote.path],
       "other-gateway-host",
       deadPid(),
       remote.path
     );
-    seedExpiredProcessRow(
+    await seedExpiredProcessRow(
       "live",
       ["-p", "review", "--mcp-config", live.path],
       os.hostname(),
@@ -216,25 +229,25 @@ describe("AsyncJobManager Claude MCP artifacts", () => {
       live.path
     );
 
-    manager.runOrphanSweepNow();
+    await manager.runOrphanSweepNow();
 
-    expect(store.getById("valid")?.status).toBe("orphaned");
+    expect((await store.getById("valid"))?.status).toBe("orphaned");
     expect(existsSync(valid.path)).toBe(false);
-    expect(store.getById("queued")?.status).toBe("orphaned");
+    expect((await store.getById("queued"))?.status).toBe("orphaned");
     expect(existsSync(queued.path)).toBe(false);
-    expect(store.getById("outside")?.status).toBe("orphaned");
+    expect((await store.getById("outside"))?.status).toBe("orphaned");
     expect(existsSync(sentinel)).toBe(true);
-    expect(store.getById("symlink")?.status).toBe("orphaned");
+    expect((await store.getById("symlink"))?.status).toBe("orphaned");
     expect(existsSync(symlinkArtifact)).toBe(true);
-    expect(store.getById("remote")?.status).toBe("orphaned");
+    expect((await store.getById("remote"))?.status).toBe("orphaned");
     expect(existsSync(remote.path)).toBe(true);
-    expect(store.getById("live")?.status).toBe("running");
+    expect((await store.getById("live"))?.status).toBe("running");
     expect(existsSync(live.path)).toBe(true);
   });
 
-  it("reclaims a local artifact after the one-shot live-PID grace expires", () => {
+  it("reclaims a local artifact after the one-shot live-PID grace expires", async () => {
     const config = buildClaudeMcpConfig(["sqry"]);
-    seedExpiredProcessRow(
+    await seedExpiredProcessRow(
       "graced",
       ["-p", "review", "--mcp-config", config.path],
       os.hostname(),
@@ -242,21 +255,21 @@ describe("AsyncJobManager Claude MCP artifacts", () => {
       config.path
     );
 
-    manager.runOrphanSweepNow();
-    expect(store.getById("graced")?.status).toBe("running");
-    expect(store.getById("graced")?.pid).toBeNull();
+    await manager.runOrphanSweepNow();
+    expect((await store.getById("graced"))?.status).toBe("running");
+    expect((await store.getById("graced"))?.pid).toBeNull();
     expect(existsSync(config.path)).toBe(true);
 
     expireLease("graced");
-    manager.runOrphanSweepNow();
+    await manager.runOrphanSweepNow();
 
-    expect(store.getById("graced")?.status).toBe("orphaned");
+    expect((await store.getById("graced"))?.status).toBe("orphaned");
     expect(existsSync(config.path)).toBe(false);
   });
 
   it("reconciles a local artifact already orphaned by another workstation", async () => {
     const config = buildClaudeMcpConfig(["sqry"]);
-    const ownerInstance = seedExpiredProcessRow(
+    const ownerInstance = await seedExpiredProcessRow(
       "cross-host",
       ["-p", "review", "--mcp-config", config.path],
       os.hostname(),
@@ -266,8 +279,8 @@ describe("AsyncJobManager Claude MCP artifacts", () => {
 
     // This is the durable transition a different workstation can make. It has
     // no access to this workstation's HOME, so the local artifact remains.
-    expect(store.recoverStaleJobs(90_000, 300_000)).toHaveLength(1);
-    expect(store.getById("cross-host")?.status).toBe("orphaned");
+    expect(await store.recoverStaleJobs(90_000, 300_000)).toHaveLength(1);
+    expect((await store.getById("cross-host"))?.status).toBe("orphaned");
     expect(existsSync(config.path)).toBe(true);
 
     // The old owner instance can be garbage-collected before its workstation
@@ -281,10 +294,16 @@ describe("AsyncJobManager Claude MCP artifacts", () => {
     } finally {
       db.close();
     }
-    expect(store.gcInstances(90_000)).toBe(1);
+    expect(await store.gcInstances(90_000)).toBe(1);
 
     await manager.dispose();
     const restarted = new AsyncJobManager(noopLogger, undefined, store);
+    // Durable admission is restored asynchronously and Kit/durable paths refuse
+    // to start until it settles. C5 made the store's own initialisation genuinely
+    // async, so without this the test runs INSIDE the startup window that
+    // design section 4.1 describes, and the refusal it sees is correct behaviour
+    // rather than the thing under test.
+    await restarted.whenStartupSettled();
     try {
       expect(existsSync(config.path)).toBe(false);
     } finally {
@@ -294,7 +313,7 @@ describe("AsyncJobManager Claude MCP artifacts", () => {
 
   it("pins an expired cross-host orphan until its origin acknowledges exact artifact cleanup", async () => {
     const config = buildClaudeMcpConfig(["sqry"]);
-    seedExpiredProcessRow(
+    await seedExpiredProcessRow(
       "retention-pinned-cross-host",
       ["-p", "review", "--mcp-config", config.path],
       os.hostname(),
@@ -305,7 +324,7 @@ describe("AsyncJobManager Claude MCP artifacts", () => {
     // A different workstation performs the durable orphan transition. It must
     // not touch this workstation's HOME, and retention must not erase the only
     // exact-path cleanup record before this origin returns.
-    expect(store.recoverStaleJobs(90_000, 300_000)).toHaveLength(1);
+    expect(await store.recoverStaleJobs(90_000, 300_000)).toHaveLength(1);
     const db = openDatabase(dbPath);
     try {
       db.prepare("UPDATE jobs SET expires_at = '2000-01-01T00:00:00.000Z' WHERE id = ?").run(
@@ -314,8 +333,8 @@ describe("AsyncJobManager Claude MCP artifacts", () => {
     } finally {
       db.close();
     }
-    expect(store.evictExpired()).toBe(0);
-    expect(store.getById("retention-pinned-cross-host")).toMatchObject({
+    expect(await store.evictExpired()).toBe(0);
+    expect(await store.getById("retention-pinned-cross-host")).toMatchObject({
       status: "orphaned",
       mcpArtifactPath: config.path,
       mcpArtifactCleanupPending: true,
@@ -324,9 +343,17 @@ describe("AsyncJobManager Claude MCP artifacts", () => {
 
     await manager.dispose();
     const restarted = new AsyncJobManager(noopLogger, undefined, store);
+    // Durable admission is restored asynchronously and Kit/durable paths refuse
+    // to start until it settles. C5 made the store's own initialisation genuinely
+    // async, so without this the test runs INSIDE the startup window that
+    // design section 4.1 describes, and the refusal it sees is correct behaviour
+    // rather than the thing under test.
+    await restarted.whenStartupSettled();
     try {
       expect(existsSync(config.path)).toBe(false);
-      expect(store.getById("retention-pinned-cross-host")?.mcpArtifactCleanupPending).toBe(false);
+      expect((await store.getById("retention-pinned-cross-host"))?.mcpArtifactCleanupPending).toBe(
+        false
+      );
 
       const afterAck = openDatabase(dbPath);
       try {
@@ -336,7 +363,7 @@ describe("AsyncJobManager Claude MCP artifacts", () => {
       } finally {
         afterAck.close();
       }
-      expect(store.evictExpired()).toBe(1);
+      expect(await store.evictExpired()).toBe(1);
     } finally {
       await restarted.dispose();
     }
@@ -345,7 +372,7 @@ describe("AsyncJobManager Claude MCP artifacts", () => {
   it("does not acknowledge a same-host foreign-scope artifact when its local path is absent", async () => {
     const config = buildClaudeMcpConfig(["sqry"]);
     const foreignScope = "foreign-installation:1:1";
-    seedExpiredProcessRow(
+    await seedExpiredProcessRow(
       "same-host-foreign-scope",
       ["-p", "review", "--mcp-config", config.path],
       os.hostname(),
@@ -358,19 +385,25 @@ describe("AsyncJobManager Claude MCP artifacts", () => {
     // having an isolated filesystem. Model its absent local path explicitly:
     // without the scope predicate, ENOENT would be treated as a successful
     // cleanup and permanently clear this origin installation's retention pin.
-    expect(store.recoverStaleJobs(90_000, 300_000)).toHaveLength(1);
+    expect(await store.recoverStaleJobs(90_000, 300_000)).toHaveLength(1);
     config.cleanup?.();
     expect(existsSync(config.path)).toBe(false);
     await manager.dispose();
     const restarted = new AsyncJobManager(noopLogger, undefined, store);
+    // Durable admission is restored asynchronously and Kit/durable paths refuse
+    // to start until it settles. C5 made the store's own initialisation genuinely
+    // async, so without this the test runs INSIDE the startup window that
+    // design section 4.1 describes, and the refusal it sees is correct behaviour
+    // rather than the thing under test.
+    await restarted.whenStartupSettled();
     try {
       expect(existsSync(config.path)).toBe(false);
-      expect(store.getById("same-host-foreign-scope")).toMatchObject({
+      expect(await store.getById("same-host-foreign-scope")).toMatchObject({
         mcpArtifactPath: config.path,
         mcpArtifactScope: foreignScope,
         mcpArtifactCleanupPending: true,
       });
-      expect(store.evictExpired()).toBe(0);
+      expect(await store.evictExpired()).toBe(0);
     } finally {
       await restarted.dispose();
     }
@@ -378,7 +411,7 @@ describe("AsyncJobManager Claude MCP artifacts", () => {
 
   it("keeps a same-scope absent artifact retention-pinned", async () => {
     const config = buildClaudeMcpConfig(["sqry"]);
-    seedExpiredProcessRow(
+    await seedExpiredProcessRow(
       "same-scope-absent",
       ["-p", "review", "--mcp-config", config.path],
       os.hostname(),
@@ -387,7 +420,7 @@ describe("AsyncJobManager Claude MCP artifacts", () => {
       config.artifactScope
     );
 
-    expect(store.recoverStaleJobs(90_000, 300_000)).toHaveLength(1);
+    expect(await store.recoverStaleJobs(90_000, 300_000)).toHaveLength(1);
     const db = openDatabase(dbPath);
     try {
       db.prepare("UPDATE jobs SET expires_at = '2000-01-01T00:00:00.000Z' WHERE id = ?").run(
@@ -401,9 +434,15 @@ describe("AsyncJobManager Claude MCP artifacts", () => {
 
     await manager.dispose();
     const restarted = new AsyncJobManager(noopLogger, undefined, store);
+    // Durable admission is restored asynchronously and Kit/durable paths refuse
+    // to start until it settles. C5 made the store's own initialisation genuinely
+    // async, so without this the test runs INSIDE the startup window that
+    // design section 4.1 describes, and the refusal it sees is correct behaviour
+    // rather than the thing under test.
+    await restarted.whenStartupSettled();
     try {
-      expect(store.getById("same-scope-absent")?.mcpArtifactCleanupPending).toBe(true);
-      expect(store.evictExpired()).toBe(0);
+      expect((await store.getById("same-scope-absent"))?.mcpArtifactCleanupPending).toBe(true);
+      expect(await store.evictExpired()).toBe(0);
     } finally {
       await restarted.dispose();
     }
@@ -414,7 +453,7 @@ describe("AsyncJobManager Claude MCP artifacts", () => {
     const originalPath = process.env.PATH;
     process.env.PATH = join(testHome, "empty-bin");
     try {
-      const started = manager.startJobWithDedup(
+      const started = await manager.startJobWithDedup(
         "claude",
         ["-p", "review", "--mcp-config", config.path],
         "confirmed-terminal-artifact-unlink",
@@ -425,10 +464,12 @@ describe("AsyncJobManager Claude MCP artifacts", () => {
           mcpArtifactScope: config.artifactScope,
         }
       );
-      await waitFor(() => manager.getJobSnapshot(started.snapshot.id)?.exited === true);
+      await waitFor(
+        async () => (await manager.getJobSnapshot(started.snapshot.id))?.exited === true
+      );
 
       expect(existsSync(config.path)).toBe(false);
-      expect(store.getById(started.snapshot.id)?.mcpArtifactCleanupPending).toBe(false);
+      expect((await store.getById(started.snapshot.id))?.mcpArtifactCleanupPending).toBe(false);
     } finally {
       if (originalPath === undefined) {
         delete process.env.PATH;
@@ -467,7 +508,7 @@ describe("AsyncJobManager Claude MCP artifacts", () => {
       const originalPath = process.env.PATH;
       process.env.PATH = join(testHome, "empty-bin");
       try {
-        const started = manager.startJobWithDedup(
+        const started = await manager.startJobWithDedup(
           "claude",
           ["-p", "review", "--mcp-config", config.path],
           "descriptor-pinned-terminal-acknowledgement",
@@ -478,12 +519,14 @@ describe("AsyncJobManager Claude MCP artifacts", () => {
             mcpArtifactScope: config.artifactScope,
           }
         );
-        await waitFor(() => manager.getJobSnapshot(started.snapshot.id)?.exited === true);
+        await waitFor(
+          async () => (await manager.getJobSnapshot(started.snapshot.id))?.exited === true
+        );
 
         expect(replacementInjected).toBe(true);
         expect(readFileSync(config.path, "utf8")).toBe("replacement must survive");
         expect(existsSync(originalArtifactPath)).toBe(false);
-        expect(store.getById(started.snapshot.id)?.mcpArtifactCleanupPending).toBe(false);
+        expect((await store.getById(started.snapshot.id))?.mcpArtifactCleanupPending).toBe(false);
       } finally {
         if (originalPath === undefined) {
           delete process.env.PATH;
@@ -507,7 +550,7 @@ describe("AsyncJobManager Claude MCP artifacts", () => {
     const originalPath = process.env.PATH;
     process.env.PATH = join(testHome, "empty-bin");
     try {
-      const started = manager.startJobWithDedup(
+      const started = await manager.startJobWithDedup(
         "claude",
         ["-p", "review", "--mcp-config", config.path],
         "unsafe-terminal-artifact-generic-cleanup",
@@ -518,12 +561,14 @@ describe("AsyncJobManager Claude MCP artifacts", () => {
           mcpArtifactScope: config.artifactScope,
         }
       );
-      await waitFor(() => manager.getJobSnapshot(started.snapshot.id)?.exited === true);
+      await waitFor(
+        async () => (await manager.getJobSnapshot(started.snapshot.id))?.exited === true
+      );
 
       expect(existsSync(config.path)).toBe(true);
       expect(existsSync(sentinel)).toBe(true);
       expect(genericCleanup).toHaveBeenCalledTimes(1);
-      expect(store.getById(started.snapshot.id)).toMatchObject({
+      expect(await store.getById(started.snapshot.id)).toMatchObject({
         mcpArtifactPath: config.path,
         mcpArtifactScope: config.artifactScope,
         mcpArtifactCleanupPending: true,
@@ -553,7 +598,7 @@ describe("AsyncJobManager Claude MCP artifacts", () => {
     const originalPath = process.env.PATH;
     process.env.PATH = binDirectory;
     try {
-      const started = manager.startJobWithDedup(
+      const started = await manager.startJobWithDedup(
         "claude",
         ["-p", "review", "--mcp-config", config.path],
         "unsafe-directory-terminal-cleanup",
@@ -564,16 +609,20 @@ describe("AsyncJobManager Claude MCP artifacts", () => {
           mcpArtifactScope: config.artifactScope,
         }
       );
-      await waitFor(() => manager.getJobSnapshot(started.snapshot.id)?.status === "running");
+      await waitFor(
+        async () => (await manager.getJobSnapshot(started.snapshot.id))?.status === "running"
+      );
       renameSync(artifactDirectory, movedArtifactDirectory);
       symlinkSync(movedArtifactDirectory, artifactDirectory, "dir");
 
-      await waitFor(() => manager.getJobSnapshot(started.snapshot.id)?.exited === true);
+      await waitFor(
+        async () => (await manager.getJobSnapshot(started.snapshot.id))?.exited === true
+      );
 
       expect(lstatSync(artifactDirectory).isSymbolicLink()).toBe(true);
       expect(existsSync(config.path)).toBe(true);
       expect(genericCleanup).toHaveBeenCalledTimes(1);
-      expect(store.getById(started.snapshot.id)).toMatchObject({
+      expect(await store.getById(started.snapshot.id)).toMatchObject({
         mcpArtifactPath: config.path,
         mcpArtifactScope: config.artifactScope,
         mcpArtifactCleanupPending: true,
@@ -592,7 +641,7 @@ describe("AsyncJobManager Claude MCP artifacts", () => {
     const artifactDirectory = dirname(config.path);
     const replacedDirectory = join(testHome, "replaced-during-cleanup");
     const originalArtifactPath = join(replacedDirectory, basename(config.path));
-    seedExpiredProcessRow(
+    await seedExpiredProcessRow(
       "directory-replacement-during-cleanup",
       ["-p", "review", "--mcp-config", config.path],
       os.hostname(),
@@ -601,7 +650,7 @@ describe("AsyncJobManager Claude MCP artifacts", () => {
       config.artifactScope
     );
 
-    expect(store.recoverStaleJobs(90_000, 300_000)).toHaveLength(1);
+    expect(await store.recoverStaleJobs(90_000, 300_000)).toHaveLength(1);
     renameSync(artifactDirectory, replacedDirectory);
     mkdirSync(artifactDirectory, { recursive: true, mode: 0o700 });
 
@@ -610,10 +659,16 @@ describe("AsyncJobManager Claude MCP artifacts", () => {
     // the original file in the renamed directory.
     await manager.dispose();
     const restarted = new AsyncJobManager(noopLogger, undefined, store);
+    // Durable admission is restored asynchronously and Kit/durable paths refuse
+    // to start until it settles. C5 made the store's own initialisation genuinely
+    // async, so without this the test runs INSIDE the startup window that
+    // design section 4.1 describes, and the refusal it sees is correct behaviour
+    // rather than the thing under test.
+    await restarted.whenStartupSettled();
     try {
       expect(existsSync(config.path)).toBe(false);
       expect(existsSync(originalArtifactPath)).toBe(true);
-      expect(store.getById("directory-replacement-during-cleanup")).toMatchObject({
+      expect(await store.getById("directory-replacement-during-cleanup")).toMatchObject({
         mcpArtifactScope: config.artifactScope,
         mcpArtifactCleanupPending: true,
       });
@@ -624,7 +679,7 @@ describe("AsyncJobManager Claude MCP artifacts", () => {
 
   it("retains a pinned orphan whose captured artifact scope is missing", async () => {
     const config = buildClaudeMcpConfig(["sqry"]);
-    seedExpiredProcessRow(
+    await seedExpiredProcessRow(
       "missing-artifact-scope",
       ["-p", "review", "--mcp-config", config.path],
       os.hostname(),
@@ -632,7 +687,7 @@ describe("AsyncJobManager Claude MCP artifacts", () => {
       config.path,
       config.artifactScope
     );
-    expect(store.recoverStaleJobs(90_000, 300_000)).toHaveLength(1);
+    expect(await store.recoverStaleJobs(90_000, 300_000)).toHaveLength(1);
     const db = openDatabase(dbPath);
     try {
       db.prepare("UPDATE jobs SET mcp_artifact_scope = NULL WHERE id = ?").run(
@@ -644,9 +699,15 @@ describe("AsyncJobManager Claude MCP artifacts", () => {
 
     await manager.dispose();
     const restarted = new AsyncJobManager(noopLogger, undefined, store);
+    // Durable admission is restored asynchronously and Kit/durable paths refuse
+    // to start until it settles. C5 made the store's own initialisation genuinely
+    // async, so without this the test runs INSIDE the startup window that
+    // design section 4.1 describes, and the refusal it sees is correct behaviour
+    // rather than the thing under test.
+    await restarted.whenStartupSettled();
     try {
       expect(existsSync(config.path)).toBe(true);
-      expect(store.getById("missing-artifact-scope")).toMatchObject({
+      expect(await store.getById("missing-artifact-scope")).toMatchObject({
         mcpArtifactScope: null,
         mcpArtifactCleanupPending: true,
       });
@@ -655,7 +716,7 @@ describe("AsyncJobManager Claude MCP artifacts", () => {
     }
   });
 
-  it("fails closed when an artifact directory is replaced before durable admission", () => {
+  it("fails closed when an artifact directory is replaced before durable admission", async () => {
     const config = buildClaudeMcpConfig(["sqry"]);
     const artifactDirectory = dirname(config.path);
     const replacedDirectory = join(testHome, "replaced-claude-mcp");
@@ -665,7 +726,7 @@ describe("AsyncJobManager Claude MCP artifacts", () => {
     renameSync(artifactDirectory, replacedDirectory);
     mkdirSync(artifactDirectory, { recursive: true, mode: 0o700 });
 
-    expect(() =>
+    await expect(
       manager.startJobWithDedup(
         "claude",
         ["-p", "review", "--mcp-config", config.path],
@@ -677,7 +738,7 @@ describe("AsyncJobManager Claude MCP artifacts", () => {
           mcpArtifactScope: config.artifactScope,
         }
       )
-    ).toThrow(/artifact directory changed before durable admission/);
+    ).rejects.toThrow(/artifact directory changed before durable admission/);
     expect(existsSync(config.path)).toBe(false);
     expect(existsSync(originalArtifactPath)).toBe(true);
 
@@ -688,7 +749,7 @@ describe("AsyncJobManager Claude MCP artifacts", () => {
     expect(existsSync(originalArtifactPath)).toBe(true);
   });
 
-  it("rejects Kit plus MCP provenance before a durable row or attempt fence is written", () => {
+  it("rejects Kit plus MCP provenance before a durable row or attempt fence is written", async () => {
     const config = buildClaudeMcpConfig(["sqry"]);
     const jobId = randomUUID();
     const kitExecution = {
@@ -700,7 +761,7 @@ describe("AsyncJobManager Claude MCP artifacts", () => {
       contextIdentity: "kit-artifact-admission-context",
     };
 
-    expect(() =>
+    await expect(
       manager.startJobWithDedup(
         "claude",
         ["-p", "review", "--mcp-config", config.path],
@@ -714,8 +775,8 @@ describe("AsyncJobManager Claude MCP artifacts", () => {
           mcpArtifactScope: config.artifactScope,
         }
       )
-    ).toThrow(/Kit jobs cannot carry Claude MCP artifact provenance/);
-    expect(store.getById(jobId)).toBeNull();
+    ).rejects.toThrow(/Kit jobs cannot carry Claude MCP artifact provenance/);
+    expect(await store.getById(jobId)).toBeNull();
 
     const db = openDatabase(dbPath);
     try {
@@ -730,7 +791,7 @@ describe("AsyncJobManager Claude MCP artifacts", () => {
 
   it("waits for close before cleaning an artifact after cancellation", async () => {
     const cleanup = vi.fn();
-    const job = manager.startJobWithDedup(
+    const job = await manager.startJobWithDedup(
       "bash" as LlmCli,
       ["-c", "trap 'sleep 0.4; exit 0' TERM; while true; do sleep 1; done"],
       "mcp-artifact-cancel",
@@ -738,14 +799,14 @@ describe("AsyncJobManager Claude MCP artifacts", () => {
     );
     try {
       await new Promise(resolve => setTimeout(resolve, 100));
-      expect(manager.cancelJob(job.snapshot.id).canceled).toBe(true);
+      expect((await manager.cancelJob(job.snapshot.id)).canceled).toBe(true);
       await new Promise(resolve => setTimeout(resolve, 100));
       expect(cleanup).not.toHaveBeenCalled();
 
-      await waitFor(() => manager.getJobSnapshot(job.snapshot.id)?.exited === true);
+      await waitFor(async () => (await manager.getJobSnapshot(job.snapshot.id))?.exited === true);
       expect(cleanup).toHaveBeenCalledTimes(1);
     } finally {
-      manager.cancelJob(job.snapshot.id);
+      await manager.cancelJob(job.snapshot.id);
     }
   }, 15000);
 });

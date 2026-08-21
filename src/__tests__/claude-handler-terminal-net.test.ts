@@ -339,7 +339,7 @@ describe("handleClaudeRequest terminal net: deferred (Mode B)", () => {
       expect(logStart).toHaveBeenCalledTimes(1);
       // Mode B: the manager owns completion; the handler must not inline-complete.
       expect(logComplete).not.toHaveBeenCalled();
-      manager.cancelJob(body.jobId);
+      await manager.cancelJob(body.jobId);
     } finally {
       slot.release();
       await manager.dispose();
@@ -613,7 +613,7 @@ describe("handleClaudeRequest terminal net: Kit deferred (Mode B, kitJobHandedOf
     if (originalDeadline === undefined) delete process.env.SYNC_DEADLINE_MS;
     else process.env.SYNC_DEADLINE_MS = originalDeadline;
     await jobs.dispose();
-    store.close();
+    await store.close();
     flight.close();
     rmSync(root, { recursive: true, force: true });
     vi.resetModules();
@@ -665,7 +665,7 @@ describe("handleClaudeRequest terminal net: Kit deferred (Mode B, kitJobHandedOf
       // kitJobHandedOff: the claimed kit session attempt is handed to the job,
       // not discarded, so the pending attempt survives for the async terminal.
       expect(release).not.toHaveBeenCalled();
-      jobs.cancelJob(body.jobId);
+      await jobs.cancelJob(body.jobId);
     } finally {
       slot.release();
     }
@@ -766,8 +766,8 @@ describe("handleClaudeRequest terminal net: H-DoubleComplete (fenced by T3 Fligh
     const realStart = jobs.startJobWithDedup.bind(jobs);
     let jobId: string | undefined;
     vi.spyOn(jobs, "startJobWithDedup").mockImplementation(
-      (...args: Parameters<typeof realStart>) => {
-        const out = realStart(...args);
+      async (...args: Parameters<typeof realStart>) => {
+        const out = await realStart(...args);
         jobId = out.snapshot.id;
         return out;
       }
@@ -783,7 +783,7 @@ describe("handleClaudeRequest terminal net: H-DoubleComplete (fenced by T3 Fligh
       // Cancel the queued job mid-sleep so it terminalizes (fires onTerminal ->
       // sets the worktree terminal latch) before the loop wakes and arms.
       await vi.waitFor(() => expect(jobId).toBeDefined());
-      jobs.cancelJob(jobId!);
+      await jobs.cancelJob(jobId!);
 
       // The deferred branch's settle -> finishHandler() rejects; the catch runs
       // flight.completeInline() (a no-op once armed), then the unconditional

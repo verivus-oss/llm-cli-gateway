@@ -339,7 +339,7 @@ describe("handleCursorRequest terminal net: deferred (Mode B) + D4 split", () =>
       expect(logStart).toHaveBeenCalledTimes(1);
       expect(arm).toHaveBeenCalledTimes(1);
       expect(logComplete).not.toHaveBeenCalled();
-      manager.cancelJob(body.jobId);
+      await manager.cancelJob(body.jobId);
     } finally {
       slot.release();
       await manager.dispose();
@@ -382,7 +382,7 @@ describe("handleCursorRequest terminal net: deferred (Mode B) + D4 split", () =>
       expect(mintedBody.status).toBe("deferred");
       expect(mintedBody.sessionId).toMatch(/^gw-/);
       expect(updateUsage).not.toHaveBeenCalled();
-      manager.cancelJob(mintedBody.jobId);
+      await manager.cancelJob(mintedBody.jobId);
 
       // User-provided: usage update fires for the provided id.
       const providedId = "33333333-3333-4333-8333-333333333333";
@@ -396,7 +396,7 @@ describe("handleCursorRequest terminal net: deferred (Mode B) + D4 split", () =>
       expect(providedBody.status).toBe("deferred");
       expect(providedBody.sessionId).toBe(providedId);
       expect(updateUsage).toHaveBeenCalledWith(providedId);
-      manager.cancelJob(providedBody.jobId);
+      await manager.cancelJob(providedBody.jobId);
     } finally {
       slot.release();
       await manager.dispose();

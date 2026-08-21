@@ -2400,7 +2400,7 @@ export function createClaudeContextArtifact(
   context: ResolvedKitContext
 ): ClaudeContextArtifact {
   mkdirSync(layout.artifactsDir, { recursive: true, mode: 0o700 });
-  reapClaudeContextArtifacts(layout, () => "unavailable");
+  reapUnownedClaudeContextArtifacts(layout);
   const artifactId = `${context.contextDigest}.${randomUUID()}`;
   const artifactPath = path.join(layout.artifactsDir, `${artifactId}.txt`);
   const ownerPath = path.join(layout.artifactsDir, `${artifactId}.owner.json`);
@@ -2448,13 +2448,29 @@ export function createClaudeContextArtifact(
  * active owner state is retained rather than risking deletion of a context
  * file still consumed by a live provider.
  */
-export function reapClaudeContextArtifacts(
+/** One artifact the reap walk found, with its ownership record resolved. */
+interface ClaudeArtifactCandidate {
+  artifactPath: string;
+  ownerPath: string;
+  exceededGrace: boolean;
+  /** Set only when the owner record is well formed and names this artifact. */
+  jobId: string | null;
+  /** True when the artifact must be retained regardless of any job state. */
+  retain: boolean;
+}
+
+/**
+ * Walk the artifacts directory and classify every file WITHOUT consulting the
+ * job store. Split out so the reap has one implementation but two entry points:
+ * the maintenance sweep, which must ask the store, and artifact creation, which
+ * passes a constant and therefore has no reason to be asynchronous.
+ */
+function collectClaudeArtifactCandidates(
   layout: KitPathLayout,
-  getJobState: (jobId: string) => ClaudeArtifactJobState,
-  now = Date.now()
-): number {
-  if (!existsSync(layout.artifactsDir)) return 0;
-  let removed = 0;
+  now: number
+): ClaudeArtifactCandidate[] {
+  if (!existsSync(layout.artifactsDir)) return [];
+  const out: ClaudeArtifactCandidate[] = [];
   for (const entry of readdirSync(layout.artifactsDir, { withFileTypes: true })) {
     if (!entry.isFile() || !entry.name.endsWith(".txt")) continue;
     const artifactPath = path.join(layout.artifactsDir, entry.name);
@@ -2466,38 +2482,93 @@ export function reapClaudeContextArtifacts(
     }
     if (!stat.isFile() || stat.isSymbolicLink()) continue;
     const ownerPath = artifactPath.replace(/\.txt$/, ".owner.json");
-    const exceededGrace = now - stat.mtimeMs >= CLAUDE_ARTIFACT_REAP_AGE_MS;
-    let shouldRemove = exceededGrace;
+    const candidate: ClaudeArtifactCandidate = {
+      artifactPath,
+      ownerPath,
+      exceededGrace: now - stat.mtimeMs >= CLAUDE_ARTIFACT_REAP_AGE_MS,
+      jobId: null,
+      retain: false,
+    };
     if (existsSync(ownerPath)) {
       try {
         const owner: unknown = JSON.parse(readFileSync(ownerPath, "utf8"));
         const jobId = isRecord(owner) && typeof owner.jobId === "string" ? owner.jobId : null;
         const artifact =
           isRecord(owner) && typeof owner.artifact === "string" ? owner.artifact : null;
-        if (!jobId || artifact !== entry.name) {
-          shouldRemove = false;
-        } else {
-          const jobState = getJobState(jobId);
-          shouldRemove = jobState === "terminal" || (jobState === "not_found" && exceededGrace);
-        }
+        if (!jobId || artifact !== entry.name) candidate.retain = true;
+        else candidate.jobId = jobId;
       } catch {
         // A malformed ownership record is ambiguous. Retain it for manual
         // recovery rather than deleting context belonging to an unknown job.
-        shouldRemove = false;
+        candidate.retain = true;
       }
     }
-    if (!shouldRemove) continue;
+    out.push(candidate);
+  }
+  return out;
+}
+
+function removeClaudeArtifact(candidate: ClaudeArtifactCandidate): boolean {
+  try {
+    unlinkSync(candidate.artifactPath);
     try {
-      unlinkSync(artifactPath);
-      try {
-        unlinkSync(ownerPath);
-      } catch {
-        // The primary artifact is gone. A later pass can remove the sidecar.
-      }
-      removed++;
+      unlinkSync(candidate.ownerPath);
     } catch {
-      // Another terminal cleanup may have won the race.
+      // The primary artifact is gone. A later pass can remove the sidecar.
     }
+    return true;
+  } catch {
+    // Another terminal cleanup may have won the race.
+    return false;
+  }
+}
+
+/**
+ * Reap terminal Claude context artifacts, asking the job store about each owned
+ * one.
+ *
+ * `getJobState` is asynchronous because the job store is. Deleting an artifact
+ * cannot change any job's state, so resolving a state after an earlier deletion
+ * yields the same decision the previous lazy per-file query made.
+ */
+export async function reapClaudeContextArtifacts(
+  layout: KitPathLayout,
+  getJobState: (jobId: string) => Promise<ClaudeArtifactJobState>,
+  now = Date.now()
+): Promise<number> {
+  let removed = 0;
+  for (const candidate of collectClaudeArtifactCandidates(layout, now)) {
+    if (candidate.retain) continue;
+    let shouldRemove = candidate.exceededGrace;
+    if (candidate.jobId) {
+      let jobState: ClaudeArtifactJobState;
+      try {
+        jobState = await getJobState(candidate.jobId);
+      } catch {
+        continue;
+      }
+      shouldRemove =
+        jobState === "terminal" || (jobState === "not_found" && candidate.exceededGrace);
+    }
+    if (shouldRemove && removeClaudeArtifact(candidate)) removed++;
+  }
+  return removed;
+}
+
+/**
+ * Reap only artifacts that no job owns, without consulting the store.
+ *
+ * Identical to calling the async reap with a resolver that always answers
+ * "unavailable": an owned artifact is retained, an unowned one goes once past
+ * the grace period. Kept synchronous deliberately, because its caller passes a
+ * constant and making it async would propagate a type change through a path
+ * that never touches storage.
+ */
+export function reapUnownedClaudeContextArtifacts(layout: KitPathLayout, now = Date.now()): number {
+  let removed = 0;
+  for (const candidate of collectClaudeArtifactCandidates(layout, now)) {
+    if (candidate.retain || candidate.jobId) continue;
+    if (candidate.exceededGrace && removeClaudeArtifact(candidate)) removed++;
   }
   return removed;
 }

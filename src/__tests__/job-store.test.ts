@@ -38,9 +38,9 @@ describe("JobStore", () => {
     store = new SqliteJobStore(dbPath);
   });
 
-  afterEach(() => {
+  afterEach(async () => {
     try {
-      store.close();
+      await store.close();
     } catch {
       /* ignore */
     }
@@ -68,12 +68,12 @@ describe("JobStore", () => {
   });
 
   describe("recordStart → recordComplete roundtrip", () => {
-    it("persists a completed job that getById returns", () => {
+    it("persists a completed job that getById returns", async () => {
       const id = "job-abc";
       const requestKey = computeRequestKey("claude", ["-p", "hi"]);
       const startedAt = new Date().toISOString();
 
-      store.recordStart({
+      await store.recordStart({
         id,
         correlationId: "corr-1",
         requestKey,
@@ -85,7 +85,7 @@ describe("JobStore", () => {
       });
 
       const finishedAt = new Date().toISOString();
-      store.recordComplete({
+      await store.recordComplete({
         id,
         status: "completed",
         exitCode: 0,
@@ -97,14 +97,14 @@ describe("JobStore", () => {
       });
 
       const row = store.getById(id);
-      expect(row).not.toBeNull();
-      expect(row!.status).toBe("completed");
-      expect(row!.exitCode).toBe(0);
-      expect(row!.stdout).toBe("result");
-      expect(row!.finishedAt).toBe(finishedAt);
+      expect(await row).not.toBeNull();
+      expect((await row!).status).toBe("completed");
+      expect((await row!).exitCode).toBe(0);
+      expect((await row!).stdout).toBe("result");
+      expect((await row!).finishedAt).toBe(finishedAt);
       // expiresAt = finishedAt + retentionMs
       const expectedExpiry = Date.parse(finishedAt) + resolveJobRetentionMs();
-      expect(Date.parse(row!.expiresAt)).toBeCloseTo(expectedExpiry, -3);
+      expect(Date.parse((await row!).expiresAt)).toBeCloseTo(expectedExpiry, -3);
     });
   });
 
@@ -126,7 +126,7 @@ describe("JobStore", () => {
       mcpArtifactScope: "job-store-artifact-scope",
     };
 
-    it("rejects invalid artifact provenance before every local store writes", () => {
+    it("rejects invalid artifact provenance before every local store writes", async () => {
       const stores: Array<[string, JobStore]> = [
         ["sqlite", store],
         ["memory", new MemoryJobStore()],
@@ -143,7 +143,7 @@ describe("JobStore", () => {
       for (const [storeName, candidate] of stores) {
         for (const [index, invalid] of invalidInputs.entries()) {
           const id = `${storeName}-invalid-artifact-${index}`;
-          expect(() =>
+          await expect(
             candidate.recordStart({
               id,
               correlationId: `corr-${id}`,
@@ -153,8 +153,8 @@ describe("JobStore", () => {
               pid: null,
               ...invalid,
             })
-          ).toThrow();
-          expect(candidate.getById(id)).toBeNull();
+          ).rejects.toThrow();
+          expect(await candidate.getById(id)).toBeNull();
         }
       }
 
@@ -169,8 +169,8 @@ describe("JobStore", () => {
       }
     });
 
-    it("persists a complete non-Kit Claude process provenance record", () => {
-      store.recordStart({
+    it("persists a complete non-Kit Claude process provenance record", async () => {
+      await store.recordStart({
         id: "valid-artifact-provenance",
         correlationId: "corr-valid-artifact-provenance",
         requestKey: "key-valid-artifact-provenance",
@@ -179,7 +179,7 @@ describe("JobStore", () => {
         pid: null,
         ...validArtifact,
       });
-      expect(store.getById("valid-artifact-provenance")).toMatchObject({
+      expect(await store.getById("valid-artifact-provenance")).toMatchObject({
         ...validArtifact,
         mcpArtifactCleanupPending: true,
       });
@@ -187,8 +187,8 @@ describe("JobStore", () => {
   });
 
   describe("owner principal (F3)", () => {
-    it("stamps and returns the owner principal on recordStart", () => {
-      store.recordStart({
+    it("stamps and returns the owner principal on recordStart", async () => {
+      await store.recordStart({
         id: "job-owned",
         correlationId: "c",
         requestKey: computeRequestKey("claude", ["-p", "x"]),
@@ -198,11 +198,11 @@ describe("JobStore", () => {
         pid: 1,
         ownerPrincipal: "user-alice@example.com",
       });
-      expect(store.getById("job-owned")?.ownerPrincipal).toBe("user-alice@example.com");
+      expect((await store.getById("job-owned"))?.ownerPrincipal).toBe("user-alice@example.com");
     });
 
-    it("defaults the owner principal to null when omitted (legacy-unowned)", () => {
-      store.recordStart({
+    it("defaults the owner principal to null when omitted (legacy-unowned)", async () => {
+      await store.recordStart({
         id: "job-unowned",
         correlationId: "c",
         requestKey: computeRequestKey("claude", ["-p", "y"]),
@@ -211,10 +211,10 @@ describe("JobStore", () => {
         startedAt: new Date().toISOString(),
         pid: 1,
       });
-      expect(store.getById("job-unowned")?.ownerPrincipal).toBeNull();
+      expect((await store.getById("job-unowned"))?.ownerPrincipal).toBeNull();
     });
 
-    it("allows only local replay of an exact legacy-unowned recovered Kit fence", () => {
+    it("allows only local replay of an exact legacy-unowned recovered Kit fence", async () => {
       const fence = {
         attemptId: "legacy-unowned-recovered-fence",
         cli: "claude",
@@ -231,19 +231,19 @@ describe("JobStore", () => {
         fencedAt: new Date().toISOString(),
       };
 
-      expect(store.fenceUnadmittedKitAttempt(fence)).toBe("reserved");
-      expect(store.fenceUnadmittedKitAttempt({ ...fence, ownerPrincipal: "local" })).toBe(
+      expect(await store.fenceUnadmittedKitAttempt(fence)).toBe("reserved");
+      expect(await store.fenceUnadmittedKitAttempt({ ...fence, ownerPrincipal: "local" })).toBe(
         "already_recovered"
       );
-      expect(store.fenceUnadmittedKitAttempt({ ...fence, ownerPrincipal: "remote-reviewer" })).toBe(
-        "conflict"
-      );
-      expect(store.fenceUnadmittedKitAttempt(fence)).toBe("conflict");
-      expect(store.fenceUnadmittedKitAttempt({ ...fence, ownerPrincipal: undefined })).toBe(
+      expect(
+        await store.fenceUnadmittedKitAttempt({ ...fence, ownerPrincipal: "remote-reviewer" })
+      ).toBe("conflict");
+      expect(await store.fenceUnadmittedKitAttempt(fence)).toBe("conflict");
+      expect(await store.fenceUnadmittedKitAttempt({ ...fence, ownerPrincipal: undefined })).toBe(
         "conflict"
       );
       expect(
-        store.fenceUnadmittedKitAttempt({
+        await store.fenceUnadmittedKitAttempt({
           ...fence,
           ownerPrincipal: 42 as unknown as string,
         })
@@ -260,26 +260,26 @@ describe("JobStore", () => {
       }
 
       const memory = new MemoryJobStore();
-      expect(memory.fenceUnadmittedKitAttempt(fence)).toBe("reserved");
-      expect(memory.fenceUnadmittedKitAttempt({ ...fence, ownerPrincipal: "local" })).toBe(
+      expect(await memory.fenceUnadmittedKitAttempt(fence)).toBe("reserved");
+      expect(await memory.fenceUnadmittedKitAttempt({ ...fence, ownerPrincipal: "local" })).toBe(
         "already_recovered"
       );
       expect(
-        memory.fenceUnadmittedKitAttempt({ ...fence, ownerPrincipal: "remote-reviewer" })
+        await memory.fenceUnadmittedKitAttempt({ ...fence, ownerPrincipal: "remote-reviewer" })
       ).toBe("conflict");
-      expect(memory.fenceUnadmittedKitAttempt(fence)).toBe("conflict");
-      expect(memory.fenceUnadmittedKitAttempt({ ...fence, ownerPrincipal: undefined })).toBe(
+      expect(await memory.fenceUnadmittedKitAttempt(fence)).toBe("conflict");
+      expect(await memory.fenceUnadmittedKitAttempt({ ...fence, ownerPrincipal: undefined })).toBe(
         "conflict"
       );
       expect(
-        memory.fenceUnadmittedKitAttempt({
+        await memory.fenceUnadmittedKitAttempt({
           ...fence,
           ownerPrincipal: 42 as unknown as string,
         })
       ).toBe("conflict");
     });
 
-    it("migrates a pre-existing jobs table by adding owner_principal (NULL for legacy rows)", () => {
+    it("migrates a pre-existing jobs table by adding owner_principal (NULL for legacy rows)", async () => {
       const require = createRequire(import.meta.url);
       const BetterSqlite3 = require("better-sqlite3");
       const legacyDir = mkdtempSync(join(tmpdir(), "job-store-legacy-"));
@@ -313,13 +313,13 @@ describe("JobStore", () => {
       const migrated = new SqliteJobStore(legacyPath);
       try {
         // Legacy row survives migration; owner is NULL (legacy-unowned).
-        expect(migrated.getById("legacy-1")?.ownerPrincipal).toBeNull();
-        expect(migrated.getById("legacy-1")).toMatchObject({
+        expect((await migrated.getById("legacy-1"))?.ownerPrincipal).toBeNull();
+        expect(await migrated.getById("legacy-1")).toMatchObject({
           errorCategory: null,
           retryable: null,
         });
         // New inserts after migration can carry an owner.
-        migrated.recordStart({
+        await migrated.recordStart({
           id: "new-1",
           correlationId: "c",
           requestKey: "k2",
@@ -329,8 +329,8 @@ describe("JobStore", () => {
           pid: null,
           ownerPrincipal: "bob",
         });
-        expect(migrated.getById("new-1")?.ownerPrincipal).toBe("bob");
-        migrated.recordComplete({
+        expect((await migrated.getById("new-1"))?.ownerPrincipal).toBe("bob");
+        await migrated.recordComplete({
           id: "new-1",
           status: "failed",
           exitCode: 126,
@@ -342,26 +342,26 @@ describe("JobStore", () => {
           retryable: false,
           finishedAt: new Date().toISOString(),
         });
-        expect(migrated.getById("new-1")).toMatchObject({
+        expect(await migrated.getById("new-1")).toMatchObject({
           errorCategory: "input_too_large",
           retryable: false,
         });
       } finally {
-        migrated.close();
+        await migrated.close();
         rmSync(legacyDir, { recursive: true, force: true });
       }
     });
   });
 
   describe("findByRequestKey (dedup lookup)", () => {
-    it("returns null when no matching job exists", () => {
+    it("returns null when no matching job exists", async () => {
       const found = store.findByRequestKey("nope");
-      expect(found).toBeNull();
+      expect(await found).toBeNull();
     });
 
-    it("returns a recent queued job with a live lease (#139: recordStart persists queued)", () => {
+    it("returns a recent queued job with a live lease (#139: recordStart persists queued)", async () => {
       const requestKey = computeRequestKey("grok", ["-p", "test"]);
-      store.recordStart({
+      await store.recordStart({
         id: "j1",
         correlationId: "c1",
         requestKey,
@@ -372,7 +372,7 @@ describe("JobStore", () => {
         pid: 7,
       });
 
-      const found = store.findByRequestKey(requestKey);
+      const found = await store.findByRequestKey(requestKey);
       expect(found?.id).toBe("j1");
       // recordStart now persists 'queued'; a live (lease-valid) queued job is
       // still dedup-eligible.
@@ -380,12 +380,12 @@ describe("JobStore", () => {
       expect(found?.leaseDeadline).not.toBeNull();
     });
 
-    it("returns the most recent matching completed job within window", () => {
+    it("returns the most recent matching completed job within window", async () => {
       const requestKey = computeRequestKey("claude", ["-p", "x"]);
       const older = new Date(Date.now() - 60_000).toISOString();
       const newer = new Date().toISOString();
 
-      store.recordStart({
+      await store.recordStart({
         id: "older",
         correlationId: "co",
         requestKey,
@@ -394,7 +394,7 @@ describe("JobStore", () => {
         startedAt: older,
         pid: 1,
       });
-      store.recordComplete({
+      await store.recordComplete({
         id: "older",
         status: "completed",
         exitCode: 0,
@@ -405,7 +405,7 @@ describe("JobStore", () => {
         finishedAt: older,
       });
 
-      store.recordStart({
+      await store.recordStart({
         id: "newer",
         correlationId: "cn",
         requestKey,
@@ -414,7 +414,7 @@ describe("JobStore", () => {
         startedAt: newer,
         pid: 2,
       });
-      store.recordComplete({
+      await store.recordComplete({
         id: "newer",
         status: "completed",
         exitCode: 0,
@@ -425,17 +425,17 @@ describe("JobStore", () => {
         finishedAt: newer,
       });
 
-      const found = store.findByRequestKey(requestKey);
+      const found = await store.findByRequestKey(requestKey);
       expect(found?.id).toBe("newer");
       expect(found?.stdout).toBe("new");
     });
 
-    it("does not return jobs older than the dedup window", () => {
+    it("does not return jobs older than the dedup window", async () => {
       // Default dedup window is 1h; insert a job started 2h ago.
       const requestKey = computeRequestKey("codex", ["exec", "ancient"]);
       const ancient = new Date(Date.now() - 2 * 60 * 60 * 1000).toISOString();
 
-      store.recordStart({
+      await store.recordStart({
         id: "ancient",
         correlationId: "ca",
         requestKey,
@@ -444,7 +444,7 @@ describe("JobStore", () => {
         startedAt: ancient,
         pid: 5,
       });
-      store.recordComplete({
+      await store.recordComplete({
         id: "ancient",
         status: "completed",
         exitCode: 0,
@@ -456,13 +456,13 @@ describe("JobStore", () => {
       });
 
       const found = store.findByRequestKey(requestKey);
-      expect(found).toBeNull();
+      expect(await found).toBeNull();
     });
 
-    it("does not dedup onto failed/canceled/orphaned jobs", () => {
+    it("does not dedup onto failed/canceled/orphaned jobs", async () => {
       const requestKey = computeRequestKey("claude", ["-p", "broken"]);
       const t = new Date().toISOString();
-      store.recordStart({
+      await store.recordStart({
         id: "bad",
         correlationId: "cb",
         requestKey,
@@ -471,7 +471,7 @@ describe("JobStore", () => {
         startedAt: t,
         pid: 9,
       });
-      store.recordComplete({
+      await store.recordComplete({
         id: "bad",
         status: "failed",
         exitCode: 1,
@@ -482,15 +482,15 @@ describe("JobStore", () => {
         finishedAt: t,
       });
 
-      expect(store.findByRequestKey(requestKey)).toBeNull();
+      expect(await store.findByRequestKey(requestKey)).toBeNull();
     });
   });
 
   describe("markOrphanedOnStartup (#139: deprecated lease shim)", () => {
-    it("orphans a lease-expired (dead-owner) row and leaves live + terminal rows alone", () => {
+    it("orphans a lease-expired (dead-owner) row and leaves live + terminal rows alone", async () => {
       const t = new Date().toISOString();
       // A job whose owner died: recorded, then its lease is aged into the past.
-      store.recordStart({
+      await store.recordStart({
         id: "dead-owner",
         correlationId: "cr",
         requestKey: "k1",
@@ -500,7 +500,7 @@ describe("JobStore", () => {
         pid: 100,
       });
       // A job whose owner is still alive (fresh lease): must NOT be swept.
-      store.recordStart({
+      await store.recordStart({
         id: "live-owner",
         correlationId: "cl",
         requestKey: "k3",
@@ -510,7 +510,7 @@ describe("JobStore", () => {
         pid: 102,
       });
       // A terminal job: must be left untouched.
-      store.recordStart({
+      await store.recordStart({
         id: "done",
         correlationId: "cd",
         requestKey: "k2",
@@ -519,7 +519,7 @@ describe("JobStore", () => {
         startedAt: t,
         pid: 101,
       });
-      store.recordComplete({
+      await store.recordComplete({
         id: "done",
         status: "completed",
         exitCode: 0,
@@ -532,7 +532,7 @@ describe("JobStore", () => {
 
       expireLease(dbPath, "dead-owner");
 
-      const changes = store.markOrphanedOnStartup();
+      const changes = await store.markOrphanedOnStartup();
       expect(changes.count).toBe(1);
       expect(changes.orphaned).toHaveLength(1);
       expect(changes.orphaned[0]).toMatchObject({
@@ -541,18 +541,18 @@ describe("JobStore", () => {
         startedAt: t,
       });
 
-      expect(store.getById("dead-owner")?.status).toBe("orphaned");
-      expect(store.getById("dead-owner")?.error).toContain("no longer alive");
+      expect((await store.getById("dead-owner"))?.status).toBe("orphaned");
+      expect((await store.getById("dead-owner"))?.error).toContain("no longer alive");
       // The live-lease job is NOT orphaned (this is the whole #139 fix).
-      expect(store.getById("live-owner")?.status).toBe("queued");
-      expect(store.getById("done")?.status).toBe("completed");
+      expect((await store.getById("live-owner"))?.status).toBe("queued");
+      expect((await store.getById("done"))?.status).toBe("completed");
     });
   });
 
   describe("evictExpired", () => {
-    it("deletes rows whose expires_at is in the past", () => {
+    it("deletes rows whose expires_at is in the past", async () => {
       const t = new Date().toISOString();
-      store.recordStart({
+      await store.recordStart({
         id: "expired",
         correlationId: "ce",
         requestKey: "k",
@@ -561,7 +561,7 @@ describe("JobStore", () => {
         startedAt: t,
         pid: 1,
       });
-      store.recordComplete({
+      await store.recordComplete({
         id: "expired",
         status: "completed",
         exitCode: 0,
@@ -574,12 +574,12 @@ describe("JobStore", () => {
       });
 
       const removed = store.evictExpired();
-      expect(removed).toBe(1);
-      expect(store.getById("expired")).toBeNull();
+      expect(await removed).toBe(1);
+      expect(await store.getById("expired")).toBeNull();
     });
 
-    it("keeps non-terminal jobs (far-future expiry) untouched", () => {
-      store.recordStart({
+    it("keeps non-terminal jobs (far-future expiry) untouched", async () => {
+      await store.recordStart({
         id: "live",
         correlationId: "cl",
         requestKey: "k",
@@ -588,10 +588,10 @@ describe("JobStore", () => {
         startedAt: new Date().toISOString(),
         pid: 1,
       });
-      store.evictExpired();
+      await store.evictExpired();
       // recordStart now persists 'queued' (flipped to running by markRunning at
       // launch); either way evictExpired must not delete a non-terminal row.
-      expect(store.getById("live")?.status).toBe("queued");
+      expect((await store.getById("live"))?.status).toBe("queued");
     });
   });
 
@@ -629,12 +629,12 @@ describe("JobStore", () => {
   });
 
   describe("U22 Mistral jobs persist through the durable store", () => {
-    it("persists a Mistral job and rehydrates it via getById", () => {
+    it("persists a Mistral job and rehydrates it via getById", async () => {
       const id = "mistral-job-1";
       const requestKey = computeRequestKey("mistral", ["-p", "hi", "--agent", "auto-approve"]);
       const startedAt = new Date().toISOString();
 
-      store.recordStart({
+      await store.recordStart({
         id,
         correlationId: "mistral-corr-1",
         requestKey,
@@ -646,7 +646,7 @@ describe("JobStore", () => {
       });
 
       const finishedAt = new Date().toISOString();
-      store.recordComplete({
+      await store.recordComplete({
         id,
         status: "completed",
         exitCode: 0,
@@ -658,11 +658,11 @@ describe("JobStore", () => {
       });
 
       const row = store.getById(id);
-      expect(row).not.toBeNull();
-      expect(row!.cli).toBe("mistral");
-      expect(row!.status).toBe("completed");
+      expect(await row).not.toBeNull();
+      expect((await row!).cli).toBe("mistral");
+      expect((await row!).status).toBe("completed");
       // Dedup lookups should resolve back to the Mistral job
-      const dedup = store.findByRequestKey(requestKey);
+      const dedup = await store.findByRequestKey(requestKey);
       expect(dedup?.id).toBe(id);
     });
   });
@@ -677,10 +677,10 @@ describe("JobStore", () => {
       ["memory", new MemoryJobStore()],
     ];
 
-    it("returns true on an open row and false once the row is terminal", () => {
+    it("returns true on an open row and false once the row is terminal", async () => {
       for (const [name, backend] of backends()) {
         const t = new Date().toISOString();
-        backend.recordStart({
+        await backend.recordStart({
           id: "parity-job",
           correlationId: "parity-corr",
           requestKey: "parity-key",
@@ -699,17 +699,17 @@ describe("JobStore", () => {
           error: "canceled by caller",
           finishedAt: t,
         };
-        expect(backend.recordComplete(terminal), name).toBe(true);
-        expect(backend.recordComplete({ ...terminal, stdout: "LATER" }), name).toBe(false);
-        expect(backend.getById("parity-job")?.stdout, name).toBe("PARTIAL");
-        backend.close();
+        expect(await backend.recordComplete(terminal), name).toBe(true);
+        expect(await backend.recordComplete({ ...terminal, stdout: "LATER" }), name).toBe(false);
+        expect((await backend.getById("parity-job"))?.stdout, name).toBe("PARTIAL");
+        await backend.close();
       }
     });
 
-    it("returns false for an id that does not exist", () => {
+    it("returns false for an id that does not exist", async () => {
       for (const [name, backend] of backends()) {
         expect(
-          backend.recordComplete({
+          await backend.recordComplete({
             id: "no-such-row",
             status: "completed",
             exitCode: 0,
@@ -721,11 +721,11 @@ describe("JobStore", () => {
           }),
           name
         ).toBe(false);
-        backend.close();
+        await backend.close();
       }
     });
 
-    it("admits a terminal write onto an orphaned row, so recovery still works", () => {
+    it("admits a terminal write onto an orphaned row, so recovery still works", async () => {
       // The guard admits 'orphaned' on purpose: a job whose owner died must
       // still be completable by whoever adopts it. If that returned false the
       // adopting instance would treat a row it legitimately owns as foreign
@@ -735,7 +735,7 @@ describe("JobStore", () => {
       const backend = new SqliteJobStore(orphanPath);
       try {
         const t = new Date().toISOString();
-        backend.recordStart({
+        await backend.recordStart({
           id: "orphan-parity",
           correlationId: "orphan-corr",
           requestKey: "orphan-key",
@@ -746,12 +746,12 @@ describe("JobStore", () => {
           ownerInstance: "dead-instance",
         });
         expireLease(orphanPath, "orphan-parity");
-        backend.recoverStaleJobs(1, 300_000);
+        await backend.recoverStaleJobs(1, 300_000);
         // Guard against a vacuous assertion: the row must really be orphaned.
-        expect(backend.getById("orphan-parity")?.status).toBe("orphaned");
+        expect((await backend.getById("orphan-parity"))?.status).toBe("orphaned");
 
         expect(
-          backend.recordComplete({
+          await backend.recordComplete({
             id: "orphan-parity",
             status: "completed",
             exitCode: 0,
@@ -762,9 +762,9 @@ describe("JobStore", () => {
             finishedAt: t,
           })
         ).toBe(true);
-        expect(backend.getById("orphan-parity")?.stdout).toBe("recovered");
+        expect((await backend.getById("orphan-parity"))?.stdout).toBe("recovered");
       } finally {
-        backend.close();
+        await backend.close();
       }
     });
   });

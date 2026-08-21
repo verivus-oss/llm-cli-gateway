@@ -60,10 +60,10 @@ describe("validation-receipt:// MCP resource (Phase 3)", () => {
     });
   }
 
-  function seedTerminalRun(owner: string): void {
+  async function seedTerminalRun(owner: string): Promise<void> {
     const now = new Date().toISOString();
     for (const id of ["j-claude", "j-codex"]) {
-      store.recordStart({
+      await store.recordStart({
         id,
         correlationId: `corr-${id}`,
         requestKey: "k",
@@ -73,7 +73,7 @@ describe("validation-receipt:// MCP resource (Phase 3)", () => {
         pid: null,
         ownerPrincipal: owner,
       });
-      store.recordComplete({
+      await store.recordComplete({
         id,
         status: "completed",
         exitCode: 0,
@@ -84,7 +84,7 @@ describe("validation-receipt:// MCP resource (Phase 3)", () => {
         finishedAt: now,
       });
     }
-    store.recordValidationRun({
+    await store.recordValidationRun({
       validationId: "v1",
       ownerPrincipal: owner,
       intent: "validate",
@@ -105,9 +105,9 @@ describe("validation-receipt:// MCP resource (Phase 3)", () => {
     flight = new FlightRecorder(join(tmp, "logs.db"));
   });
 
-  afterEach(() => {
+  afterEach(async () => {
     try {
-      store.close();
+      await store.close();
     } catch {
       /* ignore */
     }
@@ -124,7 +124,7 @@ describe("validation-receipt:// MCP resource (Phase 3)", () => {
   }
 
   it("is registered under the sqlite backend and returns the minted receipt to its owner", async () => {
-    seedTerminalRun("local");
+    await seedTerminalRun("local");
     const server = buildServer(store, "sqlite");
     expect(templates(server)["validation-receipt"]).toBeDefined();
 
@@ -134,7 +134,7 @@ describe("validation-receipt:// MCP resource (Phase 3)", () => {
   });
 
   it("is own-or-not-found: another principal gets not_found, never the data", async () => {
-    seedTerminalRun("alice");
+    await seedTerminalRun("alice");
     const server = buildServer(store, "sqlite");
 
     const bob = await read(server, "v1", "bob");
@@ -181,10 +181,10 @@ describe("validation_receipt tool (Phase 1-2)", () => {
     });
   }
 
-  function seedTerminalRun(owner: string): void {
+  async function seedTerminalRun(owner: string): Promise<void> {
     const now = new Date().toISOString();
     for (const id of ["j-claude", "j-codex"]) {
-      store.recordStart({
+      await store.recordStart({
         id,
         correlationId: `corr-${id}`,
         requestKey: "k",
@@ -194,7 +194,7 @@ describe("validation_receipt tool (Phase 1-2)", () => {
         pid: null,
         ownerPrincipal: owner,
       });
-      store.recordComplete({
+      await store.recordComplete({
         id,
         status: "completed",
         exitCode: 0,
@@ -205,7 +205,7 @@ describe("validation_receipt tool (Phase 1-2)", () => {
         finishedAt: now,
       });
     }
-    store.recordValidationRun({
+    await store.recordValidationRun({
       validationId: "v1",
       ownerPrincipal: owner,
       intent: "validate",
@@ -226,9 +226,9 @@ describe("validation_receipt tool (Phase 1-2)", () => {
     flight = new FlightRecorder(join(tmp, "logs.db"));
   });
 
-  afterEach(() => {
+  afterEach(async () => {
     try {
-      store.close();
+      await store.close();
     } catch {
       /* ignore */
     }
@@ -249,7 +249,7 @@ describe("validation_receipt tool (Phase 1-2)", () => {
   });
 
   it("returns the minted receipt as JSON by default", async () => {
-    seedTerminalRun("local");
+    await seedTerminalRun("local");
     const server = buildServer(store, "sqlite");
     const res = await callTool(server, {
       validationId: "v1",
@@ -262,7 +262,7 @@ describe("validation_receipt tool (Phase 1-2)", () => {
   });
 
   it("returns the human-readable rendering for format=markdown", async () => {
-    seedTerminalRun("local");
+    await seedTerminalRun("local");
     const server = buildServer(store, "sqlite");
     const res = await callTool(server, {
       validationId: "v1",
@@ -275,7 +275,7 @@ describe("validation_receipt tool (Phase 1-2)", () => {
   });
 
   it("is own-or-not-found for another principal", async () => {
-    seedTerminalRun("alice");
+    await seedTerminalRun("alice");
     const server = buildServer(store, "sqlite");
     const res = await callTool(
       server,

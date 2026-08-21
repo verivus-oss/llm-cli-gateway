@@ -188,7 +188,9 @@ describe("PostgreSQLSessionManager", () => {
   describe("deleteSession", () => {
     it("notifies cleanup observers only after successful removals", async () => {
       const observed: string[] = [];
-      const unsubscribe = manager.addSessionRemovalObserver(session => observed.push(session.id));
+      const unsubscribe = manager.addSessionRemovalObserver(
+        async session => await observed.push(session.id)
+      );
       const deleted = await manager.createSession("claude", "Observer delete");
       const cleared = await manager.createSession("codex", "Observer clear");
 

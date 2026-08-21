@@ -31,15 +31,15 @@ function execution(): KitExecutionRef {
   };
 }
 
-function waitFor(condition: () => boolean, timeoutMs = 3_000): Promise<void> {
+function waitFor(condition: () => boolean | Promise<boolean>, timeoutMs = 3_000): Promise<void> {
   return new Promise((resolve, reject) => {
     const deadline = Date.now() + timeoutMs;
-    const check = (): void => {
-      if (condition()) return resolve();
+    const check = async (): Promise<void> => {
+      if (await condition()) return resolve();
       if (Date.now() >= deadline) return reject(new Error("waitFor timed out"));
       setTimeout(check, 10);
     };
-    check();
+    void check();
   });
 }
 
@@ -50,19 +50,25 @@ describe("AsyncJobManager shutdown fencing", () => {
     const manager = new AsyncJobManager(undefined, undefined, null, undefined, limits());
 
     try {
-      const running = manager.startJob("sh" as LlmCli, ["-c", "sleep 30"], "shutdown-running");
-      const queued = manager.startJob(
+      const running = await manager.startJob(
+        "sh" as LlmCli,
+        ["-c", "sleep 30"],
+        "shutdown-running"
+      );
+      const queued = await manager.startJob(
         "sh" as LlmCli,
         ["-c", `printf started > ${JSON.stringify(markerPath)}; sleep 30`],
         "shutdown-queued"
       );
-      expect(manager.getJobSnapshot(running.id)?.status).toBe("running");
-      expect(manager.getJobSnapshot(queued.id)?.status).toBe("queued");
+      expect((await manager.getJobSnapshot(running.id))?.status).toBe("running");
+      expect((await manager.getJobSnapshot(queued.id))?.status).toBe("queued");
 
       await manager.dispose({ timeoutMs: 3_000 });
-      await waitFor(() => !isAsyncJobInProgress(manager.getJobSnapshot(running.id)!.status));
+      await waitFor(
+        async () => !isAsyncJobInProgress((await manager.getJobSnapshot(running.id)!).status)
+      );
 
-      expect(manager.getJobSnapshot(queued.id)).toMatchObject({
+      expect(await manager.getJobSnapshot(queued.id)).toMatchObject({
         status: "failed",
         exitCode: 1,
       });
@@ -82,7 +88,7 @@ describe("AsyncJobManager shutdown fencing", () => {
     let terminalExitCode: number | null = null;
 
     try {
-      const job = manager.startJobWithDedup(
+      const job = await manager.startJobWithDedup(
         "sh" as LlmCli,
         ["-c", 'trap "exit 0" TERM; while :; do sleep 1; done'],
         "shutdown-signal",
@@ -97,20 +103,20 @@ describe("AsyncJobManager shutdown fencing", () => {
           },
         }
       );
-      expect(manager.getJobSnapshot(job.snapshot.id)?.status).toBe("running");
+      expect((await manager.getJobSnapshot(job.snapshot.id))?.status).toBe("running");
 
       await manager.dispose({ timeoutMs: 3_000 });
       await waitFor(() => terminalStatus !== null);
 
       expect(terminalStatus).toBe("failed");
       expect(terminalExitCode).toBe(1);
-      expect(store.getById(job.snapshot.id)).toMatchObject({
+      expect(await store.getById(job.snapshot.id)).toMatchObject({
         status: "failed",
         exitCode: 1,
       });
     } finally {
       await manager.dispose({ timeoutMs: 100 });
-      store.close();
+      await store.close();
       rmSync(testDir, { recursive: true, force: true });
     }
   });
@@ -130,16 +136,23 @@ describe("AsyncJobManager shutdown fencing", () => {
     };
 
     try {
-      const job = manager.startJobWithDedup("sh" as LlmCli, ["-c", "true"], "shutdown-persist", {
-        kitExecution: execution(),
-        kitSessionId: "gateway-shutdown-persist",
-        jobId: randomUUID(),
-        forceRefresh: true,
-        onTerminal: () => {
-          terminalHookCalls += 1;
-        },
-      });
-      await waitFor(() => !isAsyncJobInProgress(manager.getJobSnapshot(job.snapshot.id)!.status));
+      const job = await manager.startJobWithDedup(
+        "sh" as LlmCli,
+        ["-c", "true"],
+        "shutdown-persist",
+        {
+          kitExecution: execution(),
+          kitSessionId: "gateway-shutdown-persist",
+          jobId: randomUUID(),
+          forceRefresh: true,
+          onTerminal: () => {
+            terminalHookCalls += 1;
+          },
+        }
+      );
+      await waitFor(
+        async () => !isAsyncJobInProgress((await manager.getJobSnapshot(job.snapshot.id)!).status)
+      );
       const inMemoryJob = (
         manager as unknown as { jobs: Map<string, { terminalPersistenceAcknowledged?: boolean }> }
       ).jobs.get(job.snapshot.id);
@@ -158,13 +171,13 @@ describe("AsyncJobManager shutdown fencing", () => {
 
       expect(completeCalls).toBeGreaterThanOrEqual(2);
       expect(terminalHookCalls).toBe(1);
-      expect(store.getById(job.snapshot.id)).toMatchObject({
+      expect(await store.getById(job.snapshot.id)).toMatchObject({
         status: "completed",
         kitTerminalFinalized: true,
       });
     } finally {
       await manager.dispose({ timeoutMs: 100 });
-      store.close();
+      await store.close();
       rmSync(testDir, { recursive: true, force: true });
     }
   });

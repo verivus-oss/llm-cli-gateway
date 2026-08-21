@@ -174,13 +174,19 @@ describe("Personal Agent Config Kit sync Flight Recorder privacy", () => {
     root = mkdtempSync(join(tmpdir(), "kit-flight-recorder-privacy-"));
     store = new SqliteJobStore(join(root, "jobs.db"));
     jobs = new AsyncJobManager(noopLogger, undefined, store);
+    // Durable admission is restored asynchronously and Kit/durable paths refuse
+    // to start until it settles. C5 made the store's own initialisation genuinely
+    // async, so without this the test runs INSIDE the startup window that
+    // design section 4.1 describes, and the refusal it sees is correct behaviour
+    // rather than the thing under test.
+    await jobs.whenStartupSettled();
     flightRecorder = new FlightRecorder(join(root, "flight-recorder.db"), { redactSecrets: false });
   });
 
   afterEach(async () => {
     vi.restoreAllMocks();
     await jobs?.dispose();
-    store?.close();
+    await store?.close();
     flightRecorder?.close();
     rmSync(root, { recursive: true, force: true });
     if (originalDeadline === undefined) delete process.env.SYNC_DEADLINE_MS;

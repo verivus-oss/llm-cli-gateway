@@ -358,5 +358,6 @@ Environment Variables:
 
 // Run if executed directly
 if (import.meta.url === `file://${process.argv[1]}`) {
-  main();
+  // `void`: module entry point. Nothing can await it, and it ends the process.
+  void main();
 }

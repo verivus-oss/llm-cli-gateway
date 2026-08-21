@@ -134,12 +134,18 @@ describe("Claude Kit argv pre-admission", () => {
   let createKitSession: ReturnType<typeof vi.spyOn>;
   let claimKitSessionAttempt: ReturnType<typeof vi.spyOn>;
 
-  beforeEach(() => {
+  beforeEach(async () => {
     root = mkdtempSync(join(tmpdir(), "claude-kit-preadmission-"));
     paths = layout(root);
     sessions = new FileSessionManager(join(root, "sessions.json"));
     store = new SqliteJobStore(join(root, "jobs.db"));
     jobs = new AsyncJobManager(noopLogger, undefined, store);
+    // Durable admission is restored asynchronously and Kit/durable paths refuse
+    // to start until it settles. C5 made the store's own initialisation genuinely
+    // async, so without this the test runs INSIDE the startup window that
+    // design section 4.1 describes, and the refusal it sees is correct behaviour
+    // rather than the thing under test.
+    await jobs.whenStartupSettled();
     const personalConfig = new PersonalConfigManager(
       { enabled: true, baselinePath: join(root, "baseline"), maxStaleHours: 168 },
       paths
@@ -166,7 +172,7 @@ describe("Claude Kit argv pre-admission", () => {
   afterEach(async () => {
     vi.restoreAllMocks();
     await jobs.dispose();
-    store.close();
+    await store.close();
     rmSync(root, { recursive: true, force: true });
   });
 

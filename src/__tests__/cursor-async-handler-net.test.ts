@@ -74,12 +74,12 @@ function mockSessionManager(sessions: Map<string, Session> = new Map()): ISessio
     getSession: vi.fn(async id => sessions.get(id) || null),
     listSessions: vi.fn(async () => [...sessions.values()]),
     deleteSession: vi.fn(async id => sessions.delete(id)),
-    setActiveSession: vi.fn(async () => true),
+    setActiveSession: vi.fn(() => true),
     getActiveSession: vi.fn(async () => null),
     updateSessionUsage: vi.fn(async () => {}),
-    updateSessionMetadata: vi.fn(async () => true),
+    updateSessionMetadata: vi.fn(() => true),
     clearAllSessions: vi.fn(async () => 0),
-    compareAndSetSession: vi.fn(async () => true),
+    compareAndSetSession: vi.fn(() => true),
   } as unknown as ISessionManager;
 }
 
@@ -125,7 +125,7 @@ describe("handleCursorRequestAsync async-enqueue envelope (A1)", () => {
     // D4: a minted (not user-provided) session gets NO durable usage update.
     expect(sm.updateSessionUsage).not.toHaveBeenCalled();
 
-    ajm.cancelJob(body.job.id);
+    await ajm.cancelJob(body.job.id);
     await ajm.dispose();
   });
 
@@ -146,7 +146,7 @@ describe("handleCursorRequestAsync async-enqueue envelope (A1)", () => {
     expect(startJob).toHaveBeenCalledTimes(1);
     expect(sm.updateSessionUsage).toHaveBeenCalledWith("user-abc");
 
-    ajm.cancelJob(body.job.id);
+    await ajm.cancelJob(body.job.id);
     await ajm.dispose();
   });
 
