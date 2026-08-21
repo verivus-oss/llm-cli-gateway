@@ -1,9 +1,7 @@
-import { chmodSync, existsSync } from "fs";
+import { chmodSync } from "fs";
 import os from "os";
 import path from "path";
 import { createHash } from "crypto";
-import { MessageChannel, receiveMessageOnPort, Worker } from "worker_threads";
-import { fileURLToPath } from "url";
 import { openDatabase } from "./sqlite-driver.js";
 import type { GatewayDatabase, GatewayStatement } from "./sqlite-driver.js";
 import type { Logger } from "./logger.js";
@@ -20,6 +18,12 @@ import {
 import { assertMcpArtifactAdmissionInvariant } from "./mcp-artifact-admission.js";
 import type { PersonalKitTerminalMetadata } from "./provider-output-metadata.js";
 import { principalCanAccess } from "./request-context.js";
+import { nodePostgresPoolFactory, PostgresStorageDriver } from "./storage/drivers/postgres.js";
+import {
+  createPostgresJobStoreOps,
+  type PostgresJobStoreOps,
+  type PostgresJobStoreOpsConfig,
+} from "./postgres-job-store-ops.js";
 
 // #139: `queued` is now a durable status. A job is persisted `queued` at
 // recordStart (owner stamped, no pid yet) and transitions to `running` at
@@ -242,8 +246,6 @@ const DEFAULT_DEDUP_WINDOW_MS = 60 * 60 * 1000; // 1 hour
 // The Postgres worker uses a 5s connection timeout and a 27s driver query
 // timeout. Keep the synchronous watchdog beyond that complete budget. Schema
 // bootstrap can also wait briefly on the transaction-scoped advisory lock.
-const POSTGRES_WORKER_OPERATION_TIMEOUT_MS = 35_000;
-const POSTGRES_WORKER_INITIALIZATION_TIMEOUT_MS = 45_000;
 
 export function resolveDedupWindowMs(): number {
   const raw = process.env.LLM_GATEWAY_DEDUP_WINDOW_MS;
@@ -2758,19 +2760,12 @@ export class MemoryJobStore implements JobStore {
  * managed by AsyncJobManager's limiter.
  */
 export class PostgresJobStore implements JobStore, ValidationRunStore {
-  private worker: Worker | null = null;
-  private retiringWorker: Worker | null = null;
-  private readonly intentionallyRetiredWorkers = new WeakSet<Worker>();
-  private workerTerminationPending = false;
+  private readonly dsn: string;
+  private readonly config: PostgresJobStoreOpsConfig;
+  private driver: PostgresStorageDriver | null = null;
+  private ops: PostgresJobStoreOps | null = null;
+  private initPromise: Promise<void> | null = null;
   private closed = false;
-  private readonly workerData: {
-    dsn: string;
-    retentionMs: number;
-    dedupWindowMs: number;
-    leaseTtlMs: number;
-    farFutureIso: string;
-    connectionTimeoutMillis: number;
-  };
 
   constructor(
     dsn: string,
@@ -2780,183 +2775,73 @@ export class PostgresJobStore implements JobStore, ValidationRunStore {
     if (!dsn) {
       throw new Error("PostgresJobStore requires a non-empty DSN");
     }
-    this.workerData = {
-      dsn,
+    this.dsn = dsn;
+    this.config = {
       retentionMs: options.retentionMs ?? resolveJobRetentionMs(),
       dedupWindowMs: options.dedupWindowMs ?? resolveDedupWindowMs(),
       leaseTtlMs: options.leaseTtlMs ?? DEFAULT_INSTANCE_LEASE_TTL_MS,
       farFutureIso: FAR_FUTURE_ISO,
-      connectionTimeoutMillis: 5000,
     };
-    try {
-      this.ensureWorker();
-    } catch (err) {
-      this.closed = true;
-      this.retireWorker(this.worker);
-      throw err;
-    }
-  }
-
-  private createWorker(): Worker {
-    const worker = new Worker(resolvePostgresWorkerUrl(), {
-      execArgv: [],
-      workerData: this.workerData,
-    });
-    worker.on("message", message => {
-      if (!isPostgresWorkerDiagnostic(message)) return;
-      const error = new Error(message.message);
-      if (message.stack) error.stack = message.stack;
-      this.logger.error(`PostgresJobStore worker ${message.kind}`, error);
-    });
-    worker.on("error", error => {
-      this.logger.error("PostgresJobStore worker crashed", error);
-      if (!this.closed && this.worker === worker) this.retireWorker(worker);
-    });
-    worker.on("exit", code => {
-      const wasRetiring =
-        this.retiringWorker === worker || this.intentionallyRetiredWorkers.has(worker);
-      if (this.worker === worker) this.worker = null;
-      if (wasRetiring) this.markWorkerRetired(worker);
-      if (this.closed || wasRetiring || code === 0) return;
-      this.logger.error(
-        "PostgresJobStore worker exited unexpectedly",
-        new Error(`PostgresJobStore worker exited with code ${code}`)
-      );
-    });
-    return worker;
   }
 
   /**
-   * The JobStore API is synchronous, but Postgres runs in a worker.  Do not use
-   * files as the response bridge here: an exhausted or externally cleaned
-   * runtime directory must not turn a healthy durable store into a failed one.
-   * A per-call MessagePort carries arbitrary-sized payloads, including the
-   * gateway's 50 MB captured-output limit; the SharedArrayBuffer only wakes the
-   * synchronous caller after the payload has been queued.
+   * Build the driver and run the schema bootstrap once, and RETRY after failure.
+   *
+   * Lazy because the pool factory imports the optional `pg` peer dynamically
+   * and a constructor cannot await. This is NOT the sync-over-async being
+   * removed: nothing blocks, and every JobStore method is asynchronous now, so
+   * the first call simply awaits the setup it needs.
+   *
+   * Retry-on-failure is carried over deliberately. A worker whose bootstrap
+   * failed was retired and `ensureWorker` built a fresh one, so a later
+   * heartbeat retried the full init. Memoising a rejected promise instead would
+   * poison every later call for the life of the process.
+   *
+   * BEHAVIOUR CHANGE, stated rather than buried. The worker ran init from the
+   * constructor, so a misconfigured Postgres threw at construction and
+   * getJobStore nulled the store. It no longer does; the first store call
+   * rejects instead. That is not a weakening: `asyncJobsEnabled` is derived
+   * from config and not from store-open success, so the old path registered the
+   * async tools anyway and handed AsyncJobManager a null store, which is
+   * exactly the silent in-memory fallback this programme exists to remove.
+   * Failing the call is fail-closed; nulling the store was not.
    */
-  private syncCall<T>(method: string, ...args: unknown[]): T {
-    if (this.closed) {
-      throw new Error("PostgresJobStore is closed");
-    }
-    const worker = this.ensureWorker();
-    return this.callWorker<T>(worker, method, args);
-  }
-
-  /**
-   * Recreate a worker only after its predecessor has fully exited. A bridge
-   * timeout has an unknown mutation outcome, so starting another worker before
-   * termination completes would allow overlapping store calls and is unsafe.
-   */
-  private ensureWorker(): Worker {
+  private async ensureInit(): Promise<PostgresJobStoreOps> {
     if (this.closed) throw new Error("PostgresJobStore is closed");
-    if (this.worker) return this.worker;
-    if (this.workerTerminationPending) {
-      throw new Error(
-        "PostgresJobStore is waiting for a failed worker to terminate before it can recover"
+    if (!this.ops) {
+      this.driver = new PostgresStorageDriver(
+        { app: this.dsn },
+        // One role, `app`, matching today's single configured dsn. Per-role
+        // DSNs belong to s9, which owns [persistence.roles]; the driver already
+        // reports role separation as not in force rather than implying it is.
+        await nodePostgresPoolFactory((role, error) =>
+          this.logger.error(`PostgresJobStore pool error on role ${role}`, error)
+        )
       );
+      this.ops = createPostgresJobStoreOps(this.driver, this.config);
     }
-    const worker = this.createWorker();
-    this.worker = worker;
-    try {
-      this.callWorker<void>(worker, "init", []);
-      return worker;
-    } catch (err) {
-      // A fresh worker whose bootstrap failed cannot safely service regular
-      // operations. Retire it, then let a later heartbeat retry the full init.
-      this.retireWorker(worker);
-      throw err;
-    }
+    const ops = this.ops;
+    this.initPromise ??= ops.init().catch((error: unknown) => {
+      this.initPromise = null;
+      throw error;
+    });
+    await this.initPromise;
+    return ops;
   }
 
-  private callWorker<T>(worker: Worker, method: string, args: unknown[]): T {
-    const shared = new SharedArrayBuffer(4);
-    const state = new Int32Array(shared);
-    const { port1: workerPort, port2: responsePort } = new MessageChannel();
-    try {
-      try {
-        worker.postMessage({ method, args, shared, responsePort: workerPort }, [workerPort]);
-      } catch (err) {
-        throw this.retireAfterBridgeFailure(
-          worker,
-          `PostgresJobStore ${method} could not dispatch work to its worker`,
-          err
-        );
-      }
-
-      // The worker has a 5s connection timeout and a 27s driver query timeout.
-      // Keep this watchdog comfortably beyond both, otherwise a healthy query
-      // can be terminated by the parent before the driver's own cancellation
-      // has completed. Bootstrap additionally performs serialized DDL.
-      const timeoutMs =
-        method === "init"
-          ? POSTGRES_WORKER_INITIALIZATION_TIMEOUT_MS
-          : POSTGRES_WORKER_OPERATION_TIMEOUT_MS;
-      const wait = Atomics.wait(state, 0, 0, timeoutMs);
-      if (wait === "timed-out") {
-        // The worker may have committed a mutation after the caller stopped
-        // waiting.  Terminate it and fail closed rather than allowing a second
-        // call to overlap an operation whose outcome is unknown.
-        throw this.retireAfterBridgeFailure(
-          worker,
-          `PostgresJobStore ${method} timed out after ${timeoutMs}ms; the operation outcome is unknown`
-        );
-      }
-      if (wait !== "ok" && wait !== "not-equal") {
-        throw this.retireAfterBridgeFailure(
-          worker,
-          `PostgresJobStore ${method} wait failed: ${wait}`
-        );
-      }
-      if (Atomics.load(state, 0) !== 1) {
-        throw this.retireAfterBridgeFailure(
-          worker,
-          `PostgresJobStore ${method} worker response transport failed`
-        );
-      }
-
-      const received = receiveMessageOnPort(responsePort);
-      if (!received || !isPostgresWorkerPayload(received.message)) {
-        throw this.retireAfterBridgeFailure(
-          worker,
-          `PostgresJobStore ${method} worker signalled without a valid response`
-        );
-      }
-      const payload = received.message as PostgresWorkerPayload<T>;
-      if (!payload.ok) {
-        const err = new Error(payload.error.message);
-        if (payload.error.stack) err.stack = payload.error.stack;
-        throw err;
-      }
-      return payload.value;
-    } finally {
-      responsePort.close();
-    }
-  }
-
-  private retireAfterBridgeFailure(worker: Worker, message: string, cause?: unknown): Error {
-    this.retireWorker(worker);
-    return cause === undefined ? new Error(message) : new Error(message, { cause });
-  }
-
-  private retireWorker(worker: Worker | null): void {
-    if (!worker || this.retiringWorker === worker) return;
-    if (this.worker === worker) this.worker = null;
-    this.retiringWorker = worker;
-    this.intentionallyRetiredWorkers.add(worker);
-    this.workerTerminationPending = true;
-    void worker.terminate().then(
-      () => this.markWorkerRetired(worker),
-      error => {
-        this.logger.error("PostgresJobStore worker termination failed", error);
-        this.markWorkerRetired(worker);
-      }
-    );
-  }
-
-  private markWorkerRetired(worker: Worker): void {
-    if (this.retiringWorker !== worker) return;
-    this.retiringWorker = null;
-    this.workerTerminationPending = false;
+  /**
+   * What `syncCall` used to be, with the sync-over-async removed.
+   *
+   * The worker existed only because this could not be awaited. There is no
+   * SharedArrayBuffer, no Atomics.wait, no MessagePort and no bridge watchdog
+   * here, because there is no thread boundary left to bridge: the operation
+   * timeouts that watchdog guarded are enforced by PostgreSQL itself through
+   * the pool's statement_timeout and query_timeout.
+   */
+  private async call<T>(method: string, ...args: unknown[]): Promise<T> {
+    if (this.closed) throw new Error("PostgresJobStore is closed");
+    const ops = await this.ensureInit();
+    return (await ops.op(method, args)) as T;
   }
 
   async recordStart(input: {
@@ -2981,42 +2866,42 @@ export class PostgresJobStore implements JobStore, ValidationRunStore {
     validationAdmission?: ValidationJobAdmission;
   }): Promise<void> {
     assertMcpArtifactAdmissionInvariant(input);
-    this.syncCall("recordStart", input);
+    await this.call("recordStart", input);
   }
 
   async fenceUnadmittedKitAttempt(input: KitAttemptFenceInput): Promise<KitAttemptFenceResult> {
-    return this.syncCall("fenceUnadmittedKitAttempt", input);
+    return this.call("fenceUnadmittedKitAttempt", input);
   }
 
   async markRunning(id: string, opts: { pid: number | null }): Promise<boolean> {
-    return this.syncCall("markRunning", id, opts);
+    return this.call("markRunning", id, opts);
   }
 
   async registerInstance(meta: GatewayInstanceMeta): Promise<void> {
-    this.syncCall("registerInstance", meta);
+    await this.call("registerInstance", meta);
   }
 
   async heartbeat(instanceId: string): Promise<void> {
-    this.syncCall("heartbeat", instanceId);
+    await this.call("heartbeat", instanceId);
   }
 
   async deregisterInstance(instanceId: string): Promise<void> {
-    this.syncCall("deregisterInstance", instanceId);
+    await this.call("deregisterInstance", instanceId);
   }
 
   async selectStaleProcessCandidates(
     leaseTtlMs: number,
     httpJobGraceMs: number
   ): Promise<SweepCandidate[]> {
-    return this.syncCall("selectStaleProcessCandidates", leaseTtlMs, httpJobGraceMs);
+    return this.call("selectStaleProcessCandidates", leaseTtlMs, httpJobGraceMs);
   }
 
   async selectOrphanedProcessCandidates(hostname: string): Promise<SweepCandidate[]> {
-    return this.syncCall("selectOrphanedProcessCandidates", hostname);
+    return this.call("selectOrphanedProcessCandidates", hostname);
   }
 
   async selectPendingMcpArtifactCleanups(hostname: string): Promise<PendingMcpArtifactCleanup[]> {
-    return this.syncCall("selectPendingMcpArtifactCleanups", hostname);
+    return this.call("selectPendingMcpArtifactCleanups", hostname);
   }
 
   async acknowledgeMcpArtifactCleanup(
@@ -3025,13 +2910,7 @@ export class PostgresJobStore implements JobStore, ValidationRunStore {
     artifactScope: string,
     artifactPath: string
   ): Promise<boolean> {
-    return this.syncCall(
-      "acknowledgeMcpArtifactCleanup",
-      id,
-      hostname,
-      artifactScope,
-      artifactPath
-    );
+    return this.call("acknowledgeMcpArtifactCleanup", id, hostname, artifactScope, artifactPath);
   }
 
   async recoverStaleJobs(
@@ -3039,7 +2918,7 @@ export class PostgresJobStore implements JobStore, ValidationRunStore {
     httpJobGraceMs: number,
     liveConfirmedIds: string[] = []
   ): Promise<OrphanedJobSnapshot[]> {
-    const result = this.syncCall<{
+    const result = await this.call<{
       orphaned: Array<{
         id: string;
         correlation_id: string;
@@ -3066,7 +2945,7 @@ export class PostgresJobStore implements JobStore, ValidationRunStore {
   }
 
   async gcInstances(instanceGcMs: number): Promise<number> {
-    return this.syncCall("gcInstances", instanceGcMs);
+    return this.call("gcInstances", instanceGcMs);
   }
 
   async recordOutput(
@@ -3075,11 +2954,11 @@ export class PostgresJobStore implements JobStore, ValidationRunStore {
     stderr: string,
     outputTruncated: boolean
   ): Promise<void> {
-    this.syncCall("recordOutput", id, stdout, stderr, outputTruncated);
+    await this.call("recordOutput", id, stdout, stderr, outputTruncated);
   }
 
   async recordProgress(id: string, progressJson: string): Promise<void> {
-    this.syncCall("recordProgress", id, progressJson);
+    await this.call("recordProgress", id, progressJson);
   }
 
   async recordProgressIfStatus(
@@ -3087,7 +2966,7 @@ export class PostgresJobStore implements JobStore, ValidationRunStore {
     status: JobStoreStatus,
     progressJson: string
   ): Promise<boolean> {
-    return this.syncCall("recordProgressIfStatus", id, status, progressJson);
+    return this.call("recordProgressIfStatus", id, status, progressJson);
   }
 
   async recordComplete(input: {
@@ -3105,40 +2984,40 @@ export class PostgresJobStore implements JobStore, ValidationRunStore {
     progressJson?: string | null;
     kitTerminalMetadata?: PersonalKitTerminalMetadata | null;
   }): Promise<boolean> {
-    return this.syncCall<boolean>("recordComplete", input);
+    return this.call<boolean>("recordComplete", input);
   }
 
   async getById(id: string): Promise<JobRecord | null> {
-    const row = this.syncCall("getById", id);
+    const row = await this.call("getById", id);
     return row ? rowToRecord(row) : null;
   }
 
   async findByRequestKey(requestKey: string): Promise<JobRecord | null> {
-    const row = this.syncCall("findByRequestKey", requestKey);
+    const row = await this.call("findByRequestKey", requestKey);
     return row ? rowToRecord(row) : null;
   }
 
   async getPendingKitFinalizations(): Promise<PendingKitFinalization[]> {
-    const rows = this.syncCall<unknown[]>("getPendingKitFinalizations");
+    const rows = await this.call<unknown[]>("getPendingKitFinalizations");
     return rows
       .map(row => toPendingKitFinalization(rowToRecord(row)))
       .filter((entry): entry is PendingKitFinalization => entry !== null);
   }
 
   async getAcknowledgedKitAttemptReleases(): Promise<AcknowledgedKitAttemptRelease[]> {
-    const rows = this.syncCall<unknown[]>("getAcknowledgedKitAttemptReleases");
+    const rows = await this.call<unknown[]>("getAcknowledgedKitAttemptReleases");
     return rows
       .map(row => toAcknowledgedKitAttemptRelease(rowToRecord(row)))
       .filter((entry): entry is AcknowledgedKitAttemptRelease => entry !== null);
   }
 
   async markKitTerminalFinalized(id: string, kitSessionId: string): Promise<boolean> {
-    return this.syncCall("markKitTerminalFinalized", id, kitSessionId);
+    return this.call("markKitTerminalFinalized", id, kitSessionId);
   }
 
   async getPinnedKitReleaseIds(): Promise<string[]> {
     const rows =
-      this.syncCall<Array<{ kit_execution_json?: string | null }>>("getPinnedKitReleaseIds");
+      await this.call<Array<{ kit_execution_json?: string | null }>>("getPinnedKitReleaseIds");
     const releases = new Set<string>();
     for (const row of rows) {
       const execution = parseKitExecution(row.kit_execution_json);
@@ -3167,15 +3046,15 @@ export class PostgresJobStore implements JobStore, ValidationRunStore {
   }
 
   async evictExpired(): Promise<number> {
-    return this.syncCall("evictExpired");
+    return this.call("evictExpired");
   }
 
   async recordValidationRun(run: ValidationRunRecord): Promise<void> {
-    this.syncCall("recordValidationRun", run);
+    await this.call("recordValidationRun", run);
   }
 
   async getValidationRun(validationId: string): Promise<ValidationRunRecord | null> {
-    const row = this.syncCall("getValidationRun", validationId);
+    const row = await this.call("getValidationRun", validationId);
     return row ? rowToValidationRunRecord(row) : null;
   }
 
@@ -3183,11 +3062,11 @@ export class PostgresJobStore implements JobStore, ValidationRunStore {
     validationId: string,
     providerLinks: ValidationRunLink[]
   ): Promise<void> {
-    this.syncCall("setValidationProviderLinks", validationId, providerLinks);
+    await this.call("setValidationProviderLinks", validationId, providerLinks);
   }
 
   async setValidationJudgeLink(validationId: string, judgeLink: ValidationRunLink): Promise<void> {
-    this.syncCall("setValidationJudgeLink", validationId, judgeLink);
+    await this.call("setValidationJudgeLink", validationId, judgeLink);
   }
 
   async transitionValidationRunStatus(
@@ -3196,7 +3075,7 @@ export class PostgresJobStore implements JobStore, ValidationRunStore {
     expectedStatus: ValidationRunRecord["status"],
     status: ValidationRunRecord["status"]
   ): Promise<boolean> {
-    return this.syncCall(
+    return this.call(
       "transitionValidationRunStatus",
       validationId,
       ownerPrincipal,
@@ -3210,96 +3089,55 @@ export class PostgresJobStore implements JobStore, ValidationRunStore {
     provider: string,
     ownerPrincipal: string
   ): Promise<void> {
-    this.syncCall("skipValidationJudge", validationId, provider, ownerPrincipal);
+    await this.call("skipValidationJudge", validationId, provider, ownerPrincipal);
   }
 
   async setValidationRunStatus(
     validationId: string,
     status: ValidationRunRecord["status"]
   ): Promise<void> {
-    this.syncCall("setValidationRunStatus", validationId, status);
+    await this.call("setValidationRunStatus", validationId, status);
   }
 
   async getValidationRunIdByJobId(jobId: string): Promise<string | null> {
-    return this.syncCall("getValidationRunIdByJobId", jobId);
+    return this.call("getValidationRunIdByJobId", jobId);
   }
 
   async recordValidationReceipt(receipt: ValidationReceiptRecord): Promise<void> {
-    this.syncCall("recordValidationReceipt", receipt);
+    await this.call("recordValidationReceipt", receipt);
   }
 
   async getValidationReceipt(validationId: string): Promise<ValidationReceiptRecord | null> {
-    const row = this.syncCall("getValidationReceipt", validationId);
+    const row = await this.call("getValidationReceipt", validationId);
     return row ? rowToValidationReceiptRecord(row) : null;
   }
 
   async close(): Promise<void> {
     if (this.closed) return;
-    const worker = this.worker;
+    // `closed` is set BEFORE the await, so a call racing this one is refused
+    // rather than reaching a driver whose pools are going away.
+    this.closed = true;
+    const driver = this.driver;
+    if (!driver) return;
     try {
-      if (worker) this.callWorker<void>(worker, "close", []);
+      await driver.close();
     } catch (err) {
       this.logger.error("PostgresJobStore close failed", err);
-    } finally {
-      this.closed = true;
-      this.retireWorker(worker);
     }
   }
-}
-
-type PostgresWorkerPayload<T> =
-  { ok: true; value: T } | { ok: false; error: { message: string; stack?: string } };
-
-function isPostgresWorkerPayload(value: unknown): value is PostgresWorkerPayload<unknown> {
-  if (!value || typeof value !== "object") return false;
-  const candidate = value as Record<string, unknown>;
-  if (candidate.ok === true) return "value" in candidate;
-  if (!candidate.error || typeof candidate.error !== "object" || candidate.ok !== false)
-    return false;
-  const error = candidate.error as Record<string, unknown>;
-  return (
-    typeof error.message === "string" &&
-    (error.stack === undefined || typeof error.stack === "string")
-  );
-}
-
-function isPostgresWorkerDiagnostic(value: unknown): value is {
-  type: "postgres-job-store-diagnostic";
-  kind: string;
-  message: string;
-  stack?: string;
-} {
-  if (!value || typeof value !== "object") return false;
-  const candidate = value as Record<string, unknown>;
-  return (
-    candidate.type === "postgres-job-store-diagnostic" &&
-    typeof candidate.kind === "string" &&
-    typeof candidate.message === "string" &&
-    (candidate.stack === undefined || typeof candidate.stack === "string")
-  );
-}
-
-function resolvePostgresWorkerUrl(): URL {
-  const sibling = new URL("./postgres-job-store-worker.js", import.meta.url);
-  if (existsSync(fileURLToPath(sibling))) return sibling;
-
-  // Vitest executes TypeScript source directly, while Node workers need a real
-  // JavaScript module. `scripts/test-pg.sh` builds first, so source-mode tests
-  // load the emitted worker from dist/.
-  if (import.meta.url.endsWith("/src/job-store.ts")) {
-    const built = new URL("../dist/postgres-job-store-worker.js", import.meta.url);
-    if (existsSync(fileURLToPath(built))) return built;
-  }
-
-  throw new Error(
-    "PostgresJobStore worker module is missing. Run `npm run build` before using backend = 'postgres'."
-  );
 }
 
 /**
  * Construct the JobStore appropriate to the resolved PersistenceConfig.
  * Returns `null` when `backend = "none"` — callers must not register
  * `*_request_async` tools in that case (use `config.asyncJobsEnabled`).
+ *
+ * Deliberately still SYNCHRONOUS. The Postgres driver needs a dynamic import of
+ * the optional `pg` peer, which cannot be awaited from here, but making this
+ * async would force getJobStore, newAsyncJobManager, getAsyncJobManager and
+ * createGatewayServer async with it, and createGatewayServer has 52 test
+ * callers plus a per-session HTTP path. PostgresJobStore builds its driver on
+ * first use instead; see the note on its `ensureInit`.
  */
 export function createJobStore(
   config: PersistenceConfig,

@@ -2,7 +2,6 @@ import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { randomUUID } from "node:crypto";
-import type { Worker } from "node:worker_threads";
 import type { Pool } from "pg";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { AsyncJobManager } from "../async-job-manager.js";
@@ -437,6 +436,12 @@ describe("PostgresJobStore", () => {
       dedupWindowMs: 60_000,
     });
     try {
+      // The scrub runs in init, which is now reached on the first store call
+      // rather than from the constructor: the driver needs a dynamic import of
+      // the optional `pg` peer and a constructor cannot await. No store
+      // operation can observe unscrubbed material, because every one of them
+      // awaits init first. This is that first call.
+      await reopened.getById("pg-worker-legacy-failed-kit");
       const row = await pool.query<{
         id: string;
         status: string;
@@ -683,7 +688,19 @@ describe("PostgresJobStore", () => {
     }
   }, 30_000);
 
-  it("recreates a retired worker before accepting the next durable operation", async () => {
+  it("retries initialisation after a failure instead of poisoning every later call", async () => {
+    // SUCCESSOR to "recreates a retired worker before accepting the next
+    // durable operation". That test drove PostgresJobStore's private `worker`,
+    // `retireWorker` and `workerTerminationPending`, all of which s5 deleted
+    // with the worker thread, so its subject no longer exists.
+    //
+    // The property it protected does survive, and this asserts it: a store
+    // whose initialisation failed must RETRY on the next call rather than be
+    // permanently unusable. Under the worker that was achieved by retiring the
+    // failed worker so a later heartbeat built a fresh one. It is achieved now
+    // by clearing the memoised init promise on rejection, and memoising the
+    // rejection instead would poison every later call for the life of the
+    // process, which is worse than the behaviour being replaced.
     const errors: string[] = [];
     const isolated = new PostgresJobStore(
       TEST_DATABASE_URL,
@@ -699,33 +716,66 @@ describe("PostgresJobStore", () => {
       }
     );
     const internals = isolated as unknown as {
-      worker: Worker | null;
-      workerTerminationPending: boolean;
-      retireWorker: (worker: Worker | null) => void;
+      ops: { init: () => Promise<void>; op: (m: string, a: unknown[]) => Promise<unknown> } | null;
+      initPromise: Promise<void> | null;
     };
-    const worker = internals.worker;
-    if (!worker) throw new Error("Expected PostgresJobStore to have a live worker");
-    const exited = new Promise<void>(resolve => worker.once("exit", () => resolve()));
 
     try {
-      // This is the same controlled-retirement path used after a bridge
-      // timeout. Waiting for exit proves the replacement cannot overlap a
-      // possibly still-running predecessor operation.
-      internals.retireWorker(worker);
-      await exited;
-      expect(internals.workerTerminationPending).toBe(false);
-      expect(errors).not.toContain("PostgresJobStore worker exited unexpectedly");
-
+      // Let the REAL initialisation run first, so what follows drives the real
+      // ensureInit rather than a stub of it. An earlier version of this test
+      // replaced ensureInit outright and therefore asserted nothing about the
+      // production retry at all.
       await isolated.recordStart({
-        id: "pg-worker-recovery",
-        correlationId: "pg-worker-recovery-corr",
-        requestKey: "pg-worker-recovery-key",
+        id: "pg-init-retry-warm",
+        correlationId: "pg-init-retry-warm-corr",
+        requestKey: "pg-init-retry-warm-key",
         cli: "claude",
         args: [],
         startedAt: new Date().toISOString(),
         pid: null,
       });
-      expect((await isolated.getById("pg-worker-recovery"))?.status).toBe("queued");
+
+      // Now make the NEXT initialisation fail exactly once, and force a
+      // re-init. Everything from here runs through the real ensureInit.
+      const realOps = internals.ops!;
+      let alreadyFailed = false;
+      internals.ops = {
+        init: async () => {
+          if (!alreadyFailed) {
+            alreadyFailed = true;
+            throw new Error("simulated bootstrap failure");
+          }
+          return realOps.init();
+        },
+        op: (method, args) => realOps.op(method, args),
+      };
+      internals.initPromise = null;
+
+      await expect(
+        isolated.recordStart({
+          id: "pg-init-retry-first",
+          correlationId: "pg-init-retry-first-corr",
+          requestKey: "pg-init-retry-first-key",
+          cli: "claude",
+          args: [],
+          startedAt: new Date().toISOString(),
+          pid: null,
+        })
+      ).rejects.toThrow(/simulated bootstrap failure/);
+
+      // THE PROPERTY: the second call gets through. It can only do so if the
+      // rejected init promise was cleared rather than memoised.
+      await isolated.recordStart({
+        id: "pg-init-retry",
+        correlationId: "pg-init-retry-corr",
+        requestKey: "pg-init-retry-key",
+        cli: "claude",
+        args: [],
+        startedAt: new Date().toISOString(),
+        pid: null,
+      });
+      expect((await isolated.getById("pg-init-retry"))?.status).toBe("queued");
+      expect(errors).toEqual([]);
     } finally {
       await isolated.close();
     }

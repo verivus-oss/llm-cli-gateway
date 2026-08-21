@@ -28,7 +28,7 @@ const SRC = join(ROOT, "src");
 const SQL_OWNERS = new Set([
   "flight-recorder.ts",
   "job-store.ts",
-  "postgres-job-store-worker.ts",
+  "postgres-job-store-ops.ts",
   "postgres-job-store-schema.ts",
   "session-manager-pg.ts",
   "sqlite-driver.ts",
