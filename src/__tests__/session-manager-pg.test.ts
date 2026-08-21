@@ -219,6 +219,70 @@ describe("PostgreSQLSessionManager", () => {
       expect(deleted).toBe(false);
     });
 
+    it("carries the owner into the DELETE, not only into the caller's decision", async () => {
+      const alice = await runWithRequestContext(
+        { transport: "http", authScopes: [], authPrincipal: "alice" },
+        () => manager.createSession("claude", "alice session")
+      );
+
+      const deleted = await runWithRequestContext(
+        { transport: "http", authScopes: [], authPrincipal: "bob" },
+        () => manager.deleteSession(alice.id)
+      );
+
+      // The DATABASE, not the return value: an unfenced DELETE returns false
+      // from a re-read and still removes the row.
+      expect(deleted).toBe(false);
+      expect(await manager.getSession(alice.id)).toMatchObject({ ownerPrincipal: "alice" });
+    });
+
+    it("does not delete a row another principal took over mid-request", async () => {
+      const alice = await runWithRequestContext(
+        { transport: "http", authScopes: [], authPrincipal: "alice" },
+        () => manager.createSession("claude", "alice session")
+      );
+
+      // A gate the test owns, holding alice's delete between its ownership
+      // read and its statement. It resolves whether or not the fence exists.
+      let release!: () => void;
+      let arrived!: () => void;
+      const gate = new Promise<void>(resolve => (release = resolve));
+      // A two-way barrier. Without the arrival half the swap could land before
+      // the held read completes, the read would return null, and the test would
+      // pass against the unfenced DELETE without ever running it.
+      const reached = new Promise<void>(resolve => (arrived = resolve));
+      const realGetSession = manager.getSession.bind(manager);
+      let held = false;
+      (manager as unknown as Record<string, unknown>).getSession = async (id: string) => {
+        const found = await realGetSession(id);
+        if (!held && id === alice.id) {
+          held = true;
+          arrived();
+          await gate;
+        }
+        return found;
+      };
+
+      const deleting = runWithRequestContext(
+        { transport: "http", authScopes: [], authPrincipal: "alice" },
+        () => manager.deleteSession(alice.id)
+      );
+      await reached;
+
+      // Alice's row goes away legitimately, and bob claims the freed id.
+      await manager.clearAllSessions();
+      await runWithRequestContext({ transport: "http", authScopes: [], authPrincipal: "bob" }, () =>
+        manager.createSession("claude", "bob session", alice.id)
+      );
+      expect(await realGetSession(alice.id)).toMatchObject({ ownerPrincipal: "bob" });
+
+      release();
+      await deleting;
+
+      (manager as unknown as Record<string, unknown>).getSession = realGetSession;
+      expect(await realGetSession(alice.id)).toMatchObject({ ownerPrincipal: "bob" });
+    });
+
     it("should clear active session if deleting active session", async () => {
       const session = await manager.createSession("claude", "Test Session");
       await manager.setActiveSession("claude", session.id);

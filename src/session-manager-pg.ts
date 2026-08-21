@@ -13,7 +13,12 @@ import {
   type SessionCompareAndSetMutation,
   type SessionGenerationIdentity,
 } from "./session-manager.js";
-import { getRequestContext, principalCanAccess, resolveOwnerPrincipal } from "./request-context.js";
+import {
+  getRequestContext,
+  principalCanAccess,
+  principalScopeSql,
+  resolveOwnerPrincipal,
+} from "./request-context.js";
 import {
   cloneKitSessionBinding,
   cloneKitSessionAttempt,
@@ -1077,20 +1082,31 @@ export class PostgreSQLSessionManager
    * Delete a session.
    */
   async deleteSession(sessionId: string): Promise<boolean> {
+    const caller = resolveOwnerPrincipal(getRequestContext());
     const session = await this.getSession(sessionId);
     if (!session) {
       return false;
     }
+    if (!principalCanAccess(session.ownerPrincipal, caller)) return false;
 
     if (getKitSessionBinding(session)?.attempt) return false;
     // Recheck the JSON binding in the DELETE itself. A concurrent Kit claim
     // between getSession() and this statement must win over user deletion.
+    // The OWNER is rechecked here for the same reason, and it was missing: a
+    // handler decides ownership an await earlier, and an id whose row is
+    // deleted in that window can be re-created under another principal before
+    // this statement runs. `principalScopeSql` is the one spelling of that
+    // rule, so the predicate here cannot drift from the in-memory one.
+    // `?` placeholders (not `$n`) because the driver numbers them; the Kit arm
+    // uses jsonb_exists rather than the `?` operator, so nothing collides.
+    const scope = principalScopeSql("owner_principal", caller);
     const rowsAffected = await this.execute(
       `DELETE FROM sessions
-       WHERE id = $1
+       WHERE id = ?
+         AND ${scope.sql}
          AND (NOT jsonb_exists(COALESCE(metadata, '{}'::jsonb), 'kit')
               OR NOT jsonb_exists(COALESCE(metadata, '{}'::jsonb)->'kit', 'attempt'))`,
-      [sessionId]
+      [sessionId, ...scope.params]
     );
     if (rowsAffected === 0) return false;
     this.notifySessionRemoved(session);

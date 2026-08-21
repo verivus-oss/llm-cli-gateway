@@ -990,7 +990,7 @@ export class FileSessionManager
     const session = this.storage.sessions[sessionId];
     if (!session) return null;
     if (this.isExpired(session)) {
-      this.deleteSession(sessionId);
+      this.evictSessionRow(sessionId);
       return null;
     }
     const binding = getKitSessionBinding(session);
@@ -1332,7 +1332,7 @@ export class FileSessionManager
     if (this.isPendingWorktreeDeletion(session)) return null;
     if (this.isExpired(session)) {
       if (this.storageFault) return null;
-      this.deleteSession(sessionId);
+      this.evictSessionRow(sessionId);
       return null;
     }
     return session;
@@ -1356,13 +1356,32 @@ export class FileSessionManager
     if (this.storageLockDepth === 0) {
       return this.withStorageLock(() => this.deleteSession(sessionId));
     }
+    // The caller's ownership is re-decided inside the lock hold that removes
+    // the row, not in the handler that called us. A handler's decision is
+    // separated from this write by at least one await, and an id whose row was
+    // TTL-evicted in that window can be re-created under another principal.
+    return this.removeSessionRow(sessionId, resolveOwnerPrincipal(getRequestContext()));
+  }
+
+  /**
+   * TTL/lifecycle eviction. Deliberately unowned: the row is already expired or
+   * otherwise unreachable, and whichever principal happens to touch the store
+   * first must be able to clear it.
+   */
+  private evictSessionRow(sessionId: string): boolean {
+    return this.removeSessionRow(sessionId, null);
+  }
+
+  private removeSessionRow(sessionId: string, caller: string | null): boolean {
     this.assertStorageWritable();
-    if (!this.storage.sessions[sessionId]) {
+    const session = this.storage.sessions[sessionId];
+    if (!session) {
       return false;
     }
 
-    const session = this.storage.sessions[sessionId];
     if (this.isPendingWorktreeDeletion(session)) return false;
+    // Own-or-not-found, same response shape as an unknown id: no oracle.
+    if (caller !== null && !principalCanAccess(session.ownerPrincipal, caller)) return false;
     if (getKitSessionBinding(session)?.attempt) {
       // Deleting a binding while its provider child owns the attempt would let
       // a later request allocate a competing native turn. Cancellation must
@@ -1385,7 +1404,7 @@ export class FileSessionManager
       const session = this.storage.sessions[sessionId];
       if (!session || this.isPendingWorktreeDeletion(session)) return false;
       if (this.isExpired(session)) {
-        this.deleteSession(sessionId);
+        this.evictSessionRow(sessionId);
         return false;
       }
       if (session.cli !== cli) return false;
@@ -1439,7 +1458,7 @@ export class FileSessionManager
       const session = this.storage.sessions[sessionId];
       if (!session) return false;
       if (this.isExpired(session)) {
-        this.deleteSession(sessionId);
+        this.evictSessionRow(sessionId);
         return false;
       }
       const binding = getKitSessionBinding(session);
@@ -1523,7 +1542,7 @@ export class FileSessionManager
     const session = this.storage.sessions[sessionId];
     if (!session || this.isPendingWorktreeDeletion(session)) return;
     if (this.isExpired(session)) {
-      this.deleteSession(sessionId);
+      this.evictSessionRow(sessionId);
       return;
     }
     session.lastUsedAt = new Date().toISOString();
@@ -1539,7 +1558,7 @@ export class FileSessionManager
     const session = this.storage.sessions[sessionId];
     if (!session || this.isPendingWorktreeDeletion(session)) return false;
     if (this.isExpired(session)) {
-      this.deleteSession(sessionId);
+      this.evictSessionRow(sessionId);
       return false;
     }
 
@@ -1607,7 +1626,7 @@ export class FileSessionManager
     const session = this.storage.sessions[sessionId];
     if (!session) return false;
     if (this.isExpired(session)) {
-      this.deleteSession(sessionId);
+      this.evictSessionRow(sessionId);
       return false;
     }
     const existing = getKitSessionBinding(session);

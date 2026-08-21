@@ -171,3 +171,12 @@ role = "eslint.config.js:8 ignores **/*.test.ts globally, so 290 test files have
 action = "Lift the ignore, measure honestly, fix what it finds, and keep the suite in npm run check from then on. The COLLECT half is done (7a8a209): check-test-collection.mjs compares the collected SET against git ls-files, covering the five *-pg suites and integration.test.ts that npm test never runs and nothing else verified either. A set, not the floor first planned, because a count only controls anything if something compares it. ALSO: no gate typechecks tests at all. npm run check builds tsconfig.build.json, which excludes them, and vitest transpiles without typechecking, MEASURED on main 2026-08-21: `tsc --noEmit -p tsconfig.json` reports 352 errors, ALL 352 in tests and ZERO outside them, which is exactly s12's premise rather than an approximation of it. Triage them; some will be deliberate invalid-input tests, so measure before assuming all 356 are defects."
 constraint = "MEASURED at 15c7eee across 281 files: 27 errors, 1 parse error, 1259 warnings, plus 6 no-misused-promises and 11 no-floating-promises PRE-EXISTING. Warnings do not fail the build (production carries 848 and exits 0), so the blocking set is ~44 and an afternoon. The current tree reports 354 floating promises; 343 are s5 test-migration residue, not s12 debt, and scoping from that number would have been wrong by 30x. Triage warnings BY RULE, not by site: a rule inapplicable to tests gets scoped off deliberately and recorded, never suppressed site by site."
 affects = []
+
+[[node]]
+id = "rf.decisions-that-do-not-reach-their-statement"
+depends_on = ["s8.sessions"]
+role = "Three review findings, one shape: a decision taken in one place and a write that does not re-take it. Not a design node, a fix list."
+action = "1. Carry the session_delete owner into the statement on BOTH engines. 2. Stop an expiring file session deleting itself under a successful response. 3. Settle whether unfenced Postgres metadata merges regress under concurrent turns, against a real server."
+constraint = "Every fix gets a control that FAILS on the unfixed code, run in both states. The races are driven by a two-way barrier, never a sleep, and defect 1 asserts the STORE, not the caller's return value. Defect 3 is INFERRED and may not be fixed on the inference."
+status = "PLANNED 2026-08-22."
+affects = []
