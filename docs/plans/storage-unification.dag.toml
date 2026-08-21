@@ -11,8 +11,7 @@ status = "s1, s2, s4 done and s3 part 1 done, 2026-08-21; b1 and s5 next"
 # 2470e09 made that visible in llm_process_health. This makes it untrue.
 
 [decisions]
-# Operator, 2026-08-21. Recorded because a stopping point that is not written
-# down is indistinguishable from an abandonment.
+# Operator, 2026-08-21. A stopping point not written down reads as an abandonment.
 scope_0a = "Option A. b1, s3sig, s5, s6, s8, s9, s11 in full; s7 stops with the recorder on the port under the SQLite driver. Transcript bodies into Postgres and s10 are a separate human-supervised run: a plan-sanctioned stop, not a deferral."
 retirement_0b = "Superseded state is proposed per file and may be moved to a quarantine directory so it stops looking live. Nothing is deleted by this run."
 
@@ -118,6 +117,7 @@ depends_on = ["s5.job-store-first"]
 role = "The third split subsystem, selected by DATABASE_URL and disconnected from [persistence] entirely."
 action = "Collapse FileSessionManager and session-manager-pg onto the port."
 constraint = "migrate-sessions.ts already implements a transactional sessions.json to Postgres move with rollback. Reuse it; do not re-author it."
+blocker = "migrations 001 and 003 carry FOUR hand-written CHECK (cli IN ...) lists missing `devin` and `cursor`, and carrying `grok-api`, which CLI_TYPES does not. Latent today because DATABASE_URL is unset so sessions are a file; s8 makes it live on a backend=postgres host. provider-surfaces-check.mjs does not scan .sql, so the DRY ratchet has a blind spot exactly here."
 affects = ["s9.one-selector"]
 
 [[node]]
