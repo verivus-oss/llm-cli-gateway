@@ -186,7 +186,7 @@ describe("the checker's own parsing", () => {
     // rejects everything is as useless as one that accepts everything.
     expect(normaliseSubject("() => store.recordStart({ id: 1 })")).toEqual({
       subject: "store.recordStart({ id: 1 })",
-      matchKey: "store.recordStart{ id: 1 }",
+      matchKey: "store.recordStart{id:1}",
       thunk: true,
       awaitCount: 0,
     });
@@ -195,7 +195,7 @@ describe("the checker's own parsing", () => {
     // rewrite even though it leaves the matcher untouched.
     expect(normaliseSubject("await store.recordStart({ id: 1 })")).toEqual({
       subject: "store.recordStart({ id: 1 })",
-      matchKey: "store.recordStart{ id: 1 }",
+      matchKey: "store.recordStart{id:1}",
       thunk: false,
       awaitCount: 1,
     });

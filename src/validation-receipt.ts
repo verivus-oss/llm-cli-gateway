@@ -806,7 +806,13 @@ export async function resolveValidationReceipt(
 
   const outcome = await tryMint(deps, run);
   if (outcome.kind === "minted") {
-    return await mintedResult(deps, outcome.record, run, opts.includeRawResponses ?? false, opts.caller);
+    return await mintedResult(
+      deps,
+      outcome.record,
+      run,
+      opts.includeRawResponses ?? false,
+      opts.caller
+    );
   }
   if (outcome.kind === "unmintable") {
     return { status: "expired_unminted", validationId };
@@ -819,7 +825,10 @@ export async function resolveValidationReceipt(
  * Best-effort and side-effect-only (no owner check: this is a system action that
  * stamps the receipt with the RUN's owner, never the caller). Never throws.
  */
-export async function eagerMintFromValidationId(deps: ReceiptDeps, validationId: string): Promise<void> {
+export async function eagerMintFromValidationId(
+  deps: ReceiptDeps,
+  validationId: string
+): Promise<void> {
   const store = deps.validationRunStore;
   if (!store) return;
   try {

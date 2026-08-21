@@ -672,7 +672,7 @@ export async function collectValidationJobResult(
 ): Promise<NormalizedValidationResult | null> {
   const result = await deps.asyncJobManager.getJobResult(jobId, maxChars);
   if (!result) return null;
-  return await normalizeJobResult(provider, model, result);
+  return normalizeJobResult(provider, model, result);
 }
 
 /** The outcome of the one launch path. See launchProviderSeat. */
@@ -851,13 +851,17 @@ async function linkJudgeJob(
   try {
     const run = await store.getValidationRun(validationId);
     if (!run) return;
-    if (!principalCanAccess((run).ownerPrincipal, resolveOwnerPrincipal(getRequestContext()))) return;
-    if ((run).status !== "running" || (run).judgeLink || await store.getValidationReceipt(validationId)) {
+    if (!principalCanAccess(run.ownerPrincipal, resolveOwnerPrincipal(getRequestContext()))) return;
+    if (
+      run.status !== "running" ||
+      run.judgeLink ||
+      (await store.getValidationReceipt(validationId))
+    ) {
       return;
     }
     let plannedJudge: unknown = null;
     try {
-      const request = JSON.parse((run).requestJson) as { judgeProvider?: unknown };
+      const request = JSON.parse(run.requestJson) as { judgeProvider?: unknown };
       plannedJudge = request.judgeProvider ?? null;
     } catch {
       return;
@@ -935,11 +939,11 @@ async function persistValidationRun(
       const persisted = await store.getValidationRun(args.validationId);
       if (
         !persisted ||
-        (persisted).ownerPrincipal !== ownerPrincipal ||
-        (persisted).intent !== args.intent ||
-        (persisted).requestJson !== requestJson ||
-        (persisted).status !== (args.initialStatus ?? "running") ||
-        JSON.stringify((persisted).providerLinks) !== JSON.stringify(providerLinks)
+        persisted.ownerPrincipal !== ownerPrincipal ||
+        persisted.intent !== args.intent ||
+        persisted.requestJson !== requestJson ||
+        persisted.status !== (args.initialStatus ?? "running") ||
+        JSON.stringify(persisted.providerLinks) !== JSON.stringify(providerLinks)
       ) {
         throw new ValidationRunPersistenceError();
       }
@@ -982,7 +986,10 @@ async function completeReviewAdmission(
   }
 }
 
-async function fenceReviewAdmission(deps: ValidationOrchestratorDeps, validationId: string): Promise<void> {
+async function fenceReviewAdmission(
+  deps: ValidationOrchestratorDeps,
+  validationId: string
+): Promise<void> {
   const store = deps.validationRunStore;
   if (!store) throw new ValidationRunPersistenceError();
   const ownerPrincipal = resolveOwnerPrincipal(getRequestContext());
@@ -1038,7 +1045,7 @@ async function verifyValidationProviderLinks(
     }));
   try {
     const persisted = await store.getValidationRun(validationId);
-    if (!persisted || JSON.stringify((persisted).providerLinks) !== JSON.stringify(providerLinks)) {
+    if (!persisted || JSON.stringify(persisted.providerLinks) !== JSON.stringify(providerLinks)) {
       throw new ValidationRunPersistenceError();
     }
   } catch (error) {

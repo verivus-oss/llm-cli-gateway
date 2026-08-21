@@ -292,7 +292,8 @@ async function bindReviewSynthesisInput(
     linkedCorrelationIds.add(link.correlationId);
     let linkedValidationId: string | null;
     try {
-      linkedValidationId = await deps.validationRunStore?.getValidationRunIdByJobId(link.jobId) ?? null;
+      linkedValidationId =
+        (await deps.validationRunStore?.getValidationRunIdByJobId(link.jobId)) ?? null;
     } catch {
       return { ok: false, error: "Durable review provider link integrity is unavailable" };
     }
@@ -314,53 +315,62 @@ async function bindReviewSynthesisInput(
       return { ok: false, error: "A durable review provider result is missing" };
     }
     if (
-      (await result).id !== link.jobId ||
-      (await result).cli !== link.provider ||
-      (await result).correlationId !== link.correlationId
+      (result).id !== link.jobId ||
+      (result).cli !== link.provider ||
+      (result).correlationId !== link.correlationId
     ) {
       return { ok: false, error: "A durable review provider result is mismatched" };
     }
-    if ((await result).status === "queued" || (await result).status === "running") {
+    if ((result).status === "queued" || (result).status === "running") {
       return { ok: false, error: "Every durable review provider result must be terminal" };
     }
     if (
-      (await result).outputTruncated ||
-      (await result).stdoutTruncated ||
-      (await result).stderrTruncated ||
-      (await result).stdoutOffsetChars !== 0 ||
-      (await result).stderrOffsetChars !== 0 ||
-      (await result).stdoutNextOffsetChars !== null ||
-      (await result).stderrNextOffsetChars !== null ||
-      (await result).stdoutTotalChars !== (await result).stdout.length ||
-      (await result).stderrTotalChars !== (await result).stderr.length
+      (result).outputTruncated ||
+      (result).stdoutTruncated ||
+      (result).stderrTruncated ||
+      (result).stdoutOffsetChars !== 0 ||
+      (result).stderrOffsetChars !== 0 ||
+      (result).stdoutNextOffsetChars !== null ||
+      (result).stderrNextOffsetChars !== null ||
+      (result).stdoutTotalChars !== (result).stdout.length ||
+      (result).stderrTotalChars !== (result).stderr.length
     ) {
       return {
         ok: false,
         error: "A durable review provider output is truncated or paging is incomplete",
       };
     }
-    const stdoutByteLength = Buffer.byteLength((await result).stdout, "utf8");
-    const stderrByteLength = Buffer.byteLength((await result).stderr, "utf8");
-    if ((await result).stdoutBytes !== stdoutByteLength || (await result).stderrBytes !== stderrByteLength) {
+    const stdoutByteLength = Buffer.byteLength((result).stdout, "utf8");
+    const stderrByteLength = Buffer.byteLength((result).stderr, "utf8");
+    if (
+      (result).stdoutBytes !== stdoutByteLength ||
+      (result).stderrBytes !== stderrByteLength
+    ) {
       return {
         ok: false,
         error: "A durable review provider output byte identity is inconsistent",
       };
     }
-    const stdoutSha256 = createHash("sha256").update((await result).stdout).digest("hex");
-    const stderrSha256 = createHash("sha256").update((await result).stderr).digest("hex");
+    const stdoutSha256 = createHash("sha256")
+      .update((result).stdout)
+      .digest("hex");
+    const stderrSha256 = createHash("sha256")
+      .update((result).stderr)
+      .digest("hex");
     reviewEvidence.push({
       schemaVersion: "review-judge-evidence.v1",
       provider: link.provider,
       jobId: link.jobId,
       correlationId: link.correlationId,
-      status: (await result).status,
-      exitCode: (await result).exitCode,
-      error: (await result).error,
-      stdout: { text: (await result).stdout, byteLength: stdoutByteLength, sha256: stdoutSha256 },
-      stderr: { text: (await result).stderr, byteLength: stderrByteLength, sha256: stderrSha256 },
+      status: (result).status,
+      exitCode: (result).exitCode,
+      error: (result).error,
+      stdout: { text: (result).stdout, byteLength: stdoutByteLength, sha256: stdoutSha256 },
+      stderr: { text: (result).stderr, byteLength: stderrByteLength, sha256: stderrSha256 },
     });
-    providerResults.push(await normalizeJobResult(link.provider, (await result).model ?? null, result));
+    providerResults.push(
+      normalizeJobResult(link.provider, (result).model ?? null, result)
+    );
   }
 
   return {
@@ -928,11 +938,11 @@ export function registerValidationTools(server: McpServer, deps: ValidationToolD
         try {
           const run = await deps.validationRunStore.getValidationRun(validationId);
           const caller = resolveOwnerPrincipal(getRequestContext());
-          ownedRun = Boolean(run && principalCanAccess((run).ownerPrincipal, caller));
-          review = Boolean(ownedRun && (run)?.intent === "review");
+          ownedRun = Boolean(run && principalCanAccess(run.ownerPrincipal, caller));
+          review = Boolean(ownedRun && run?.intent === "review");
           if (review && run) {
             ownedReviewRun = run;
-            reviewAuthorization = parseReviewRunAuthorization((run).requestJson);
+            reviewAuthorization = parseReviewRunAuthorization(run.requestJson);
           }
         } catch {
           return textResponse({
@@ -1031,17 +1041,17 @@ export function registerValidationTools(server: McpServer, deps: ValidationToolD
           resolveOwnerPrincipal(getRequestContext()),
           judgeModel
         );
-        if (!(bound).ok) {
+        if (!bound.ok) {
           return textResponse({
             success: false,
             tool: "synthesize_validation",
-            error: (bound).error,
+            error: bound.error,
             errorCategory: "review_synthesis_binding_failed",
           });
         }
-        synthesisQuestion = (bound).question;
-        synthesisProviderResults = (bound).providerResults;
-        synthesisReviewEvidence = (bound).reviewEvidence;
+        synthesisQuestion = bound.question;
+        synthesisProviderResults = bound.providerResults;
+        synthesisReviewEvidence = bound.reviewEvidence;
       } else if (!synthesisQuestion || synthesisProviderResults.length === 0) {
         return textResponse({
           success: false,
@@ -1218,9 +1228,9 @@ export function registerValidationTools(server: McpServer, deps: ValidationToolD
         });
         // Phase 2: markdown is a read-time rendering of the stored
         // structuredContent (renderHumanReport), never stored, never hashed.
-        if (format === "markdown" && (result).status === "minted") {
+        if (format === "markdown" && result.status === "minted") {
           return {
-            content: [{ type: "text" as const, text: (result).receipt.humanReadable }],
+            content: [{ type: "text" as const, text: result.receipt.humanReadable }],
             structuredContent: result as unknown as Record<string, unknown>,
           };
         }

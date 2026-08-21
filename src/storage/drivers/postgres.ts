@@ -202,7 +202,8 @@ export class PostgresStorageDriver implements StorageDriver {
         try {
           await connection.execute("ROLLBACK");
         } catch (rollbackError) {
-          discard = rollbackError instanceof Error ? rollbackError : new Error(String(rollbackError));
+          discard =
+            rollbackError instanceof Error ? rollbackError : new Error(String(rollbackError));
         }
         throw error;
       }

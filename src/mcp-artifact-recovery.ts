@@ -78,17 +78,17 @@ export async function recoverMcpArtifactCleanupPin(
 
   const row = await store.getById(jobId);
   if (!row) return refused(jobId, "not_found");
-  if (!(await isTerminalClaudeProcessArtifactPin(row))) {
+  if (!(isTerminalClaudeProcessArtifactPin(row))) {
     return refused(jobId, "not_terminal_claude_process_job");
   }
-  if (!(row).ownerHostname || (row).ownerHostname !== hostname) {
+  if (!row.ownerHostname || row.ownerHostname !== hostname) {
     return refused(jobId, "foreign_or_unknown_host");
   }
-  if (!(row).mcpArtifactPath || !(row).mcpArtifactScope) {
+  if (!row.mcpArtifactPath || !row.mcpArtifactScope) {
     return refused(jobId, "missing_captured_artifact_provenance");
   }
 
-  const removed = removeClaudeMcpArtifact((row).mcpArtifactPath, (row).mcpArtifactScope);
+  const removed = removeClaudeMcpArtifact(row.mcpArtifactPath, row.mcpArtifactScope);
   let outcome: McpArtifactRecoveryResult["outcome"];
   if (removed === "removed") {
     outcome = "removed_and_acknowledged";
@@ -97,7 +97,7 @@ export async function recoverMcpArtifactCleanupPin(
     // non-acknowledgement-worthy. Re-prove the exact scoped namespace before
     // this explicit operator path may clear the pin.
     if (
-      proveClaudeMcpArtifactAbsent((row).mcpArtifactPath, (row).mcpArtifactScope) !== "verified_absent"
+      proveClaudeMcpArtifactAbsent(row.mcpArtifactPath, row.mcpArtifactScope) !== "verified_absent"
     ) {
       return refused(jobId, "artifact_not_safely_recoverable");
     }
@@ -110,10 +110,10 @@ export async function recoverMcpArtifactCleanupPin(
   // the compiler will not flag a dropped promise, so it is awaited explicitly.
   const acknowledged = await acknowledge.call(
     store,
-    (row).id,
+    row.id,
     hostname,
-    (row).mcpArtifactScope,
-    (row).mcpArtifactPath
+    row.mcpArtifactScope,
+    row.mcpArtifactPath
   );
   if (!acknowledged) {
     return refused(jobId, "acknowledgement_compare_and_set_missed");

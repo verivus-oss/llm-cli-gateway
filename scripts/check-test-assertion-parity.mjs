@@ -21,6 +21,7 @@
  */
 import ts from "typescript";
 import { execFileSync } from "node:child_process";
+import { existsSync, readFileSync } from "node:fs";
 
 const MATCHER_MODIFIERS = new Set(["resolves", "rejects", "not"]);
 const TEST_CALLEES = new Set(["it", "test", "describe"]);
@@ -50,7 +51,11 @@ export function normaliseSubject(text) {
   // pair (`x?.y` becomes `(await x)?.y`), so parens are ignored when matching.
   // They are kept in `subject`, because a violation message has to be readable
   // and `store.recordStart{ id: 1 }` is not.
-  const matchKey = subject.replace(/[()]/g, "");
+  // ALL whitespace removed as well as parens. Prettier reflows a subject across
+  // lines when an inserted await makes it longer, and a line break is not a
+  // change of assertion. Comparing with spaces left in reported six violations
+  // that were purely reformatting.
+  const matchKey = subject.replace(/[()]/g, "").replace(/\s+/g, "");
   return { subject, matchKey, thunk, awaitCount };
 }
 
@@ -229,12 +234,19 @@ export function compareTestFile(baseSource, headSource, filename) {
   const headAssertions = extractAssertions(headSource, filename);
   const pool = [...headAssertions];
 
+  // TWO passes. First-fit in a single pass is order-dependent: an earlier base
+  // assertion can consume, as a "permitted rewrite", the head assertion that a
+  // later one matches EXACTLY, leaving the later one reported as a violation
+  // even though nothing changed. Claim every exact match first, then offer only
+  // what is left to the rewrite rules.
+  const unmatched = [];
   for (const b of baseAssertions) {
     const exact = pool.findIndex(h => key(h) === key(b));
-    if (exact !== -1) {
-      pool.splice(exact, 1);
-      continue;
-    }
+    if (exact !== -1) pool.splice(exact, 1);
+    else unmatched.push(b);
+  }
+
+  for (const b of unmatched) {
     const rewritten = pool.findIndex(h => permittedRewrite(b, h));
     if (rewritten !== -1) {
       pool.splice(rewritten, 1);
@@ -288,7 +300,11 @@ function main() {
     const baseSource = gitShow(baseRef, path);
     // A NEW test file has no base to weaken, so it is out of scope.
     if (baseSource === null) continue;
-    const headSource = gitShow("HEAD", path) ?? "";
+    // The WORKING TREE, not HEAD. This gate is meant to be run before you
+    // commit, and reading HEAD silently grades the previous commit instead of
+    // the change in front of you: it reported five violations I had already
+    // fixed, which is the kind of stale answer that gets a gate mistrusted.
+    const headSource = existsSync(path) ? readFileSync(path, "utf8") : "";
     violations.push(...compareTestFile(baseSource, headSource, path));
     bare.push(...preExistingBareMatchers(baseSource, path));
   }

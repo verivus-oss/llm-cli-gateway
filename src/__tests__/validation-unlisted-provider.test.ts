@@ -119,7 +119,7 @@ function statusOf(
   report: ReturnType<typeof startValidationRun>,
   provider: ValidationProvider
 ): { status: string; error: string | null } {
-  const found = (await report).results.find(async r => r.provider === provider);
+  const found = (await report).results.find(r => r.provider === provider);
   if (!found) throw new Error(`No ${provider} result`);
   return { status: found.status, error: found.error };
 }

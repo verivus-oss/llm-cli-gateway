@@ -1409,6 +1409,32 @@ export class AsyncJobManager {
     }
   }
 
+  /**
+   * Resolve once startup registration has settled.
+   *
+   * The constructor cannot await, so it STARTS registration and keeps the
+   * promise. Anything that needs to observe post-registration state, rather
+   * than merely to be sequenced after it, has to await this: the internal
+   * admission path already does, but `canAdmitDurableJobs()` is deliberately a
+   * synchronous snapshot (it reads in-memory state and calls no store), so it
+   * reports the pre-registration value if asked early enough.
+   *
+   * Never rejects: a failed registration leaves `durableAdmission` false rather
+   * than poisoning every later call.
+   *
+   * HAS NO PRODUCTION CALLER TODAY, deliberately and disclosed. The promise
+   * exists whether or not anything reads it, and the internal admission path
+   * already awaits it; what this accessor adds is the ability to OBSERVE
+   * post-registration state rather than merely be sequenced after it, which
+   * `canAdmitDurableJobs()` cannot offer because it is a synchronous snapshot
+   * by design. Without it a caller can only weaken its check or spin on
+   * microtasks, and spinning is a flake generator. s6 and s7 both convert
+   * initialisation paths and will want the same handle.
+   */
+  whenReady(): Promise<void> {
+    return this.ready;
+  }
+
   /** #139: true iff this instance may admit durable async jobs right now. */
   canAdmitDurableJobs(): boolean {
     return this.store !== null && this.durableAdmission;
@@ -2765,7 +2791,7 @@ export class AsyncJobManager {
       });
     }
 
-    const deferredControl: DeferredJobLaunch | undefined = (await await await deferLaunch)
+    const deferredControl: DeferredJobLaunch | undefined = (deferLaunch)
       ? {
           release: () => {
             if (launchReleased) return;
@@ -4006,7 +4032,7 @@ export class AsyncJobManager {
       this.logger.info(`Job ${id} queued for ${cli} (limiter saturated)`, { correlationId });
     }
 
-    const deferredControl: DeferredJobLaunch | undefined = (await await await deferLaunch)
+    const deferredControl: DeferredJobLaunch | undefined = (deferLaunch)
       ? {
           release: () => {
             if (launchReleased) return;
@@ -4740,7 +4766,7 @@ export class AsyncJobManager {
         return null;
       }
       this.jobs.delete(jobId);
-      return await this.hydrateJobRecord(row);
+      return this.hydrateJobRecord(row);
     } catch (err) {
       this.logger.error(`JobStore.getById failed while refreshing shared job ${jobId}`, err);
       return job;

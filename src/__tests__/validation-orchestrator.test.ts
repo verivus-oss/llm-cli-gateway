@@ -243,7 +243,7 @@ describe("Layer 6 validation orchestrator (U20)", () => {
     expect((await normalized!).status).toBe("completed");
     expect((await normalized!).verdict).toBe("approve");
     expect((await normalized!).rationale).toContain("looks good");
-    expect((await normalized!).risks.some(async r => /risk/i.test(r))).toBe(true);
+    expect((await normalized!).risks.some(r => /risk/i.test(r))).toBe(true);
   });
 
   it("normalizes a failed provider result with its stderr surfaced as error", async () => {

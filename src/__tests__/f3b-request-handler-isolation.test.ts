@@ -210,7 +210,7 @@ describe("F3b sessions://* resource ownership isolation", () => {
     });
 
     const view = await read("sessions://all", "alice");
-    const projected = view.sessions.find(async (session: any) => session.id === (alice).id);
+    const projected = view.sessions.find((session: any) => session.id === (alice).id);
     expect(projected.metadata?.worktreeOwnerHostname).toBeUndefined();
     expect(projected.metadata?.worktreeOwnerInstanceId).toBeUndefined();
     expect(projected.metadata?.worktreeCleanupPending).toBeUndefined();

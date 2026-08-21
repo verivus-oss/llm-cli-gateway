@@ -729,7 +729,10 @@ export interface JobStore {
    * check and same-host request-artifact cleanup. Queued/pre-spawn rows carry a
    * null pid and are not pid-probed. Read-only; does not mutate any row.
    */
-  selectStaleProcessCandidates(leaseTtlMs: number, httpJobGraceMs: number): Promise<SweepCandidate[]>;
+  selectStaleProcessCandidates(
+    leaseTtlMs: number,
+    httpJobGraceMs: number
+  ): Promise<SweepCandidate[]>;
   /**
    * #139: already-orphaned process rows whose durable owner-hostname snapshot
    * matches `hostname`. Used only by that host's startup reconciliation to
@@ -773,7 +776,11 @@ export interface JobStore {
   /** Replace one job's complete bounded progress projection atomically. */
   recordProgress(id: string, progressJson: string): Promise<void>;
   /** Replace progress only while the durable row still has the expected status. */
-  recordProgressIfStatus?(id: string, status: JobStoreStatus, progressJson: string): Promise<boolean>;
+  recordProgressIfStatus?(
+    id: string,
+    status: JobStoreStatus,
+    progressJson: string
+  ): Promise<boolean>;
   /**
    * Write the terminal row. Returns true when the row was actually written,
    * false when the completion guard rejected it because the row was already
@@ -941,7 +948,10 @@ export interface ValidationRunStore {
   recordValidationRun(run: ValidationRunRecord): Promise<void>;
   getValidationRun(validationId: string): Promise<ValidationRunRecord | null>;
   /** Replace provider links after a pre-dispatch authorization row is established. */
-  setValidationProviderLinks(validationId: string, providerLinks: ValidationRunLink[]): Promise<void>;
+  setValidationProviderLinks(
+    validationId: string,
+    providerLinks: ValidationRunLink[]
+  ): Promise<void>;
   setValidationJudgeLink(validationId: string, judgeLink: ValidationRunLink): Promise<void>;
   /** Owner-scoped compare-and-set used to open or fence a review roster. */
   transitionValidationRunStatus(
@@ -951,8 +961,15 @@ export interface ValidationRunStore {
     status: ValidationRunRecord["status"]
   ): Promise<boolean>;
   /** Atomically terminalize a planned review judge that cannot be dispatched. */
-  skipValidationJudge(validationId: string, provider: string, ownerPrincipal: string): Promise<void>;
-  setValidationRunStatus(validationId: string, status: ValidationRunRecord["status"]): Promise<void>;
+  skipValidationJudge(
+    validationId: string,
+    provider: string,
+    ownerPrincipal: string
+  ): Promise<void>;
+  setValidationRunStatus(
+    validationId: string,
+    status: ValidationRunRecord["status"]
+  ): Promise<void>;
   /** Reverse lookup for eager mint: which run owns this provider/judge job, if any. */
   getValidationRunIdByJobId(jobId: string): Promise<string | null>;
   /** Insert the immutable receipt once. Idempotent on validation_id (INSERT OR IGNORE). */
@@ -1699,7 +1716,10 @@ export class SqliteJobStore implements JobStore, ValidationRunStore {
     this.deregisterInstanceStmt.run({ instance_id: instanceId });
   }
 
-  async selectStaleProcessCandidates(_leaseTtlMs: number, _httpJobGraceMs: number): Promise<SweepCandidate[]> {
+  async selectStaleProcessCandidates(
+    _leaseTtlMs: number,
+    _httpJobGraceMs: number
+  ): Promise<SweepCandidate[]> {
     const rows = this.selectStaleCandidatesStmt.all() as Array<{
       id: string;
       pid: number | null;
@@ -1823,7 +1843,12 @@ export class SqliteJobStore implements JobStore, ValidationRunStore {
   /**
    * Batched output flush. Cheap to call repeatedly; node:sqlite is sync.
    */
-  async recordOutput(id: string, stdout: string, stderr: string, outputTruncated: boolean): Promise<void> {
+  async recordOutput(
+    id: string,
+    stdout: string,
+    stderr: string,
+    outputTruncated: boolean
+  ): Promise<void> {
     this.updateOutputStmt.run({
       id,
       stdout,
@@ -1836,7 +1861,11 @@ export class SqliteJobStore implements JobStore, ValidationRunStore {
     this.updateProgressStmt.run({ id, progress_json: progressJson });
   }
 
-  async recordProgressIfStatus(id: string, status: JobStoreStatus, progressJson: string): Promise<boolean> {
+  async recordProgressIfStatus(
+    id: string,
+    status: JobStoreStatus,
+    progressJson: string
+  ): Promise<boolean> {
     const result = this.updateProgressIfStatusStmt.run({
       id,
       status,
@@ -1960,7 +1989,7 @@ export class SqliteJobStore implements JobStore, ValidationRunStore {
     orphaned: Array<OrphanedJobSnapshot>;
   }> {
     const orphaned = await this.recoverStaleJobs(this.leaseTtlMs, DEFAULT_HTTP_JOB_GRACE_MS);
-    return { count: (await orphaned).length, orphaned };
+    return { count: (orphaned).length, orphaned };
   }
 
   /**
@@ -2026,7 +2055,10 @@ export class SqliteJobStore implements JobStore, ValidationRunStore {
     return row ? rowToValidationRunRecord(row) : null;
   }
 
-  async setValidationProviderLinks(validationId: string, providerLinks: ValidationRunLink[]): Promise<void> {
+  async setValidationProviderLinks(
+    validationId: string,
+    providerLinks: ValidationRunLink[]
+  ): Promise<void> {
     const update = this.db.prepare(
       `UPDATE validation_runs SET provider_links = ? WHERE validation_id = ?`
     );
@@ -2082,7 +2114,11 @@ export class SqliteJobStore implements JobStore, ValidationRunStore {
     return Number(result.changes) === 1;
   }
 
-  async skipValidationJudge(validationId: string, provider: string, ownerPrincipal: string): Promise<void> {
+  async skipValidationJudge(
+    validationId: string,
+    provider: string,
+    ownerPrincipal: string
+  ): Promise<void> {
     this.db.withTransaction(() => {
       const row = this.db
         .prepare(
@@ -2108,7 +2144,10 @@ export class SqliteJobStore implements JobStore, ValidationRunStore {
     })();
   }
 
-  async setValidationRunStatus(validationId: string, status: ValidationRunRecord["status"]): Promise<void> {
+  async setValidationRunStatus(
+    validationId: string,
+    status: ValidationRunRecord["status"]
+  ): Promise<void> {
     this.db
       .prepare(`UPDATE validation_runs SET status = ? WHERE validation_id = ?`)
       .run(status, validationId);
@@ -2451,7 +2490,10 @@ export class MemoryJobStore implements JobStore {
 
   async deregisterInstance(_instanceId: string): Promise<void> {}
 
-  async selectStaleProcessCandidates(_leaseTtlMs: number, _httpJobGraceMs: number): Promise<SweepCandidate[]> {
+  async selectStaleProcessCandidates(
+    _leaseTtlMs: number,
+    _httpJobGraceMs: number
+  ): Promise<SweepCandidate[]> {
     return [];
   }
 
@@ -2523,7 +2565,12 @@ export class MemoryJobStore implements JobStore {
     return 0;
   }
 
-  async recordOutput(id: string, stdout: string, stderr: string, outputTruncated: boolean): Promise<void> {
+  async recordOutput(
+    id: string,
+    stdout: string,
+    stderr: string,
+    outputTruncated: boolean
+  ): Promise<void> {
     const row = this.rows.get(id);
     if (!row) return;
     row.stdout = row.kitExecution ? "" : stdout;
@@ -2536,7 +2583,11 @@ export class MemoryJobStore implements JobStore {
     if (row) row.progressJson = progressJson;
   }
 
-  async recordProgressIfStatus(id: string, status: JobStoreStatus, progressJson: string): Promise<boolean> {
+  async recordProgressIfStatus(
+    id: string,
+    status: JobStoreStatus,
+    progressJson: string
+  ): Promise<boolean> {
     const row = this.rows.get(id);
     if (!row || row.status !== status) return false;
     row.progressJson = progressJson;
@@ -2953,7 +3004,10 @@ export class PostgresJobStore implements JobStore, ValidationRunStore {
     this.syncCall("deregisterInstance", instanceId);
   }
 
-  async selectStaleProcessCandidates(leaseTtlMs: number, httpJobGraceMs: number): Promise<SweepCandidate[]> {
+  async selectStaleProcessCandidates(
+    leaseTtlMs: number,
+    httpJobGraceMs: number
+  ): Promise<SweepCandidate[]> {
     return this.syncCall("selectStaleProcessCandidates", leaseTtlMs, httpJobGraceMs);
   }
 
@@ -3015,7 +3069,12 @@ export class PostgresJobStore implements JobStore, ValidationRunStore {
     return this.syncCall("gcInstances", instanceGcMs);
   }
 
-  async recordOutput(id: string, stdout: string, stderr: string, outputTruncated: boolean): Promise<void> {
+  async recordOutput(
+    id: string,
+    stdout: string,
+    stderr: string,
+    outputTruncated: boolean
+  ): Promise<void> {
     this.syncCall("recordOutput", id, stdout, stderr, outputTruncated);
   }
 
@@ -3023,7 +3082,11 @@ export class PostgresJobStore implements JobStore, ValidationRunStore {
     this.syncCall("recordProgress", id, progressJson);
   }
 
-  async recordProgressIfStatus(id: string, status: JobStoreStatus, progressJson: string): Promise<boolean> {
+  async recordProgressIfStatus(
+    id: string,
+    status: JobStoreStatus,
+    progressJson: string
+  ): Promise<boolean> {
     return this.syncCall("recordProgressIfStatus", id, status, progressJson);
   }
 
@@ -3100,7 +3163,7 @@ export class PostgresJobStore implements JobStore, ValidationRunStore {
       DEFAULT_INSTANCE_LEASE_TTL_MS,
       DEFAULT_HTTP_JOB_GRACE_MS
     );
-    return { count: (await orphaned).length, orphaned };
+    return { count: (orphaned).length, orphaned };
   }
 
   async evictExpired(): Promise<number> {
@@ -3116,7 +3179,10 @@ export class PostgresJobStore implements JobStore, ValidationRunStore {
     return row ? rowToValidationRunRecord(row) : null;
   }
 
-  async setValidationProviderLinks(validationId: string, providerLinks: ValidationRunLink[]): Promise<void> {
+  async setValidationProviderLinks(
+    validationId: string,
+    providerLinks: ValidationRunLink[]
+  ): Promise<void> {
     this.syncCall("setValidationProviderLinks", validationId, providerLinks);
   }
 
@@ -3139,11 +3205,18 @@ export class PostgresJobStore implements JobStore, ValidationRunStore {
     );
   }
 
-  async skipValidationJudge(validationId: string, provider: string, ownerPrincipal: string): Promise<void> {
+  async skipValidationJudge(
+    validationId: string,
+    provider: string,
+    ownerPrincipal: string
+  ): Promise<void> {
     this.syncCall("skipValidationJudge", validationId, provider, ownerPrincipal);
   }
 
-  async setValidationRunStatus(validationId: string, status: ValidationRunRecord["status"]): Promise<void> {
+  async setValidationRunStatus(
+    validationId: string,
+    status: ValidationRunRecord["status"]
+  ): Promise<void> {
     this.syncCall("setValidationRunStatus", validationId, status);
   }
 
