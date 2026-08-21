@@ -672,7 +672,7 @@ export function registerValidationTools(server: McpServer, deps: ValidationToolD
         success: true,
         tool: "validate_with_models",
         readMostly: true,
-        report: startValidationRun(deps, {
+        report: await startValidationRun(deps, {
           intent: "validate",
           question,
           providers,
@@ -712,7 +712,7 @@ export function registerValidationTools(server: McpServer, deps: ValidationToolD
         success: true,
         tool: "second_opinion",
         readMostly: true,
-        report: startValidationRun(deps, {
+        report: await startValidationRun(deps, {
           intent: "second_opinion",
           question,
           content: answer,
@@ -783,7 +783,7 @@ export function registerValidationTools(server: McpServer, deps: ValidationToolD
         success: true,
         tool: "red_team_review",
         readMostly: true,
-        report: startValidationRun(deps, {
+        report: await startValidationRun(deps, {
           intent: "red_team",
           content,
           providers,
@@ -821,7 +821,7 @@ export function registerValidationTools(server: McpServer, deps: ValidationToolD
         success: true,
         tool: "consensus_check",
         readMostly: true,
-        report: startValidationRun(deps, {
+        report: await startValidationRun(deps, {
           intent: "consensus",
           content: claim,
           providers,
@@ -858,7 +858,7 @@ export function registerValidationTools(server: McpServer, deps: ValidationToolD
         success: true,
         tool: "ask_model",
         readMostly: true,
-        report: startValidationRun(deps, {
+        report: await startValidationRun(deps, {
           intent: "ask_model",
           question,
           providers,
@@ -1050,7 +1050,7 @@ export function registerValidationTools(server: McpServer, deps: ValidationToolD
           error: "General validation synthesis requires question and providerResults",
         });
       }
-      const synthesis = startJudgeSynthesis(deps, {
+      const synthesis = await startJudgeSynthesis(deps, {
         question: synthesisQuestion,
         providerResults: synthesisProviderResults,
         judgeProvider: judgeModel,
@@ -1171,7 +1171,7 @@ export function registerValidationTools(server: McpServer, deps: ValidationToolD
         result,
         normalized:
           provider !== undefined
-            ? collectValidationJobResult(deps, provider, jobId, null, maxChars)
+            ? await collectValidationJobResult(deps, provider, jobId, null, maxChars)
             : null,
       });
     }

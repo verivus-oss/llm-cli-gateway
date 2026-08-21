@@ -416,18 +416,18 @@ describe("AsyncJobManager + flight-recorder (slice 1.5)", () => {
       // row will NOT be flipped on construction. Use the sqlite-backed
       // assertions for the real orphan path; here we cover the contract that
       // memory's no-op produces zero FR writes.
-      new AsyncJobManager(noopLogger, undefined, store, fr);
+      await new AsyncJobManager(noopLogger, undefined, store, fr).whenReady();
       expect(fr.completes).toHaveLength(0);
     });
 
-    it("no in-flight rows → zero logComplete calls (case h)", () => {
+    it("no in-flight rows → zero logComplete calls (case h)", async () => {
       const fr = new CapturingFlightRecorder();
       const store = new MemoryJobStore();
-      new AsyncJobManager(noopLogger, undefined, store, fr);
+      await new AsyncJobManager(noopLogger, undefined, store, fr).whenReady();
       expect(fr.completes).toHaveLength(0);
     });
 
-    it("orphan path: captured stdout is not logged as a provider failure", () => {
+    it("orphan path: captured stdout is not logged as a provider failure", async () => {
       const fr = new CapturingFlightRecorder();
       const startedAt = new Date(Date.now() - 30000).toISOString();
       // #139: the ctor now runs the durable lease sweep (recoverStaleJobs) at
@@ -493,7 +493,12 @@ describe("AsyncJobManager + flight-recorder (slice 1.5)", () => {
         evictExpired: () => 0,
         close: () => {},
       };
-      new AsyncJobManager(noopLogger, undefined, fakeStore as unknown as MemoryJobStore, fr);
+      await new AsyncJobManager(
+        noopLogger,
+        undefined,
+        fakeStore as unknown as MemoryJobStore,
+        fr
+      ).whenReady();
       expect(fr.completes).toHaveLength(4);
       const c1 = fr.completes.find(c => c.correlationId === "corr-j1");
       expect(c1?.result.status).toBe("completed");
@@ -518,7 +523,7 @@ describe("AsyncJobManager + flight-recorder (slice 1.5)", () => {
       expect(c1?.result.durationMs).toBeGreaterThanOrEqual(29000);
     });
 
-    it("does not replay raw legacy Kit output into the flight recorder during recovery", () => {
+    it("does not replay raw legacy Kit output into the flight recorder during recovery", async () => {
       const fr = new CapturingFlightRecorder();
       const startedAt = new Date(Date.now() - 30000).toISOString();
       const privateOutput = "PRIVATE_LEGACY_KIT_ORPHAN_SENTINEL";
@@ -556,7 +561,12 @@ describe("AsyncJobManager + flight-recorder (slice 1.5)", () => {
         close: () => {},
       };
 
-      new AsyncJobManager(noopLogger, undefined, fakeStore as unknown as MemoryJobStore, fr);
+      await new AsyncJobManager(
+        noopLogger,
+        undefined,
+        fakeStore as unknown as MemoryJobStore,
+        fr
+      ).whenReady();
 
       const completion = fr.completes.find(
         entry => entry.correlationId === "corr-legacy-kit-orphan"
@@ -620,7 +630,7 @@ describe("AsyncJobManager + flight-recorder (slice 1.5)", () => {
       // it via a real spawn races with the close handler.
       const internal = manager as unknown as {
         jobs: Map<string, Record<string, unknown>>;
-        evictCompletedJobs(): void;
+        evictCompletedJobs(): Promise<void>;
       };
       const corrId = "corr-e3";
       const jobId = "fake-dead-job-e3";
@@ -655,7 +665,7 @@ describe("AsyncJobManager + flight-recorder (slice 1.5)", () => {
         flightRecorderComplete: false,
         flightCompleteArmed: true,
       });
-      internal.evictCompletedJobs();
+      await internal.evictCompletedJobs();
       const c = fr.completes.find(x => x.correlationId === corrId);
       expect(c).toBeDefined();
       expect(c!.result.status).toBe("failed");
@@ -664,7 +674,7 @@ describe("AsyncJobManager + flight-recorder (slice 1.5)", () => {
   });
 
   describe("output overflow (case e2, Codex-F6)", () => {
-    it("output overflow → status='failed' + errorMessage='Output exceeded maximum size (50MB)'", () => {
+    it("output overflow → status='failed' + errorMessage='Output exceeded maximum size (50MB)'", async () => {
       const fr = new CapturingFlightRecorder();
       const manager = new AsyncJobManager(noopLogger, undefined, new MemoryJobStore(), fr);
       // Exercise the overflow branch directly instead of streaming 55MB
@@ -676,7 +686,7 @@ describe("AsyncJobManager + flight-recorder (slice 1.5)", () => {
           job: Record<string, unknown>,
           stream: "stdout" | "stderr",
           chunk: Buffer
-        ): void;
+        ): Promise<void>;
       };
       const jobId = "fake-overflow-job-e2";
       const job: Record<string, unknown> = {
@@ -706,7 +716,7 @@ describe("AsyncJobManager + flight-recorder (slice 1.5)", () => {
         clearIdleTimer: () => {},
       };
       internal.jobs.set(jobId, job);
-      internal.appendOutput(job, "stdout", Buffer.from("!"));
+      await internal.appendOutput(job, "stdout", Buffer.from("!"));
       const c = fr.completes.find(x => x.correlationId === "corr-e2");
       expect(c).toBeDefined();
       expect(c!.result.status).toBe("failed");

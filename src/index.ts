@@ -4805,7 +4805,7 @@ export function registerBaseResources(server: McpServer, runtime: GatewayServerR
           ? variables.validationId[0]
           : variables.validationId;
         runtime.logger.debug(`Reading validation-receipt://${validationId}`);
-        const result = resolveValidationReceipt(
+        const result = await resolveValidationReceipt(
           { asyncJobManager: runtime.asyncJobManager, validationRunStore: validationReceiptStore },
           String(validationId),
           { caller: currentCaller() }
@@ -16756,7 +16756,7 @@ async function dispatchRoutedCliAsync(
       outputFormat,
       params.optimizePrompt
     );
-    const job = runtime.asyncJobManager.startJob(
+    const job = await runtime.asyncJobManager.startJob(
       cli,
       args,
       corrId,
