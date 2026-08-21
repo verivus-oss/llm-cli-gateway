@@ -3772,7 +3772,11 @@ export class AsyncJobManager {
     await this.assertDurableAdmission(cli);
 
     const id = reservedKitJobId ?? randomUUID();
-    if (this.jobs.has(id) || this.store?.getById(id)) {
+    // AWAITED: unawaited this is a promise in boolean position, always truthy,
+    // so EVERY job creation threw "already in use". Neither no-floating-promises
+    // nor no-misused-promises reports it, because the promise is used (as a
+    // `||` operand) rather than floating.
+    if (this.jobs.has(id) || (await this.store?.getById(id))) {
       throw new Error(`Job id ${id} is already in use`);
     }
     const startedAt = new Date().toISOString();
