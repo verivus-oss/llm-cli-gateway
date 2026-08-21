@@ -219,6 +219,38 @@ describe("PostgreSQLSessionManager", () => {
       expect(deleted).toBe(false);
     });
 
+    it("admits one of two concurrent continuation writes from the same basis", async () => {
+      const s = await manager.createSession("claude", "two turns");
+      const basis = { ...(s.metadata ?? {}) };
+      const identity = sessionGenerationIdentity(s);
+      const fenced = await Promise.all([
+        manager.compareAndSetSession(identity, {
+          kind: "replace_metadata",
+          expectedMetadata: basis,
+          metadata: { ...basis, apiPreviousResponseId: "A" },
+        }),
+        manager.compareAndSetSession(identity, {
+          kind: "replace_metadata",
+          expectedMetadata: basis,
+          metadata: { ...basis, apiPreviousResponseId: "B" },
+        }),
+      ]);
+      expect(fenced.filter(Boolean)).toHaveLength(1);
+      const row = await manager.getSession(s.id);
+      expect((row?.metadata as Record<string, unknown>).apiPreviousResponseId).toBe(
+        fenced[0] ? "A" : "B"
+      );
+
+      // The negative control, in the same test: the unfenced merge these writes
+      // used to take admits BOTH, which is how an earlier turn's handle could
+      // end up in the row with both callers told true.
+      const merged = await Promise.all([
+        manager.updateSessionMetadata(s.id, { apiPreviousResponseId: "A" }),
+        manager.updateSessionMetadata(s.id, { apiPreviousResponseId: "B" }),
+      ]);
+      expect(merged).toEqual([true, true]);
+    });
+
     it("carries the owner into the DELETE, not only into the caller's decision", async () => {
       const alice = await runWithRequestContext(
         { transport: "http", authScopes: [], authPrincipal: "alice" },

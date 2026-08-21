@@ -1533,20 +1533,29 @@ export class FileSessionManager
     return session;
   }
 
-  updateSessionUsage(sessionId: string): void {
+  /**
+   * A write is a USE.
+   *
+   * This reaped a session that crossed its TTL here, on the one path that
+   * proves the session is still in use, and the `void` return meant no caller
+   * could be told: the request that deleted the session went on to report
+   * success and hand back an id that no longer existed. PostgreSQL never
+   * carried the check at all, so honouring the write is also what makes the two
+   * engines agree rather than a new third behaviour.
+   *
+   * Returns whether the row was written, because a caller that reports a
+   * session id needs to know the write landed.
+   */
+  updateSessionUsage(sessionId: string): boolean {
     if (this.storageLockDepth === 0) {
-      this.withStorageLock(() => this.updateSessionUsage(sessionId));
-      return;
+      return this.withStorageLock(() => this.updateSessionUsage(sessionId));
     }
     this.assertStorageWritable();
     const session = this.storage.sessions[sessionId];
-    if (!session || this.isPendingWorktreeDeletion(session)) return;
-    if (this.isExpired(session)) {
-      this.evictSessionRow(sessionId);
-      return;
-    }
+    if (!session || this.isPendingWorktreeDeletion(session)) return false;
     session.lastUsedAt = new Date().toISOString();
     this.saveStorage();
+    return true;
   }
 
   updateSessionMetadata(sessionId: string, metadata: Record<string, any>): boolean {
@@ -1557,12 +1566,14 @@ export class FileSessionManager
     if (Object.prototype.hasOwnProperty.call(metadata, "kit")) return false;
     const session = this.storage.sessions[sessionId];
     if (!session || this.isPendingWorktreeDeletion(session)) return false;
-    if (this.isExpired(session)) {
-      this.evictSessionRow(sessionId);
-      return false;
-    }
 
     session.metadata = { ...session.metadata, ...metadata };
+    // Same rule as updateSessionUsage. A session that was live when its request
+    // resolved and crossed the TTL while the provider ran is refreshed here
+    // rather than deleted under a response that reports it. Only when expired:
+    // a live session's clock stays with updateSessionUsage, so an ordinary
+    // metadata stamp does not silently extend every session by a whole TTL.
+    if (this.isExpired(session)) session.lastUsedAt = new Date().toISOString();
     this.saveStorage();
     return true;
   }
@@ -1728,7 +1739,7 @@ export interface ISessionManager {
   deleteSession(sessionId: string): boolean | Promise<boolean>;
   setActiveSession(cli: ProviderType, sessionId: string | null): boolean | Promise<boolean>;
   getActiveSession(cli: ProviderType): Session | null | Promise<Session | null>;
-  updateSessionUsage(sessionId: string): void | Promise<void>;
+  updateSessionUsage(sessionId: string): boolean | Promise<boolean>;
   updateSessionMetadata(
     sessionId: string,
     metadata: Record<string, any>

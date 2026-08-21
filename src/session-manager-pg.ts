@@ -1273,9 +1273,16 @@ export class PostgreSQLSessionManager
   /**
    * Update session usage timestamp.
    */
-  async updateSessionUsage(sessionId: string): Promise<void> {
+  async updateSessionUsage(sessionId: string): Promise<boolean> {
     const now = new Date().toISOString();
-    await this.execute("UPDATE sessions SET last_used_at = $1 WHERE id = $2", [now, sessionId]);
+    // Reports whether the row was written. The previous `void` contract could
+    // not tell a caller that the session it is about to report no longer
+    // exists, which is the same swallowed-loss shape the file store had.
+    const rowsAffected = await this.execute("UPDATE sessions SET last_used_at = $1 WHERE id = $2", [
+      now,
+      sessionId,
+    ]);
+    return rowsAffected !== 0;
   }
 
   /**

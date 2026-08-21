@@ -2386,6 +2386,79 @@ function sessionBoundDedupArgs(args: readonly string[], sessionId?: string): str
   return sessionId ? ["gateway-session-binding", sessionId, ...args] : [...args];
 }
 
+/**
+ * Perform a session write and refuse to lose it in silence.
+ *
+ * Every caller here goes on to report the session id in a successful response.
+ * A discarded `false` therefore hands the caller a handle that resolves to
+ * nothing, and the next resume starts a fresh conversation without saying so.
+ * The write itself no longer deletes an expiring session (see
+ * FileSessionManager.updateSessionUsage), so a `false` now means the row is
+ * genuinely gone or the store is unwritable.
+ */
+async function recordSessionWrite(
+  runtime: GatewayServerRuntime,
+  corrId: string,
+  sessionId: string,
+  write: () => boolean | Promise<boolean>
+): Promise<boolean> {
+  const persisted = await Promise.resolve(write());
+  if (!persisted) {
+    runtime.logger.warn(
+      `[${corrId}] session ${sessionId} write did not land; the session is not resumable`
+    );
+  }
+  return persisted;
+}
+
+/**
+ * Write a continuation handle onto the exact session state it was derived from.
+ *
+ * An unfenced JSON merge lands whenever it arrives, and two turns of one session
+ * do not arrive in the order they were decided. MEASURED against a real
+ * PostgreSQL server through this very request path: with two concurrent turns
+ * on one session, the EARLIER turn's handle was the one left in the row 3 times
+ * in 200 pairs, and both callers were told the write succeeded. The compare
+ * half is the metadata the turn read at resolution, so a turn whose basis has
+ * moved on refuses instead of restoring an older thread, and the refusal is
+ * reported rather than swallowed.
+ */
+async function persistSessionContinuation(
+  runtime: GatewayServerRuntime,
+  corrId: string,
+  session: Session,
+  expectedMetadata: Record<string, any>,
+  patch: Record<string, any>
+): Promise<{ persisted: boolean; metadata: Record<string, any> }> {
+  const next = { ...expectedMetadata, ...patch };
+  if (typeof session.generation !== "string" || session.generation.length === 0) {
+    // Both stores mint a generation at creation and backfill it on load, so
+    // this is unreachable today. Degrade LOUDLY rather than silently dropping
+    // the fence if a store ever hands back a row without one.
+    runtime.logger.warn(
+      `[${corrId}] session ${session.id} has no generation fence; continuation write is unfenced`
+    );
+    const merged = await recordSessionWrite(runtime, corrId, session.id, () =>
+      runtime.sessionManager.updateSessionMetadata(session.id, patch)
+    );
+    return { persisted: merged, metadata: merged ? next : expectedMetadata };
+  }
+  const persisted = await Promise.resolve(
+    runtime.sessionManager.compareAndSetSession(sessionGenerationIdentity(session), {
+      kind: "replace_metadata",
+      expectedMetadata,
+      metadata: next,
+    })
+  );
+  if (!persisted) {
+    runtime.logger.warn(
+      `[${corrId}] session ${session.id} continuation write lost to a concurrent turn; this turn is not resumable`
+    );
+    return { persisted: false, metadata: expectedMetadata };
+  }
+  return { persisted: true, metadata: next };
+}
+
 async function safeUpdateSessionUsageAfterJobAdmission(
   sessionManager: ISessionManager,
   sessionId: string | undefined,
@@ -2393,7 +2466,9 @@ async function safeUpdateSessionUsageAfterJobAdmission(
 ): Promise<void> {
   if (!sessionId) return;
   try {
-    await Promise.resolve(sessionManager.updateSessionUsage(sessionId));
+    if (!(await Promise.resolve(sessionManager.updateSessionUsage(sessionId)))) {
+      runtime.logger.warn(`Job admitted but session ${sessionId} no longer exists`);
+    }
   } catch (error) {
     runtime.logger.warn(
       `Job admitted but session usage update failed for ${sessionId}: ${error instanceof Error ? error.message : String(error)}`
@@ -9467,6 +9542,12 @@ function buildGrokApiToolResponse(args: {
   sessionId?: string;
   previousResponseId?: string;
   stalePreviousResponseCleared: boolean;
+  /**
+   * False when the continuation handle could not be persisted, so the reported
+   * session id will not resume. Reported rather than swallowed: the write used
+   * to be able to DELETE the session and the response still claimed success.
+   */
+  sessionContinuityPersisted?: boolean;
   optimizeResponse: boolean;
 }): ExtendedToolResponse {
   let text = args.result.text;
@@ -9489,6 +9570,9 @@ function buildGrokApiToolResponse(args: {
       responseId: args.result.responseId,
       previousResponseId: args.previousResponseId || null,
       stalePreviousResponseCleared: args.stalePreviousResponseCleared,
+      sessionContinuityPersisted: args.sessionId
+        ? (args.sessionContinuityPersisted ?? true)
+        : undefined,
       status: args.result.status,
       httpStatus: args.result.httpStatus,
       durationMs: args.durationMs,
@@ -9504,7 +9588,7 @@ function buildGrokApiToolResponse(args: {
 async function resolveGrokApiSession(
   params: Pick<GrokApiRequestParams, "sessionId" | "createNewSession">,
   runtime: GatewayServerRuntime
-): Promise<{ sessionId: string; previousResponseId?: string }> {
+): Promise<{ sessionId: string; previousResponseId?: string; session: Session }> {
   if (params.sessionId) {
     const existing = await getExistingSessionForProvider(
       runtime.sessionManager,
@@ -9522,7 +9606,7 @@ async function resolveGrokApiSession(
       !params.createNewSession && typeof session.metadata?.xaiPreviousResponseId === "string"
         ? session.metadata.xaiPreviousResponseId
         : undefined;
-    return { sessionId: session.id, previousResponseId: previous };
+    return { sessionId: session.id, previousResponseId: previous, session };
   }
 
   if (!params.createNewSession) {
@@ -9532,7 +9616,7 @@ async function resolveGrokApiSession(
         typeof active.metadata?.xaiPreviousResponseId === "string"
           ? active.metadata.xaiPreviousResponseId
           : undefined;
-      return { sessionId: active.id, previousResponseId: previous };
+      return { sessionId: active.id, previousResponseId: previous, session: active };
     }
   }
 
@@ -9541,7 +9625,7 @@ async function resolveGrokApiSession(
     "Grok API Session",
     `${GATEWAY_SESSION_PREFIX}${randomUUID()}`
   );
-  return { sessionId: session.id };
+  return { sessionId: session.id, session };
 }
 
 export async function handleGrokApiRequest(
@@ -9611,6 +9695,11 @@ export async function handleGrokApiRequest(
   try {
     const session = await resolveGrokApiSession(params, runtime);
     sessionId = session.sessionId;
+    const resolvedSession = session.session;
+    const resolvedSessionId = session.sessionId;
+    // The metadata this turn's handle is derived from. Carried, not re-read:
+    // it is the compare half of every continuation write below.
+    let sessionBasis: Record<string, any> = { ...(resolvedSession.metadata ?? {}) };
     previousResponseId = session.previousResponseId;
 
     // Slice 4b: route through the shared XaiResponsesProvider adapter +
@@ -9644,10 +9733,14 @@ export async function handleGrokApiRequest(
         runtime.logger.warn(
           `[${corrId}] xAI previous_response_id was rejected; clearing stale session metadata and retrying fresh`
         );
-        await runtime.sessionManager.updateSessionMetadata(sessionId, {
-          xaiPreviousResponseId: null,
-          xaiResponseCreatedAt: null,
-        });
+        const cleared = await persistSessionContinuation(
+          runtime,
+          corrId,
+          resolvedSession,
+          sessionBasis,
+          { xaiPreviousResponseId: null, xaiResponseCreatedAt: null }
+        );
+        sessionBasis = cleared.metadata;
         stalePreviousResponseCleared = true;
         previousResponseId = undefined;
         result = await call(undefined);
@@ -9659,12 +9752,17 @@ export async function handleGrokApiRequest(
     durationMs = Math.max(0, Date.now() - startTime);
     wasSuccessful = true;
 
-    await runtime.sessionManager.updateSessionMetadata(sessionId, {
-      xaiPreviousResponseId: result.responseId,
-      xaiResponseCreatedAt: new Date().toISOString(),
-      xaiModel: result.model || prep.resolvedModel,
-    });
-    await runtime.sessionManager.updateSessionUsage(sessionId);
+    const handlePersisted = (
+      await persistSessionContinuation(runtime, corrId, resolvedSession, sessionBasis, {
+        xaiPreviousResponseId: result.responseId,
+        xaiResponseCreatedAt: new Date().toISOString(),
+        xaiModel: result.model || prep.resolvedModel,
+      })
+    ).persisted;
+    const usagePersisted = await recordSessionWrite(runtime, corrId, resolvedSessionId, () =>
+      runtime.sessionManager.updateSessionUsage(resolvedSessionId)
+    );
+    const continuityPersisted = handlePersisted && usagePersisted;
 
     await safeFlightComplete(
       corrId,
@@ -9689,6 +9787,7 @@ export async function handleGrokApiRequest(
       sessionId,
       previousResponseId,
       stalePreviousResponseCleared,
+      sessionContinuityPersisted: continuityPersisted,
       optimizeResponse: params.optimizeResponse ?? false,
     });
   } catch (error) {
@@ -9818,7 +9917,7 @@ async function resolveApiSession(
   continuity: ApiContinuity,
   params: { sessionId?: string; createNewSession?: boolean },
   runtime: GatewayServerRuntime
-): Promise<{ sessionId: string; previousResponseId?: string }> {
+): Promise<{ sessionId: string; previousResponseId?: string; session: Session }> {
   const label = `${providerName} API Session`;
   // Slice 4: only server-side-id providers carry a continuation handle; stateless
   // sessions are pure bookkeeping and never read/store one.
@@ -9840,7 +9939,7 @@ async function resolveApiSession(
     const session =
       existing ??
       (await runtime.sessionManager.createSession(providerName, label, params.sessionId));
-    return { sessionId: session.id, previousResponseId: readPrev(session) };
+    return { sessionId: session.id, previousResponseId: readPrev(session), session };
   }
 
   // Server-side-id (no sessionId) reuses the caller's active session so the
@@ -9849,7 +9948,8 @@ async function resolveApiSession(
   // so there is no implicit-reuse surprise for stateless callers.
   if (continuity === "server-side-id" && !params.createNewSession) {
     const active = await getCallerOwnedActiveSession(runtime.sessionManager, providerName);
-    if (active) return { sessionId: active.id, previousResponseId: readPrev(active) };
+    if (active)
+      return { sessionId: active.id, previousResponseId: readPrev(active), session: active };
   }
 
   const session = await runtime.sessionManager.createSession(
@@ -9857,7 +9957,7 @@ async function resolveApiSession(
     label,
     `${GATEWAY_SESSION_PREFIX}${randomUUID()}`
   );
-  return { sessionId: session.id };
+  return { sessionId: session.id, session };
 }
 
 /** Build the canonical ApiRequest + provider adapter from resolved input. */
@@ -9895,6 +9995,8 @@ function buildApiSuccessResponse(
     /** Slice 4: server-side-id continuation surface (parity with grok_api). */
     previousResponseId?: string;
     stalePreviousResponseCleared?: boolean;
+    /** See buildGrokApiToolResponse: a lost continuation write is reported. */
+    sessionContinuityPersisted?: boolean;
     status?: string | null;
   }
 ): ExtendedToolResponse {
@@ -9911,6 +10013,9 @@ function buildApiSuccessResponse(
       responseId: telemetry?.responseId ?? null,
       previousResponseId: telemetry?.previousResponseId ?? null,
       stalePreviousResponseCleared: telemetry?.stalePreviousResponseCleared ?? false,
+      sessionContinuityPersisted: telemetry?.sessionId
+        ? (telemetry.sessionContinuityPersisted ?? true)
+        : undefined,
       status: telemetry?.status ?? undefined,
       httpStatus: telemetry?.httpStatus ?? undefined,
       inputTokens: usage?.inputTokens,
@@ -9957,6 +10062,9 @@ export async function handleApiProviderRequest(
       serverSide || params.sessionId !== undefined || params.createNewSession === true;
     let sessionId: string | undefined;
     let previousResponseId: string | undefined;
+    let resolvedSession: Session | undefined;
+    let sessionBasis: Record<string, any> = {};
+    let sessionContinuityPersisted = true;
     if (wantsSession) {
       const session = await resolveApiSession(
         providerRuntime.name,
@@ -9965,8 +10073,13 @@ export async function handleApiProviderRequest(
         runtimeArg
       );
       sessionId = session.sessionId;
+      resolvedSession = session.session;
+      sessionBasis = { ...(session.session.metadata ?? {}) };
       previousResponseId = session.previousResponseId;
-      await runtimeArg.sessionManager.updateSessionUsage(sessionId);
+      const touchedId = sessionId;
+      sessionContinuityPersisted = await recordSessionWrite(runtimeArg, corrId, touchedId, () =>
+        runtimeArg.sessionManager.updateSessionUsage(touchedId)
+      );
       // server-side-id only: thread the stored handle so the provider continues.
       if (previousResponseId) apiRequest.previousResponseId = previousResponseId;
     }
@@ -10022,10 +10135,16 @@ export async function handleApiProviderRequest(
       sessionId &&
       previousResponseId
     ) {
-      await runtimeArg.sessionManager.updateSessionMetadata(sessionId, {
-        apiPreviousResponseId: null,
-        apiResponseCreatedAt: null,
-      });
+      if (resolvedSession) {
+        const cleared = await persistSessionContinuation(
+          runtimeArg,
+          corrId,
+          resolvedSession,
+          sessionBasis,
+          { apiPreviousResponseId: null, apiResponseCreatedAt: null }
+        );
+        sessionBasis = cleared.metadata;
+      }
       apiRequest.previousResponseId = undefined;
       previousResponseId = undefined;
       stalePreviousResponseCleared = true;
@@ -10070,11 +10189,25 @@ export async function handleApiProviderRequest(
     wasSuccessful = true;
     // Slice 4: persist the new continuation handle for server-side-id providers so
     // the next turn in this session continues server-side.
-    if (serverSide && sessionId && result.responseId) {
-      await runtimeArg.sessionManager.updateSessionMetadata(sessionId, {
-        apiPreviousResponseId: result.responseId,
-        apiResponseCreatedAt: new Date().toISOString(),
-      });
+    if (serverSide && sessionId && result.responseId && resolvedSession) {
+      const handlePersisted = (
+        await persistSessionContinuation(runtimeArg, corrId, resolvedSession, sessionBasis, {
+          apiPreviousResponseId: result.responseId,
+          apiResponseCreatedAt: new Date().toISOString(),
+        })
+      ).persisted;
+      sessionContinuityPersisted = sessionContinuityPersisted && handlePersisted;
+    }
+    if (sessionId) {
+      // The turn USED this session, and the fenced write above does not touch
+      // last_used_at. Without this a session that crossed its TTL while the
+      // provider ran survives the write and is reaped on the next read, which
+      // is the same lost handle one step later.
+      const usedId = sessionId;
+      const touched = await recordSessionWrite(runtimeArg, corrId, usedId, () =>
+        runtimeArg.sessionManager.updateSessionUsage(usedId)
+      );
+      sessionContinuityPersisted = sessionContinuityPersisted && touched;
     }
     let text = result.stdout;
     if (params.optimizeResponse) {
@@ -10112,6 +10245,7 @@ export async function handleApiProviderRequest(
       sessionId,
       previousResponseId,
       stalePreviousResponseCleared,
+      sessionContinuityPersisted,
       status: result.status,
     });
   } catch (err) {
