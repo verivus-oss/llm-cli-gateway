@@ -55,6 +55,7 @@ import {
   mkdirSync,
   openSync,
   readSync,
+  readFileSync,
   realpathSync,
   rmSync,
   statSync,
@@ -64,7 +65,8 @@ import { homedir } from "node:os";
 import { basename, dirname, join, resolve, sep } from "node:path";
 import { monitorEventLoopDelay, performance } from "node:perf_hooks";
 import { clearInterval, setInterval, setTimeout as setTimer } from "node:timers";
-import { spawn } from "node:child_process";
+import { spawn, execFileSync } from "node:child_process";
+import { createHash } from "node:crypto";
 import { pathToFileURL } from "node:url";
 
 const ROOT = resolve(new URL("../..", import.meta.url).pathname);
@@ -124,6 +126,7 @@ function parseArgs(argv) {
     concurrency: 8,
     drainOps: 200,
     injectAsyncDelayMs: 0,
+    injectAsyncBlockMs: 0,
     synchronous: "FULL",
     seed: 20260821,
     bootstrapIterations: 2000,
@@ -152,6 +155,7 @@ function parseArgs(argv) {
     else if (arg === "--concurrency") options.concurrency = Number(argv[++i]);
     else if (arg === "--drain-ops") options.drainOps = Number(argv[++i]);
     else if (arg === "--inject-async-delay-ms") options.injectAsyncDelayMs = Number(argv[++i]);
+    else if (arg === "--inject-async-block-ms") options.injectAsyncBlockMs = Number(argv[++i]);
     else if (arg === "--only") options.only = String(argv[++i]).split(",");
     else if (arg === "--scenarios") options.scenarios = String(argv[++i]).split(",");
     else if (arg === "--rates") options.rates = parseRates(argv[++i]);
@@ -277,7 +281,7 @@ function textOfLength(length) {
  * characters, and drawn from the snapshot's own joint distribution so the
  * prompt/response correlation survives.
  */
-function samplePayloadSizes(openReadOnly, dbPath, limit) {
+function samplePayloadSizes(openReadOnly, dbPath) {
   const db = openReadOnly(dbPath);
   try {
     const rows = db
@@ -287,10 +291,9 @@ function samplePayloadSizes(openReadOnly, dbPath, limit) {
          FROM requests ORDER BY rowid`
       )
       .all();
-    const stride = Math.max(1, Math.floor(rows.length / limit));
-    const sampled = [];
-    for (let i = 0; i < rows.length; i += stride) sampled.push([rows[i].p, rows[i].r]);
-    return sampled;
+    // Every row, not every Nth: systematic rowid sampling can bias provider and
+    // time clusters, and retaining all 34,373 pairs costs nothing.
+    return rows.map(row => [row.p, row.r]);
   } finally {
     db.close();
   }
@@ -312,33 +315,68 @@ function loadReplayTrace(openReadOnly, dbPath, windowPrefix) {
                 length(CAST(prompt AS BLOB)) AS p,
                 length(CAST(COALESCE(response, '') AS BLOB)) AS r
          FROM requests
-         WHERE datetime_utc >= ? AND datetime_utc < ? AND duration_ms IS NOT NULL
-         ORDER BY datetime_utc`
+         WHERE datetime_utc >= ? AND datetime_utc < ?
+         ORDER BY datetime_utc, rowid`
       )
       .all(windowPrefix, `${windowPrefix}~`);
     if (rows.length === 0) return [];
     const origin = Date.parse(rows[0].t);
-    return rows.map(row => ({
-      startOffsetMs: Date.parse(row.t) - origin,
-      completeOffsetMs: Date.parse(row.t) - origin + row.d,
-      promptLength: row.p,
-      responseLength: row.r,
-    }));
+    // Every start is replayed. Dropping rows without duration_ms would remove
+    // their perfectly valid start transactions from the arrival stream and
+    // quietly change the load. A completion is added only where the duration
+    // is finite and not negative.
+    // Payload strings are materialised HERE, not inside the replayed
+    // transaction, for the same reason buildPayloadPlan does it: an allocation
+    // inside the measured window is charged to storage.
+    const cache = new Map();
+    const text = length => {
+      if (!cache.has(length)) cache.set(length, textOfLength(length));
+      return cache.get(length);
+    };
+    return rows.map(row => {
+      const startOffsetMs = Date.parse(row.t) - origin;
+      const usable = typeof row.d === "number" && Number.isFinite(row.d) && row.d >= 0;
+      return {
+        startOffsetMs,
+        completeOffsetMs: usable ? startOffsetMs + row.d : null,
+        promptLength: row.p,
+        responseLength: row.r,
+        prompt: text(row.p),
+        response: text(row.r),
+      };
+    });
   } finally {
     db.close();
   }
 }
 
+/**
+ * Payload STRINGS are materialised here, before any timing starts. An earlier
+ * version stored lengths and called textOfLength inside the transaction, so
+ * every measured write also allocated its own payload: for the large cell that
+ * is a 283 KB allocation and its garbage collection inside the window, which
+ * lands on capacity and queue service rather than on storage. Production hands
+ * the recorder strings that already exist.
+ */
 function buildPayloadPlan(sizes, cell, count, seed) {
   const random = mulberry32(seed);
   const plan = [];
+  const cache = new Map();
+  const text = length => {
+    if (!cache.has(length)) cache.set(length, textOfLength(length));
+    return cache.get(length);
+  };
   for (let i = 0; i < count; i++) {
-    if (cell.promptBytes !== null) {
-      plan.push({ promptLength: cell.promptBytes, responseLength: cell.responseBytes });
-      continue;
-    }
-    const pick = sizes[Math.floor(random() * sizes.length)];
-    plan.push({ promptLength: pick[0], responseLength: pick[1] });
+    const pick =
+      cell.promptBytes !== null
+        ? [cell.promptBytes, cell.responseBytes]
+        : sizes[Math.floor(random() * sizes.length)];
+    plan.push({
+      promptLength: pick[0],
+      responseLength: pick[1],
+      prompt: text(pick[0]),
+      response: text(pick[1]),
+    });
   }
   return plan;
 }
@@ -403,6 +441,9 @@ function effectivePragmas(openReadOnly, work) {
     };
     return {
       journal_mode: read("journal_mode"),
+      // Read back rather than assumed: without this the OFF lens is asserted
+      // by the command line and never confirmed in the record.
+      synchronous: read("synchronous"),
       wal_autocheckpoint: read("wal_autocheckpoint"),
       busy_timeout: read("busy_timeout"),
       page_size: read("page_size"),
@@ -479,7 +520,7 @@ function startRowValues(columns, id, payload) {
     id,
     cli: "bench",
     model: "bench-model",
-    prompt: textOfLength(payload.promptLength),
+    prompt: payload.prompt,
     system: null,
     session_id: `gw-bench-${id.slice(0, 8)}`,
     datetime_utc: new Date().toISOString(),
@@ -496,7 +537,7 @@ function startRowValues(columns, id, payload) {
 }
 
 function completeRequestValues(payload) {
-  return [textOfLength(payload.responseLength), 1234, 100, 200, 0, 0, "measured"];
+  return [payload.response, 1234, 100, 200, 0, 0, "measured"];
 }
 
 function completeMetaValues() {
@@ -529,7 +570,6 @@ function sqlFor(columns) {
       updateMeta: `UPDATE gateway_metadata SET ${UPDATE_META_COLUMNS.map(c => `${c} = ?`).join(
         ", "
       )} WHERE request_id = ? AND status = 'started'`,
-      readOne: `SELECT id, cli, model, datetime_utc FROM requests WHERE id = ?`,
     },
   };
 }
@@ -541,9 +581,14 @@ function nowMs() {
 }
 
 let idCounter = 0;
+/** Set per scenario so committed rows can be counted back by tag (G6). */
+let scenarioToken = "x";
+function setScenarioToken(token) {
+  scenarioToken = token;
+}
 function newId(tag) {
   idCounter += 1;
-  return `bench-${tag}-${idCounter}-${Math.random().toString(36).slice(2, 8)}`;
+  return `bench-${tag}-${scenarioToken}-${idCounter}-${Math.random().toString(36).slice(2, 8)}`;
 }
 
 // -------------------------------------------------------------- variants ---
@@ -556,7 +601,7 @@ function namedObject(columns, values) {
   return object;
 }
 
-function buildA0(modules, work, columns, sql, _inject, synchronous) {
+function buildA0(modules, work, columns, sql, injection, synchronous) {
   const db = modules.openDatabase(work);
   db.exec("PRAGMA journal_mode = WAL");
   db.exec("PRAGMA foreign_keys = ON");
@@ -576,20 +621,12 @@ function buildA0(modules, work, columns, sql, _inject, synchronous) {
     });
     updateMeta.run({ id, ...namedObject(UPDATE_META_COLUMNS, completeMetaValues()) });
   });
-  let readDb = null;
   return {
     id: "A0",
     async: false,
     start: (id, payload) => startTxn(id, payload),
     complete: (id, payload) => completeTxn(id, payload),
-    read: id => {
-      readDb ??= modules.openReadOnly(work);
-      return readDb.prepare(sql.positional.readOne).all(id);
-    },
-    close: () => {
-      if (readDb) readDb.close();
-      db.close();
-    },
+    close: () => db.close(),
   };
 }
 
@@ -601,14 +638,14 @@ function buildA0(modules, work, columns, sql, _inject, synchronous) {
  * { rowsAffected } result object. The ONLY difference from Bnq is that nothing
  * here returns a promise.
  */
-function buildA1(modules, work, columns, sql, _inject, synchronous) {
+function buildA1(modules, work, columns, sql, injection, synchronous) {
   const db = modules.openDatabase(work);
   db.exec("PRAGMA journal_mode = WAL");
   db.exec("PRAGMA foreign_keys = ON");
   db.exec(`PRAGMA synchronous = ${synchronous}`);
   const roles = new Set(["app"]);
+  const readOnlyOperations = new Set(["transcript_read", "analytics_read"]);
   let closed = false;
-  let readDb = null;
 
   const connectionOver = handle => ({
     query: (statement, params = []) => handle.prepare(statement).all(...params),
@@ -616,16 +653,22 @@ function buildA1(modules, work, columns, sql, _inject, synchronous) {
       rowsAffected: handle.prepare(statement).run(...params).changes,
     }),
   });
+  // Only the write path is transcribed. No scenario exercises a read class, and
+  // an unexercised branch here would later be mistaken for a tested one.
   const connectionFor = operation => {
     if (closed) throw new Error("storage: sqlite driver is closed");
     modules.resolveStorageRole(operation, roles);
-    if (operation !== "transcript_read" && operation !== "analytics_read") {
-      return connectionOver(db);
-    }
-    readDb ??= modules.openReadOnly(work);
-    return connectionOver(readDb);
+    // The set lookup production pays at storage/drivers/sqlite.ts:61, kept so
+    // it is not silently absent from the twin.
+    if (!readOnlyOperations.has(operation)) return connectionOver(db);
+    throw new Error("read class not exercised by any scenario");
   };
   const transaction = (operation, body) => {
+    // The upfront read-class rejection production performs at
+    // storage/drivers/sqlite.ts:88 before touching a connection.
+    if (readOnlyOperations.has(operation)) {
+      throw new Error(`storage: ${operation} is a read class and cannot open a transaction`);
+    }
     const connection = connectionFor(operation);
     connection.execute("BEGIN IMMEDIATE");
     try {
@@ -651,24 +694,42 @@ function buildA1(modules, work, columns, sql, _inject, synchronous) {
         connection.execute(sql.positional.updateRequest, [...completeRequestValues(payload), id]);
         connection.execute(sql.positional.updateMeta, [...completeMetaValues(), id]);
       }),
-    read: id => connectionFor("transcript_read").query(sql.positional.readOne, [id]),
     close: () => {
       closed = true;
-      if (readDb) readDb.close();
       db.close();
     },
   };
 }
 
-function asyncVariant(modules, work, columns, sql, injectDelayMs, synchronous, useQueue) {
+function asyncVariant(modules, work, columns, sql, injection, synchronous, useQueue) {
   const driver = new modules.SqliteStorageDriver(work);
   const ready = driver.withConnection("write", async connection => {
     await connection.execute("PRAGMA journal_mode = WAL");
     await connection.execute("PRAGMA foreign_keys = ON");
     await connection.execute(`PRAGMA synchronous = ${synchronous}`);
   });
+  /**
+   * Two injection modes, because one cannot test both instruments. A macrotask
+   * sleep YIELDS the event loop, so it must appear in latency and must NOT
+   * appear in the event-loop-delay histogram. A busy spin blocks, so it must
+   * appear in BOTH. Crediting one probe for both instruments would leave the
+   * histogram unexercised while appearing to have been verified.
+   */
   const delay = ms => new Promise(done => setTimer(done, ms));
-  const queueWait = [];
+  const spin = ms => {
+    const until = nowMs() + ms;
+    while (nowMs() < until) {
+      /* deliberately blocking */
+    }
+  };
+  /**
+   * Admission to body start. It is NOT pure queue delay: the driver runs
+   * `connectionFor` and `BEGIN IMMEDIATE` between the queue handing off and
+   * this callback (storage/drivers/sqlite.ts:93-97), so both are inside this
+   * interval. Named for what it measures rather than for what would be
+   * convenient.
+   */
+  const admissionToBody = [];
 
   /**
    * The no-queue arm reproduces transaction()'s body through withConnection,
@@ -688,24 +749,35 @@ function asyncVariant(modules, work, columns, sql, injectDelayMs, synchronous, u
       }
     });
 
+  /**
+   * Instrumentation is OFF unless a scenario asks for it. An earlier version
+   * wrapped every async operation in a closure that took two hrtime readings,
+   * pushed to an array and evaluated two injection branches, while A0 and A1
+   * paid none of that. The quantity under test is tens of microseconds, so
+   * instrumenting only the candidate arm was measuring the instrument.
+   */
+  const injecting = injection.delayMs > 0 || injection.blockMs > 0;
+  let instrumenting = false;
   const run = (operation, body) => {
+    const submit = useQueue ? driver.transaction.bind(driver) : runNoQueue;
+    if (!instrumenting && !injecting) return submit(operation, body);
     const admitted = nowMs();
-    const instrumented = async connection => {
-      queueWait.push(nowMs() - admitted);
-      if (injectDelayMs > 0) await delay(injectDelayMs);
+    return submit(operation, async connection => {
+      if (instrumenting) admissionToBody.push(nowMs() - admitted);
+      if (injection.delayMs > 0) await delay(injection.delayMs);
+      if (injection.blockMs > 0) spin(injection.blockMs);
       return body(connection);
-    };
-    return useQueue
-      ? driver.transaction(operation, instrumented)
-      : runNoQueue(operation, instrumented);
+    });
   };
 
   return {
     id: useQueue ? "B" : "Bnq",
     async: true,
-    sequentialOnly: !useQueue,
     ready,
-    queueWait,
+    admissionToBody,
+    setInstrumenting: on => {
+      instrumenting = on;
+    },
     start: (id, payload) =>
       run("write", async connection => {
         await connection.execute(
@@ -722,10 +794,6 @@ function asyncVariant(modules, work, columns, sql, injectDelayMs, synchronous, u
         ]);
         await connection.execute(sql.positional.updateMeta, [...completeMetaValues(), id]);
       }),
-    read: id =>
-      driver.withConnection("transcript_read", async connection =>
-        connection.query(sql.positional.readOne, [id])
-      ),
     closeWithoutDraining: () => driver.close(),
     close: () => driver.close(),
   };
@@ -968,6 +1036,8 @@ async function runOpenLoop(variant, plan, rate, durationMs) {
 async function runReplay(variant, trace, speed, capMs) {
   const startService = [];
   const completeService = [];
+  const startSojourn = [];
+  const completeSojourn = [];
   const inFlight = [];
   let starts = 0;
   let completes = 0;
@@ -978,7 +1048,9 @@ async function runReplay(variant, trace, speed, capMs) {
   const events = [];
   for (const row of trace) {
     events.push({ at: row.startOffsetMs / speed, kind: "start", row });
-    events.push({ at: row.completeOffsetMs / speed, kind: "complete", row });
+    if (row.completeOffsetMs !== null) {
+      events.push({ at: row.completeOffsetMs / speed, kind: "complete", row });
+    }
   }
   events.sort((a, b) => a.at - b.at);
   const capped = events.filter(event => event.at <= capMs);
@@ -986,11 +1058,13 @@ async function runReplay(variant, trace, speed, capMs) {
   const origin = nowMs();
 
   const fire = event => {
+    const scheduled = origin + event.at;
     if (event.kind === "start") {
       const id = newId(variant.id);
       ids.set(event.row, id);
       starts += 1;
       const t0 = nowMs();
+      startSojourn.push(t0 - scheduled);
       if (!variant.async) {
         variant.start(id, event.row);
         startService.push(nowMs() - t0);
@@ -1010,15 +1084,20 @@ async function runReplay(variant, trace, speed, capMs) {
     if (!id) return;
     completes += 1;
     const t0 = nowMs();
+    const sojournStart = scheduled;
     if (!variant.async) {
       variant.complete(id, event.row);
       completeService.push(nowMs() - t0);
+      completeSojourn.push(nowMs() - sojournStart);
       return;
     }
     inFlight.push(
       variant
         .complete(id, event.row)
-        .then(() => completeService.push(nowMs() - t0))
+        .then(() => {
+          completeService.push(nowMs() - t0);
+          completeSojourn.push(nowMs() - sojournStart);
+        })
         .catch(() => {
           failures += 1;
         })
@@ -1056,7 +1135,9 @@ async function runReplay(variant, trace, speed, capMs) {
     achievedTransactionsPerSec: round(((starts + completes) / wallMs) * 1000),
     startService: summarise(startService),
     completeService: summarise(completeService),
-    samples: { completeService },
+    startSojourn: summarise(startSojourn),
+    completeSojourn: summarise(completeSojourn),
+    samples: { completeService, completeSojourn },
     eventLoopDelayMs: {
       mean: round(histogram.mean / 1e6),
       p50: round(histogram.percentile(50) / 1e6),
@@ -1077,7 +1158,8 @@ async function runConcurrency(variant, plan, batches, concurrency) {
   if (!variant.async) {
     return { skipped: "synchronous variant cannot overlap by construction", concurrency };
   }
-  variant.queueWait.length = 0;
+  variant.setInstrumenting(true);
+  variant.admissionToBody.length = 0;
   const latency = [];
   const batchLatency = [];
   let rejected = 0;
@@ -1110,7 +1192,7 @@ async function runConcurrency(variant, plan, batches, concurrency) {
     firstError,
     perOperation: summarise(latency),
     perBatch: summarise(batchLatency),
-    queueWait: summarise([...variant.queueWait]),
+    admissionToBody: summarise([...variant.admissionToBody]),
     samples: { perOperation: latency },
   };
 }
@@ -1186,25 +1268,88 @@ async function runCloseUnderLoad(variant, plan, ops, modules, work) {
     closeMs: round(closeMs),
     rejected: settled.filter(s => s === "rejected").length,
     rowsFound,
-    rowsLost: ops - rowsFound,
+    rowsLost: rowsFound === null ? null : ops - rowsFound,
   };
 }
 
+/**
+ * Returns null, never a sentinel number, when the count cannot be taken. An
+ * earlier version returned -1, which arithmetic downstream turned into
+ * `rowsLost = ops + 1`: a harness failure wearing the costume of data loss.
+ */
 function countRows(modules, work, ids) {
-  const db = modules.openReadOnly(work);
+  let db = null;
   try {
+    db = modules.openReadOnly(work);
     const statement = db.prepare("SELECT count(*) AS c FROM requests WHERE id = ?");
     let found = 0;
     for (const id of ids) found += statement.all(id)[0].c;
     return found;
-  } catch {
-    return -1;
+  } catch (error) {
+    console.error(`  ! countRows failed, not a loss result: ${error.message}`);
+    return null;
   } finally {
-    db.close();
+    if (db) db.close();
+  }
+}
+
+/**
+ * Row accounting for the scenarios that do not retain every id: count what this
+ * variant actually committed under its own tag. G6 asks for verification by
+ * reopening the file, and counting thrown errors is not that.
+ */
+function countRowsByTag(modules, work, tag) {
+  let db = null;
+  try {
+    db = modules.openReadOnly(work);
+    return db.prepare("SELECT count(*) AS c FROM requests WHERE id LIKE ?").all(`bench-${tag}-%`)[0]
+      .c;
+  } catch (error) {
+    console.error(`  ! countRowsByTag failed, not a loss result: ${error.message}`);
+    return null;
+  } finally {
+    if (db) db.close();
   }
 }
 
 // ------------------------------------------------------------------ main ---
+
+/**
+ * Provenance for what was actually measured. An existence check does not stop a
+ * stale dist from being benchmarked, so every imported artefact is hashed, its
+ * TypeScript source is hashed beside it, and a source newer than its build is a
+ * hard error rather than a warning.
+ */
+function buildProvenance(paths) {
+  const digest = path => createHash("sha256").update(readFileSync(path)).digest("hex").slice(0, 16);
+  const record = {};
+  for (const [name, distPath] of Object.entries(paths)) {
+    const sourcePath = distPath
+      .replace(`${sep}dist${sep}`, `${sep}src${sep}`)
+      .replace(/\.js$/, ".ts");
+    const stale =
+      existsSync(sourcePath) && statSync(sourcePath).mtimeMs > statSync(distPath).mtimeMs;
+    if (stale) {
+      throw new Error(`${sourcePath} is newer than ${distPath}. Run \`npm run build\`.`);
+    }
+    record[name] = {
+      dist: digest(distPath),
+      source: existsSync(sourcePath) ? digest(sourcePath) : null,
+    };
+  }
+  let git;
+  try {
+    git = {
+      head: execFileSync("git", ["rev-parse", "HEAD"], { cwd: ROOT, encoding: "utf8" }).trim(),
+      dirty:
+        execFileSync("git", ["status", "--porcelain"], { cwd: ROOT, encoding: "utf8" }).trim()
+          .length > 0,
+    };
+  } catch {
+    git = { head: null, dirty: null };
+  }
+  return { modules: record, git, harness: digest(new URL(import.meta.url).pathname) };
+}
 
 async function loadModules() {
   const paths = {
@@ -1217,6 +1362,7 @@ async function loadModules() {
       throw new Error(`missing ${path}. Run \`npm run build\` first: this measures dist, not src.`);
     }
   }
+  const provenance = buildProvenance(paths);
   const adapter = await import(pathToFileURL(paths.adapter).href);
   const storage = await import(pathToFileURL(paths.storage).href);
   const roles = await import(pathToFileURL(paths.roles).href);
@@ -1225,6 +1371,7 @@ async function loadModules() {
     openReadOnly: adapter.openReadOnly,
     SqliteStorageDriver: storage.SqliteStorageDriver,
     resolveStorageRole: roles.resolveStorageRole,
+    provenance,
   };
 }
 
@@ -1236,7 +1383,7 @@ async function withVariant(modules, options, work, columns, sql, variantId, body
     work,
     columns,
     sql,
-    options.injectAsyncDelayMs,
+    { delayMs: options.injectAsyncDelayMs, blockMs: options.injectAsyncBlockMs },
     options.synchronous
   );
   if (variant.ready) await variant.ready;
@@ -1276,18 +1423,26 @@ async function main() {
   const modules = await loadModules();
   const columns = resolveColumns(modules.openReadOnly, options.source);
   const sql = sqlFor(columns);
-  const sizes = samplePayloadSizes(modules.openReadOnly, options.source, 4000);
+  const sizes = samplePayloadSizes(modules.openReadOnly, options.source);
   const trace = loadReplayTrace(modules.openReadOnly, options.source, options.replayWindow);
 
   console.log(`# b1 sqlite async-wrapping benchmark`);
   console.log(`source      ${options.source} (${statSync(options.source).size} bytes)`);
   console.log(`node        ${process.version}`);
+  console.log(
+    `build       driver ${modules.provenance.modules.storage.dist} ` +
+      `git ${String(modules.provenance.git.head).slice(0, 8)}` +
+      `${modules.provenance.git.dirty ? " DIRTY" : ""}`
+  );
   console.log(`synchronous ${options.synchronous}  (the recorder leaves SQLite's FULL default)`);
   console.log(`columns     ${columns.length} of ${REQUEST_INSERT_COLUMNS.length}`);
   console.log(`payloads    ${sizes.length} size pairs (UTF-8 bytes) from the snapshot`);
   console.log(`replay      ${trace.length} traced requests from ${options.replayWindow}`);
   if (options.injectAsyncDelayMs > 0) {
-    console.log(`PROBE       ${options.injectAsyncDelayMs}ms injected into every async operation`);
+    console.log(`PROBE       ${options.injectAsyncDelayMs}ms macrotask sleep per async operation`);
+  }
+  if (options.injectAsyncBlockMs > 0) {
+    console.log(`PROBE       ${options.injectAsyncBlockMs}ms BUSY SPIN per async operation`);
   }
 
   const variantIds = options.only ?? ["A0", "A1", "Bnq", "B"];
@@ -1298,6 +1453,7 @@ async function main() {
       columns,
       source: options.source,
       sourceBytes: statSync(options.source).size,
+      provenance: modules.provenance,
       options,
       startedAt: new Date().toISOString(),
     },
@@ -1314,9 +1470,13 @@ async function main() {
       for (const cell of wanted("closed") ? options.cells : []) {
         const plan = buildPayloadPlan(sizes, cell, cell.n, 0x1234);
         const warmup = Math.floor(cell.n * options.warmupFraction);
+        const token = `c${cell.label}r${repeat}`;
+        setScenarioToken(token);
         const run = await withVariant(modules, options, work, columns, sql, variantId, variant =>
           runClosedLoop(variant, plan, warmup)
         );
+        run.rowsExpected = cell.n;
+        run.rowsCommitted = countRowsByTag(modules, work, `${variantId}-${token}`);
         console.log(
           `   closed:${cell.label.padEnd(5)} n=${run.endToEnd.n} p50 ${run.endToEnd.p50}ms ` +
             `p99 ${run.endToEnd.p99}ms tput ${run.throughputPerSec}/s ` +
@@ -1329,6 +1489,8 @@ async function main() {
 
       for (const rateSpec of wanted("open") && overlapCapable ? options.rates : []) {
         const plan = buildPayloadPlan(sizes, options.cells[2], 2000, 0x2345);
+        const token = `o${rateSpec.label}r${repeat}`;
+        setScenarioToken(token);
         const run = await withVariant(modules, options, work, columns, sql, variantId, async v => {
           const sidecar = startReaderAndWalSampler(work);
           const measured = await runOpenLoop(v, plan, rateSpec.rate, rateSpec.durationMs);
@@ -1336,6 +1498,8 @@ async function main() {
           measured.pragmas = effectivePragmas(modules.openReadOnly, work);
           return measured;
         });
+        run.rowsExpected = run.dispatched - run.failures;
+        run.rowsCommitted = countRowsByTag(modules, work, `${variantId}-${token}`);
         console.log(
           `   open ${String(rateSpec.rate).padStart(6)}/s n=${run.responseLatency.n} ` +
             `resp p50 ${run.responseLatency.p50}ms p99 ${run.responseLatency.p99}ms ` +
@@ -1353,12 +1517,16 @@ async function main() {
       for (const speed of wanted("replay") && overlapCapable && trace.length > 0
         ? options.replaySpeeds
         : []) {
+        const token = `rp${speed}r${repeat}`;
+        setScenarioToken(token);
         const run = await withVariant(modules, options, work, columns, sql, variantId, async v => {
           const sidecar = startReaderAndWalSampler(work);
           const measured = await runReplay(v, trace, speed, 90000);
           measured.sidecar = await sidecar.stop();
           return measured;
         });
+        run.rowsExpected = run.starts;
+        run.rowsCommitted = countRowsByTag(modules, work, `${variantId}-${token}`);
         console.log(
           `   replay x${speed} starts ${run.starts} completes ${run.completes} ` +
             `${run.achievedTransactionsPerSec} txn/s complete p99 ${run.completeService.p99}ms ` +
@@ -1367,7 +1535,15 @@ async function main() {
         results.runs.push({ repeat, variant: variantId, scenario: `replay:x${speed}`, ...run });
       }
 
-      for (const concurrency of wanted("concurrency") ? [1, options.concurrency] : []) {
+      // Bnq at concurrency > 1 cannot work: two bodies BEGIN on one connection.
+      // That is recorded once as a labelled finding below, not as a measured
+      // scenario whose deliberate rejections would then violate G6.
+      const concurrencyLevels = wanted("concurrency")
+        ? variantId === "Bnq"
+          ? [1]
+          : [1, options.concurrency]
+        : [];
+      for (const concurrency of concurrencyLevels) {
         const plan = buildPayloadPlan(sizes, options.cells[0], 1000, 0x3456);
         const run = await withVariant(modules, options, work, columns, sql, variantId, v =>
           runConcurrency(v, plan, 60, concurrency)
@@ -1376,7 +1552,7 @@ async function main() {
           `   conc x${concurrency}   ${
             run.skipped ??
             `per-op p50 ${run.perOperation.p50}ms p99 ${run.perOperation.p99}ms ` +
-              `queue-wait p99 ${run.queueWait.p99}ms`
+              `admission-to-body p99 ${run.admissionToBody.p99}ms`
           }`
         );
         results.runs.push({
@@ -1476,8 +1652,9 @@ function report(results, variantIds, options) {
       show("responseLatency.p50", "resp-p50");
       show("responseLatency.p99", "resp-p99");
       show("completeService.p99", "compl-p99");
+      show("completeSojourn.p99", "compl-sojourn-p99");
       show("perOperation.p50", "op-p50");
-      show("queueWait.p99", "queue-p99");
+      show("admissionToBody.p99", "admit-p99");
       show("eventLoopDelayMs.p99", "eld-p99");
       show("eventLoopDelayMs.max", "eld-max");
       show("eventLoopUtilisation", "elu");
@@ -1486,6 +1663,8 @@ function report(results, variantIds, options) {
       show("timerFairness.gapMs.p99", "timer-p99");
       show("drainMs", "drainMs");
       show("rowsFound", "rowsFound");
+      show("rowsExpected", "rowsExpected");
+      show("rowsCommitted", "rowsCommitted");
       show("rowsLost", "rowsLost");
       show("rejected", "rejected");
       show("failures", "failures");
