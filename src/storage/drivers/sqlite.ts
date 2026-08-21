@@ -124,6 +124,23 @@ export class SqliteStorageDriver implements StorageDriver {
    * two callers awaiting concurrently would otherwise interleave.
    */
   private queue: Promise<unknown> = Promise.resolve();
+  /**
+   * Wall-clock instant after which a still-QUEUED transaction is abandoned.
+   *
+   * The bound cannot be enforced by a timer alone. `node:sqlite` is
+   * synchronous, so every `await connection.execute(...)` settles as a
+   * microtask and the queue is an unbroken microtask chain. Node drains the
+   * microtask queue completely before it reaches the timers phase, so a
+   * `setTimeout` cannot fire while the queue is draining: the timeout was being
+   * starved by the very work it was supposed to bound. Measured at queue depth
+   * 500, the drain ran 2598 ms past a 2000 ms bound and abandoned nothing.
+   *
+   * A deadline the queue runner reads itself needs no event-loop turn, so it
+   * holds exactly where the timer failed.
+   */
+  private drainDeadline: number | null = null;
+  /** Transactions abandoned by the drain bound, so close() can report honestly. */
+  private abandonedOnClose = 0;
 
   transaction<T>(
     operation: StorageOperationClass,
@@ -144,10 +161,12 @@ export class SqliteStorageDriver implements StorageDriver {
       // Reached only when the drain expired with this transaction still queued.
       // The caller learns its write did not land from THIS rejection: there is
       // no logger here and a silent drop is the failure being fixed.
-      if (this.closed) {
+      const pastDeadline = this.drainDeadline !== null && Date.now() >= this.drainDeadline;
+      if (this.closed || pastDeadline) {
+        this.abandonedOnClose += 1;
         throw new Error(
           `storage: sqlite driver closed while this transaction was still queued; ` +
-            `the drain timed out after ${this.drainTimeoutMs}ms and the write did NOT land`
+            `the drain bound of ${this.drainTimeoutMs}ms elapsed and the write did NOT land`
         );
       }
       const connection = this.connectionFor(operation, true);
@@ -192,6 +211,13 @@ export class SqliteStorageDriver implements StorageDriver {
   private async performClose(): Promise<void> {
     this.closing = true;
     if (this.drainTimeoutMs > 0) {
+      // TWO mechanisms, covering DIFFERENT properties rather than the same one.
+      // The deadline bounds work still QUEUED, which a timer cannot do because
+      // a synchronous-engine queue starves the timers phase. The timer bounds a
+      // transaction already IN FLIGHT and blocked on something real, where the
+      // event loop IS reachable and a deadline nobody reads would never fire.
+      // Neither covers the other's case, so both stay.
+      this.drainDeadline = Date.now() + this.drainTimeoutMs;
       let timer: ReturnType<typeof setTimeout> | undefined;
       const expired = new Promise<void>(resolve => {
         timer = setTimeout(resolve, this.drainTimeoutMs);

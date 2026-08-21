@@ -303,6 +303,63 @@ describe("SqliteStorageDriver", () => {
     await other.close();
   });
 
+  it("ENFORCES the drain bound against a microtask-only queue", async () => {
+    // The bound was `Promise.race([queue, setTimeout(...)])`. node:sqlite is
+    // synchronous, so the queue is an unbroken microtask chain and Node never
+    // reaches the timers phase while it drains: the timeout was starved by the
+    // work it bounded. Measured at depth 500, the drain overran a 2000 ms bound
+    // by 2598 ms and abandoned nothing.
+    //
+    // This asserts the BOUND, not the drain. The pre-existing drain test passes
+    // whether or not the bound fires, which is exactly why the defect survived.
+    const bounded = new SqliteStorageDriver(join(dir, "bounded.db"), { drainTimeoutMs: 150 });
+    await bounded.withConnection("write", c =>
+      c.execute("CREATE TABLE t (id INTEGER PRIMARY KEY, v TEXT)")
+    );
+
+    const submitted = Array.from({ length: 500 }, (_unused, i) =>
+      bounded
+        .transaction("write", async c => {
+          await c.execute("INSERT INTO t VALUES (?, ?)", [i, "x".repeat(200)]);
+        })
+        .then(
+          () => "landed",
+          (err: Error) => (/did NOT land/.test(err.message) ? "abandoned" : "other")
+        )
+    );
+
+    const startedAt = Date.now();
+    await bounded.close();
+    const elapsed = Date.now() - startedAt;
+
+    const outcomes = await Promise.all(submitted);
+    const abandoned = outcomes.filter(o => o === "abandoned").length;
+
+    // The bound fired: work was abandoned rather than all 500 draining.
+    expect(abandoned).toBeGreaterThan(0);
+    expect(outcomes.filter(o => o === "other")).toEqual([]);
+    // And it fired NEAR the bound. Generous ceiling, because the point is that
+    // it is bounded at all, not that it is precise: unbounded was 2598 ms over.
+    expect(elapsed).toBeLessThan(150 * 6);
+  });
+
+  it("does NOT abandon a queue that fits inside the bound", async () => {
+    // Control. A close() that abandoned everything would satisfy the test above
+    // while being just as broken in the other direction.
+    const roomy = new SqliteStorageDriver(join(dir, "roomy.db"), { drainTimeoutMs: 5000 });
+    await roomy.withConnection("write", c => c.execute("CREATE TABLE t (id INTEGER PRIMARY KEY)"));
+
+    const submitted = Array.from({ length: 20 }, (_unused, i) =>
+      roomy.transaction("write", async c => {
+        await c.execute("INSERT INTO t VALUES (?)", [i]);
+      })
+    );
+    await roomy.close();
+
+    const settled = await Promise.allSettled(submitted);
+    expect(settled.filter(r => r.status === "rejected")).toEqual([]);
+  });
+
   it("refuses work after close", async () => {
     await driver.close();
     await expect(driver.withConnection("write", c => c.query("SELECT 1"))).rejects.toThrow(
