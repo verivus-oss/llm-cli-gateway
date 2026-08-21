@@ -3,7 +3,7 @@
 
 [meta]
 surface = "FlightRecorder, JobStore and ISessionManager: 3 interfaces, 42 methods, 2 engines"
-status = "2026-08-21. s1, s2, s4 done, s3 part 1 done. b1 measured, awaiting its results review. s5 is 42 commits in: port moved, worker deleted, test:pg 133/133, and 18 REGRESSIONS measured against main. s3sig, s6, s8 and s12 unblock when s5 lands."
+status = "2026-08-21. s1, s2, s4 done, s3 part 1 done. b1 measured, awaiting its results review. b1 done. s5 is 44 commits in: port moved, worker deleted, 18 regressions found against main and fixed as 4 mechanisms; controller re-verifying. s3sig, s6, s8 and s12 unblock when s5 lands."
 
 # WHY: `[persistence].backend` selects the job store and nothing else, so one
 # request's two halves live in two engines 15 ms apart, beside an abandoned
@@ -30,6 +30,7 @@ depends_on = []
 role = "Design section 9's outstanding deliverable. Until it exists, whether wrapping a synchronous engine in promises costs anything at the recorder's call rate is UNKNOWN, and the design says so."
 action = "Measure p50/p99 request latency, event-loop delay, WAL contention and shutdown drain on a representative 1.2 GB copy, at measured and worst-case rates."
 constraint = "Never against the live logs.db; use a snapshot. A result that says the overhead matters is a finding that reshapes s7, not a failure."
+status = "done 2026-08-21, 5 rounds. Wrapping is not a stable effect (-1.3us, sign-unstable over 3 processes); the stable +17us is the driver's non-async bundle, so s7 proceeds. Buried under 10.8ms fsync/request and an 11ms low-rate cold penalty, not shown independent. Round 5 asked the only question that could have stopped s7, whether the UNNAMED cold penalty interacts with wrapping, and both reviewers independently said no: the paired B-A0 delta does not grow as the machine goes cold (+0.058/+0.202/+0.072ms cold against +0.068/+0.043/+0.020ms warm), which falsifies every interaction hypothesis at once. All four harness asymmetries found across five rounds bias AGAINST async, which is why near-zero survives them. Shutdown is the real async cost: JobStore.close() is `void` so no caller can await a drain, and a setTimeout bound cannot preempt the queue's microtask chain (500 queued, 2598ms, 0 rejected)."
 affects = ["s7.flight-recorder-onto-the-port"]
 
 [[node]]
