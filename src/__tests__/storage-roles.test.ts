@@ -83,6 +83,33 @@ describe("storage role routing", () => {
     expect(routed).toHaveLength(STORAGE_OPERATION_CLASSES.length);
     expect(new Set(routed).size).toBe(STORAGE_OPERATION_CLASSES.length);
   });
+
+  it("fails closed on an unrecognised operation class instead of widening to app", () => {
+    // The defect: PREFERRED_ROLE[unknown] is undefined, configured.has(undefined)
+    // is false, so the fall-through returned { role: "app", degradedFrom:
+    // undefined }. That routes to the WIDEST credential while reporting that
+    // separation is in force. Unreachable from typed callers because
+    // StorageOperationClass is a closed union, but it is the primitive s9 builds
+    // its health assertion on, and a function that reports "not degraded" while
+    // degrading is the wrong thing to build that on.
+    const full = new Set<StorageRole>(STORAGE_ROLES);
+
+    for (const bogus of ["", "admin", "write ", "TRANSCRIPT_READ", "__proto__"]) {
+      expect(() =>
+        resolveStorageRole(bogus as unknown as (typeof STORAGE_OPERATION_CLASSES)[number], full)
+      ).toThrow(/unknown operation class/);
+    }
+  });
+
+  it("still routes every real class after the guard", () => {
+    // The guard must fail closed on nonsense WITHOUT rejecting the closed union
+    // it exists to protect. A guard that refuses everything is not a control.
+    const full = new Set<StorageRole>(STORAGE_ROLES);
+    for (const op of STORAGE_OPERATION_CLASSES) {
+      expect(resolveStorageRole(op, full).degradedFrom).toBeUndefined();
+    }
+    expect(roleSeparationInForce(full)).toBe(true);
+  });
 });
 
 describe("state inventory", () => {
