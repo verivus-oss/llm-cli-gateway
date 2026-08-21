@@ -214,6 +214,7 @@ import {
   type AsyncJobUsageExtractor,
   type AsyncJobErrorCategory,
   type AsyncJobSnapshot,
+  type StartJobOutcome,
 } from "./async-job-manager.js";
 import { createJobStore, type JobStore } from "./job-store.js";
 import {
@@ -1828,9 +1829,19 @@ async function awaitJobOrDefer(
     }
   }
 
-  let outcome;
+  // AWAITED INSIDE THE TRY, and that is the whole point. While
+  // startJobWithDedup was synchronous a pre-spawn failure threw here and this
+  // catch reclaimed onComplete. C3 made it async, so the failure became a
+  // rejection that surfaced at the `await` on the next line, OUTSIDE the try:
+  // the catch was dead, `onCompleteOwnedByCaller = false` ran unconditionally,
+  // and the contract documented above told the caller not to reclaim either.
+  // Three real rejection paths land here (throws before `this.jobs.set`, the
+  // JobSaturationError after `this.jobs.delete`, and recordStartOrFailClosed),
+  // so a fail-closed durable start leaked the outputSchema temp file, the
+  // Claude MCP artifact or the worktree that onComplete was to clean up.
+  let outcome: StartJobOutcome;
   try {
-    outcome = runtime.asyncJobManager.startJobWithDedup(cli, args, corrId, {
+    outcome = await runtime.asyncJobManager.startJobWithDedup(cli, args, corrId, {
       cwd,
       idleTimeoutMs,
       outputFormat,
@@ -1865,10 +1876,10 @@ async function awaitJobOrDefer(
     consumeOnComplete();
     throw err;
   }
-  const job = (await outcome).snapshot;
-  if ((await outcome).deduped) {
+  const job = outcome.snapshot;
+  if (outcome.deduped) {
     runtime.logger.info(
-      `[${corrId}] sync request deduped onto running job ${job.id} (original corrId=${(await outcome).originalCorrelationId})`
+      `[${corrId}] sync request deduped onto running job ${job.id} (original corrId=${outcome.originalCorrelationId})`
     );
   }
   const deadline = Date.now() + SYNC_DEADLINE_MS;
@@ -2028,9 +2039,12 @@ async function awaitApiJobOrDefer(
     }
   }
 
-  let outcome;
+  // Awaited inside the try for the reason given at the CLI sibling above: an
+  // async startHttpJob delivers its failure as a rejection, which an unawaited
+  // assignment carries straight past this catch and out of the function.
+  let outcome: StartJobOutcome;
   try {
-    outcome = runtime.asyncJobManager.startHttpJob({
+    outcome = await runtime.asyncJobManager.startHttpJob({
       provider,
       apiRequest,
       correlationId: corrId,
@@ -2045,10 +2059,10 @@ async function awaitApiJobOrDefer(
     throw err;
   }
 
-  const job = (await outcome).snapshot;
-  if ((await outcome).deduped) {
+  const job = outcome.snapshot;
+  if (outcome.deduped) {
     runtime.logger.info(
-      `[${corrId}] api request deduped onto job ${job.id} (original corrId=${(await outcome).originalCorrelationId})`
+      `[${corrId}] api request deduped onto job ${job.id} (original corrId=${outcome.originalCorrelationId})`
     );
   }
   const deadline = Date.now() + SYNC_DEADLINE_MS;
@@ -16924,6 +16938,13 @@ async function recoverUnadmittedPersonalKitAttempt(input: {
   attemptId: string;
   execution: KitExecutionRef;
 }): Promise<{ fence: "reserved" | "already_recovered" }> {
+  // Cross the startup barrier BEFORE the admission gate, for the same reason
+  // resolvePersonalKitRequest does. assertKitDurableAdmission reads the
+  // synchronous canAdmitDurableJobs() snapshot, so inside the startup window a
+  // valid recovery attempt is refused kit_busy. The barrier at
+  // lookupJobSnapshot further down cannot help: a later await does not protect
+  // an earlier read.
+  await input.runtime.asyncJobManager.whenStartupSettled();
   assertKitDurableAdmission(input.runtime);
   const manager = requireKitSessionManager(input.runtime);
   const session = await Promise.resolve(manager.getSession(input.sessionId));
@@ -22080,7 +22101,13 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
         // in the caller-facing (compressed) text.
         const compressJob =
           !rawOutput && asyncJobManager.getJobCompressResponse(jobId) && outputFormat !== "json";
-        const personalKitJob = Boolean(asyncJobManager.getJobKitExecution(jobId));
+        // AWAITED. getJobKitExecution became async with the store, and
+        // `Boolean(promise)` is always true, so this read silently claimed
+        // every job was a Kit job and suppressed compression telemetry for all
+        // of them. Boolean() is a coercion, not a condition, which is why
+        // check-promise-in-condition.mjs did not see it; the gate now visits
+        // coercion callees too.
+        const personalKitJob = Boolean(await asyncJobManager.getJobKitExecution(jobId));
         if (compressJob && result.stdout) {
           if (outputFormat === "stream-json" && parsed) {
             result.stdout = parsed.text;

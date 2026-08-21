@@ -13,8 +13,46 @@
  * durability controls, and one broke every job creation. That last one was
  * caught by a runtime test, not by either rule, which is why this exists.
  *
- * Boolean positions checked: if/while/do conditions, the ternary condition,
- * `!x`, and every operand of `&&` / `||` that is not the value-producing tail.
+ * Boolean positions checked: if/while/do/for conditions, the ternary condition,
+ * `!x`, every operand of `&&` / `||` that is not the value-producing tail, and
+ * `Boolean(x)` anywhere.
+ *
+ * THE COERCION FAMILY, enumerated and decided one by one. A live defect sat in
+ * `Boolean(asyncJobManager.getJobKitExecution(jobId))` while this gate reported
+ * zero, because a coercion CALL is not a syntactic boolean position. Adding
+ * `Boolean` alone would have left the rest of the family as the next blind spot,
+ * so each shape below is a decision, not an omission.
+ *
+ *   Boolean(p)        FLAGGED anywhere. The call exists to produce truthiness,
+ *                     so it is a boolean position by definition, and there is no
+ *                     reading under which coercing a promise to a boolean is
+ *                     what the author meant.
+ *   !!p               ALREADY FLAGGED, and no code was needed: the outer `!`
+ *                     yields a boolean the checker rejects, then the visitor
+ *                     descends to the inner `!` whose operand is the promise.
+ *                     Verified by fixture, not assumed.
+ *   Number(p)         SEEN THROUGH in a boolean position, not flagged outside
+ *   String(p)         one. `Number(p)` is NaN and `String(p)` is the constant
+ *                     "[object Promise]", so in a condition the guard is dead
+ *                     exactly as with Boolean. Outside a condition they are a
+ *                     diagnostic shape rather than a failed guard, and this gate
+ *                     is named for guards; widening it there would change its
+ *                     subject and its noise floor.
+ *   `${p}`            NOT FLAGGED, same reasoning as String() outside a
+ *                     condition, and template literals are overwhelmingly log
+ *                     text.
+ *   xs.filter(Boolean) FLAGGED when the ELEMENT type is a promise. The existing
+ *                     predicate rule asks what the callback RETURNS, which says
+ *                     nothing here: `Boolean` is synchronous and correct, and it
+ *                     is the array that is wrong. Every element survives.
+ *   p ?? fallback     NOT FLAGGED. `??` tests nullishness, not truthiness, so a
+ *                     bare-promise left side makes the FALLBACK dead rather than
+ *                     the guard. That is a different defect, and this gate
+ *                     deliberately permits `Promise<T> | undefined` (see below),
+ *                     so it has no way to tell the two apart without contradicting
+ *                     that exemption.
+ *   switch/case p     NOT FLAGGED. `case` compares with `===`; a promise simply
+ *                     never matches, which is a dead branch and not a dead guard.
  */
 import ts from "typescript";
 import { relative } from "node:path";
@@ -80,6 +118,14 @@ function isPromiseLike(type) {
  *
  * No legitimate idiom to exempt: an async predicate is unconditionally wrong.
  */
+/**
+ * Coercion callees this gate sees through. `Boolean` is additionally a boolean
+ * position in its own right (see the header); `Number` and `String` are only
+ * transparent, so they are reported when a condition wraps them and ignored
+ * when a log line does.
+ */
+const COERCERS = new Set(["Boolean", "Number", "String"]);
+
 const TRUTHINESS_PREDICATES = new Set([
   "every",
   "some",
@@ -96,7 +142,34 @@ for (const sf of program.getSourceFiles()) {
   const rel = relative(ROOT, sf.fileName);
   if (!rel.startsWith("src/")) continue;
 
-  const flag = (node, why) => {
+  /**
+   * See through a coercion call so the boolean positions below examine the
+   * VALUE, not the boolean/number/string the coercion manufactures from it.
+   * Without this every rule here stops at `Boolean(...)` and reports nothing,
+   * which is precisely how the llm_job_result telemetry defect survived.
+   */
+  const unwrapCoercion = node => {
+    let cur = node;
+    for (;;) {
+      if (
+        ts.isCallExpression(cur) &&
+        ts.isIdentifier(cur.expression) &&
+        COERCERS.has(cur.expression.text) &&
+        cur.arguments.length === 1
+      ) {
+        cur = cur.arguments[0];
+        continue;
+      }
+      if (ts.isParenthesizedExpression(cur)) {
+        cur = cur.expression;
+        continue;
+      }
+      return cur;
+    }
+  };
+
+  const flag = (rawNode, why) => {
+    const node = unwrapCoercion(rawNode);
     let t;
     try {
       t = checker.getTypeAtLocation(node);
@@ -147,9 +220,46 @@ for (const sf of program.getSourceFiles()) {
         });
       }
     }
+    // `Boolean(p)` is a boolean position wherever it appears: the call has no
+    // purpose other than truthiness. Number/String are NOT handled here, only
+    // seen through by `flag`, because outside a condition they are diagnostics.
+    if (
+      ts.isCallExpression(node) &&
+      ts.isIdentifier(node.expression) &&
+      node.expression.text === "Boolean" &&
+      node.arguments.length === 1
+    ) {
+      flag(node.arguments[0], "Boolean() coercion");
+    }
+    // `xs.filter(Boolean)` and friends: the callback is fine, the ELEMENTS are
+    // promises, and every promise survives the filter.
+    if (
+      ts.isCallExpression(node) &&
+      ts.isPropertyAccessExpression(node.expression) &&
+      TRUTHINESS_PREDICATES.has(node.expression.name.text) &&
+      node.arguments.length === 1 &&
+      ts.isIdentifier(node.arguments[0]) &&
+      node.arguments[0].text === "Boolean"
+    ) {
+      try {
+        const receiver = checker.getTypeAtLocation(node.expression.expression);
+        const element = checker.getIndexTypeOfType(receiver, ts.IndexKind.Number);
+        if (element && isPromiseLike(element)) {
+          const { line } = sf.getLineAndCharacterOfPosition(node.getStart(sf));
+          violations.push({
+            site: `${rel}:${line + 1}`,
+            why: `.${node.expression.name.text}(Boolean) over promise elements`,
+            code: node.getText(sf).replace(/\s+/g, " ").slice(0, 74),
+          });
+        }
+      } catch {
+        /* type resolution failure is not a finding */
+      }
+    }
     if (ts.isIfStatement(node)) flag(node.expression, "if condition");
     else if (ts.isWhileStatement(node) || ts.isDoStatement(node))
       flag(node.expression, "loop condition");
+    else if (ts.isForStatement(node) && node.condition) flag(node.condition, "for condition");
     else if (ts.isConditionalExpression(node)) flag(node.condition, "ternary condition");
     else if (ts.isPrefixUnaryExpression(node) && node.operator === ts.SyntaxKind.ExclamationToken)
       flag(node.operand, "negation");

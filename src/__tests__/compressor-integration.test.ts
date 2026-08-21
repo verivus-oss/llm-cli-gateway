@@ -1,14 +1,17 @@
-import { describe, it, expect, beforeEach, afterEach } from "vitest";
+import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 import { mkdtempSync, rmSync } from "fs";
 import os from "os";
 import path from "path";
 import { createRequire } from "module";
+import { randomUUID } from "node:crypto";
 import { buildCliResponse, createGatewayServer, resolveEffectiveCompression } from "../index.js";
 import { readPersistedRequest } from "../cache-stats.js";
 import { FlightRecorder } from "../flight-recorder.js";
 import { AsyncJobManager } from "../async-job-manager.js";
-import { MemoryJobStore } from "../job-store.js";
+import { MemoryJobStore, SqliteJobStore } from "../job-store.js";
 import { NoopFlightRecorder } from "../flight-recorder.js";
+import type { CompressionTelemetry } from "../flight-recorder.js";
+import type { KitExecutionRef } from "../personal-config-types.js";
 import { runWithRequestContext } from "../request-context.js";
 
 const require = createRequire(import.meta.url);
@@ -200,11 +203,33 @@ describe("byte-recovery escape hatch (spec 5.3 / 9.10)", () => {
 });
 
 describe("async llm_job_result wiring (spec 5.2 / 5.4 / 9.9)", () => {
+  const KIT_EXECUTION: KitExecutionRef = {
+    version: 1,
+    releaseId: "release-telemetry",
+    configStamp: "stamp-telemetry",
+    scopeRoot: null,
+    scopeHead: null,
+    contextIdentity: "c".repeat(64),
+  };
+
+  /** Captures what llm_job_result actually recorded, rather than swallowing it. */
+  class CompressionCapturingFlightRecorder extends NoopFlightRecorder {
+    readonly compression: Array<{ correlationId: string; telemetry: CompressionTelemetry }> = [];
+
+    override recordCompressionTelemetry(
+      correlationId: string,
+      telemetry: CompressionTelemetry
+    ): void {
+      this.compression.push({ correlationId, telemetry });
+    }
+  }
+
   async function seed(
     store: MemoryJobStore,
     id: string,
     compress: boolean,
-    ndjson: string
+    ndjson: string,
+    kit?: { kitExecution: KitExecutionRef; kitSessionId: string }
   ): Promise<void> {
     const now = new Date().toISOString();
     await store.recordStart({
@@ -218,6 +243,7 @@ describe("async llm_job_result wiring (spec 5.2 / 5.4 / 9.9)", () => {
       startedAt: now,
       pid: null,
       ownerPrincipal: "local",
+      ...(kit ?? {}),
     });
     await store.recordComplete({
       id,
@@ -249,11 +275,13 @@ describe("async llm_job_result wiring (spec 5.2 / 5.4 / 9.9)", () => {
   async function callJobResult(
     store: MemoryJobStore,
     jobId: string,
-    params: Record<string, unknown> = {}
+    params: Record<string, unknown> = {},
+    recorder: NoopFlightRecorder = new NoopFlightRecorder()
   ): Promise<any> {
-    const mgr = new AsyncJobManager(undefined, undefined, store, new NoopFlightRecorder());
+    const mgr = new AsyncJobManager(undefined, undefined, store, recorder);
     const server = createGatewayServer({
       asyncJobManager: mgr,
+      flightRecorder: recorder,
       compression: { enabled: false, sources: { configFile: null } },
     });
     const tool = (server as any)._registeredTools["llm_job_result"];
@@ -282,6 +310,82 @@ describe("async llm_job_result wiring (spec 5.2 / 5.4 / 9.9)", () => {
     expect(raw.result.stdout.length).toBeLessThan(REPLY.length);
     expect("text" in raw.parsed).toBe(false);
     expect(raw.parsed.usage).toBeTruthy();
+  });
+
+  it("records compression telemetry for a NON-Kit job", async () => {
+    // The property that broke. `personalKitJob` was
+    // `Boolean(asyncJobManager.getJobKitExecution(jobId))`; getJobKitExecution
+    // became async with the store, and Boolean(promise) is always true, so
+    // safeRecordCompression's suppressForPersonalKit argument was true for
+    // EVERY job and recordCompressionTelemetry was never called from
+    // llm_job_result at all. Nothing failed, nothing logged, the telemetry
+    // simply stopped existing.
+    const store = new MemoryJobStore();
+    await seed(store, "jtel", true, claudeNdjson(REPLY));
+    const recorder = new CompressionCapturingFlightRecorder();
+    const raw = await callJobResult(store, "jtel", {}, recorder);
+    // Compression really happened, so telemetry is owed.
+    expect(raw.result.stdout.startsWith("[[gateway-note")).toBe(true);
+    expect(recorder.compression).toHaveLength(1);
+    expect(recorder.compression[0]!.correlationId).toBe("corr-jtel");
+    expect(recorder.compression[0]!.telemetry.compressedChars).toBeGreaterThan(0);
+  });
+
+  it("still SUPPRESSES compression telemetry for a Kit job held in memory", async () => {
+    // The control for the fix above. Awaiting the call must not quietly delete
+    // the suppression it was guarding: Kit output is private, so its
+    // compression shape is deliberately not recorded. A fix that made the
+    // non-Kit test pass by dropping the argument would fail here.
+    //
+    // The job has to be LIVE in this manager's memory. job-store.ts:2718 stores
+    // `row.stdout = row.kitExecution ? "" : stdout`, so a Kit row read back
+    // from the store alone has no stdout at all, the `compressJob &&
+    // result.stdout` guard is false, and the suppression is never reached. A
+    // seeded row would therefore have passed this test for the wrong reason.
+    // SqliteJobStore, not MemoryJobStore: Kit admission requires a durable
+    // validation-run store (async-job-manager.ts:3913).
+    const kitDir = mkdtempSync(path.join(os.tmpdir(), "compress-kit-"));
+    const store = new SqliteJobStore(path.join(kitDir, "jobs.db"));
+    const recorder = new CompressionCapturingFlightRecorder();
+    const mgr = new AsyncJobManager(undefined, undefined, store, recorder);
+    await mgr.whenStartupSettled();
+    const reservedKitJobId = randomUUID();
+    const server = createGatewayServer({
+      asyncJobManager: mgr,
+      flightRecorder: recorder,
+      compression: { enabled: false, sources: { configFile: null } },
+    });
+    const tool = (server as any)._registeredTools["llm_job_result"];
+    try {
+      const started = await runWithRequestContext({ principal: "local" } as any, () =>
+        mgr.startJobWithDedup("echo" as any, [REPLY], "corr-kit-live", {
+          compressResponse: true,
+          kitExecution: KIT_EXECUTION,
+          kitSessionId: "gw-kit-telemetry",
+          // A Kit job must carry a caller-reserved durable id and forceRefresh
+          // (async-job-manager.ts:3916); its request key is that id, never a
+          // fingerprint of the private argv.
+          jobId: reservedKitJobId,
+          forceRefresh: true,
+        })
+      );
+      const jobId = started.snapshot.id;
+      await vi.waitFor(async () => {
+        expect((await mgr.getJobSnapshot(jobId))?.status).toBe("completed");
+      });
+      const res = await runWithRequestContext({ principal: "local" } as any, () =>
+        tool.handler({ jobId, maxChars: 200000 }, {})
+      );
+      const raw = JSON.parse(res.content[0].text);
+      // The output IS present and DID compress, so the only reason telemetry is
+      // absent is the Kit suppression.
+      expect(raw.result.stdout.startsWith("[[gateway-note")).toBe(true);
+      expect(recorder.compression).toHaveLength(0);
+    } finally {
+      await mgr.dispose();
+      await store.close();
+      rmSync(kitDir, { recursive: true, force: true });
+    }
   });
 
   it("returns concatenable raw pages for complete forensic retrieval", async () => {

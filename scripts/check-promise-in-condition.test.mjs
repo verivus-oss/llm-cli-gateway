@@ -171,4 +171,100 @@ describe("promise-in-condition gate", () => {
   }`);
     expect(runGate().exitCode).toBe(0);
   });
+
+  // ── the coercion family ────────────────────────────────────────────────────
+  // Added after a LIVE defect, Boolean(getJobKitExecution(jobId)), sat in
+  // llm_job_result while this gate reported zero. Each shape below is a
+  // separate rule and therefore gets its own control: a single Boolean() test
+  // would leave the rest of the family unexecuted, which is the same blind spot
+  // one enumeration later.
+
+  it("FIRES on Boolean(promise), the shape of the live defect", () => {
+    inject(`  probeBooleanCoercion(): boolean {
+    const p = Promise.resolve(false);
+    return Boolean(p);
+  }`);
+    const r = runGate();
+    expect(r.exitCode).toBe(1);
+    expect(r.output).toMatch(/Boolean\(\) coercion/);
+  });
+
+  it("FIRES on !!promise, which the negation rule already covered", () => {
+    // VERIFIED, not assumed. The header claims `!!p` needed no new code
+    // because the visitor descends past the outer `!` to the inner one. A
+    // claim about a gate's coverage that nothing executes is exactly what this
+    // file exists to refuse.
+    inject(`  probeDoubleBang(): boolean {
+    const p = Promise.resolve(false);
+    return !!p;
+  }`);
+    const r = runGate();
+    expect(r.exitCode).toBe(1);
+    expect(r.output).toMatch(/negation/);
+  });
+
+  it("FIRES on Number(promise) in a condition", () => {
+    // Number(p) is NaN, so the guard is dead in the other direction: always
+    // FALSE rather than always true. Equally silent.
+    inject(`  probeNumberCoercion(): void {
+    const p = Promise.resolve(1);
+    if (Number(p)) return;
+  }`);
+    const r = runGate();
+    expect(r.exitCode).toBe(1);
+    expect(r.output).toMatch(/if condition/);
+  });
+
+  it("FIRES on String(promise) in a condition", () => {
+    inject(`  probeStringCoercion(): void {
+    const p = Promise.resolve("x");
+    if (String(p)) return;
+  }`);
+    const r = runGate();
+    expect(r.exitCode).toBe(1);
+    expect(r.output).toMatch(/if condition/);
+  });
+
+  it("does NOT fire on String(promise) outside a condition", () => {
+    // The deliberate boundary from the header. This gate is named for dead
+    // GUARDS; a stringified promise in a log line is a different complaint and
+    // flagging it here would raise the noise floor of a gate whose whole value
+    // is that a finding is always real.
+    inject(`  probeStringLog(): string {
+    const p = Promise.resolve("x");
+    return "value=" + String(p);
+  }`);
+    expect(runGate().exitCode).toBe(0);
+  });
+
+  it("FIRES on a promise in a for-loop condition", () => {
+    inject(`  probeForCondition(): void {
+    const p = Promise.resolve(false);
+    for (let i = 0; p; i++) return;
+  }`);
+    const r = runGate();
+    expect(r.exitCode).toBe(1);
+    expect(r.output).toMatch(/for condition/);
+  });
+
+  it("FIRES on .filter(Boolean) over promise ELEMENTS", () => {
+    // The predicate rule asks what the callback returns, which says nothing
+    // here: Boolean is synchronous and correct. It is the array that is wrong,
+    // and every element survives the filter.
+    inject(`  probeFilterBooleanPromises(xs: Promise<number>[]): Promise<number>[] {
+    return xs.filter(Boolean);
+  }`);
+    const r = runGate();
+    expect(r.exitCode).toBe(1);
+    expect(r.output).toMatch(/\.filter\(Boolean\) over promise elements/);
+  });
+
+  it("does NOT fire on .filter(Boolean) over ordinary elements", () => {
+    // The control for the rule above: dropping nullish entries with
+    // `.filter(Boolean)` is a correct and common idiom.
+    inject(`  probeFilterBooleanPlain(xs: (number | null)[]): number[] {
+    return xs.filter(Boolean) as number[];
+  }`);
+    expect(runGate().exitCode).toBe(0);
+  });
 });
