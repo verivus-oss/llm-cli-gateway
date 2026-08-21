@@ -42,6 +42,50 @@ describe("promise-in-condition gate", () => {
     expect(runGate().exitCode).toBe(0);
   });
 
+  it("FIRES on a thenable whose type is NOT named Promise<...>", () => {
+    // The control for structural detection. This gate used to decide
+    // promise-ness with /^Promise</ against the rendered type name, which is
+    // the exact mistake that stripped seven awaits earlier in this node:
+    // PromiseWithChild is a promise and does not match that name.
+    //
+    // Without this control the name match could be reinstated and all the
+    // other controls would still pass, which is what "a control that passes in
+    // both states is not a control" means in practice. Probed: restoring the
+    // name match fails THIS test and nothing else.
+    inject(`  probeNamedThenable(): void {
+    const deferred = { then(resolve: (v: boolean) => void): void { resolve(true); } };
+    if (deferred) return;
+  }`);
+    const r = runGate();
+    expect(r.exitCode).toBe(1);
+    expect(r.output).toContain("if condition");
+  });
+
+  it("FIRES on a NAMED async predicate, not only an inline async arrow", () => {
+    // Review found this hole: the gate matched only a syntactically `async`
+    // arrow written at the call site, so hoisting the same predicate into a
+    // const hid it. The truthiness bug is identical either way.
+    inject(`  probeNamedPredicate(xs: number[]): number | undefined {
+    const isBig = async (x: number) => x > 0;
+    return xs.find(isBig);
+  }`);
+    const r = runGate();
+    expect(r.exitCode).toBe(1);
+    expect(r.output).toContain("async predicate to .find()");
+  });
+
+  it("FIRES on a predicate that returns a promise WITHOUT the async keyword", () => {
+    // The second half of the same hole: no `async` keyword anywhere, and the
+    // returned promise is still unconditionally truthy.
+    inject(`  probePromiseReturningPredicate(xs: number[]): number[] {
+    const isBig = (x: number): Promise<boolean> => Promise.resolve(x > 0);
+    return xs.filter(isBig);
+  }`);
+    const r = runGate();
+    expect(r.exitCode).toBe(1);
+    expect(r.output).toContain("async predicate to .filter()");
+  });
+
   it("FIRES on a promise in an if condition", () => {
     inject(`  probeIf(): void {
     const p = Promise.resolve(false);

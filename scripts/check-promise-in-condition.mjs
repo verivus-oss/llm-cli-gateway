@@ -35,7 +35,21 @@ const checker = program.getTypeChecker();
  * deferred, and for joining an in-flight reconciliation run. Flagging those
  * would train the reader to ignore the gate, which is how a real finding gets
  * missed.
+ *
+ * Promise-ness is decided by asking the checker for a CALLABLE `then` member,
+ * never by matching the rendered type NAME. This gate previously tested
+ * /^Promise</, which is exactly the mistake that stripped seven awaits earlier
+ * in this node: PromiseWithChild IS a promise and does not match that name.
+ * Both reviewers found it independently, and a gate that is wrong on the one
+ * type that matters is the reliable-looking tool the design warns about.
  */
+function thenable(type) {
+  const then = checker.getPropertyOfType(type, "then");
+  const decl = then?.valueDeclaration ?? then?.declarations?.[0];
+  if (!decl) return false;
+  return checker.getTypeOfSymbolAtLocation(then, decl).getCallSignatures().length > 0;
+}
+
 function isPromiseLike(type) {
   if (!type) return false;
   if (type.isUnion()) {
@@ -43,9 +57,9 @@ function isPromiseLike(type) {
       t => (t.flags & (ts.TypeFlags.Undefined | ts.TypeFlags.Null)) !== 0
     );
     if (nullish) return false;
-    return type.types.some(t => /^Promise</.test(checker.typeToString(t)));
+    return type.types.some(thenable);
   }
-  return /^Promise</.test(checker.typeToString(type));
+  return thenable(type);
 }
 
 /**
@@ -106,9 +120,24 @@ for (const sf of program.getSourceFiles()) {
       node.arguments.length >= 1
     ) {
       const cb = node.arguments[0];
-      const isAsync =
+      // Syntactically `async`, OR anything whose call signature RETURNS a
+      // promise. Matching only inline async arrows missed two shapes a reviewer
+      // named: `const p = async x => ...; items.find(p)`, and a plain callback
+      // that returns a promise without the async keyword. Both make the
+      // predicate unconditionally truthy in exactly the same way.
+      let isAsync =
         (ts.isArrowFunction(cb) || ts.isFunctionExpression(cb)) &&
-        cb.modifiers?.some(m => m.kind === ts.SyntaxKind.AsyncKeyword);
+        (cb.modifiers?.some(m => m.kind === ts.SyntaxKind.AsyncKeyword) ?? false);
+      if (!isAsync) {
+        try {
+          const signatures = checker.getTypeAtLocation(cb).getCallSignatures();
+          isAsync =
+            signatures.length > 0 &&
+            signatures.every(sig => isPromiseLike(checker.getReturnTypeOfSignature(sig)));
+        } catch {
+          isAsync = false;
+        }
+      }
       if (isAsync) {
         const { line } = sf.getLineAndCharacterOfPosition(cb.getStart(sf));
         violations.push({

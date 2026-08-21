@@ -1767,6 +1767,14 @@ export class AsyncJobManager {
         pid: this.instancePid,
       });
       await this.store.heartbeat(this.instanceId);
+      // RE-CHECKED after the awaits, not only before them.
+      //
+      // dispose() sets `disposed` synchronously and then deregisters. Without
+      // this check a restore that was already in flight resumes afterwards and
+      // sets durableAdmission = true on a disposed manager, re-enabling
+      // admission and leaving an instance row registered after the
+      // deregistration that was supposed to remove it.
+      if (this.disposed) return;
       const wasDisabled = !this.durableAdmission;
       this.durableAdmission = true;
       this.consecutiveHeartbeatFailures = 0;
@@ -1836,6 +1844,10 @@ export class AsyncJobManager {
     let liveConfirmedIds: string[];
     try {
       candidates = await this.store.selectStaleProcessCandidates(leaseTtl, httpGrace);
+      // Same reason as restoreDurableAdmission: disposal can land during this
+      // await, and recovering jobs after deregistration writes rows on behalf
+      // of an instance that has already declared itself gone.
+      if (this.disposed) return;
       liveConfirmedIds = this.confirmLiveProcessCandidates(candidates);
     } catch (err) {
       this.logger.error("#139 selecting stale process candidates failed", err);
@@ -4931,10 +4943,19 @@ export class AsyncJobManager {
     }
 
     job.resetIdleTimer?.();
-    this.progressTracker(job).ingest(stream, chunk);
-    job.progressDirty = true;
-    await this.maybeFlushProgress(job);
 
+    // Append to the in-memory buffer BEFORE any await, and never after one.
+    //
+    // The child's `data` handlers fire and forget this method, because an
+    // EventEmitter cannot apply backpressure, so two calls for one job can be
+    // in flight. While the append sat after `await maybeFlushProgress`, two
+    // ORDERED data events could append in the opposite order, and the byte-cap
+    // check above read lengths that a suspended call had not yet contributed
+    // to, so the cap undercounted. Neither is observable as an error: the
+    // captured output is simply wrong.
+    //
+    // Everything from the cap check to here is one synchronous run, so the
+    // order chunks arrive in is the order they land in.
     const text = chunk.toString();
     if (stream === "stdout") {
       job.stdout += text;
@@ -4942,6 +4963,10 @@ export class AsyncJobManager {
       job.stderr += text;
     }
     job.outputDirty = true;
+
+    this.progressTracker(job).ingest(stream, chunk);
+    job.progressDirty = true;
+    await this.maybeFlushProgress(job);
     await this.maybeFlushOutput(job);
   }
 }

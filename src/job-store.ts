@@ -3146,6 +3146,18 @@ export class PostgresJobStore implements JobStore, ValidationRunStore {
     // `closed` is set BEFORE the await, so a call racing this one is refused
     // rather than reaching a driver whose pools are going away.
     this.closed = true;
+
+    // JOIN an initialisation that is already in flight before closing.
+    //
+    // Without this, close() could return while the pool factory's dynamic
+    // import was still pending: buildAndInit would then resume, construct a
+    // pool for a store that is already closed, and leave it open with nothing
+    // holding a reference to it. Its own failure is not interesting here, only
+    // that it has finished deciding whether a driver exists.
+    if (this.startupPromise) {
+      await this.startupPromise.catch(() => undefined);
+    }
+
     const driver = this.driver;
     if (!driver) return;
     try {
