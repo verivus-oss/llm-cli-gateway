@@ -13,7 +13,41 @@ import { afterEach, describe, expect, it } from "vitest";
 
 const TARGET = "src/metrics.ts";
 const ANCHOR = "export class PerformanceMetrics {";
+
+// EVERY probe this file injects starts with this marker, so a pristine
+// src/metrics.ts can never contain it.
+const PROBE_MARKER = "probe";
+
 const original = readFileSync(TARGET, "utf8");
+
+// `original` is captured ONCE, at module load, and afterEach writes it back
+// verbatim. That is safe only if the file was pristine when we read it. If a
+// concurrent or crashed run had already injected, `original` would capture the
+// INJECTED text and afterEach would then write a real promise-in-condition
+// violation into a real source file, permanently and silently, on a run that
+// otherwise reports green.
+//
+// So refuse to start rather than bake it in. This does not make two concurrent
+// runs safe against each other, it makes them fail loudly instead of corrupting.
+// The full fix is a per-run probe file rather than a shared tracked one.
+if (/\bprobe[A-Z]/.test(original)) {
+  throw new Error(
+    `${TARGET} already contains an injected probe. A previous run of this file ` +
+      `crashed, or two runs overlapped. Restore it with \`git checkout -- ${TARGET}\` ` +
+      `before running this suite; do NOT let afterEach write this state back.`
+  );
+}
+
+// A crash between inject() and afterEach leaves a violation in a tracked source
+// file. Restore on the way out too, so an interrupted run does not hand the next
+// reader a dirty tree that looks like someone's edit.
+process.on("exit", () => {
+  try {
+    if (readFileSync(TARGET, "utf8") !== original) writeFileSync(TARGET, original);
+  } catch {
+    // Nothing useful to do while the process is already leaving.
+  }
+});
 
 function runGate() {
   try {
