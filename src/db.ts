@@ -45,10 +45,9 @@ export class DatabaseConnection {
   async connect(): Promise<void> {
     const createPool = await sessionPoolFactory(this.logger);
     const driver = new PostgresStorageDriver(
-      // One role, `app`. Per-role DSNs are s9's `[persistence.roles]`; until
-      // they exist the driver already reports role separation as not in force
-      // rather than implying it is.
-      { app: this.config.database!.connectionString },
+      // Every credential `[persistence.roles]` configured, with `app` taken
+      // from the selected connection string so there is one source for it.
+      { ...this.config.roleDsns, app: this.config.database!.connectionString },
       createPool
     );
 

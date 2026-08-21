@@ -32,6 +32,15 @@ export type StorageRole = "app" | "reader" | "analytics" | "retention";
 
 export const STORAGE_ROLES: readonly StorageRole[] = ["app", "reader", "analytics", "retention"];
 
+/**
+ * Per-role connection strings. A role with no DSN is simply not held.
+ *
+ * Declared here rather than in the Postgres driver because `[persistence.roles]`
+ * in `config.ts` is what produces one, and config must not import a driver to
+ * name the shape of its own output.
+ */
+export type StorageRoleDsns = Partial<Record<StorageRole, string>>;
+
 export const STORAGE_OPERATION_CLASSES: readonly StorageOperationClass[] = [
   "write",
   "transcript_read",

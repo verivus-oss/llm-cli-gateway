@@ -203,6 +203,19 @@ export function createPostgresJobStoreOps(
   ): Promise<{ rows: R[] }> =>
     driver.withConnection("write", connection => rows<R>(connection, statement, params));
 
+  /**
+   * The one job-store statement that is NOT `write`. See
+   * postgres-security-hardening.md 4.3: job expiry is a retention operation and
+   * routes to `llmgw_retention`, which is what lets `llmgw_app` hold no
+   * `DELETE` on `jobs`. A deployment with no retention credential degrades onto
+   * `app`, exactly as it behaves today.
+   */
+  const retentionAffected = (
+    statement: string,
+    params: readonly unknown[] = []
+  ): Promise<{ rowCount: number }> =>
+    driver.withConnection("retention", connection => affected(connection, statement, params));
+
   const poolAffected = (
     statement: string,
     params: readonly unknown[] = []
@@ -1066,7 +1079,7 @@ export function createPostgresJobStoreOps(
         return (result.rowCount ?? 0) > 0;
       }
       case "evictExpired": {
-        const result = await poolAffected(
+        const result = await retentionAffected(
           `DELETE FROM jobs
          WHERE expires_at < $1
            AND (
