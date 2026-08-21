@@ -2184,3 +2184,116 @@ describe("Session Migration", () => {
     expect(migrated?.metadata).toEqual({});
   });
 });
+
+/**
+ * The session `cli` domain, asserted against the ENUM rather than against the
+ * migration text.
+ *
+ * Migrations 001 and 003 each spell out a provider list by hand, and both are
+ * wrong in both directions today: they omit `devin` and `cursor`, and they
+ * carry `grok-api`, which is an API provider id. Neither can be corrected in
+ * place, because every migration's SHA-256 is pinned in
+ * POSTGRES_IMMUTABLE_MIGRATION_SHA256 and re-verified against databases that
+ * already applied it, so an edit makes the runner refuse to migrate them.
+ *
+ * They do not need correcting: migration 005 drops both constraints and
+ * replaces them with a format guard, because API provider ids are arbitrary and
+ * a closed enum was the wrong shape. What keeps that honest is this pair of
+ * tests, not the frozen text. The first derives its expectation from
+ * PROVIDER_TYPES, so admitting an eighth provider extends it by itself; the
+ * second runs the same insert against the pre-005 schema and shows it failing,
+ * so a first test that passed for any other reason would be caught here.
+ */
+describe("session provider domain", () => {
+  it("admits every PROVIDER_TYPES value once every migration is applied", async () => {
+    const { pool } = await setupTestDatabase();
+    const schema = `session_cli_domain_${randomUUID().replaceAll("-", "")}`;
+    let client: PoolClient | null = null;
+    let schemaCreated = false;
+
+    try {
+      await pool.query(`CREATE SCHEMA ${quoteIdentifier(schema)}`);
+      schemaCreated = true;
+      client = await pool.connect();
+      await client.query(`SET search_path TO ${quoteIdentifier(schema)}`);
+      await applyMigrations(client, ALL_MIGRATION_VERSIONS);
+
+      for (const provider of PROVIDER_TYPES) {
+        await client.query("INSERT INTO sessions (id, cli) VALUES ($1, $2)", [
+          `session-${provider}`,
+          provider,
+        ]);
+        await client.query("INSERT INTO active_sessions (cli, session_id) VALUES ($1, $2)", [
+          provider,
+          `session-${provider}`,
+        ]);
+      }
+
+      const stored = await client.query<{ cli: string }>("SELECT cli FROM sessions ORDER BY cli");
+      expect(stored.rows.map(row => row.cli)).toEqual([...PROVIDER_TYPES].sort());
+      const pointers = await client.query<{ cli: string }>(
+        "SELECT cli FROM active_sessions ORDER BY cli"
+      );
+      expect(pointers.rows.map(row => row.cli)).toEqual([...PROVIDER_TYPES].sort());
+    } finally {
+      if (client) {
+        await client.query("RESET search_path");
+        client.release();
+      }
+      if (schemaCreated)
+        await pool.query(`DROP SCHEMA IF EXISTS ${quoteIdentifier(schema)} CASCADE`);
+    }
+  });
+
+  it("shows the pre-005 schema rejecting the providers 001 never listed", async () => {
+    const listed = new Set(
+      [...(migrationSql(1).match(/cli IN \(([^)]*)\)/) ?? [])[1].matchAll(/'([^']+)'/g)].map(
+        match => match[1]
+      )
+    );
+    const unlisted = PROVIDER_TYPES.filter(provider => !listed.has(provider));
+    // Without this the test would pass vacuously the moment the two sets agreed
+    // for any reason, including someone editing the frozen migration.
+    expect(unlisted.length).toBeGreaterThan(0);
+
+    const { pool } = await setupTestDatabase();
+    const schema = `session_cli_pre005_${randomUUID().replaceAll("-", "")}`;
+    let client: PoolClient | null = null;
+    let schemaCreated = false;
+
+    try {
+      await pool.query(`CREATE SCHEMA ${quoteIdentifier(schema)}`);
+      schemaCreated = true;
+      client = await pool.connect();
+      await client.query(`SET search_path TO ${quoteIdentifier(schema)}`);
+      await applyMigrations(client, [1, 2, 3, 4]);
+
+      for (const provider of unlisted) {
+        await expect(
+          client.query("INSERT INTO sessions (id, cli) VALUES ($1, $2)", [
+            `pre-005-${provider}`,
+            provider,
+          ])
+        ).rejects.toThrow(/violates check constraint/);
+      }
+
+      await applyMigrations(client, [5]);
+
+      for (const provider of unlisted) {
+        await client.query("INSERT INTO sessions (id, cli) VALUES ($1, $2)", [
+          `post-005-${provider}`,
+          provider,
+        ]);
+      }
+      const stored = await client.query<{ cli: string }>("SELECT cli FROM sessions ORDER BY cli");
+      expect(stored.rows.map(row => row.cli)).toEqual([...unlisted].sort());
+    } finally {
+      if (client) {
+        await client.query("RESET search_path");
+        client.release();
+      }
+      if (schemaCreated)
+        await pool.query(`DROP SCHEMA IF EXISTS ${quoteIdentifier(schema)} CASCADE`);
+    }
+  });
+});

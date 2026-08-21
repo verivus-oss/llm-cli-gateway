@@ -2,7 +2,8 @@
 /**
  * provider:surfaces:check is the DRY ratchet for the provider registry.
  *
- * Scans src/ and FAILS on forbidden hand-maintained provider surfaces:
+ * Scans src/ (TypeScript) and the repository's .sql files, and FAILS on
+ * forbidden hand-maintained provider surfaces:
  *
  *   (1) literal provider-name arrays  (shared_provider_registry_design
  *       .forbidden_patterns.literal_provider_arrays), i.e. an array literal that
@@ -20,6 +21,15 @@
  *   (5) two-way provider-label ternaries, e.g.
  *       `provider === "claude" ? "Claude" : "Codex"`, which mislabel every
  *       provider outside the pair. Use `getKitProviderLabel()` instead.
+ *   (7) enumerated provider lists in SQL, e.g. a
+ *       `CHECK (cli IN ('claude', 'codex', ...))` constraint in a migration.
+ *
+ * (7) exists because the scan used to stop at `.ts` and therefore could not see
+ * a `.sql` file at all. Four hand-written provider lists sat in `migrations/`
+ * through two provider admissions, wrong in BOTH directions: missing `devin`
+ * and `cursor`, and carrying `grok-api`, which is an API provider id and not a
+ * CliType. The gate built to forbid hand-maintained provider lists had a blind
+ * spot exactly where four of them lived.
  *
  * (4) and (5) exist because the Kit provider set grew from two to three and the
  * stale two-provider forms survived in `index.ts`, reachable by no test: those
@@ -172,6 +182,63 @@ const PROVIDER_LABEL_TERNARY = new RegExp(
 const PIPED_PROVIDER_PROSE = new RegExp(
   `(?:${PROVIDER_NAME})(?:\\s*\\|\\s*(?:${PROVIDER_NAME}|grok-api|[a-z]+-api)){2,}`
 );
+
+/**
+ * Pattern (7): an enumerated provider list in SQL, single-quoted because that
+ * is SQL's string literal. Three or more names in a comma-separated run, the
+ * same threshold pattern (6) uses and for the same reason: two can be a
+ * legitimate pair, three is a roster.
+ *
+ * `grok-api` is included in the alternation deliberately. The lists this
+ * catches carry it, and a detector that could not see the wrong name would miss
+ * half of what makes them wrong.
+ */
+const SQL_ENUMERATED_PROVIDER_LIST = new RegExp(
+  `'(?:${PROVIDER_NAME}|grok-api)'(?:\\s*,\\s*'(?:${PROVIDER_NAME}|grok-api)'){2,}`
+);
+
+export function findSqlEnumeratedProviderLists(content) {
+  return findAllRegex(content, SQL_ENUMERATED_PROVIDER_LIST);
+}
+
+const SQL_PATTERNS = [
+  { kind: "sql-enumerated-provider-list", regex: SQL_ENUMERATED_PROVIDER_LIST },
+  { kind: "piped-provider-prose", regex: PIPED_PROVIDER_PROSE },
+];
+
+/**
+ * SQL provider lists that are FROZEN rather than fixed, with the exact number
+ * of occurrences each file is allowed to contain.
+ *
+ * These cannot be corrected in place and cannot be generated from CLI_TYPES,
+ * and the reason is mechanical rather than a preference. Every migration file's
+ * SHA-256 is recorded in `POSTGRES_IMMUTABLE_MIGRATION_SHA256` and re-verified
+ * against every database that already applied it (`assertRecordedMigrationChecksum`
+ * in src/migrate.ts refuses to run migrations on a checksum mismatch), so
+ * editing one byte of an applied migration bricks migration for every existing
+ * installation. A file generated from CLI_TYPES would change its checksum
+ * whenever a provider is admitted, which is the same failure on a timer.
+ *
+ * They also do not need correcting. Migration 005 DROPS both enumerated
+ * constraints and replaces them with a format guard, because API provider ids
+ * are arbitrary and a closed enum was the wrong shape; 006 uses that guard from
+ * the start. What keeps the head state honest is therefore not this text, it is
+ * the pair of tests in src/__tests__/migration-pg.test.ts ("session provider
+ * domain"), which apply the real migrations to a real database and assert that
+ * every PROVIDER_TYPES value is admitted, and show the pre-005 schema rejecting
+ * the ones 001 never listed. Admitting an eighth provider extends that
+ * assertion by itself, with no list to retype.
+ *
+ * Pinned in BOTH directions. A fifth occurrence in one of these files fails,
+ * and so does a disappearing one, which would mean a published migration had
+ * been edited.
+ */
+const FROZEN_SQL_PROVIDER_LISTS = {
+  "migrations/001_initial_schema.sql": 2,
+  "migrations/003_provider_type_sessions.sql": 2,
+  // The one in 005 is the comment recording the set that 005 removes.
+  "migrations/005_provider_type_open_api_names.sql": 1,
+};
 
 // ---------------------------------------------------------------------------
 // CENSUS RATCHET: hand-authored provider data.
@@ -354,19 +421,48 @@ function isAlwaysAllowed(relPath) {
   return false;
 }
 
-function walk(dir) {
+function walk(dir, extension = ".ts", ignored = new Set()) {
   const out = [];
   for (const entry of readdirSync(dir)) {
+    if (ignored.has(entry)) continue;
     const full = join(dir, entry);
     const st = statSync(full);
     if (st.isDirectory()) {
-      out.push(...walk(full));
-    } else if (entry.endsWith(".ts")) {
+      out.push(...walk(full, extension, ignored));
+    } else if (entry.endsWith(extension)) {
       out.push(full);
     }
   }
   return out;
 }
+
+/**
+ * Directories with no authored SQL in them. `dist` and `installer/dist` are
+ * build output, the rest are caches and dependencies. Skipping them is what
+ * makes a whole-repository walk for `.sql` cheap enough to run in the gate.
+ */
+const SQL_SCAN_IGNORED_DIRECTORIES = new Set([
+  ".git",
+  ".sqry",
+  ".sqry-cache",
+  ".worktrees",
+  "coverage",
+  "dist",
+  "node_modules",
+]);
+
+/**
+ * A fixture root for the gate's own tests, which need to add a NEW violating
+ * file rather than remove an existing one (the ADD-form negative control the
+ * design's section 3.5 requires). Scanning a temporary directory keeps that
+ * test from writing into the repository it is checking.
+ *
+ * In fixture mode the TypeScript scan and the hand-authored census are skipped:
+ * both are calibrated against the real tree, so running them against a fixture
+ * would report the whole grandfathered set as missing.
+ */
+const sqlFixtureArg = process.argv.find(arg => arg.startsWith("--sql-fixture="));
+const sqlFixtureRoot = sqlFixtureArg ? resolve(sqlFixtureArg.slice("--sql-fixture=".length)) : null;
 
 const newViolations = [];
 const legacyHits = [];
@@ -375,7 +471,33 @@ const legacyHits = [];
 // always-allowed file must still be counted.
 const scannedFiles = [];
 
-for (const absPath of walk(srcRoot)) {
+/**
+ * Frozen-file occurrence counts actually seen, for the both-directions check.
+ *
+ * Exported because a gate that scanned nothing also exits 0, and this is what a
+ * test can read to prove the .sql walk reached the migrations at all.
+ */
+export const frozenSqlCounts = new Map();
+
+const sqlScanRoot = sqlFixtureRoot ?? repoRoot;
+for (const absPath of walk(sqlScanRoot, ".sql", SQL_SCAN_IGNORED_DIRECTORIES)) {
+  const relPath = relative(sqlScanRoot, absPath).split("\\").join("/");
+  const content = readFileSync(absPath, "utf8");
+  const frozenLimit = sqlFixtureRoot ? undefined : FROZEN_SQL_PROVIDER_LISTS[relPath];
+
+  for (const { kind, regex } of SQL_PATTERNS) {
+    const hits = findAllRegex(content, regex);
+    if (kind === "sql-enumerated-provider-list" && frozenLimit !== undefined) {
+      frozenSqlCounts.set(relPath, hits.length);
+      continue;
+    }
+    for (const hit of hits) {
+      newViolations.push({ relPath, kind, line: hit.line, snippet: hit.snippet });
+    }
+  }
+}
+
+for (const absPath of sqlFixtureRoot ? [] : walk(srcRoot)) {
   const relPath = relative(repoRoot, absPath).split("\\").join("/");
   scannedFiles.push({ relPath, content: readFileSync(absPath, "utf8") });
   if (isAlwaysAllowed(relPath)) continue;
@@ -404,7 +526,34 @@ function log(msg) {
 }
 
 log("provider:surfaces:check");
-log(`  scanned: ${srcRoot}`);
+log(
+  `  scanned: ${sqlFixtureRoot ? `${sqlFixtureRoot} (.sql fixture only)` : `${srcRoot}, ${sqlScanRoot}/**/*.sql`}`
+);
+
+/**
+ * The frozen SQL lists, checked in both directions.
+ *
+ * "Missing" is not a pass. A frozen file whose count fell is a published
+ * migration that has been edited, which breaks the checksum every database that
+ * applied it verifies against.
+ */
+export function compareFrozenSqlCounts(actualCounts) {
+  const problems = [];
+  for (const [relPath, expected] of Object.entries(FROZEN_SQL_PROVIDER_LISTS)) {
+    const actual = actualCounts.get(relPath);
+    if (actual === expected) continue;
+    problems.push(
+      actual === undefined
+        ? `${relPath}: file not found, or it no longer contains the ${expected} frozen list(s)`
+        : `${relPath}: ${actual} enumerated provider list(s), expected exactly ${expected}`
+    );
+  }
+  return problems;
+}
+
+function frozenSqlProblems() {
+  return sqlFixtureRoot ? [] : compareFrozenSqlCounts(frozenSqlCounts);
+}
 
 if (legacyHits.length > 0) {
   log("");
@@ -418,7 +567,23 @@ if (legacyHits.length > 0) {
 // detector, and a top-level process.exit takes the runner down with it. The
 // same defect was fixed in generate-provider-seed.mjs earlier the same day.
 function main() {
-  const censusProblems = censusHandAuthoredProviderData(scannedFiles);
+  const frozenProblems = frozenSqlProblems();
+  if (frozenProblems.length > 0) {
+    log("");
+    log("  FAIL: a frozen SQL provider list changed:");
+    for (const problem of frozenProblems) log(`    ${problem}`);
+    log("");
+    log("  These lists are frozen because every migration's SHA-256 is verified");
+    log("  against databases that already applied it. If a migration file was");
+    log("  edited, revert it and write a NEW migration; if one was added or");
+    log("  removed, update FROZEN_SQL_PROVIDER_LISTS in this script.");
+    process.exit(1);
+  }
+
+  // Skipped in fixture mode: the census is a repo-wide SET, so an empty scan
+  // reports every grandfathered name as deleted and the gate would exit 1 for a
+  // reason that has nothing to do with what the fixture is testing.
+  const censusProblems = sqlFixtureRoot ? [] : censusHandAuthoredProviderData(scannedFiles);
   if (censusProblems.length > 0) {
     log("");
     log("  FAIL: hand-authored provider data (the flag set belongs to the customer's binary):");
@@ -445,6 +610,14 @@ function main() {
     log("  (or a projection in src/provider-surface-generator.ts). If this is a");
     log("  not-yet-migrated legacy surface, add it to LEGACY_ALLOWLIST with the");
     log("  phase that removes it.");
+    if (newViolations.some(v => v.kind === "sql-enumerated-provider-list")) {
+      log("");
+      log("  A migration cannot import CLI_TYPES, so a provider enum written into");
+      log("  SQL goes stale the moment a provider is admitted and cannot be edited");
+      log("  afterwards. Constrain the FORMAT of the identifier instead, as");
+      log("  migration 005 does, and assert the domain in a test derived from the");
+      log('  enum (src/__tests__/migration-pg.test.ts, "session provider domain").');
+    }
     process.exit(1);
   }
 
