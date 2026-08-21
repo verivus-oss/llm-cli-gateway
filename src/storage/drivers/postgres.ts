@@ -271,10 +271,24 @@ export class PostgresStorageDriver implements StorageDriver {
  *
  * `max: 1` USED to be incidental. Under the worker the parent's JobStore
  * interface was synchronous, so only one operation could be in flight and a
- * larger pool bought nothing. After the port the parent is concurrent, so this
- * is no longer incidental: it is the connection mutex that serialises store
- * writes, and it must be carried as a STATED fence or replaced by an explicit
- * equivalent. Raising it is a concurrency change, not a tuning change.
+ * larger pool bought nothing. After the port the parent is concurrent, so it
+ * has become load bearing, and raising it is a concurrency change rather than
+ * a tuning change.
+ *
+ * It serialises CONNECTIONS, not OPERATIONS, and the difference matters. A
+ * `transaction()` body holds one checked-out client for its whole duration, so
+ * that IS serialised. `withConnection` does not: it runs each statement through
+ * `pool.query`, which checks out, runs and releases per statement. So two
+ * `withConnection` statements belonging to one logical operation can interleave
+ * with another operation between them, which the worker's single in-flight RPC
+ * made impossible. An earlier version of this comment called it "the connection
+ * mutex that serialises store writes"; that overstated it, and a multi-statement
+ * operation that needs atomicity must use `transaction()` rather than rely on
+ * the pool size.
+ *
+ * The waiting behaviour is also a try-lock, not a queue without end: a caller
+ * that cannot get the single client fails after `connectionTimeoutMillis`
+ * rather than waiting for the holder.
  *
  * The timeouts exist so PostgreSQL aborts a blocked or pathological operation
  * rather than leaving the caller unsure whether its mutation landed.

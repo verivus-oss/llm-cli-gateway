@@ -839,6 +839,20 @@ interface AsyncJobRecord {
   resolveTerminalHookCompletion?: (success: boolean) => void;
   terminalHookOutcome?: boolean;
   outputDirty: boolean; // true if stdout/stderr changed since last DB flush
+  /**
+   * Serialises this job's durable output writes. PER JOB, not global: two
+   * different jobs have no ordering relationship and serialising them would be
+   * a throughput regression for no correctness gain.
+   *
+   * Needed because every flush writes the WHOLE accumulated job.stdout rather
+   * than a delta, and maybeFlushOutput clears outputDirty and stamps
+   * lastOutputFlushAt BEFORE it awaits. While the write was synchronous that
+   * was safe. Once a write can outlast the 1000ms throttle, a second flush can
+   * begin while the first is in flight, and if the older snapshot lands last
+   * the durable row is silently truncated back to it: output that was already
+   * stored disappears, with no error anywhere.
+   */
+  outputWriteChain?: Promise<void>;
   lastOutputFlushAt: number;
   /**
    * True once no further output can arrive for this job: `close` fired, or the
@@ -1349,6 +1363,7 @@ export class AsyncJobManager {
   private heartbeatTickInFlight = false;
   /** Single-flight guard for the orphan sweep tick. See onSweepTick. */
   private sweepTickInFlight = false;
+  private evictionTickInFlight = false;
 
   constructor(
     private logger: Logger = noopLogger,
@@ -1396,7 +1411,17 @@ export class AsyncJobManager {
 
     // `void`: a timer cannot await its callback, so fire-and-forget is
     // deliberate at the ENTRY POINT. evictCompletedJobs owns its own errors.
-    this.evictionTimer = setInterval(() => void this.evictCompletedJobs(), EVICTION_INTERVAL_MS);
+    // Skip-if-running, like heartbeat and sweep. evictCompletedJobs became
+    // async when the store did, and section 4.2 of the design records three
+    // store-touching timers getting a guard. This one never got it: two
+    // overlapping ticks could both persistComplete the same dead pid.
+    this.evictionTimer = setInterval(() => {
+      if (this.evictionTickInFlight) return;
+      this.evictionTickInFlight = true;
+      void this.evictCompletedJobs().finally(() => {
+        this.evictionTickInFlight = false;
+      });
+    }, EVICTION_INTERVAL_MS);
     // Allow the process to exit even if the timer is active
     if (this.evictionTimer.unref) {
       this.evictionTimer.unref();
@@ -1779,7 +1804,27 @@ export class AsyncJobManager {
    * sweep excluding those ids, and (5) emit a flight-recorder completion for
    * each orphaned row.
    */
-  private async runOrphanSweep(): Promise<void> {
+  /**
+   * Single-flighted HERE, on the sweep itself, not only on the sweep timer.
+   *
+   * Per-timer guards are insufficient and it is worth saying why: heartbeat and
+   * sweep are different timers with different flags, and restoreDurableAdmission
+   * calls this from the HEARTBEAT path as well as from startup. So a reaper tick
+   * can overlap a nested sweep with both timer flags set, and two manager-side
+   * sweeps then both recoverStaleJobs and both persistOrphanProgress. The row
+   * locks serialise the UPDATE in the database; they do not serialise the
+   * manager's follow-up writes.
+   */
+  private orphanSweepInFlight: Promise<void> | null = null;
+
+  private runOrphanSweep(): Promise<void> {
+    this.orphanSweepInFlight ??= this.runOrphanSweepBody().finally(() => {
+      this.orphanSweepInFlight = null;
+    });
+    return this.orphanSweepInFlight;
+  }
+
+  private async runOrphanSweepBody(): Promise<void> {
     if (!this.store || this.disposed || !this.durableAdmission) return;
     if (this.skipSweepThisCycle) {
       this.skipSweepThisCycle = false;
@@ -3208,9 +3253,27 @@ export class AsyncJobManager {
     if (!force && now - job.lastOutputFlushAt < OUTPUT_FLUSH_INTERVAL_MS) return;
     job.outputDirty = false;
     job.lastOutputFlushAt = now;
-    await this.safeStoreCall("recordOutput", () =>
-      this.store!.recordOutput(job.id, job.stdout, job.stderr, job.outputTruncated)
-    );
+    // Snapshot BEFORE joining the chain. The bytes belonging to this flush are
+    // the ones present when it was decided on; reading job.stdout after the
+    // wait would hand two queued flushes the same later value and hide the
+    // ordering rather than fix it.
+    const stdout = job.stdout;
+    const stderr = job.stderr;
+    const truncated = job.outputTruncated;
+    const previous = job.outputWriteChain ?? Promise.resolve();
+    const write = previous
+      .catch(() => undefined)
+      .then(() =>
+        this.safeStoreCall("recordOutput", () =>
+          this.store!.recordOutput(job.id, stdout, stderr, truncated)
+        )
+      );
+    job.outputWriteChain = write;
+    // Registered so dispose() drains it. Without this, shutdown can complete
+    // with an output write outstanding, which is the close() drain defect one
+    // layer up.
+    this.trackPendingWrite(write);
+    await write;
   }
 
   private async emitProgress(
