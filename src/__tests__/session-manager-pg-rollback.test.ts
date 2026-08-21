@@ -1,6 +1,10 @@
 import { describe, expect, it, vi } from "vitest";
-import type { Pool, PoolClient } from "pg";
 import { PostgreSQLSessionManager } from "../session-manager-pg.js";
+import {
+  PostgresStorageDriver,
+  type PgClientLike,
+  type PgPoolLike,
+} from "../storage/drivers/postgres.js";
 import type { KitSessionBinding } from "../personal-config-types.js";
 
 function binding(): KitSessionBinding {
@@ -32,9 +36,17 @@ function managerWhoseRollbackFails(
     if (statement.includes("INSERT INTO sessions")) throw primaryError;
     return { rows: [], rowCount: 0 };
   });
-  const client = { query, release } as unknown as PoolClient;
-  const pool = { connect: vi.fn().mockResolvedValue(client) } as unknown as Pool;
-  const manager = new PostgreSQLSessionManager(pool);
+  const client = { query, release } as unknown as PgClientLike;
+  const pool = {
+    query,
+    connect: vi.fn().mockResolvedValue(client),
+    end: vi.fn(),
+  } as unknown as PgPoolLike;
+  // The rollback now belongs to the driver, so this exercises the real one over
+  // a fake pool rather than a hand-rolled transaction in the session manager.
+  const manager = new PostgreSQLSessionManager(
+    new PostgresStorageDriver({ app: "postgres://fake" }, () => pool)
+  );
   // These suites exercise rollback, not the schema preflight, so both cached
   // readiness gates are pre-satisfied.
   (manager as unknown as { kitPointerSchemaReady: Promise<void> | null }).kitPointerSchemaReady =
@@ -61,7 +73,10 @@ describe("PostgreSQLSessionManager transaction rollback failures", () => {
     const { manager, query, release } = managerWhoseRollbackFails(primaryError, rollbackError);
 
     await expect(operation(manager)).rejects.toBe(primaryError);
-    expect(query).toHaveBeenCalledWith("ROLLBACK");
+    expect(query).toHaveBeenCalledWith("ROLLBACK", []);
+    // Released ONCE, and with the rollback failure, which destroys the client
+    // instead of returning a connection that may still be inside a transaction.
     expect(release).toHaveBeenCalledTimes(1);
+    expect(release).toHaveBeenCalledWith(rollbackError);
   });
 });

@@ -9,7 +9,20 @@ import type {
 } from "../personal-config-types.js";
 import { runWithRequestContext } from "../request-context.js";
 import { kitActiveSessionKey } from "../session-manager.js";
-import { cleanTestDatabase, setupTestDatabase } from "./setup.js";
+import { cleanTestDatabase, setupTestDatabase, setupTestStorageDriver } from "./setup.js";
+import { PostgresStorageDriver, type PgPoolLike } from "../storage/drivers/postgres.js";
+
+/**
+ * A driver over a pool this test already owns. These cases point a pool at a
+ * temporary schema through `search_path`, which is the property under test, so
+ * the driver must be built over THAT pool rather than opening its own.
+ */
+function driverOver(pool: Pool): PostgresStorageDriver {
+  return new PostgresStorageDriver(
+    { app: "postgres://owned-by-the-test" },
+    () => pool as unknown as PgPoolLike
+  );
+}
 
 function execution(overrides: Partial<KitExecutionRef> = {}): KitExecutionRef {
   return {
@@ -72,14 +85,14 @@ describe("PostgreSQL Personal Agent Config Kit session persistence", () => {
   beforeEach(async () => {
     await cleanTestDatabase();
     ({ pool } = await setupTestDatabase());
-    manager = new PostgreSQLSessionManager(pool);
+    manager = new PostgreSQLSessionManager(await setupTestStorageDriver());
   });
 
   it("preflights the exact Kit relation resolved through search_path", async () => {
     const schema = temporarySchemaName("kit_preflight_path");
     await pool.query(`CREATE SCHEMA ${schema}`);
     const scopedPool = new Pool({ connectionString: schemaScopedDsn(schema) });
-    const scopedManager = new PostgreSQLSessionManager(scopedPool);
+    const scopedManager = new PostgreSQLSessionManager(driverOver(scopedPool));
     try {
       // The first search-path schema deliberately has no Kit table. The
       // unqualified runtime relation resolves to public.kit_active_sessions.
@@ -105,7 +118,7 @@ describe("PostgreSQL Personal Agent Config Kit session persistence", () => {
       )`
     );
     const scopedPool = new Pool({ connectionString: schemaScopedDsn(schema) });
-    const scopedManager = new PostgreSQLSessionManager(scopedPool);
+    const scopedManager = new PostgreSQLSessionManager(driverOver(scopedPool));
     try {
       await expect(
         scopedManager.importKitSession("claude", binding(), undefined, "incomplete-kit-session")

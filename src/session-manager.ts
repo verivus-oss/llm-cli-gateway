@@ -1839,7 +1839,7 @@ export async function createSessionManager(
       db = await createDatabaseConnection(config, logger);
     }
 
-    return new PostgreSQLSessionManager(db.getPool());
+    return new PostgreSQLSessionManager(db.getDriver());
   } else {
     // Use file-based storage with TTL from config
     const sessionTtlMs = config?.sessionTtl

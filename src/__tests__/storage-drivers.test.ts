@@ -53,6 +53,28 @@ describe("toDollarPlaceholders", () => {
   it("is a no-op on a statement with no placeholders", () => {
     expect(toDollarPlaceholders("SELECT 1")).toBe("SELECT 1");
   });
+
+  it("cannot tell jsonb's key-exists OPERATOR from a placeholder", () => {
+    // Not a defect in this function: `?` is both, and nothing in the statement
+    // says which. It is a trap for every caller, and the session store walked
+    // into it: eight `metadata ? 'kit'` predicates became `metadata $1 'kit'`
+    // and failed with `syntax error at or near "$1"` the moment they went
+    // through the driver. Recorded here so the next author writing a jsonb
+    // predicate finds the reason to spell it `jsonb_exists(metadata, 'kit')`,
+    // which is the same operator by its function name.
+    //
+    // It is not free, and the cost is measured rather than assumed: with
+    // enable_seqscan off over 50,000 rows, the OPERATOR form takes a bitmap
+    // index scan on the GIN index and the FUNCTION form still sequential
+    // scans, because the planner matches indexes on operators. With seqscan
+    // ON, both sequential scan at that size, so nothing regresses today.
+    expect(toDollarPlaceholders("SELECT 1 WHERE metadata ? 'kit'")).toBe(
+      "SELECT 1 WHERE metadata $1 'kit'"
+    );
+    expect(toDollarPlaceholders("SELECT 1 WHERE jsonb_exists(metadata, 'kit')")).toBe(
+      "SELECT 1 WHERE jsonb_exists(metadata, 'kit')"
+    );
+  });
 });
 
 describe("SqliteStorageDriver", () => {

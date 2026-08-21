@@ -313,10 +313,36 @@ interface PgPoolConfig {
   max: number;
   idleTimeoutMillis: number;
   connectionTimeoutMillis: number;
-  statement_timeout: number;
-  lock_timeout: number;
-  query_timeout: number;
+  statement_timeout?: number;
+  lock_timeout?: number;
+  query_timeout?: number;
   application_name: string;
+}
+
+/**
+ * Per-subsystem pool settings.
+ *
+ * The constants above are the JOB STORE's, carried over from its worker as
+ * parity rather than preference, and `max: 1` in particular is a concurrency
+ * property that must not move. The session store arrives on this driver with
+ * its own established settings (`db.ts`: ten connections, a ten second
+ * statement timeout, and no lock or query timeout at all), and imposing the job
+ * store's on it would be a behaviour change dressed as a refactor: one
+ * connection where there were ten, and a five second lock timeout turning
+ * `FOR UPDATE` contention from a wait into an error.
+ *
+ * So the settings are a parameter. A key left `undefined` is not sent, which is
+ * how "no lock timeout" is expressed: `pg` treats an absent option and an
+ * explicit zero differently.
+ */
+export interface PgPoolSettings {
+  max?: number;
+  idleTimeoutMillis?: number;
+  connectionTimeoutMillis?: number;
+  statementTimeoutMs?: number | null;
+  lockTimeoutMs?: number | null;
+  queryTimeoutMs?: number | null;
+  applicationName?: string;
 }
 
 /** A pool that can report asynchronous failures on an idle backend. */
@@ -335,7 +361,8 @@ type PgPoolWithEvents = PgPoolLike & {
  * be forgotten at a call site.
  */
 export async function nodePostgresPoolFactory(
-  onPoolError: (role: StorageRole, error: Error) => void
+  onPoolError: (role: StorageRole, error: Error) => void,
+  settings: PgPoolSettings = {}
 ): Promise<PgPoolFactory> {
   const pg = (await import("pg")) as unknown as {
     default?: { Pool: new (config: PgPoolConfig) => PgPoolLike };
@@ -344,17 +371,43 @@ export async function nodePostgresPoolFactory(
   const Pool = pg.Pool ?? pg.default?.Pool;
   if (!Pool) throw new Error("storage: the optional peer dependency `pg` is not installed");
   return (role, dsn) => {
-    const pool = new Pool({
+    const config: PgPoolConfig = {
       connectionString: dsn,
-      max: PG_POOL_MAX,
-      idleTimeoutMillis: PG_IDLE_TIMEOUT_MS,
-      connectionTimeoutMillis: PG_CONNECTION_TIMEOUT_MS,
-      statement_timeout: PG_STATEMENT_TIMEOUT_MS,
-      lock_timeout: PG_LOCK_TIMEOUT_MS,
-      query_timeout: PG_QUERY_TIMEOUT_MS,
-      application_name: PG_APPLICATION_NAME,
-    }) as PgPoolWithEvents;
+      max: settings.max ?? PG_POOL_MAX,
+      idleTimeoutMillis: settings.idleTimeoutMillis ?? PG_IDLE_TIMEOUT_MS,
+      connectionTimeoutMillis: settings.connectionTimeoutMillis ?? PG_CONNECTION_TIMEOUT_MS,
+      application_name: settings.applicationName ?? PG_APPLICATION_NAME,
+    };
+    // `null` means "do not send this option", which is not the same as sending
+    // zero. `undefined` means "keep the default".
+    const statementTimeout = settings.statementTimeoutMs ?? PG_STATEMENT_TIMEOUT_MS;
+    const lockTimeout =
+      settings.lockTimeoutMs === undefined ? PG_LOCK_TIMEOUT_MS : settings.lockTimeoutMs;
+    const queryTimeout =
+      settings.queryTimeoutMs === undefined ? PG_QUERY_TIMEOUT_MS : settings.queryTimeoutMs;
+    if (statementTimeout !== null) config.statement_timeout = statementTimeout;
+    if (lockTimeout !== null) config.lock_timeout = lockTimeout;
+    if (queryTimeout !== null) config.query_timeout = queryTimeout;
+    const pool = new Pool(config) as PgPoolWithEvents;
     pool.on?.("error", error => onPoolError(role, error));
     return pool;
   };
 }
+
+/**
+ * The session store's pool settings, carried across from `db.ts` unchanged.
+ *
+ * Ten connections because the session manager is called concurrently by every
+ * in-flight request, and a `max: 1` pool would turn two simultaneous session
+ * reads into a five second wait and then a connection timeout. No lock or query
+ * timeout, because it had none.
+ */
+export const SESSION_POOL_SETTINGS: PgPoolSettings = {
+  max: 10,
+  idleTimeoutMillis: 30_000,
+  connectionTimeoutMillis: 5_000,
+  statementTimeoutMs: 10_000,
+  lockTimeoutMs: null,
+  queryTimeoutMs: null,
+  applicationName: "llm-cli-gateway-sessions",
+};
