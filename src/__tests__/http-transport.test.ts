@@ -1267,7 +1267,7 @@ describe("Layer 6 HTTP MCP transport (U20)", () => {
       httpLimits: httpLimits({ maxSessions: 1 }),
     });
 
-    const first = rawInitialize(gateway);
+    const first = await rawInitialize(gateway);
     await firstConnect;
 
     const second = await rawInitialize(gateway);

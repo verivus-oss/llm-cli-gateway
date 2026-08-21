@@ -256,7 +256,7 @@ describe("AsyncJobManager Claude MCP artifacts", () => {
 
   it("reconciles a local artifact already orphaned by another workstation", async () => {
     const config = buildClaudeMcpConfig(["sqry"]);
-    const ownerInstance = seedExpiredProcessRow(
+    const ownerInstance = await seedExpiredProcessRow(
       "cross-host",
       ["-p", "review", "--mcp-config", config.path],
       os.hostname(),

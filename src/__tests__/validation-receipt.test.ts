@@ -482,7 +482,7 @@ describe("validation receipt mint + resolve", () => {
     expect(
       (await resolveValidationReceipt(deps, "v-skipped-source", { caller: "local" })).status
     ).toBe("minted");
-    const source = requireStoredReceipt("v-skipped-source");
+    const source = await requireStoredReceipt("v-skipped-source");
     const validationId = `v-skipped-binding-${field.replaceAll(" ", "-")}`;
     await recordCoherentReceiptClone(source, validationId, mutate);
 
@@ -653,7 +653,7 @@ describe("validation receipt mint + resolve", () => {
     expect(
       (await resolveValidationReceipt(deps, "v-linked-judge-source", { caller: "local" })).status
     ).toBe("minted");
-    const source = requireStoredReceipt("v-linked-judge-source");
+    const source = await requireStoredReceipt("v-linked-judge-source");
     const validationId = `v-linked-judge-binding-${field.replaceAll(" ", "-")}`;
     await recordCoherentReceiptClone(source, validationId, mutate);
 
@@ -671,7 +671,7 @@ describe("validation receipt mint + resolve", () => {
     expect(
       (await resolveValidationReceipt(deps, "v-skipped-judge-source", { caller: "local" })).status
     ).toBe("minted");
-    const source = requireStoredReceipt("v-skipped-judge-source");
+    const source = await requireStoredReceipt("v-skipped-judge-source");
     const validationId = "v-finalized-skipped-judge";
     await recordCoherentReceiptClone(source, validationId);
 
@@ -690,7 +690,7 @@ describe("validation receipt mint + resolve", () => {
     expect(
       (await resolveValidationReceipt(deps, "v-linked-status-source", { caller: "local" })).status
     ).toBe("minted");
-    const source = requireStoredReceipt("v-linked-status-source");
+    const source = await requireStoredReceipt("v-linked-status-source");
     const validationId = "v-linked-invalid-run-status";
     await recordCoherentReceiptClone(source, validationId, () => undefined, {
       status: "judge_skipped",
@@ -719,7 +719,7 @@ describe("validation receipt mint + resolve", () => {
     expect(
       (await resolveValidationReceipt(deps, "v-judge-alias-source", { caller: "local" })).status
     ).toBe("minted");
-    const source = requireStoredReceipt("v-judge-alias-source");
+    const source = await requireStoredReceipt("v-judge-alias-source");
     const validationId = `v-judge-alias-${field.replaceAll(" ", "-")}`;
     const sourceReport = JSON.parse(source.reportJson);
     const providerLinks = sourceReport.perModelOutputs.map((output: any, index: number) => ({
@@ -1210,7 +1210,7 @@ describe("validation receipt mint + resolve", () => {
 
   it("verifies a legacy receipt minted before the planned-judge gate existed", async () => {
     await mintLegacyPlannedJudgeReceipt("v-legacy-planned-judge");
-    const stored = requireStoredReceipt("v-legacy-planned-judge");
+    const stored = await requireStoredReceipt("v-legacy-planned-judge");
     // Precondition: the fixture really is the legacy shape the old mint wrote.
     expect(JSON.parse(stored.reportJson).synthesis).toEqual({
       status: "not_requested",
@@ -1231,7 +1231,7 @@ describe("validation receipt mint + resolve", () => {
 
   it("reports verification_failed, not expired_unminted, for a corrupted legacy receipt", async () => {
     await mintLegacyPlannedJudgeReceipt("v-legacy-corrupt");
-    const stored = requireStoredReceipt("v-legacy-corrupt");
+    const stored = await requireStoredReceipt("v-legacy-corrupt");
     // Same legacy shape and a roster that matches the run exactly, so the ONLY
     // defect under test is the tampered evidence itself.
     const validationId = "v-legacy-corrupt-clone";
@@ -1263,7 +1263,7 @@ describe("validation receipt mint + resolve", () => {
     // `running` is gated to pending today and must never mint this shape, so a
     // receipt claiming it does not verify.
     await mintLegacyPlannedJudgeReceipt("v-legacy-running-source");
-    const stored = requireStoredReceipt("v-legacy-running-source");
+    const stored = await requireStoredReceipt("v-legacy-running-source");
     const validationId = "v-legacy-running";
     const report = JSON.parse(stored.reportJson);
     report.validationId = validationId;

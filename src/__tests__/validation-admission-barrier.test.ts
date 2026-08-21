@@ -143,7 +143,7 @@ describe("validation roster durable admission barrier", () => {
   });
 
   it("holds a CLI process until its atomically linked queued job is released", async () => {
-    const { store, validationId } = createStore();
+    const { store, validationId } = await createStore();
     const manager = new AsyncJobManager(noopLogger, undefined, store);
     const marker = join(directories.at(-1)!, "cli-launched");
     try {
@@ -179,7 +179,7 @@ describe("validation roster durable admission barrier", () => {
   });
 
   it("holds a permit granted later from the limiter queue until release", async () => {
-    const { store, validationId } = createStore();
+    const { store, validationId } = await createStore();
     const limits: JobLimitsConfig = {
       maxRunningJobs: 1,
       maxRunningJobsPerProvider: 1,
@@ -223,7 +223,7 @@ describe("validation roster durable admission barrier", () => {
   });
 
   it("launches no CLI process when the atomic validation link is rejected", async () => {
-    const { store, validationId } = createStore("another-owner");
+    const { store, validationId } = await createStore("another-owner");
     const manager = new AsyncJobManager(noopLogger, undefined, store);
     const marker = join(directories.at(-1)!, "cli-must-not-launch");
     try {
@@ -261,9 +261,9 @@ describe("validation roster durable admission barrier", () => {
       model: "m1",
       messages: [{ role: "user", content: "review" }],
     };
-    const accepted = createStore();
+    const accepted = await createStore();
     const acceptedManager = new AsyncJobManager(noopLogger, undefined, accepted.store);
-    const rejected = createStore("another-owner");
+    const rejected = await createStore("another-owner");
     const rejectedManager = new AsyncJobManager(noopLogger, undefined, rejected.store);
     try {
       const outcome = await acceptedManager.startHttpJob({
@@ -319,7 +319,7 @@ describe("validation roster durable admission barrier", () => {
       response.writeHead(200).end();
     });
     await new Promise<void>(resolve => server.listen(0, "127.0.0.1", resolve));
-    const { store } = createStore();
+    const { store } = await createStore();
     let validationId = "";
     const originalRecord = store.recordValidationRun.bind(store);
     store.recordValidationRun = async run => {
@@ -386,7 +386,7 @@ describe("validation roster durable admission barrier", () => {
       response.writeHead(200).end();
     });
     await new Promise<void>(resolve => server.listen(0, "127.0.0.1", resolve));
-    const { store } = createStore();
+    const { store } = await createStore();
     const manager = new AsyncJobManager(noopLogger, undefined, store);
     const judge = {
       ...apiRuntime("judge-api"),

@@ -106,9 +106,9 @@ describe("AsyncJobManager limiter (issue #130)", () => {
 
   it("starts queued process jobs in FIFO order as capacity frees", async () => {
     const manager = makeManager({ maxRunningJobs: 1, maxRunningJobsPerProvider: 5 });
-    const a = startSleeper(manager, 0.4, "corr-a");
-    const b = startSleeper(manager, 0.3, "corr-b");
-    const c = startSleeper(manager, 0.3, "corr-c");
+    const a = await startSleeper(manager, 0.4, "corr-a");
+    const b = await startSleeper(manager, 0.3, "corr-b");
+    const c = await startSleeper(manager, 0.3, "corr-c");
 
     expect(((await manager.getJobSnapshot(a))!).status).toBe("running");
     // both b and c queued behind a

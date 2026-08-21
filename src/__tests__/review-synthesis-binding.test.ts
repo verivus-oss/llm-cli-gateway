@@ -190,7 +190,7 @@ async function synthesize(handler: ToolHandler, overrides: Record<string, any> =
 
 describe("durable review synthesis input binding", () => {
   it("uses only the stored question and exact durable provider result", async () => {
-    const { handlers, httpStarts, store } = harness({});
+    const { handlers, httpStarts, store } = await harness({});
     const response = await synthesize(handlers.synthesize_validation, {
       question: "fabricated caller question",
       providerResults: [
@@ -223,7 +223,7 @@ describe("durable review synthesis input binding", () => {
   it("preserves a material finding beyond normalized rationale limits", async () => {
     const materialFinding = "MATERIAL_FINDING_AFTER_1800: unsafe rollback deletes user data";
     const stdout = `${"context ".repeat(300)}${materialFinding}`;
-    const { handlers, httpStarts } = harness({ providerResult: result({ stdout }) });
+    const { handlers, httpStarts } = await harness({ providerResult: result({ stdout }) });
 
     const response = await synthesize(handlers.synthesize_validation);
     expect(response.structuredContent).toMatchObject({ success: true });
@@ -250,7 +250,7 @@ describe("durable review synthesis input binding", () => {
         { provider: "claude", jobId: "job-claude", correlationId: "corr-claude" },
       ],
     };
-    const { handlers, httpStarts } = harness({
+    const { handlers, httpStarts } = await harness({
       run,
       providerResultsById: {
         "job-codex": result(),
@@ -280,7 +280,7 @@ describe("durable review synthesis input binding", () => {
     ["incomplete stdout paging", result({ stdoutNextOffsetChars: 10 })],
     ["wrong stdout offset", result({ stdoutOffsetChars: 1 })],
   ])("rejects %s before API dispatch", async (_name, providerResult) => {
-    const { handlers, httpStarts } = harness({ providerResult });
+    const { handlers, httpStarts } = await harness({ providerResult });
     const response = await synthesize(handlers.synthesize_validation);
     expect(response.structuredContent).toMatchObject({
       success: false,
@@ -291,7 +291,7 @@ describe("durable review synthesis input binding", () => {
   });
 
   it("rejects inconsistent durable output byte identity before API dispatch", async () => {
-    const { handlers, httpStarts } = harness({
+    const { handlers, httpStarts } = await harness({
       providerResult: result({ stdoutBytes: 1 }),
     });
     const response = await synthesize(handlers.synthesize_validation);
@@ -305,7 +305,7 @@ describe("durable review synthesis input binding", () => {
 
   it("rejects durable evidence whose reverse index belongs to another run", async () => {
     const reverseIndexedRun = runRecord({ validationId: "review-other" });
-    const { handlers, httpStarts } = harness({ reverseIndexedRun });
+    const { handlers, httpStarts } = await harness({ reverseIndexedRun });
 
     const response = await synthesize(handlers.synthesize_validation);
 
@@ -330,7 +330,7 @@ describe("durable review synthesis input binding", () => {
         { provider: "claude", jobId: "job-claude", correlationId: "corr-shared" },
       ],
     };
-    const { handlers, httpStarts } = harness({
+    const { handlers, httpStarts } = await harness({
       run: duplicateCorrelationRun,
       providerResultsById: {
         "job-codex": result({ correlationId: "corr-shared" }),
@@ -365,7 +365,7 @@ describe("durable review synthesis input binding", () => {
       "result is mismatched",
     ],
   ])("rejects %s durable evidence before API dispatch", async (_name, job, owner, message) => {
-    const { handlers, httpStarts } = harness({
+    const { handlers, httpStarts } = await harness({
       providerResult: job as AsyncJobResult | null,
       providerOwner: owner as string | null,
     });
@@ -404,7 +404,7 @@ describe("durable review synthesis input binding", () => {
       "judgeModel does not match",
     ],
   ])("rejects a run with %s", async (_name, run, message) => {
-    const { handlers, httpStarts } = harness({ run });
+    const { handlers, httpStarts } = await harness({ run });
     const response = await synthesize(handlers.synthesize_validation);
     expect(response.structuredContent).toMatchObject({
       success: false,
@@ -422,7 +422,7 @@ describe("durable review synthesis input binding", () => {
         modelList: ["codex", "claude"],
       }),
     };
-    const { handlers, httpStarts } = harness({ run });
+    const { handlers, httpStarts } = await harness({ run });
     const response = await synthesize(handlers.synthesize_validation);
     expect(response.structuredContent).toMatchObject({
       success: true,
@@ -460,7 +460,7 @@ describe("durable review synthesis input binding", () => {
       }),
     ],
   ])("rejects a %s", async (_name, run) => {
-    const { handlers, httpStarts } = harness({ run });
+    const { handlers, httpStarts } = await harness({ run });
     const response = await synthesize(handlers.synthesize_validation);
     expect(response.structuredContent).toMatchObject({
       success: false,
@@ -483,7 +483,7 @@ describe("durable review synthesis input binding", () => {
       "already has a judge job",
     ],
   ])("rejects a %s before API dispatch", async (_name, run, message) => {
-    const { handlers, httpStarts } = harness({ run });
+    const { handlers, httpStarts } = await harness({ run });
     const response = await synthesize(handlers.synthesize_validation);
     expect(response.structuredContent).toMatchObject({
       success: false,
@@ -493,7 +493,7 @@ describe("durable review synthesis input binding", () => {
   });
 
   it("still requires caller inputs for general validation synthesis", async () => {
-    const { handlers, httpStarts } = harness({});
+    const { handlers, httpStarts } = await harness({});
     const response = await handlers.synthesize_validation({ judgeModel: "codex" });
     expect(response.structuredContent).toMatchObject({
       success: false,
