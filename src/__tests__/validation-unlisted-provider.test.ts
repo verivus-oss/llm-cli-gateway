@@ -164,14 +164,19 @@ describe("issue #271: an unlisted provider is skipped, not fatal", () => {
     expect(cursor.error).not.toMatch(/providers list/);
   });
 
-  it("leaves an unrelated error fatal rather than swallowing it as a skip", () => {
+  it("leaves an unrelated error fatal rather than swallowing it as a skip", async () => {
     // The catch must stay narrow. A bug in cwd resolution is not a workspace
     // policy statement about one provider, and silently degrading it to
     // "skipped" would hide a real fault behind a configuration message.
-    expect(() =>
+    //
+    // `rejects`, not `toThrow`: startValidationRun is async, so the same
+    // re-thrown TypeError now arrives as a rejection. The error class and the
+    // assertion are unchanged; only the delivery is. The catch is still narrow,
+    // which is what this test exists to hold.
+    await expect(
       run(["claude"], () => {
         throw new TypeError("cwd resolution is broken");
-      })
-    ).toThrow(TypeError);
+      }).report
+    ).rejects.toThrow(TypeError);
   });
 });

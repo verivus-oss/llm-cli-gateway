@@ -1267,7 +1267,11 @@ describe("Layer 6 HTTP MCP transport (U20)", () => {
       httpLimits: httpLimits({ maxSessions: 1 }),
     });
 
-    const first = await rawInitialize(gateway);
+    // NOT awaited, deliberately: this initialize must stay PENDING so it is
+    // counted against http.max_sessions while the second one is attempted, and
+    // `firstResult` awaits it below. The conversion codemod inserted an await
+    // here, so the request completed first and the test hung on `firstConnect`.
+    const first = rawInitialize(gateway);
     await firstConnect;
 
     const second = await rawInitialize(gateway);

@@ -232,7 +232,7 @@ describe("late child output survives a terminal-status-before-close transition",
 
       const internals = frManager as unknown as {
         jobs: Map<string, { process: { pid: number } | null }>;
-        evictCompletedJobs: () => void;
+        evictCompletedJobs: () => Promise<void>;
       };
       const record = internals.jobs.get(jobId)!;
       const realPid = record.process!.pid;
@@ -240,7 +240,7 @@ describe("late child output survives a terminal-status-before-close transition",
       // takes the ESRCH branch while the real child keeps running and its
       // close handler stays wired up.
       record.process = { pid: 0x7ffffff0 };
-      internals.evictCompletedJobs();
+      await internals.evictCompletedJobs();
 
       // The sweep wrote the row from the bytes known at that instant.
       expect(readPersistedRequest(rec, "corr-esrch")?.response).toContain("EARLY_BYTES");

@@ -52,7 +52,7 @@ describe("the orchestrator has exactly one provider launch path", () => {
     // launchProviderSeat, which is what makes the gates unforgettable.
     const sites = callSites(orchestrator(), "dispatchProviderJob");
     expect(sites).toHaveLength(1);
-    expect(sites[0]).toContain("const outcome = dispatchProviderJob(");
+    expect(sites[0]).toContain("const outcome = await dispatchProviderJob(");
   });
 
   it("providerPreflight is called from exactly one place", () => {

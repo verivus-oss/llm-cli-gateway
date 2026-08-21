@@ -117,7 +117,7 @@ describe("Slice 2 — api provider request handlers (loopback)", () => {
   let closeServer: (() => Promise<void>) | null = null;
   let lastBody: any;
 
-  function buildRuntime(baseUrl: string): GatewayServerRuntime {
+  async function buildRuntime(baseUrl: string): Promise<GatewayServerRuntime> {
     const metrics = new PerformanceMetrics();
     const recorder = new NoopFlightRecorder();
     const asyncJobManager = new AsyncJobManager(
@@ -126,6 +126,12 @@ describe("Slice 2 — api provider request handlers (loopback)", () => {
       new MemoryJobStore(),
       recorder
     );
+    // Sequence like production: main() awaits the startup barrier before it
+    // connects a transport. deferralAvailable is computed from the synchronous
+    // canAdmitDurableJobs() snapshot, so inside the startup window an api
+    // request runs INLINE and never consults the job store, which is where
+    // dedup lives.
+    await asyncJobManager.whenStartupSettled();
     return resolveGatewayServerRuntime(
       {
         sessionManager,
@@ -177,7 +183,7 @@ describe("Slice 2 — api provider request handlers (loopback)", () => {
         JSON.stringify({ model: "qwen2.5", choices: [{ message: { content: "hello-api" } }] })
       );
     });
-    runtime = buildRuntime(baseUrl);
+    runtime = await buildRuntime(baseUrl);
     const providerRuntime: ApiProviderRuntime = {
       name: "ollama",
       kind: "openai-compatible",
@@ -193,7 +199,7 @@ describe("Slice 2 — api provider request handlers (loopback)", () => {
   });
 
   it("rejects a model outside the allowlist before any HTTP call", async () => {
-    runtime = buildRuntime("http://127.0.0.1:1/v1");
+    runtime = await buildRuntime("http://127.0.0.1:1/v1");
     const providerRuntime: ApiProviderRuntime = {
       name: "ollama",
       kind: "openai-compatible",
@@ -216,7 +222,7 @@ describe("Slice 2 — api provider request handlers (loopback)", () => {
       res.writeHead(200, { "content-type": "application/json" });
       res.end(JSON.stringify({ choices: [{ message: { content: "x" } }] }));
     });
-    runtime = buildRuntime(baseUrl);
+    runtime = await buildRuntime(baseUrl);
     const providerRuntime: ApiProviderRuntime = {
       name: "ollama",
       kind: "openai-compatible",
@@ -315,7 +321,7 @@ describe("Slice 1 — api provider telemetry parity", () => {
   let closeServer: (() => Promise<void>) | null = null;
   let lastBody: any;
 
-  function buildRuntime(baseUrl: string): GatewayServerRuntime {
+  async function buildRuntime(baseUrl: string): Promise<GatewayServerRuntime> {
     const metrics = new PerformanceMetrics();
     recorder = new CapturingFlightRecorder();
     const asyncJobManager = new AsyncJobManager(
@@ -324,6 +330,12 @@ describe("Slice 1 — api provider telemetry parity", () => {
       new MemoryJobStore(),
       recorder
     );
+    // Sequence like production: main() awaits the startup barrier before it
+    // connects a transport. deferralAvailable is computed from the synchronous
+    // canAdmitDurableJobs() snapshot, so inside the startup window an api
+    // request runs INLINE and never consults the job store, which is where
+    // dedup lives.
+    await asyncJobManager.whenStartupSettled();
     return resolveGatewayServerRuntime(
       {
         sessionManager,
@@ -389,7 +401,7 @@ describe("Slice 1 — api provider telemetry parity", () => {
         })
       );
     });
-    runtime = buildRuntime(baseUrl);
+    runtime = await buildRuntime(baseUrl);
     const res = await handleApiProviderRequest(runtime, rt(baseUrl), { prompt: "ping" });
 
     expect(res.isError).toBeFalsy();
@@ -417,7 +429,7 @@ describe("Slice 1 — api provider telemetry parity", () => {
       res.writeHead(200, { "content-type": "application/json" });
       res.end(JSON.stringify({ choices: [{ message: { content: "x" } }] }));
     });
-    runtime = buildRuntime(baseUrl);
+    runtime = await buildRuntime(baseUrl);
 
     await handleApiProviderRequest(runtime, rt(baseUrl, { usageInclude: true }), { prompt: "on" });
     expect(lastBody.usage).toEqual({ include: true });
@@ -432,7 +444,7 @@ describe("Slice 1 — api provider telemetry parity", () => {
       res.writeHead(400, { "content-type": "application/json" });
       res.end(JSON.stringify({ error: { message: "bad-request-detail" } }));
     });
-    runtime = buildRuntime(baseUrl);
+    runtime = await buildRuntime(baseUrl);
     const res = await handleApiProviderRequest(runtime, rt(baseUrl), { prompt: "p" });
 
     expect(res.isError).toBe(true);
@@ -455,7 +467,7 @@ describe("Slice 2 — api provider schema parity", () => {
   let lastBody: any;
   let hits: number;
 
-  function buildRuntime(baseUrl: string): GatewayServerRuntime {
+  async function buildRuntime(baseUrl: string): Promise<GatewayServerRuntime> {
     const metrics = new PerformanceMetrics();
     const recorder = new NoopFlightRecorder();
     const asyncJobManager = new AsyncJobManager(
@@ -464,6 +476,12 @@ describe("Slice 2 — api provider schema parity", () => {
       new MemoryJobStore(),
       recorder
     );
+    // Sequence like production: main() awaits the startup barrier before it
+    // connects a transport. deferralAvailable is computed from the synchronous
+    // canAdmitDurableJobs() snapshot, so inside the startup window an api
+    // request runs INLINE and never consults the job store, which is where
+    // dedup lives.
+    await asyncJobManager.whenStartupSettled();
     return resolveGatewayServerRuntime(
       {
         sessionManager,
@@ -520,7 +538,7 @@ describe("Slice 2 — api provider schema parity", () => {
 
   it("assembles promptParts into system + tagged user content", async () => {
     const baseUrl = await startServer();
-    runtime = buildRuntime(baseUrl);
+    runtime = await buildRuntime(baseUrl);
     const res = await handleApiProviderRequest(runtime, rt(baseUrl), {
       promptParts: { system: "be terse", tools: "T", context: "C", task: "do it" },
     });
@@ -532,7 +550,7 @@ describe("Slice 2 — api provider schema parity", () => {
   });
 
   it("rejects prompt + promptParts together, and neither", async () => {
-    runtime = buildRuntime("http://127.0.0.1:1/v1");
+    runtime = await buildRuntime("http://127.0.0.1:1/v1");
     const both = await handleApiProviderRequest(runtime, rt("http://127.0.0.1:1/v1"), {
       prompt: "hi",
       promptParts: { task: "x" },
@@ -546,7 +564,7 @@ describe("Slice 2 — api provider schema parity", () => {
 
   it("forceRefresh bypasses dedup (server hit twice instead of once)", async () => {
     const baseUrl = await startServer();
-    runtime = buildRuntime(baseUrl);
+    runtime = await buildRuntime(baseUrl);
     // Two identical requests: the second dedups onto the first → server hit once.
     await handleApiProviderRequest(runtime, rt(baseUrl), { prompt: "same" });
     await handleApiProviderRequest(runtime, rt(baseUrl), { prompt: "same" });
@@ -571,7 +589,7 @@ describe("Slice 3 — api provider continuity + sessions", () => {
   let closeServer: (() => Promise<void>) | null = null;
   let lastBody: any;
 
-  function buildRuntime(baseUrl: string): GatewayServerRuntime {
+  async function buildRuntime(baseUrl: string): Promise<GatewayServerRuntime> {
     const metrics = new PerformanceMetrics();
     const recorder = new NoopFlightRecorder();
     const asyncJobManager = new AsyncJobManager(
@@ -580,6 +598,12 @@ describe("Slice 3 — api provider continuity + sessions", () => {
       new MemoryJobStore(),
       recorder
     );
+    // Sequence like production: main() awaits the startup barrier before it
+    // connects a transport. deferralAvailable is computed from the synchronous
+    // canAdmitDurableJobs() snapshot, so inside the startup window an api
+    // request runs INLINE and never consults the job store, which is where
+    // dedup lives.
+    await asyncJobManager.whenStartupSettled();
     return resolveGatewayServerRuntime(
       {
         sessionManager,
@@ -634,7 +658,7 @@ describe("Slice 3 — api provider continuity + sessions", () => {
 
   it("tracks a session for a stateless provider and never threads previous_response_id", async () => {
     const baseUrl = await startServer();
-    runtime = buildRuntime(baseUrl);
+    runtime = await buildRuntime(baseUrl);
     const res = await handleApiProviderRequest(runtime, rt(baseUrl), {
       prompt: "hi",
       sessionId: "sess-1",
@@ -648,7 +672,7 @@ describe("Slice 3 — api provider continuity + sessions", () => {
 
   it("creates no session for a stateless provider without session params", async () => {
     const baseUrl = await startServer();
-    runtime = buildRuntime(baseUrl);
+    runtime = await buildRuntime(baseUrl);
     const res = await handleApiProviderRequest(runtime, rt(baseUrl), { prompt: "hi" });
     expect(res.isError).toBeFalsy();
     expect((res.structuredContent as any).sessionId).toBeNull();
@@ -657,7 +681,7 @@ describe("Slice 3 — api provider continuity + sessions", () => {
 
   it("reuses the same session on a repeat sessionId and refreshes lastUsedAt", async () => {
     const baseUrl = await startServer();
-    runtime = buildRuntime(baseUrl);
+    runtime = await buildRuntime(baseUrl);
     await handleApiProviderRequest(runtime, rt(baseUrl), { prompt: "one", sessionId: "s1" });
     const after1 = sessionManager.getSession("s1")!.lastUsedAt;
     await handleApiProviderRequest(runtime, rt(baseUrl), { prompt: "two", sessionId: "s1" });
@@ -684,7 +708,7 @@ describe("Slice 4a — api provider server-side-id continuation", () => {
   let closeServer: (() => Promise<void>) | null = null;
   let lastBody: any;
 
-  function buildRuntime(): GatewayServerRuntime {
+  async function buildRuntime(): Promise<GatewayServerRuntime> {
     const metrics = new PerformanceMetrics();
     const recorder = new NoopFlightRecorder();
     const asyncJobManager = new AsyncJobManager(
@@ -693,6 +717,12 @@ describe("Slice 4a — api provider server-side-id continuation", () => {
       new MemoryJobStore(),
       recorder
     );
+    // Sequence like production: main() awaits the startup barrier before it
+    // connects a transport. deferralAvailable is computed from the synchronous
+    // canAdmitDurableJobs() snapshot, so inside the startup window an api
+    // request runs INLINE and never consults the job store, which is where
+    // dedup lives.
+    await asyncJobManager.whenStartupSettled();
     return resolveGatewayServerRuntime(
       {
         sessionManager,
@@ -761,7 +791,7 @@ describe("Slice 4a — api provider server-side-id continuation", () => {
       res.writeHead(200, { "content-type": "application/json" });
       res.end(xaiReply(`resp-${n}`, `reply-${n}`));
     });
-    runtime = buildRuntime();
+    runtime = await buildRuntime();
 
     // Turn 1: no stored handle → no previous_response_id sent; handle persisted.
     const r1 = await handleApiProviderRequest(runtime, xaiRt(baseUrl), {
@@ -794,7 +824,7 @@ describe("Slice 4a — api provider server-side-id continuation", () => {
       res.writeHead(200, { "content-type": "application/json" });
       res.end(xaiReply("fresh-1", "recovered"));
     });
-    runtime = buildRuntime();
+    runtime = await buildRuntime();
     // Pre-seed a session carrying a stale handle.
     sessionManager.createSession("xai", "Xai", "x9");
     sessionManager.updateSessionMetadata("x9", { apiPreviousResponseId: "stale-id" });

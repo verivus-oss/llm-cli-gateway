@@ -432,7 +432,10 @@ describe("JsonRpcStdioTransport", () => {
     // outbound requests AND inbound notifications/requests/responses as activity.
     const h = createHarness();
 
-    await h.transport.request("session/prompt"); // outbound request -> +1
+    // NOT awaited, deliberately: request() resolves only when the peer writes a
+    // response, and the response frames are written below. The conversion
+    // codemod inserted an await here and the test hung for the full timeout.
+    void h.transport.request("session/prompt"); // outbound request -> +1
     const id = decodeWritten(h.written, 0).id as number;
     expect(h.activity()).toBe(1);
 

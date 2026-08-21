@@ -557,8 +557,10 @@ describe("#139 AsyncJobManager lease lifecycle (M/N series)", () => {
     ).onHeartbeatTick(15_000);
   }
 
-  function runEviction(manager: AsyncJobManager): void {
-    (manager as unknown as { evictCompletedJobs: () => void }).evictCompletedJobs();
+  async function runEviction(manager: AsyncJobManager): Promise<void> {
+    await (
+      manager as unknown as { evictCompletedJobs: () => Promise<void> }
+    ).evictCompletedJobs();
   }
 
   it("M6: registers before admit; a job recorded after construction is stamped with the manager's instance id", async () => {
@@ -788,7 +790,7 @@ describe("#139 AsyncJobManager lease lifecycle (M/N series)", () => {
       await runHeartbeatTick(mgr);
       expect(mgr.canAdmitDurableJobs()).toBe(false);
 
-      runEviction(mgr);
+      await runEviction(mgr);
       expect(evictionCalls).toBe(0);
     } finally {
       await mgr.dispose();
