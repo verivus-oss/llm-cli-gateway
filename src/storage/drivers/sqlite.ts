@@ -183,6 +183,31 @@ export class SqliteStorageDriver implements StorageDriver {
   /** Transactions abandoned by the drain bound, so close() can report honestly. */
   private abandonedOnClose = 0;
 
+  /**
+   * Schema bootstrap: DDL, PRAGMAs and idempotent column migrations.
+   *
+   * NOT a routed runtime operation, and deliberately not one of the four
+   * operation classes, for the same reason as the Postgres driver's
+   * `bootstrap`: DDL is none of `write`, `transcript_read`, `analytics_read` or
+   * `retention`, and giving it a class is how an exceptional path starts
+   * looking routine to the next reader.
+   *
+   * It runs through the same `queue` as `transaction`, so a bootstrap cannot
+   * interleave with a write, and it is granted transaction control because a
+   * PRAGMA is not a routed statement and the migrations need to be atomic.
+   */
+  bootstrap<T>(fn: (connection: StorageConnection) => Promise<T>): Promise<T> {
+    if (this.closing && !this.closed) return Promise.reject(new Error(CLOSING_MESSAGE));
+    if (inTransactionOn(this)) return Promise.reject(nestedConnectionRefusal(this));
+    const run = async (): Promise<T> => {
+      if (this.closed) throw new Error("storage: sqlite driver is closed");
+      return runInTransaction(this, () => fn(this.connectionFor("write", true)));
+    };
+    const started = this.queue.then(run, run);
+    this.queue = started.catch(() => undefined);
+    return started;
+  }
+
   transaction<T>(
     operation: StorageOperationClass,
     fn: (connection: StorageConnection) => Promise<T>
