@@ -48,7 +48,34 @@ const planFiles = execFileSync(
 // `docs/evidence/<name>` and <name> is not there.
 const CITATION = /docs\/evidence\/([A-Za-z0-9][A-Za-z0-9._-]*\.md)/g;
 
-const evidenceDir = join(ROOT, "docs", "evidence");
+// docs/evidence is gitignored, so it exists in the MAIN checkout and in no
+// worktree. Resolving it against ROOT made this gate fail in every track's
+// worktree the day it shipped, and the track worked around it with a symlink.
+// A gate that forces a workaround has moved the problem, not solved it.
+//
+// `git rev-parse --git-common-dir` is the main checkout's .git from anywhere,
+// including from inside a linked worktree, so the evidence directory is found
+// where it actually lives rather than where this file happens to sit.
+function resolveEvidenceDir() {
+  const local = join(ROOT, "docs", "evidence");
+  if (existsSync(local)) return local;
+  try {
+    const commonDir = execFileSync("git", ["rev-parse", "--git-common-dir"], {
+      cwd: ROOT,
+      encoding: "utf8",
+    }).trim();
+    const mainRoot = dirname(commonDir.endsWith(".git") ? commonDir : join(commonDir, ".."));
+    const shared = join(mainRoot, "docs", "evidence");
+    if (existsSync(shared)) return shared;
+  } catch {
+    // Not a git checkout, or git is unavailable. Fall through: the directory
+    // genuinely cannot be found, which the caller below reports as missing
+    // rather than passing over in silence.
+  }
+  return local;
+}
+
+const evidenceDir = resolveEvidenceDir();
 const present = new Set(existsSync(evidenceDir) ? readdirSync(evidenceDir) : []);
 
 const missing = [];
