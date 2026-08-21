@@ -221,12 +221,12 @@ type ReviewSynthesisBinding =
     }
   | { ok: false; error: string };
 
-function bindReviewSynthesisInput(
+async function bindReviewSynthesisInput(
   deps: ValidationToolDeps,
   run: ValidationRunRecord,
   caller: string,
   judgeProvider: ValidationProvider
-): ReviewSynthesisBinding {
+): Promise<ReviewSynthesisBinding> {
   if (run.ownerPrincipal !== caller) {
     return { ok: false, error: "The review run is not owned by the current caller" };
   }
@@ -292,7 +292,7 @@ function bindReviewSynthesisInput(
     linkedCorrelationIds.add(link.correlationId);
     let linkedValidationId: string | null;
     try {
-      linkedValidationId = deps.validationRunStore?.getValidationRunIdByJobId(link.jobId) ?? null;
+      linkedValidationId = await deps.validationRunStore?.getValidationRunIdByJobId(link.jobId) ?? null;
     } catch {
       return { ok: false, error: "Durable review provider link integrity is unavailable" };
     }
@@ -300,10 +300,10 @@ function bindReviewSynthesisInput(
       return { ok: false, error: "A durable review provider job is linked to another run" };
     }
     let owner: string | null | undefined;
-    let result: ReturnType<ValidationToolDeps["asyncJobManager"]["getJobResult"]>;
+    let result: Awaited<ReturnType<ValidationToolDeps["asyncJobManager"]["getJobResult"]>>;
     try {
-      owner = deps.asyncJobManager.getJobOwner(link.jobId);
-      result = deps.asyncJobManager.getJobResult(link.jobId, Number.MAX_SAFE_INTEGER);
+      owner = await deps.asyncJobManager.getJobOwner(link.jobId);
+      result = await deps.asyncJobManager.getJobResult(link.jobId, Number.MAX_SAFE_INTEGER);
     } catch {
       return { ok: false, error: "Durable review provider evidence is unavailable" };
     }
@@ -314,53 +314,53 @@ function bindReviewSynthesisInput(
       return { ok: false, error: "A durable review provider result is missing" };
     }
     if (
-      result.id !== link.jobId ||
-      result.cli !== link.provider ||
-      result.correlationId !== link.correlationId
+      (await result).id !== link.jobId ||
+      (await result).cli !== link.provider ||
+      (await result).correlationId !== link.correlationId
     ) {
       return { ok: false, error: "A durable review provider result is mismatched" };
     }
-    if (result.status === "queued" || result.status === "running") {
+    if ((await result).status === "queued" || (await result).status === "running") {
       return { ok: false, error: "Every durable review provider result must be terminal" };
     }
     if (
-      result.outputTruncated ||
-      result.stdoutTruncated ||
-      result.stderrTruncated ||
-      result.stdoutOffsetChars !== 0 ||
-      result.stderrOffsetChars !== 0 ||
-      result.stdoutNextOffsetChars !== null ||
-      result.stderrNextOffsetChars !== null ||
-      result.stdoutTotalChars !== result.stdout.length ||
-      result.stderrTotalChars !== result.stderr.length
+      (await result).outputTruncated ||
+      (await result).stdoutTruncated ||
+      (await result).stderrTruncated ||
+      (await result).stdoutOffsetChars !== 0 ||
+      (await result).stderrOffsetChars !== 0 ||
+      (await result).stdoutNextOffsetChars !== null ||
+      (await result).stderrNextOffsetChars !== null ||
+      (await result).stdoutTotalChars !== (await result).stdout.length ||
+      (await result).stderrTotalChars !== (await result).stderr.length
     ) {
       return {
         ok: false,
         error: "A durable review provider output is truncated or paging is incomplete",
       };
     }
-    const stdoutByteLength = Buffer.byteLength(result.stdout, "utf8");
-    const stderrByteLength = Buffer.byteLength(result.stderr, "utf8");
-    if (result.stdoutBytes !== stdoutByteLength || result.stderrBytes !== stderrByteLength) {
+    const stdoutByteLength = Buffer.byteLength((await result).stdout, "utf8");
+    const stderrByteLength = Buffer.byteLength((await result).stderr, "utf8");
+    if ((await result).stdoutBytes !== stdoutByteLength || (await result).stderrBytes !== stderrByteLength) {
       return {
         ok: false,
         error: "A durable review provider output byte identity is inconsistent",
       };
     }
-    const stdoutSha256 = createHash("sha256").update(result.stdout).digest("hex");
-    const stderrSha256 = createHash("sha256").update(result.stderr).digest("hex");
+    const stdoutSha256 = createHash("sha256").update((await result).stdout).digest("hex");
+    const stderrSha256 = createHash("sha256").update((await result).stderr).digest("hex");
     reviewEvidence.push({
       schemaVersion: "review-judge-evidence.v1",
       provider: link.provider,
       jobId: link.jobId,
       correlationId: link.correlationId,
-      status: result.status,
-      exitCode: result.exitCode,
-      error: result.error,
-      stdout: { text: result.stdout, byteLength: stdoutByteLength, sha256: stdoutSha256 },
-      stderr: { text: result.stderr, byteLength: stderrByteLength, sha256: stderrSha256 },
+      status: (await result).status,
+      exitCode: (await result).exitCode,
+      error: (await result).error,
+      stdout: { text: (await result).stdout, byteLength: stdoutByteLength, sha256: stdoutSha256 },
+      stderr: { text: (await result).stderr, byteLength: stderrByteLength, sha256: stderrSha256 },
     });
-    providerResults.push(normalizeJobResult(link.provider, result.model ?? null, result));
+    providerResults.push(await normalizeJobResult(link.provider, (await result).model ?? null, result));
   }
 
   return {
@@ -560,7 +560,7 @@ export function registerValidationTools(server: McpServer, deps: ValidationToolD
             focus,
             maxPromptBytes,
           });
-          const report = startReviewRun(deps, {
+          const report = await startReviewRun(deps, {
             prompt: built.prompt,
             providers,
             focus,
@@ -926,13 +926,13 @@ export function registerValidationTools(server: McpServer, deps: ValidationToolD
       let reviewAuthorization: ReturnType<typeof parseReviewRunAuthorization> = null;
       if (validationId && deps.validationRunStore) {
         try {
-          const run = deps.validationRunStore.getValidationRun(validationId);
+          const run = await deps.validationRunStore.getValidationRun(validationId);
           const caller = resolveOwnerPrincipal(getRequestContext());
-          ownedRun = Boolean(run && principalCanAccess(run.ownerPrincipal, caller));
-          review = Boolean(ownedRun && run?.intent === "review");
+          ownedRun = Boolean(run && principalCanAccess((run).ownerPrincipal, caller));
+          review = Boolean(ownedRun && (run)?.intent === "review");
           if (review && run) {
             ownedReviewRun = run;
-            reviewAuthorization = parseReviewRunAuthorization(run.requestJson);
+            reviewAuthorization = parseReviewRunAuthorization((run).requestJson);
           }
         } catch {
           return textResponse({
@@ -1025,23 +1025,23 @@ export function registerValidationTools(server: McpServer, deps: ValidationToolD
       let synthesisProviderResults = providerResults;
       let synthesisReviewEvidence: DurableReviewJudgeEvidence[] | undefined;
       if (ownedReviewRun) {
-        const bound = bindReviewSynthesisInput(
+        const bound = await bindReviewSynthesisInput(
           deps,
           ownedReviewRun,
           resolveOwnerPrincipal(getRequestContext()),
           judgeModel
         );
-        if (!bound.ok) {
+        if (!(bound).ok) {
           return textResponse({
             success: false,
             tool: "synthesize_validation",
-            error: bound.error,
+            error: (bound).error,
             errorCategory: "review_synthesis_binding_failed",
           });
         }
-        synthesisQuestion = bound.question;
-        synthesisProviderResults = bound.providerResults;
-        synthesisReviewEvidence = bound.reviewEvidence;
+        synthesisQuestion = (bound).question;
+        synthesisProviderResults = (bound).providerResults;
+        synthesisReviewEvidence = (bound).reviewEvidence;
       } else if (!synthesisQuestion || synthesisProviderResults.length === 0) {
         return textResponse({
           success: false,
@@ -1068,7 +1068,7 @@ export function registerValidationTools(server: McpServer, deps: ValidationToolD
       // rather than requiring a separate validation_receipt call. A still-running
       // judge leaves the run non-terminal, so this is a no-op until the judge's
       // result is collected (where the job_result eager hook mints it).
-      if (validationId) eagerMintFromValidationId(deps, validationId);
+      if (validationId) await eagerMintFromValidationId(deps, validationId);
       return textResponse({
         success: true,
         tool: "synthesize_validation",
@@ -1119,9 +1119,9 @@ export function registerValidationTools(server: McpServer, deps: ValidationToolD
       // F3b owner check (cross-LLM validation receipts §5a): own-or-not-found.
       // A job owned by another principal is reported as absent, mirroring the
       // llm_job_status path; previously this surface had no ownership check.
-      const job = deps.asyncJobManager.getJobSnapshot(jobId);
+      const job = await deps.asyncJobManager.getJobSnapshot(jobId);
       const caller = resolveOwnerPrincipal(getRequestContext());
-      if (!job || !principalCanAccess(deps.asyncJobManager.getJobOwner(jobId), caller)) {
+      if (!job || !principalCanAccess(await deps.asyncJobManager.getJobOwner(jobId), caller)) {
         return textResponse({ success: false, error: "Job not found", jobId });
       }
       return textResponse({ success: true, job });
@@ -1155,16 +1155,16 @@ export function registerValidationTools(server: McpServer, deps: ValidationToolD
       // F3b owner check (cross-LLM validation receipts §5a): own-or-not-found.
       // A job owned by another principal is reported as absent, mirroring the
       // llm_job_result path; previously this surface had no ownership check.
-      const result = deps.asyncJobManager.getJobResult(jobId, maxChars);
+      const result = await deps.asyncJobManager.getJobResult(jobId, maxChars);
       const caller = resolveOwnerPrincipal(getRequestContext());
-      if (!result || !principalCanAccess(deps.asyncJobManager.getJobOwner(jobId), caller)) {
+      if (!result || !principalCanAccess(await deps.asyncJobManager.getJobOwner(jobId), caller)) {
         return textResponse({ success: false, error: "Job not found", jobId });
       }
       // Cross-LLM validation receipts (Phase 1): eager mint. If this job is the
       // one that just made its validation run terminal, mint the receipt now,
       // while the linked job outputs still exist (they are evicted after the
       // retention window). Best-effort; never affects the job_result response.
-      eagerMintFromJobId(deps, jobId);
+      await eagerMintFromJobId(deps, jobId);
       return textResponse({
         success: true,
         result,
@@ -1212,15 +1212,15 @@ export function registerValidationTools(server: McpServer, deps: ValidationToolD
         openWorldHint: false,
       },
       async ({ validationId, format, includeRawResponses }) => {
-        const result = resolveValidationReceipt(deps, validationId, {
+        const result = await resolveValidationReceipt(deps, validationId, {
           caller: currentCaller(),
           includeRawResponses,
         });
         // Phase 2: markdown is a read-time rendering of the stored
         // structuredContent (renderHumanReport), never stored, never hashed.
-        if (format === "markdown" && result.status === "minted") {
+        if (format === "markdown" && (result).status === "minted") {
           return {
-            content: [{ type: "text" as const, text: result.receipt.humanReadable }],
+            content: [{ type: "text" as const, text: (result).receipt.humanReadable }],
             structuredContent: result as unknown as Record<string, unknown>,
           };
         }

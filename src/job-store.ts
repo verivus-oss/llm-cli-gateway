@@ -696,7 +696,7 @@ export interface JobStore {
     kitSessionId?: string | null;
     /** Repository-review provider link committed in the same transaction as the job row. */
     validationAdmission?: ValidationJobAdmission;
-  }): void;
+  }): Promise<void>;
   /**
    * Permanently reserve an unadmitted Kit attempt id. This is an atomic
    * insert-if-absent fence, not a job row: it is intentionally excluded from
@@ -704,7 +704,7 @@ export interface JobStore {
    * admission or recovery already owns the id, so callers must retain the
    * matching session attempt.
    */
-  fenceUnadmittedKitAttempt(input: KitAttemptFenceInput): KitAttemptFenceResult;
+  fenceUnadmittedKitAttempt(input: KitAttemptFenceInput): Promise<KitAttemptFenceResult>;
   /**
    * #139: transition a durable `queued` row to `running`, stamp the real child
    * pid (process transport; null for http), and re-set the lease. Returns true
@@ -712,37 +712,37 @@ export interface JobStore {
    * `queued` (e.g. already swept to `orphaned` while it waited in the limiter
    * queue), which the caller uses to fail-close a process launch.
    */
-  markRunning(id: string, opts: { pid: number | null }): boolean;
+  markRunning(id: string, opts: { pid: number | null }): Promise<boolean>;
   /** #139: register this live instance (writes last_heartbeat = DB now). */
-  registerInstance(meta: GatewayInstanceMeta): void;
+  registerInstance(meta: GatewayInstanceMeta): Promise<void>;
   /**
    * #139: advance this instance's own lease. Updates `last_heartbeat` on the
    * instance row AND `lease_deadline = db_now + leaseTtl` for every
    * `queued`/`running` job it owns, so heartbeat and sweep contend on the same
    * job rows.
    */
-  heartbeat(instanceId: string): void;
+  heartbeat(instanceId: string): Promise<void>;
   /** #139: remove this instance's `gateway_instances` row (graceful shutdown). */
-  deregisterInstance(instanceId: string): void;
+  deregisterInstance(instanceId: string): Promise<void>;
   /**
    * #139: expired process-transport candidates for the advisory `kill(pid,0)`
    * check and same-host request-artifact cleanup. Queued/pre-spawn rows carry a
    * null pid and are not pid-probed. Read-only; does not mutate any row.
    */
-  selectStaleProcessCandidates(leaseTtlMs: number, httpJobGraceMs: number): SweepCandidate[];
+  selectStaleProcessCandidates(leaseTtlMs: number, httpJobGraceMs: number): Promise<SweepCandidate[]>;
   /**
    * #139: already-orphaned process rows whose durable owner-hostname snapshot
    * matches `hostname`. Used only by that host's startup reconciliation to
    * reclaim its own request-scoped artifacts. Read-only; never returns
    * remote/unknown hosts.
    */
-  selectOrphanedProcessCandidates(hostname: string): SweepCandidate[];
+  selectOrphanedProcessCandidates(hostname: string): Promise<SweepCandidate[]>;
   /**
    * Terminal Claude MCP artifacts awaiting local cleanup acknowledgement. This
    * capability is optional so older third-party JobStore implementations keep
    * their safe fail-closed behavior (the row remains retained instead).
    */
-  selectPendingMcpArtifactCleanups?(hostname: string): PendingMcpArtifactCleanup[];
+  selectPendingMcpArtifactCleanups?(hostname: string): Promise<PendingMcpArtifactCleanup[]>;
   /**
    * Compare-and-set acknowledgement for one exact origin-host artifact. An
    * acknowledgement only succeeds for a terminal row still marked pending.
@@ -752,7 +752,7 @@ export interface JobStore {
     hostname: string,
     artifactScope: string,
     artifactPath: string
-  ): boolean;
+  ): Promise<boolean>;
   /**
    * #139: the fencing sweep. In one atomic unit: (a) advance the lease by one
    * `leaseTtlMs` for every id in `liveConfirmedIds` (the manager's advisory
@@ -766,14 +766,14 @@ export interface JobStore {
     leaseTtlMs: number,
     httpJobGraceMs: number,
     liveConfirmedIds?: string[]
-  ): OrphanedJobSnapshot[];
+  ): Promise<OrphanedJobSnapshot[]>;
   /** #139: delete `gateway_instances` rows whose last_heartbeat is older than instanceGcMs. */
-  gcInstances(instanceGcMs: number): number;
-  recordOutput(id: string, stdout: string, stderr: string, outputTruncated: boolean): void;
+  gcInstances(instanceGcMs: number): Promise<number>;
+  recordOutput(id: string, stdout: string, stderr: string, outputTruncated: boolean): Promise<void>;
   /** Replace one job's complete bounded progress projection atomically. */
-  recordProgress(id: string, progressJson: string): void;
+  recordProgress(id: string, progressJson: string): Promise<void>;
   /** Replace progress only while the durable row still has the expected status. */
-  recordProgressIfStatus?(id: string, status: JobStoreStatus, progressJson: string): boolean;
+  recordProgressIfStatus?(id: string, status: JobStoreStatus, progressJson: string): Promise<boolean>;
   /**
    * Write the terminal row. Returns true when the row was actually written,
    * false when the completion guard rejected it because the row was already
@@ -803,34 +803,34 @@ export interface JobStore {
     progressJson?: string | null;
     /** Compatibility input ignored at the durable persistence boundary. */
     kitTerminalMetadata?: PersonalKitTerminalMetadata | null;
-  }): boolean;
-  getById(id: string): JobRecord | null;
-  findByRequestKey(requestKey: string): JobRecord | null;
+  }): Promise<boolean>;
+  getById(id: string): Promise<JobRecord | null>;
+  findByRequestKey(requestKey: string): Promise<JobRecord | null>;
   /**
    * Terminal Kit jobs whose durable output has not yet been applied to their
    * gateway session. Used by the startup/retry reconciliation path only.
    */
-  getPendingKitFinalizations(): PendingKitFinalization[];
+  getPendingKitFinalizations(): Promise<PendingKitFinalization[]>;
   /**
    * Terminal Kit jobs acknowledged before a crash may retain their exact
    * session attempt. The periodic reconciler uses this to release only that
    * generation, never a newer attempt.
    */
-  getAcknowledgedKitAttemptReleases(): AcknowledgedKitAttemptRelease[];
+  getAcknowledgedKitAttemptReleases(): Promise<AcknowledgedKitAttemptRelease[]>;
   /**
    * Compare-and-set the terminal-finalized marker after the session update
    * succeeds. The session id prevents a stale caller from finalizing a job for
    * a different gateway session.
    */
-  markKitTerminalFinalized(id: string, kitSessionId: string): boolean;
+  markKitTerminalFinalized(id: string, kitSessionId: string): Promise<boolean>;
   /**
    * Active jobs and terminal Kit jobs awaiting finalization pin their immutable
    * releases. A release cannot be garbage-collected between a durable provider
    * result and its session-binding write.
    */
-  getPinnedKitReleaseIds?(): string[];
+  getPinnedKitReleaseIds?(): Promise<string[]>;
   /** Alias with explicit release-GC language for callers outside the store. */
-  getReferencedKitReleaseIds?(): string[];
+  getReferencedKitReleaseIds?(): Promise<string[]>;
   /**
    * @deprecated #139: a documented alias for `recoverStaleJobs`, kept for the
    * single-owner sqlite/memory path and existing callers/tests.
@@ -848,12 +848,12 @@ export interface JobStore {
    * durationMs from startedAt). Pre-slice-1.5 rows that never wrote a
    * logStart degrade silently to a no-op UPDATE inside the FR.
    */
-  markOrphanedOnStartup(): {
+  markOrphanedOnStartup(): Promise<{
     count: number;
     orphaned: Array<OrphanedJobSnapshot>;
-  };
-  evictExpired(): number;
-  close(): void;
+  }>;
+  evictExpired(): Promise<number>;
+  close(): Promise<void>;
 }
 
 /**
@@ -938,26 +938,26 @@ export interface ValidationReceiptRecord {
  */
 export interface ValidationRunStore {
   /** Insert the run row once at kickoff. Idempotent on validation_id (INSERT OR IGNORE). */
-  recordValidationRun(run: ValidationRunRecord): void;
-  getValidationRun(validationId: string): ValidationRunRecord | null;
+  recordValidationRun(run: ValidationRunRecord): Promise<void>;
+  getValidationRun(validationId: string): Promise<ValidationRunRecord | null>;
   /** Replace provider links after a pre-dispatch authorization row is established. */
-  setValidationProviderLinks(validationId: string, providerLinks: ValidationRunLink[]): void;
-  setValidationJudgeLink(validationId: string, judgeLink: ValidationRunLink): void;
+  setValidationProviderLinks(validationId: string, providerLinks: ValidationRunLink[]): Promise<void>;
+  setValidationJudgeLink(validationId: string, judgeLink: ValidationRunLink): Promise<void>;
   /** Owner-scoped compare-and-set used to open or fence a review roster. */
   transitionValidationRunStatus(
     validationId: string,
     ownerPrincipal: string,
     expectedStatus: ValidationRunRecord["status"],
     status: ValidationRunRecord["status"]
-  ): boolean;
+  ): Promise<boolean>;
   /** Atomically terminalize a planned review judge that cannot be dispatched. */
-  skipValidationJudge(validationId: string, provider: string, ownerPrincipal: string): void;
-  setValidationRunStatus(validationId: string, status: ValidationRunRecord["status"]): void;
+  skipValidationJudge(validationId: string, provider: string, ownerPrincipal: string): Promise<void>;
+  setValidationRunStatus(validationId: string, status: ValidationRunRecord["status"]): Promise<void>;
   /** Reverse lookup for eager mint: which run owns this provider/judge job, if any. */
-  getValidationRunIdByJobId(jobId: string): string | null;
+  getValidationRunIdByJobId(jobId: string): Promise<string | null>;
   /** Insert the immutable receipt once. Idempotent on validation_id (INSERT OR IGNORE). */
-  recordValidationReceipt(receipt: ValidationReceiptRecord): void;
-  getValidationReceipt(validationId: string): ValidationReceiptRecord | null;
+  recordValidationReceipt(receipt: ValidationReceiptRecord): Promise<void>;
+  getValidationReceipt(validationId: string): Promise<ValidationReceiptRecord | null>;
 }
 
 /** True when a job store also persists validation runs and their job links. */
@@ -1452,7 +1452,7 @@ export class SqliteJobStore implements JobStore, ValidationRunStore {
   /**
    * Insert a new running job row. Caller has already computed requestKey.
    */
-  recordStart(input: {
+  async recordStart(input: {
     id: string;
     correlationId: string;
     requestKey: string;
@@ -1472,7 +1472,7 @@ export class SqliteJobStore implements JobStore, ValidationRunStore {
     kitExecution?: KitExecutionRef | null;
     kitSessionId?: string | null;
     validationAdmission?: ValidationJobAdmission;
-  }): void {
+  }): Promise<void> {
     assertMcpArtifactAdmissionInvariant(input);
     const insertJob = (): void => {
       this.insertStmt.run({
@@ -1623,7 +1623,7 @@ export class SqliteJobStore implements JobStore, ValidationRunStore {
   }
 
   /** Atomically reserve a never-reusable pre-admission attempt id for recovery. */
-  fenceUnadmittedKitAttempt(input: KitAttemptFenceInput): KitAttemptFenceResult {
+  async fenceUnadmittedKitAttempt(input: KitAttemptFenceInput): Promise<KitAttemptFenceResult> {
     const inserted = this.insertKitAttemptFence({ ...input, state: "recovered" });
     if (inserted) return "reserved";
     const existing = this.getKitAttemptFenceStmt.get(input.attemptId) as
@@ -1665,7 +1665,7 @@ export class SqliteJobStore implements JobStore, ValidationRunStore {
     return Number(result.changes) === 1;
   }
 
-  markRunning(id: string, opts: { pid: number | null }): boolean {
+  async markRunning(id: string, opts: { pid: number | null }): Promise<boolean> {
     // Returns true iff a queued row actually transitioned to running. A zero-row
     // result means the durable row is no longer queued (e.g. another instance
     // already swept it to 'orphaned' while it waited in the limiter queue); the
@@ -1679,7 +1679,7 @@ export class SqliteJobStore implements JobStore, ValidationRunStore {
     return Number(result.changes) > 0;
   }
 
-  registerInstance(meta: GatewayInstanceMeta): void {
+  async registerInstance(meta: GatewayInstanceMeta): Promise<void> {
     this.registerInstanceStmt.run({
       instance_id: meta.instanceId,
       role: meta.role ?? null,
@@ -1688,18 +1688,18 @@ export class SqliteJobStore implements JobStore, ValidationRunStore {
     });
   }
 
-  heartbeat(instanceId: string): void {
+  async heartbeat(instanceId: string): Promise<void> {
     // Advance the observability row AND the authoritative per-job lease. The
     // job-lease UPDATE is what serializes against the sweep on the row lock.
     this.heartbeatInstanceStmt.run({ instance_id: instanceId });
     this.heartbeatJobsStmt.run({ instance_id: instanceId, lease_ttl_ms: this.leaseTtlMs });
   }
 
-  deregisterInstance(instanceId: string): void {
+  async deregisterInstance(instanceId: string): Promise<void> {
     this.deregisterInstanceStmt.run({ instance_id: instanceId });
   }
 
-  selectStaleProcessCandidates(_leaseTtlMs: number, _httpJobGraceMs: number): SweepCandidate[] {
+  async selectStaleProcessCandidates(_leaseTtlMs: number, _httpJobGraceMs: number): Promise<SweepCandidate[]> {
     const rows = this.selectStaleCandidatesStmt.all() as Array<{
       id: string;
       pid: number | null;
@@ -1716,7 +1716,7 @@ export class SqliteJobStore implements JobStore, ValidationRunStore {
     }));
   }
 
-  selectOrphanedProcessCandidates(hostname: string): SweepCandidate[] {
+  async selectOrphanedProcessCandidates(hostname: string): Promise<SweepCandidate[]> {
     const rows = this.selectOrphanedCandidatesStmt.all({ hostname }) as Array<{
       id: string;
       pid: number | null;
@@ -1733,7 +1733,7 @@ export class SqliteJobStore implements JobStore, ValidationRunStore {
     }));
   }
 
-  selectPendingMcpArtifactCleanups(hostname: string): PendingMcpArtifactCleanup[] {
+  async selectPendingMcpArtifactCleanups(hostname: string): Promise<PendingMcpArtifactCleanup[]> {
     const rows = this.selectPendingMcpArtifactCleanupsStmt.all({ hostname }) as Array<{
       id: string;
       owner_instance: string | null;
@@ -1750,12 +1750,12 @@ export class SqliteJobStore implements JobStore, ValidationRunStore {
     }));
   }
 
-  acknowledgeMcpArtifactCleanup(
+  async acknowledgeMcpArtifactCleanup(
     id: string,
     hostname: string,
     artifactScope: string,
     artifactPath: string
-  ): boolean {
+  ): Promise<boolean> {
     const result = this.acknowledgeMcpArtifactCleanupStmt.run({
       id,
       hostname,
@@ -1765,11 +1765,11 @@ export class SqliteJobStore implements JobStore, ValidationRunStore {
     return Number(result.changes) === 1;
   }
 
-  recoverStaleJobs(
+  async recoverStaleJobs(
     leaseTtlMs: number,
     httpJobGraceMs: number,
     liveConfirmedIds: string[] = []
-  ): OrphanedJobSnapshot[] {
+  ): Promise<OrphanedJobSnapshot[]> {
     const excludeJson = JSON.stringify(liveConfirmedIds);
     const httpGraceModifier = `-${httpJobGraceMs / 1000} seconds`;
     // One atomic unit: advance (+clear pid on) the advisory-live rows, then flip
@@ -1815,7 +1815,7 @@ export class SqliteJobStore implements JobStore, ValidationRunStore {
     return run();
   }
 
-  gcInstances(instanceGcMs: number): number {
+  async gcInstances(instanceGcMs: number): Promise<number> {
     const result = this.gcInstancesStmt.run({ gc_ms: instanceGcMs });
     return Number(result.changes);
   }
@@ -1823,7 +1823,7 @@ export class SqliteJobStore implements JobStore, ValidationRunStore {
   /**
    * Batched output flush. Cheap to call repeatedly; node:sqlite is sync.
    */
-  recordOutput(id: string, stdout: string, stderr: string, outputTruncated: boolean): void {
+  async recordOutput(id: string, stdout: string, stderr: string, outputTruncated: boolean): Promise<void> {
     this.updateOutputStmt.run({
       id,
       stdout,
@@ -1832,11 +1832,11 @@ export class SqliteJobStore implements JobStore, ValidationRunStore {
     });
   }
 
-  recordProgress(id: string, progressJson: string): void {
+  async recordProgress(id: string, progressJson: string): Promise<void> {
     this.updateProgressStmt.run({ id, progress_json: progressJson });
   }
 
-  recordProgressIfStatus(id: string, status: JobStoreStatus, progressJson: string): boolean {
+  async recordProgressIfStatus(id: string, status: JobStoreStatus, progressJson: string): Promise<boolean> {
     const result = this.updateProgressIfStatusStmt.run({
       id,
       status,
@@ -1848,7 +1848,7 @@ export class SqliteJobStore implements JobStore, ValidationRunStore {
   /**
    * Mark a job as completed/failed/canceled. Sets expires_at = now + retention.
    */
-  recordComplete(input: {
+  async recordComplete(input: {
     id: string;
     status: Exclude<JobStoreStatus, "running" | "queued">;
     exitCode: number | null;
@@ -1862,7 +1862,7 @@ export class SqliteJobStore implements JobStore, ValidationRunStore {
     httpStatus?: number | null;
     progressJson?: string | null;
     kitTerminalMetadata?: PersonalKitTerminalMetadata | null;
-  }): boolean {
+  }): Promise<boolean> {
     const expiresAt = new Date(Date.parse(input.finishedAt) + this.retentionMs).toISOString();
     const result = this.updateCompleteStmt.run({
       id: input.id,
@@ -1883,7 +1883,7 @@ export class SqliteJobStore implements JobStore, ValidationRunStore {
     return Number(result.changes) === 1;
   }
 
-  getById(id: string): JobRecord | null {
+  async getById(id: string): Promise<JobRecord | null> {
     const row = this.getByIdStmt.get(id);
     return row ? rowToRecord(row) : null;
   }
@@ -1892,27 +1892,27 @@ export class SqliteJobStore implements JobStore, ValidationRunStore {
    * Returns the most recent matching job within the dedup window, if any.
    * Caller pre-filters out forceRefresh requests.
    */
-  findByRequestKey(requestKey: string): JobRecord | null {
+  async findByRequestKey(requestKey: string): Promise<JobRecord | null> {
     const cutoff = new Date(Date.now() - this.dedupWindowMs).toISOString();
     const row = this.findByRequestKeyStmt.get(requestKey, cutoff);
     return row ? rowToRecord(row) : null;
   }
 
-  getPendingKitFinalizations(): PendingKitFinalization[] {
+  async getPendingKitFinalizations(): Promise<PendingKitFinalization[]> {
     const rows = this.selectPendingKitFinalizationsStmt.all();
     return rows
       .map(row => toPendingKitFinalization(rowToRecord(row)))
       .filter((entry): entry is PendingKitFinalization => entry !== null);
   }
 
-  getAcknowledgedKitAttemptReleases(): AcknowledgedKitAttemptRelease[] {
+  async getAcknowledgedKitAttemptReleases(): Promise<AcknowledgedKitAttemptRelease[]> {
     const rows = this.selectAcknowledgedKitAttemptReleasesStmt.all();
     return rows
       .map(row => toAcknowledgedKitAttemptRelease(rowToRecord(row)))
       .filter((entry): entry is AcknowledgedKitAttemptRelease => entry !== null);
   }
 
-  markKitTerminalFinalized(id: string, kitSessionId: string): boolean {
+  async markKitTerminalFinalized(id: string, kitSessionId: string): Promise<boolean> {
     const result = this.markKitTerminalFinalizedStmt.run({
       id,
       kit_session_id: kitSessionId,
@@ -1921,7 +1921,7 @@ export class SqliteJobStore implements JobStore, ValidationRunStore {
     return Number(result.changes) > 0;
   }
 
-  getPinnedKitReleaseIds(): string[] {
+  async getPinnedKitReleaseIds(): Promise<string[]> {
     const rows = this.db
       .prepare(
         `SELECT kit_execution_json FROM jobs
@@ -1943,7 +1943,7 @@ export class SqliteJobStore implements JobStore, ValidationRunStore {
     return [...releases].sort();
   }
 
-  getReferencedKitReleaseIds(): string[] {
+  async getReferencedKitReleaseIds(): Promise<string[]> {
     return this.getPinnedKitReleaseIds();
   }
 
@@ -1955,18 +1955,18 @@ export class SqliteJobStore implements JobStore, ValidationRunStore {
    * and a legacy NULL-lease row are recovered; a job kept alive by a live
    * instance's heartbeat is not. Retained only for existing callers/tests.
    */
-  markOrphanedOnStartup(): {
+  async markOrphanedOnStartup(): Promise<{
     count: number;
     orphaned: Array<OrphanedJobSnapshot>;
-  } {
-    const orphaned = this.recoverStaleJobs(this.leaseTtlMs, DEFAULT_HTTP_JOB_GRACE_MS);
-    return { count: orphaned.length, orphaned };
+  }> {
+    const orphaned = await this.recoverStaleJobs(this.leaseTtlMs, DEFAULT_HTTP_JOB_GRACE_MS);
+    return { count: (await orphaned).length, orphaned };
   }
 
   /**
    * Delete rows whose expires_at has passed. Returns number of rows deleted.
    */
-  evictExpired(): number {
+  async evictExpired(): Promise<number> {
     const now = new Date().toISOString();
     const result = this.deleteExpiredStmt.run(now);
     return Number(result.changes);
@@ -1974,7 +1974,7 @@ export class SqliteJobStore implements JobStore, ValidationRunStore {
 
   // --- ValidationRunStore (cross-LLM validation receipts, Phase 0) ---
 
-  recordValidationRun(run: ValidationRunRecord): void {
+  async recordValidationRun(run: ValidationRunRecord): Promise<void> {
     // INSERT OR IGNORE: kickoff writes once; a re-run with the same validation_id
     // (a randomUUID collision is effectively impossible, but the guard keeps the
     // write idempotent and race-safe) is a no-op rather than an overwrite.
@@ -2012,21 +2012,21 @@ export class SqliteJobStore implements JobStore, ValidationRunStore {
       .run(jobId, validationId, role);
   }
 
-  getValidationRunIdByJobId(jobId: string): string | null {
+  async getValidationRunIdByJobId(jobId: string): Promise<string | null> {
     const row = this.db
       .prepare(`SELECT validation_id FROM validation_run_jobs WHERE job_id = ?`)
       .get(jobId) as { validation_id?: string } | undefined;
     return row?.validation_id ?? null;
   }
 
-  getValidationRun(validationId: string): ValidationRunRecord | null {
+  async getValidationRun(validationId: string): Promise<ValidationRunRecord | null> {
     const row = this.db
       .prepare(`SELECT * FROM validation_runs WHERE validation_id = ?`)
       .get(validationId);
     return row ? rowToValidationRunRecord(row) : null;
   }
 
-  setValidationProviderLinks(validationId: string, providerLinks: ValidationRunLink[]): void {
+  async setValidationProviderLinks(validationId: string, providerLinks: ValidationRunLink[]): Promise<void> {
     const update = this.db.prepare(
       `UPDATE validation_runs SET provider_links = ? WHERE validation_id = ?`
     );
@@ -2047,7 +2047,7 @@ export class SqliteJobStore implements JobStore, ValidationRunStore {
     })();
   }
 
-  setValidationJudgeLink(validationId: string, judgeLink: ValidationRunLink): void {
+  async setValidationJudgeLink(validationId: string, judgeLink: ValidationRunLink): Promise<void> {
     this.db.withTransaction(() => {
       const result = this.db
         .prepare(
@@ -2067,12 +2067,12 @@ export class SqliteJobStore implements JobStore, ValidationRunStore {
     })();
   }
 
-  transitionValidationRunStatus(
+  async transitionValidationRunStatus(
     validationId: string,
     ownerPrincipal: string,
     expectedStatus: ValidationRunRecord["status"],
     status: ValidationRunRecord["status"]
-  ): boolean {
+  ): Promise<boolean> {
     const result = this.db
       .prepare(
         `UPDATE validation_runs SET status = ?
@@ -2082,7 +2082,7 @@ export class SqliteJobStore implements JobStore, ValidationRunStore {
     return Number(result.changes) === 1;
   }
 
-  skipValidationJudge(validationId: string, provider: string, ownerPrincipal: string): void {
+  async skipValidationJudge(validationId: string, provider: string, ownerPrincipal: string): Promise<void> {
     this.db.withTransaction(() => {
       const row = this.db
         .prepare(
@@ -2108,13 +2108,13 @@ export class SqliteJobStore implements JobStore, ValidationRunStore {
     })();
   }
 
-  setValidationRunStatus(validationId: string, status: ValidationRunRecord["status"]): void {
+  async setValidationRunStatus(validationId: string, status: ValidationRunRecord["status"]): Promise<void> {
     this.db
       .prepare(`UPDATE validation_runs SET status = ? WHERE validation_id = ?`)
       .run(status, validationId);
   }
 
-  recordValidationReceipt(receipt: ValidationReceiptRecord): void {
+  async recordValidationReceipt(receipt: ValidationReceiptRecord): Promise<void> {
     // INSERT OR IGNORE: the receipt is immutable and minted exactly once. A
     // concurrent or repeat mint for the same validation_id is a no-op; callers
     // re-read to get the authoritative stored row.
@@ -2144,14 +2144,14 @@ export class SqliteJobStore implements JobStore, ValidationRunStore {
       });
   }
 
-  getValidationReceipt(validationId: string): ValidationReceiptRecord | null {
+  async getValidationReceipt(validationId: string): Promise<ValidationReceiptRecord | null> {
     const row = this.db
       .prepare(`SELECT * FROM validation_receipts WHERE validation_id = ?`)
       .get(validationId);
     return row ? rowToValidationReceiptRecord(row) : null;
   }
 
-  close(): void {
+  async close(): Promise<void> {
     try {
       this.db.close();
     } catch (err) {
@@ -2310,7 +2310,7 @@ export class MemoryJobStore implements JobStore {
     this.leaseTtlMs = options.leaseTtlMs ?? DEFAULT_INSTANCE_LEASE_TTL_MS;
   }
 
-  recordStart(input: {
+  async recordStart(input: {
     id: string;
     correlationId: string;
     requestKey: string;
@@ -2330,7 +2330,7 @@ export class MemoryJobStore implements JobStore {
     kitExecution?: KitExecutionRef | null;
     kitSessionId?: string | null;
     validationAdmission?: ValidationJobAdmission;
-  }): void {
+  }): Promise<void> {
     assertMcpArtifactAdmissionInvariant(input);
     if (input.kitExecution) {
       const kitSessionId = input.kitSessionId?.trim();
@@ -2396,7 +2396,7 @@ export class MemoryJobStore implements JobStore {
     });
   }
 
-  fenceUnadmittedKitAttempt(input: KitAttemptFenceInput): KitAttemptFenceResult {
+  async fenceUnadmittedKitAttempt(input: KitAttemptFenceInput): Promise<KitAttemptFenceResult> {
     if (this.insertKitAttemptFence({ ...input, state: "recovered" })) return "reserved";
     const existing = this.kitAttemptFences.get(input.attemptId);
     if (
@@ -2423,7 +2423,7 @@ export class MemoryJobStore implements JobStore {
     return true;
   }
 
-  markRunning(id: string, opts: { pid: number | null }): boolean {
+  async markRunning(id: string, opts: { pid: number | null }): Promise<boolean> {
     const row = this.rows.get(id);
     if (!row || row.status !== "queued") return false;
     row.status = "running";
@@ -2434,9 +2434,9 @@ export class MemoryJobStore implements JobStore {
 
   // #139: instance registration is a no-op for the in-process store (there is
   // only ever one owner and no cross-process visibility).
-  registerInstance(_meta: GatewayInstanceMeta): void {}
+  async registerInstance(_meta: GatewayInstanceMeta): Promise<void> {}
 
-  heartbeat(instanceId: string): void {
+  async heartbeat(instanceId: string): Promise<void> {
     // Still advance in-memory leases for parity (harmless; recover is a no-op).
     const deadline = Date.now() + this.leaseTtlMs;
     for (const row of this.rows.values()) {
@@ -2449,17 +2449,17 @@ export class MemoryJobStore implements JobStore {
     }
   }
 
-  deregisterInstance(_instanceId: string): void {}
+  async deregisterInstance(_instanceId: string): Promise<void> {}
 
-  selectStaleProcessCandidates(_leaseTtlMs: number, _httpJobGraceMs: number): SweepCandidate[] {
+  async selectStaleProcessCandidates(_leaseTtlMs: number, _httpJobGraceMs: number): Promise<SweepCandidate[]> {
     return [];
   }
 
-  selectOrphanedProcessCandidates(_hostname: string): SweepCandidate[] {
+  async selectOrphanedProcessCandidates(_hostname: string): Promise<SweepCandidate[]> {
     return [];
   }
 
-  selectPendingMcpArtifactCleanups(hostname: string): PendingMcpArtifactCleanup[] {
+  async selectPendingMcpArtifactCleanups(hostname: string): Promise<PendingMcpArtifactCleanup[]> {
     return [...this.rows.values()]
       .filter(
         row =>
@@ -2483,12 +2483,12 @@ export class MemoryJobStore implements JobStore {
       }));
   }
 
-  acknowledgeMcpArtifactCleanup(
+  async acknowledgeMcpArtifactCleanup(
     id: string,
     hostname: string,
     artifactScope: string,
     artifactPath: string
-  ): boolean {
+  ): Promise<boolean> {
     const row = this.rows.get(id);
     if (
       !row ||
@@ -2511,19 +2511,19 @@ export class MemoryJobStore implements JobStore {
    * In-memory stores have no cross-process state, so any open rows here belong
    * to this very process and are not actually orphaned. Per-process no-op.
    */
-  recoverStaleJobs(
+  async recoverStaleJobs(
     _leaseTtlMs: number,
     _httpJobGraceMs: number,
     _liveConfirmedIds?: string[]
-  ): OrphanedJobSnapshot[] {
+  ): Promise<OrphanedJobSnapshot[]> {
     return [];
   }
 
-  gcInstances(_instanceGcMs: number): number {
+  async gcInstances(_instanceGcMs: number): Promise<number> {
     return 0;
   }
 
-  recordOutput(id: string, stdout: string, stderr: string, outputTruncated: boolean): void {
+  async recordOutput(id: string, stdout: string, stderr: string, outputTruncated: boolean): Promise<void> {
     const row = this.rows.get(id);
     if (!row) return;
     row.stdout = row.kitExecution ? "" : stdout;
@@ -2531,19 +2531,19 @@ export class MemoryJobStore implements JobStore {
     row.outputTruncated = outputTruncated;
   }
 
-  recordProgress(id: string, progressJson: string): void {
+  async recordProgress(id: string, progressJson: string): Promise<void> {
     const row = this.rows.get(id);
     if (row) row.progressJson = progressJson;
   }
 
-  recordProgressIfStatus(id: string, status: JobStoreStatus, progressJson: string): boolean {
+  async recordProgressIfStatus(id: string, status: JobStoreStatus, progressJson: string): Promise<boolean> {
     const row = this.rows.get(id);
     if (!row || row.status !== status) return false;
     row.progressJson = progressJson;
     return true;
   }
 
-  recordComplete(input: {
+  async recordComplete(input: {
     id: string;
     status: Exclude<JobStoreStatus, "running" | "queued">;
     exitCode: number | null;
@@ -2557,7 +2557,7 @@ export class MemoryJobStore implements JobStore {
     httpStatus?: number | null;
     progressJson?: string | null;
     kitTerminalMetadata?: PersonalKitTerminalMetadata | null;
-  }): boolean {
+  }): Promise<boolean> {
     const row = this.rows.get(input.id);
     if (!row) return false;
     // #139: guarded completion, mirroring the sqlite WHERE guard. A terminal
@@ -2591,12 +2591,12 @@ export class MemoryJobStore implements JobStore {
     return true;
   }
 
-  getById(id: string): JobRecord | null {
+  async getById(id: string): Promise<JobRecord | null> {
     const row = this.rows.get(id);
     return row ? cloneJobRecord(row) : null;
   }
 
-  findByRequestKey(requestKey: string): JobRecord | null {
+  async findByRequestKey(requestKey: string): Promise<JobRecord | null> {
     const cutoffMs = Date.now() - this.dedupWindowMs;
     const nowMs = Date.now();
     let best: JobRecord | null = null;
@@ -2617,21 +2617,21 @@ export class MemoryJobStore implements JobStore {
     return best ? cloneJobRecord(best) : null;
   }
 
-  getPendingKitFinalizations(): PendingKitFinalization[] {
+  async getPendingKitFinalizations(): Promise<PendingKitFinalization[]> {
     return [...this.rows.values()]
       .map(toPendingKitFinalization)
       .filter((entry): entry is PendingKitFinalization => entry !== null)
       .sort((a, b) => a.finishedAt.localeCompare(b.finishedAt) || a.jobId.localeCompare(b.jobId));
   }
 
-  getAcknowledgedKitAttemptReleases(): AcknowledgedKitAttemptRelease[] {
+  async getAcknowledgedKitAttemptReleases(): Promise<AcknowledgedKitAttemptRelease[]> {
     return [...this.rows.values()]
       .map(toAcknowledgedKitAttemptRelease)
       .filter((entry): entry is AcknowledgedKitAttemptRelease => entry !== null)
       .sort((a, b) => a.jobId.localeCompare(b.jobId));
   }
 
-  markKitTerminalFinalized(id: string, kitSessionId: string): boolean {
+  async markKitTerminalFinalized(id: string, kitSessionId: string): Promise<boolean> {
     const row = this.rows.get(id);
     if (
       !row ||
@@ -2650,7 +2650,7 @@ export class MemoryJobStore implements JobStore {
     return true;
   }
 
-  getPinnedKitReleaseIds(): string[] {
+  async getPinnedKitReleaseIds(): Promise<string[]> {
     const releases = new Set<string>();
     for (const row of this.rows.values()) {
       if (
@@ -2663,7 +2663,7 @@ export class MemoryJobStore implements JobStore {
     return [...releases].sort();
   }
 
-  getReferencedKitReleaseIds(): string[] {
+  async getReferencedKitReleaseIds(): Promise<string[]> {
     return this.getPinnedKitReleaseIds();
   }
 
@@ -2671,14 +2671,14 @@ export class MemoryJobStore implements JobStore {
    * In-memory stores have no cross-process state, so any "running" rows here
    * came from this very process and aren't actually orphaned. No-op.
    */
-  markOrphanedOnStartup(): {
+  async markOrphanedOnStartup(): Promise<{
     count: number;
     orphaned: Array<OrphanedJobSnapshot>;
-  } {
+  }> {
     return { count: 0, orphaned: [] };
   }
 
-  evictExpired(): number {
+  async evictExpired(): Promise<number> {
     const nowIso = new Date().toISOString();
     let removed = 0;
     for (const [id, row] of this.rows) {
@@ -2694,7 +2694,7 @@ export class MemoryJobStore implements JobStore {
     return removed;
   }
 
-  close(): void {
+  async close(): Promise<void> {
     this.rows.clear();
   }
 }
@@ -2908,7 +2908,7 @@ export class PostgresJobStore implements JobStore, ValidationRunStore {
     this.workerTerminationPending = false;
   }
 
-  recordStart(input: {
+  async recordStart(input: {
     id: string;
     correlationId: string;
     requestKey: string;
@@ -2928,49 +2928,49 @@ export class PostgresJobStore implements JobStore, ValidationRunStore {
     kitExecution?: KitExecutionRef | null;
     kitSessionId?: string | null;
     validationAdmission?: ValidationJobAdmission;
-  }): void {
+  }): Promise<void> {
     assertMcpArtifactAdmissionInvariant(input);
     this.syncCall("recordStart", input);
   }
 
-  fenceUnadmittedKitAttempt(input: KitAttemptFenceInput): KitAttemptFenceResult {
+  async fenceUnadmittedKitAttempt(input: KitAttemptFenceInput): Promise<KitAttemptFenceResult> {
     return this.syncCall("fenceUnadmittedKitAttempt", input);
   }
 
-  markRunning(id: string, opts: { pid: number | null }): boolean {
+  async markRunning(id: string, opts: { pid: number | null }): Promise<boolean> {
     return this.syncCall("markRunning", id, opts);
   }
 
-  registerInstance(meta: GatewayInstanceMeta): void {
+  async registerInstance(meta: GatewayInstanceMeta): Promise<void> {
     this.syncCall("registerInstance", meta);
   }
 
-  heartbeat(instanceId: string): void {
+  async heartbeat(instanceId: string): Promise<void> {
     this.syncCall("heartbeat", instanceId);
   }
 
-  deregisterInstance(instanceId: string): void {
+  async deregisterInstance(instanceId: string): Promise<void> {
     this.syncCall("deregisterInstance", instanceId);
   }
 
-  selectStaleProcessCandidates(leaseTtlMs: number, httpJobGraceMs: number): SweepCandidate[] {
+  async selectStaleProcessCandidates(leaseTtlMs: number, httpJobGraceMs: number): Promise<SweepCandidate[]> {
     return this.syncCall("selectStaleProcessCandidates", leaseTtlMs, httpJobGraceMs);
   }
 
-  selectOrphanedProcessCandidates(hostname: string): SweepCandidate[] {
+  async selectOrphanedProcessCandidates(hostname: string): Promise<SweepCandidate[]> {
     return this.syncCall("selectOrphanedProcessCandidates", hostname);
   }
 
-  selectPendingMcpArtifactCleanups(hostname: string): PendingMcpArtifactCleanup[] {
+  async selectPendingMcpArtifactCleanups(hostname: string): Promise<PendingMcpArtifactCleanup[]> {
     return this.syncCall("selectPendingMcpArtifactCleanups", hostname);
   }
 
-  acknowledgeMcpArtifactCleanup(
+  async acknowledgeMcpArtifactCleanup(
     id: string,
     hostname: string,
     artifactScope: string,
     artifactPath: string
-  ): boolean {
+  ): Promise<boolean> {
     return this.syncCall(
       "acknowledgeMcpArtifactCleanup",
       id,
@@ -2980,11 +2980,11 @@ export class PostgresJobStore implements JobStore, ValidationRunStore {
     );
   }
 
-  recoverStaleJobs(
+  async recoverStaleJobs(
     leaseTtlMs: number,
     httpJobGraceMs: number,
     liveConfirmedIds: string[] = []
-  ): OrphanedJobSnapshot[] {
+  ): Promise<OrphanedJobSnapshot[]> {
     const result = this.syncCall<{
       orphaned: Array<{
         id: string;
@@ -3011,23 +3011,23 @@ export class PostgresJobStore implements JobStore, ValidationRunStore {
     }));
   }
 
-  gcInstances(instanceGcMs: number): number {
+  async gcInstances(instanceGcMs: number): Promise<number> {
     return this.syncCall("gcInstances", instanceGcMs);
   }
 
-  recordOutput(id: string, stdout: string, stderr: string, outputTruncated: boolean): void {
+  async recordOutput(id: string, stdout: string, stderr: string, outputTruncated: boolean): Promise<void> {
     this.syncCall("recordOutput", id, stdout, stderr, outputTruncated);
   }
 
-  recordProgress(id: string, progressJson: string): void {
+  async recordProgress(id: string, progressJson: string): Promise<void> {
     this.syncCall("recordProgress", id, progressJson);
   }
 
-  recordProgressIfStatus(id: string, status: JobStoreStatus, progressJson: string): boolean {
+  async recordProgressIfStatus(id: string, status: JobStoreStatus, progressJson: string): Promise<boolean> {
     return this.syncCall("recordProgressIfStatus", id, status, progressJson);
   }
 
-  recordComplete(input: {
+  async recordComplete(input: {
     id: string;
     status: Exclude<JobStoreStatus, "running" | "queued">;
     exitCode: number | null;
@@ -3041,39 +3041,39 @@ export class PostgresJobStore implements JobStore, ValidationRunStore {
     httpStatus?: number | null;
     progressJson?: string | null;
     kitTerminalMetadata?: PersonalKitTerminalMetadata | null;
-  }): boolean {
+  }): Promise<boolean> {
     return this.syncCall<boolean>("recordComplete", input);
   }
 
-  getById(id: string): JobRecord | null {
+  async getById(id: string): Promise<JobRecord | null> {
     const row = this.syncCall("getById", id);
     return row ? rowToRecord(row) : null;
   }
 
-  findByRequestKey(requestKey: string): JobRecord | null {
+  async findByRequestKey(requestKey: string): Promise<JobRecord | null> {
     const row = this.syncCall("findByRequestKey", requestKey);
     return row ? rowToRecord(row) : null;
   }
 
-  getPendingKitFinalizations(): PendingKitFinalization[] {
+  async getPendingKitFinalizations(): Promise<PendingKitFinalization[]> {
     const rows = this.syncCall<unknown[]>("getPendingKitFinalizations");
     return rows
       .map(row => toPendingKitFinalization(rowToRecord(row)))
       .filter((entry): entry is PendingKitFinalization => entry !== null);
   }
 
-  getAcknowledgedKitAttemptReleases(): AcknowledgedKitAttemptRelease[] {
+  async getAcknowledgedKitAttemptReleases(): Promise<AcknowledgedKitAttemptRelease[]> {
     const rows = this.syncCall<unknown[]>("getAcknowledgedKitAttemptReleases");
     return rows
       .map(row => toAcknowledgedKitAttemptRelease(rowToRecord(row)))
       .filter((entry): entry is AcknowledgedKitAttemptRelease => entry !== null);
   }
 
-  markKitTerminalFinalized(id: string, kitSessionId: string): boolean {
+  async markKitTerminalFinalized(id: string, kitSessionId: string): Promise<boolean> {
     return this.syncCall("markKitTerminalFinalized", id, kitSessionId);
   }
 
-  getPinnedKitReleaseIds(): string[] {
+  async getPinnedKitReleaseIds(): Promise<string[]> {
     const rows =
       this.syncCall<Array<{ kit_execution_json?: string | null }>>("getPinnedKitReleaseIds");
     const releases = new Set<string>();
@@ -3084,7 +3084,7 @@ export class PostgresJobStore implements JobStore, ValidationRunStore {
     return [...releases].sort();
   }
 
-  getReferencedKitReleaseIds(): string[] {
+  async getReferencedKitReleaseIds(): Promise<string[]> {
     return this.getPinnedKitReleaseIds();
   }
 
@@ -3092,44 +3092,44 @@ export class PostgresJobStore implements JobStore, ValidationRunStore {
    * @deprecated #139: delegates to the durable lease sweep (like the sqlite
    * shim). No longer blanket-orphans every running row.
    */
-  markOrphanedOnStartup(): {
+  async markOrphanedOnStartup(): Promise<{
     count: number;
     orphaned: Array<OrphanedJobSnapshot>;
-  } {
-    const orphaned = this.recoverStaleJobs(
+  }> {
+    const orphaned = await this.recoverStaleJobs(
       DEFAULT_INSTANCE_LEASE_TTL_MS,
       DEFAULT_HTTP_JOB_GRACE_MS
     );
-    return { count: orphaned.length, orphaned };
+    return { count: (await orphaned).length, orphaned };
   }
 
-  evictExpired(): number {
+  async evictExpired(): Promise<number> {
     return this.syncCall("evictExpired");
   }
 
-  recordValidationRun(run: ValidationRunRecord): void {
+  async recordValidationRun(run: ValidationRunRecord): Promise<void> {
     this.syncCall("recordValidationRun", run);
   }
 
-  getValidationRun(validationId: string): ValidationRunRecord | null {
+  async getValidationRun(validationId: string): Promise<ValidationRunRecord | null> {
     const row = this.syncCall("getValidationRun", validationId);
     return row ? rowToValidationRunRecord(row) : null;
   }
 
-  setValidationProviderLinks(validationId: string, providerLinks: ValidationRunLink[]): void {
+  async setValidationProviderLinks(validationId: string, providerLinks: ValidationRunLink[]): Promise<void> {
     this.syncCall("setValidationProviderLinks", validationId, providerLinks);
   }
 
-  setValidationJudgeLink(validationId: string, judgeLink: ValidationRunLink): void {
+  async setValidationJudgeLink(validationId: string, judgeLink: ValidationRunLink): Promise<void> {
     this.syncCall("setValidationJudgeLink", validationId, judgeLink);
   }
 
-  transitionValidationRunStatus(
+  async transitionValidationRunStatus(
     validationId: string,
     ownerPrincipal: string,
     expectedStatus: ValidationRunRecord["status"],
     status: ValidationRunRecord["status"]
-  ): boolean {
+  ): Promise<boolean> {
     return this.syncCall(
       "transitionValidationRunStatus",
       validationId,
@@ -3139,28 +3139,28 @@ export class PostgresJobStore implements JobStore, ValidationRunStore {
     );
   }
 
-  skipValidationJudge(validationId: string, provider: string, ownerPrincipal: string): void {
+  async skipValidationJudge(validationId: string, provider: string, ownerPrincipal: string): Promise<void> {
     this.syncCall("skipValidationJudge", validationId, provider, ownerPrincipal);
   }
 
-  setValidationRunStatus(validationId: string, status: ValidationRunRecord["status"]): void {
+  async setValidationRunStatus(validationId: string, status: ValidationRunRecord["status"]): Promise<void> {
     this.syncCall("setValidationRunStatus", validationId, status);
   }
 
-  getValidationRunIdByJobId(jobId: string): string | null {
+  async getValidationRunIdByJobId(jobId: string): Promise<string | null> {
     return this.syncCall("getValidationRunIdByJobId", jobId);
   }
 
-  recordValidationReceipt(receipt: ValidationReceiptRecord): void {
+  async recordValidationReceipt(receipt: ValidationReceiptRecord): Promise<void> {
     this.syncCall("recordValidationReceipt", receipt);
   }
 
-  getValidationReceipt(validationId: string): ValidationReceiptRecord | null {
+  async getValidationReceipt(validationId: string): Promise<ValidationReceiptRecord | null> {
     const row = this.syncCall("getValidationReceipt", validationId);
     return row ? rowToValidationReceiptRecord(row) : null;
   }
 
-  close(): void {
+  async close(): Promise<void> {
     if (this.closed) return;
     const worker = this.worker;
     try {

@@ -1857,17 +1857,17 @@ async function awaitJobOrDefer(
     consumeOnComplete();
     throw err;
   }
-  const job = outcome.snapshot;
-  if (outcome.deduped) {
+  const job = (await outcome).snapshot;
+  if ((await outcome).deduped) {
     runtime.logger.info(
-      `[${corrId}] sync request deduped onto running job ${job.id} (original corrId=${outcome.originalCorrelationId})`
+      `[${corrId}] sync request deduped onto running job ${job.id} (original corrId=${(await outcome).originalCorrelationId})`
     );
   }
   const deadline = Date.now() + SYNC_DEADLINE_MS;
 
   while (Date.now() < deadline) {
-    const snapshot = runtime.asyncJobManager.getJobSnapshot(job.id);
-    if (snapshot && !isAsyncJobInProgress(snapshot.status)) {
+    const snapshot = await runtime.asyncJobManager.getJobSnapshot(job.id);
+    if (snapshot && !isAsyncJobInProgress((snapshot).status)) {
       // Terminal hooks own every durable Kit update. A terminal process can be
       // observed before its async hook finishes, so never expose an inline
       // result (or run a second finalizer) until that acknowledgement lands.
@@ -1876,16 +1876,16 @@ async function awaitJobOrDefer(
         if (!finalized) throw new KitTerminalFinalizationError(job.id);
       }
       // Job finished within deadline — extract result
-      const result = runtime.asyncJobManager.getJobResult(job.id);
+      const result = await runtime.asyncJobManager.getJobResult(job.id);
       if (!result) {
         return { stdout: "", stderr: "Job result unavailable", code: 1, jobId: job.id };
       }
       return {
-        stdout: result.stdout,
-        stderr: result.stderr || result.error || "",
-        code: result.exitCode ?? 1,
-        ...(result.errorCategory ? { errorCategory: result.errorCategory } : {}),
-        ...(typeof result.retryable === "boolean" ? { retryable: result.retryable } : {}),
+        stdout: (result).stdout,
+        stderr: (result).stderr || (result).error || "",
+        code: (result).exitCode ?? 1,
+        ...((result).errorCategory ? { errorCategory: (result).errorCategory } : {}),
+        ...(typeof (result).retryable === "boolean" ? { retryable: (result).retryable } : {}),
         jobId: job.id,
       };
     }
@@ -2029,17 +2029,17 @@ async function awaitApiJobOrDefer(
     throw err;
   }
 
-  const job = outcome.snapshot;
-  if (outcome.deduped) {
+  const job = (await outcome).snapshot;
+  if ((await outcome).deduped) {
     runtime.logger.info(
-      `[${corrId}] api request deduped onto job ${job.id} (original corrId=${outcome.originalCorrelationId})`
+      `[${corrId}] api request deduped onto job ${job.id} (original corrId=${(await outcome).originalCorrelationId})`
     );
   }
   const deadline = Date.now() + SYNC_DEADLINE_MS;
   while (Date.now() < deadline) {
-    const snapshot = runtime.asyncJobManager.getJobSnapshot(job.id);
-    if (snapshot && !isAsyncJobInProgress(snapshot.status)) {
-      const result = runtime.asyncJobManager.getJobResult(job.id);
+    const snapshot = await runtime.asyncJobManager.getJobSnapshot(job.id);
+    if (snapshot && !isAsyncJobInProgress((snapshot).status)) {
+      const result = await runtime.asyncJobManager.getJobResult(job.id);
       if (!result) return { stdout: "", stderr: "Job result unavailable", code: 1 };
       return {
         stdout: result.stdout,
@@ -8597,25 +8597,25 @@ async function recoverOrRejectKitAttempt(input: {
     );
   }
 
-  const lookup = input.runtime.asyncJobManager.lookupJobSnapshot(activeAttempt.id);
-  if (lookup.state === "unavailable") {
+  const lookup = await input.runtime.asyncJobManager.lookupJobSnapshot(activeAttempt.id);
+  if ((lookup).state === "unavailable") {
     throw new PersonalConfigError(
       "kit_busy",
       "Unable to verify the durable Kit job; retaining its session attempt"
     );
   }
-  if (lookup.state === "found") {
+  if ((lookup).state === "found") {
     if (
-      !lookup.kitExecution ||
-      !sameKitExecutionRef(lookup.kitExecution, input.execution) ||
-      lookup.kitSessionId !== input.session.id
+      !(lookup).kitExecution ||
+      !sameKitExecutionRef((lookup).kitExecution, input.execution) ||
+      (lookup).kitSessionId !== input.session.id
     ) {
       throw new PersonalConfigError(
         "kit_busy",
         "The durable Kit job does not match this session attempt; retaining both for recovery"
       );
     }
-    if (lookup.kitTerminalFinalized) {
+    if ((lookup).kitTerminalFinalized) {
       // Crash-window recovery: terminal output and durable acknowledgement
       // landed, but the process died before it could remove the matching
       // session attempt. It is now safe to release exactly that lease.
@@ -8653,7 +8653,7 @@ async function recoverOrRejectKitAttempt(input: {
       }
       return recovered;
     }
-    if (lookup.snapshot.status !== "orphaned" && !isAsyncJobInProgress(lookup.snapshot.status)) {
+    if ((lookup).snapshot.status !== "orphaned" && !isAsyncJobInProgress((lookup).snapshot.status)) {
       await reconcilePendingPersonalKitFinalizations(input.runtime);
       const refreshed = await Promise.resolve(input.manager.getSession(input.session.id));
       binding = refreshed ? getKitSessionBinding(refreshed) : null;
@@ -8662,7 +8662,7 @@ async function recoverOrRejectKitAttempt(input: {
       }
     }
     const reason =
-      lookup.snapshot.status === "orphaned"
+      (lookup).snapshot.status === "orphaned"
         ? "The matching Kit job is orphaned and remains pinned until confirmed manual recovery"
         : "The matching Kit session already has a durable provider turn in progress";
     throw new PersonalConfigError("kit_busy", reason);
@@ -9100,7 +9100,7 @@ async function finalizeAndAcknowledgePersonalKitTerminal(input: {
   initialNativeSessionId?: string;
 }): Promise<void> {
   await finalizePersonalKitSessionOrThrow({ ...input, retainAttempt: true });
-  const marked = input.runtime.asyncJobManager.markKitTerminalFinalized(
+  const marked = await input.runtime.asyncJobManager.markKitTerminalFinalized(
     input.attemptId,
     input.gatewaySessionId
   );
@@ -9215,16 +9215,19 @@ async function releaseAcknowledgedPersonalKitAttempt(input: {
 const pendingKitFinalizationRuns = new WeakMap<GatewayServerRuntime, Promise<void>>();
 const personalKitMaintenanceTimers = new WeakMap<GatewayServerRuntime, NodeJS.Timeout>();
 
-function reapTerminalClaudeKitArtifacts(runtime: GatewayServerRuntime): void {
-  const removed = reapClaudeContextArtifacts(runtime.personalConfig.layout, jobId => {
-    const lookup = runtime.asyncJobManager.lookupJobSnapshot(jobId);
-    if (lookup.state === "unavailable") return "unavailable";
-    if (lookup.state === "not_found") return "not_found";
-    if (isAsyncJobInProgress(lookup.snapshot.status) || lookup.snapshot.status === "orphaned") {
-      return "active";
+async function reapTerminalClaudeKitArtifacts(runtime: GatewayServerRuntime): Promise<void> {
+  const removed = await reapClaudeContextArtifacts(
+    runtime.personalConfig.layout,
+    async jobId => {
+      const lookup = await runtime.asyncJobManager.lookupJobSnapshot(jobId);
+      if (lookup.state === "unavailable") return "unavailable";
+      if (lookup.state === "not_found") return "not_found";
+      if (isAsyncJobInProgress(lookup.snapshot.status) || lookup.snapshot.status === "orphaned") {
+        return "active";
+      }
+      return "terminal";
     }
-    return "terminal";
-  });
+  );
   if (removed > 0)
     runtime.logger.info(`Reaped ${removed} terminal Personal Agent Config artifact(s)`);
 }
@@ -9236,9 +9239,11 @@ function startPersonalKitMaintenance(runtime: GatewayServerRuntime): void {
       .catch(error =>
         runtime.logger.error("Personal Agent Config maintenance reconciliation failed", error)
       )
-      .finally(() => {
+      .finally(async () => {
         try {
-          reapTerminalClaudeKitArtifacts(runtime);
+          // AWAITED inside a callback the caller already fires and forgets:
+          // the outer `void` is the deliberate part, this catch is not.
+          await reapTerminalClaudeKitArtifacts(runtime);
         } catch (error) {
           runtime.logger.error("Personal Agent Config artifact maintenance failed", error);
         }
@@ -9318,8 +9323,11 @@ async function reconcilePendingPersonalKitFinalizations(
   if (!runtime.personalConfig.settings.enabled) return;
   const existing = pendingKitFinalizationRuns.get(runtime);
   if (existing) return existing;
+  // NOT awaited here: the WeakMap below stores this promise so a concurrent
+  // caller joins the in-flight reconciliation instead of starting a second one.
+  // Awaiting it into the map would store a resolved value and dedupe nothing.
   const run = (async () => {
-    for (const pending of runtime.asyncJobManager.getPendingKitFinalizations()) {
+    for (const pending of await runtime.asyncJobManager.getPendingKitFinalizations()) {
       if (pending.status === "orphaned") {
         // A stale lease is not proof that a remote or paused process died. Do
         // not release this native-session attempt until an operator or a later
@@ -9358,7 +9366,7 @@ async function reconcilePendingPersonalKitFinalizations(
         );
       }
     }
-    for (const acknowledged of runtime.asyncJobManager.getAcknowledgedKitAttemptReleases()) {
+    for (const acknowledged of await runtime.asyncJobManager.getAcknowledgedKitAttemptReleases()) {
       if (
         acknowledged.cli !== "claude" &&
         acknowledged.cli !== "codex" &&
@@ -9391,6 +9399,9 @@ async function reconcilePendingPersonalKitFinalizations(
       }
     }
   })();
+  // `run` stays a PROMISE in the map: concurrent callers join the in-flight
+  // reconciliation rather than starting a second one. Awaiting it into the map
+  // would store a resolved value and deduplicate nothing.
   pendingKitFinalizationRuns.set(runtime, run);
   try {
     await run;
@@ -10120,11 +10131,11 @@ export async function handleApiProviderRequest(
 }
 
 /** Async `api_<name>_request_async`: start the http job, return its jobId. */
-export function handleApiProviderRequestAsync(
+export async function handleApiProviderRequestAsync(
   runtimeArg: GatewayServerRuntime,
   providerRuntime: ApiProviderRuntime,
   params: ApiProviderToolParams
-): ExtendedToolResponse {
+): Promise<ExtendedToolResponse> {
   const toolName = `api_${providerRuntime.name}_request_async`;
   const corrId = params.correlationId ?? randomUUID();
   const kitError = rejectUnsupportedKitProvider(runtimeArg, providerRuntime.name, toolName, corrId);
@@ -10142,7 +10153,7 @@ export function handleApiProviderRequestAsync(
     // and the terminal logComplete (armed by writeFlightStart), populating usage
     // from the captured apiUsage. (optimizeResponse is N/A on the async path: the
     // response is collected later via llm_job_result.)
-    const outcome = runtimeArg.asyncJobManager.startHttpJob({
+    const outcome = await runtimeArg.asyncJobManager.startHttpJob({
       provider,
       apiRequest,
       correlationId: corrId,
@@ -10157,12 +10168,12 @@ export function handleApiProviderRequestAsync(
     });
     return buildDeferredToolResponse({
       deferred: true,
-      jobId: outcome.snapshot.id,
+      jobId: (outcome).snapshot.id,
       cli: providerRuntime.name,
       correlationId: corrId,
-      message: outcome.deduped
-        ? `Deduped onto existing job ${outcome.snapshot.id}. Poll with llm_job_status.`
-        : `Started async job ${outcome.snapshot.id}. Poll with llm_job_status, collect with llm_job_result.`,
+      message: (outcome).deduped
+        ? `Deduped onto existing job ${(outcome).snapshot.id}. Poll with llm_job_status.`
+        : `Started async job ${(outcome).snapshot.id}. Poll with llm_job_status, collect with llm_job_result.`,
     });
   } catch (err) {
     if (err instanceof ApiModelNotAllowedError) {
@@ -15452,7 +15463,7 @@ export async function handleMistralRequestAsync(
       params.outputFormat,
       params.optimizePrompt
     );
-    const job = deps.asyncJobManager.startJob(
+    const job = await deps.asyncJobManager.startJob(
       "mistral",
       args,
       corrId,
@@ -15481,7 +15492,7 @@ export async function handleMistralRequestAsync(
       sessionResult.userProvidedSession ? effectiveSessionId : undefined,
       runtime
     );
-    deps.logger.info(`[${corrId}] mistral_request_async started job ${job.id}`);
+    deps.logger.info(`[${corrId}] mistral_request_async started job ${(job).id}`);
 
     const asyncResponse: Record<string, unknown> = {
       success: true,
@@ -16917,14 +16928,14 @@ async function recoverUnadmittedPersonalKitAttempt(input: {
       "A legacy non-durable Kit attempt has no durable fence and must remain retained"
     );
   }
-  const lookup = input.runtime.asyncJobManager.lookupJobSnapshot(attempt.id);
-  if (lookup.state === "unavailable") {
+  const lookup = await input.runtime.asyncJobManager.lookupJobSnapshot(attempt.id);
+  if ((lookup).state === "unavailable") {
     throw new PersonalConfigError(
       "kit_busy",
       "Unable to verify the durable Kit job; retaining its session attempt"
     );
   }
-  if (lookup.state === "found") {
+  if ((lookup).state === "found") {
     throw new PersonalConfigError(
       "kit_busy",
       "A durable job already exists for this Kit attempt; it cannot be manually recovered"
@@ -16932,7 +16943,7 @@ async function recoverUnadmittedPersonalKitAttempt(input: {
   }
   let fence: "reserved" | "already_recovered" | "conflict";
   try {
-    fence = input.runtime.asyncJobManager.fenceUnadmittedKitAttempt({
+    fence = await input.runtime.asyncJobManager.fenceUnadmittedKitAttempt({
       attemptId: attempt.id,
       cli: input.provider,
       kitExecution: input.execution,
@@ -21764,14 +21775,14 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
         openWorldHint: false,
       },
       async ({ jobId, afterProgressSeq, progressLimit }) => {
-        const job = asyncJobManager.getJobSnapshot(jobId, {
+        const job = await asyncJobManager.getJobSnapshot(jobId, {
           afterProgressSeq,
           progressLimit,
         });
         // F3b: own-or-not-found. A job owned by another principal is reported as
         // "not found" — identical to an unknown jobId (no existence oracle).
         const caller = resolveOwnerPrincipal(getRequestContext());
-        if (!job || !principalCanAccess(asyncJobManager.getJobOwner(jobId), caller)) {
+        if (!job || !principalCanAccess(await asyncJobManager.getJobOwner(jobId), caller)) {
           return {
             content: [
               {
@@ -21827,10 +21838,10 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
       },
       async ({ jobId, afterProgressSeq, progressLimit, waitMs }, extra) => {
         const caller = resolveOwnerPrincipal(getRequestContext());
-        const accessible = (): boolean =>
-          principalCanAccess(asyncJobManager.getJobOwner(jobId), caller);
-        let job = accessible()
-          ? asyncJobManager.getJobSnapshot(jobId, { afterProgressSeq, progressLimit })
+        const accessible = async (): Promise<boolean> =>
+          principalCanAccess(await asyncJobManager.getJobOwner(jobId), caller);
+        let job = (await accessible())
+          ? await asyncJobManager.getJobSnapshot(jobId, { afterProgressSeq, progressLimit })
           : null;
         if (!job) {
           return {
@@ -21846,8 +21857,8 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
 
         const deadline = Date.now() + waitMs;
         while (
-          job.progress.events.length === 0 &&
-          (job.status === "queued" || job.status === "running") &&
+          (await job).progress.events.length === 0 &&
+          ((await job).status === "queued" || (await job).status === "running") &&
           Date.now() < deadline &&
           !extra.signal.aborted
         ) {
@@ -21864,13 +21875,13 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
             };
             extra.signal.addEventListener("abort", abort, { once: true });
           });
-          job = accessible()
-            ? asyncJobManager.getJobSnapshot(jobId, { afterProgressSeq, progressLimit })
+          job = (await accessible())
+            ? await asyncJobManager.getJobSnapshot(jobId, { afterProgressSeq, progressLimit })
             : null;
           if (!job) break;
         }
 
-        if (!job || !accessible()) {
+        if (!job || !(await accessible())) {
           return {
             content: [
               {
@@ -21884,7 +21895,7 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
 
         const progressToken = extra._meta?.progressToken;
         if (progressToken !== undefined) {
-          for (const event of job.progress.events) {
+          for (const event of (await job).progress.events) {
             if (extra.signal.aborted) break;
             await extra.sendNotification({
               method: "notifications/progress",
@@ -21952,14 +21963,14 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
       },
       async ({ jobId, maxChars, stdoutOffsetChars, stderrOffsetChars, rawOutput }) => {
         const remoteCaller = callerIsRemote();
-        const result = asyncJobManager.getJobResult(jobId, maxChars, {
+        const result = await asyncJobManager.getJobResult(jobId, maxChars, {
           stdoutOffsetChars,
           stderrOffsetChars,
           redactProviderSessionIds: remoteCaller,
         });
         // F3b: own-or-not-found (no cross-principal readback of job output).
         const caller = resolveOwnerPrincipal(getRequestContext());
-        if (!result || !principalCanAccess(asyncJobManager.getJobOwner(jobId), caller)) {
+        if (!result || !principalCanAccess(await asyncJobManager.getJobOwner(jobId), caller)) {
           return {
             content: [
               {
@@ -22003,8 +22014,8 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
         // Parse stream-json output for Claude async jobs
         const outputFormat = asyncJobManager.getJobOutputFormat(jobId);
         let parsed: ReturnType<typeof parseStreamJson> | undefined;
-        if (!rawOutput && outputFormat === "stream-json" && result.stdout) {
-          parsed = parseStreamJson(result.stdout);
+        if (!rawOutput && outputFormat === "stream-json" && (result).stdout) {
+          parsed = parseStreamJson((result).stdout);
         }
 
         // #44: codex async jobs always run with `--json`, so `result.stdout`
@@ -22017,15 +22028,15 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
         // in-memory job record. Token usage was already recorded to the flight
         // recorder at job completion, so this display swap loses nothing. `json`
         // mode returns the raw JSONL.
-        if (!rawOutput && result.stdout) {
+        if (!rawOutput && (result).stdout) {
           // Same shared display helper the sync path uses (design 5.4), but with
           // applyGrokDisplay: false so the readback keeps its current behavior
           // (codex reconstructs; grok stays raw). A codex job swaps; grok/claude
           // are unchanged, byte-identical to the former codex-only branch.
-          result.stdout = applyProviderDisplayText({
+          (result).stdout = applyProviderDisplayText({
             cli: asyncJobManager.getJobCli(jobId) ?? "unknown",
             outputFormat,
-            stdout: result.stdout,
+            stdout: (result).stdout,
             applyGrokDisplay: false,
           });
         }
@@ -22049,20 +22060,20 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
         const compressJob =
           !rawOutput && asyncJobManager.getJobCompressResponse(jobId) && outputFormat !== "json";
         const personalKitJob = Boolean(asyncJobManager.getJobKitExecution(jobId));
-        if (compressJob && result.stdout) {
+        if (compressJob && (result).stdout) {
           if (outputFormat === "stream-json" && parsed) {
-            result.stdout = parsed.text;
+            (result).stdout = parsed.text;
           }
-          const compressed = compressDisplayText(result.stdout, {
+          const compressed = compressDisplayText((result).stdout, {
             provider: asyncJobManager.getJobCli(jobId) ?? "unknown",
             direction: "outbound",
             outputFormat,
             outputSchemaDeclared: false,
             lossless: true,
           });
-          if (compressed.text !== result.stdout) {
-            result.stdout = compressed.text;
-            safeRecordCompression(result.correlationId, compressed, runtime, personalKitJob);
+          if (compressed.text !== (result).stdout) {
+            (result).stdout = compressed.text;
+            safeRecordCompression((result).correlationId, compressed, runtime, personalKitJob);
           }
         }
 
@@ -22078,18 +22089,18 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
         // compression above keeps any leaked id contiguous and findable, so this
         // scrub still catches it in the compressed stdout.
         if (remoteCaller) {
-          const leakedId = result.providerSessionId;
-          delete result.providerSessionId;
+          const leakedId = (result).providerSessionId;
+          delete (result).providerSessionId;
           // AsyncJobManager redacts identifier ranges before pagination, which
           // covers a secret that crosses a caller-selected page boundary. Keep
           // this whole-string scrub as defense in depth for any later display
           // transform that reintroduces a complete identifier.
           if (leakedId) {
-            if (result.stdout && result.stdout.includes(leakedId)) {
-              result.stdout = result.stdout.split(leakedId).join("[redacted-session-id]");
+            if ((result).stdout && (result).stdout.includes(leakedId)) {
+              (result).stdout = (result).stdout.split(leakedId).join("[redacted-session-id]");
             }
-            if (result.stderr && result.stderr.includes(leakedId)) {
-              result.stderr = result.stderr.split(leakedId).join("[redacted-session-id]");
+            if ((result).stderr && (result).stderr.includes(leakedId)) {
+              (result).stderr = (result).stderr.split(leakedId).join("[redacted-session-id]");
             }
           }
         }
@@ -22149,8 +22160,8 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
         // is reported as "not found" rather than cancelled.
         const caller = resolveOwnerPrincipal(getRequestContext());
         if (
-          asyncJobManager.getJobSnapshot(jobId) &&
-          !principalCanAccess(asyncJobManager.getJobOwner(jobId), caller)
+          await asyncJobManager.getJobSnapshot(jobId) &&
+          !principalCanAccess(await asyncJobManager.getJobOwner(jobId), caller)
         ) {
           return {
             content: [
@@ -22170,8 +22181,8 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
             isError: true,
           };
         }
-        const cancel = asyncJobManager.cancelJob(jobId);
-        if (!cancel.canceled) {
+        const cancel = await asyncJobManager.cancelJob(jobId);
+        if (!(cancel).canceled) {
           return {
             content: [
               {
@@ -22180,7 +22191,7 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
                   {
                     success: false,
                     jobId,
-                    reason: cancel.reason || "Unable to cancel",
+                    reason: (cancel).reason || "Unable to cancel",
                   },
                   null,
                   2
@@ -23769,7 +23780,16 @@ async function performShutdown(signal: string, exitCode: number): Promise<void> 
     }
 
     if (jobStore) {
-      jobStore.close();
+      // AWAITED, unlike every sibling close in this block, which were already
+      // awaited. Once the store became async an unawaited close let
+      // `process.exit()` below fire while the handle was still closing, and the
+      // log line on the next line asserted a completed close that had not
+      // happened: the system making an untrue statement about itself.
+      //
+      // It also matters ahead of s5's C5. When SqliteJobStore moves onto
+      // SqliteStorageDriver, that driver's bounded drain runs inside close(),
+      // and an unawaited call here would discard the drain entirely.
+      await jobStore.close();
       logger.info("Durable job store closed");
       jobStore = null;
       jobStoreInitialized = false;
@@ -23792,8 +23812,10 @@ async function performShutdown(signal: string, exitCode: number): Promise<void> 
   }
 }
 
-process.on("SIGTERM", () => shutdown("SIGTERM"));
-process.on("SIGINT", () => shutdown("SIGINT"));
+// `void`: a signal handler cannot be awaited, and shutdown() ends in
+// process.exit(), so nothing after it could observe the promise.
+process.on("SIGTERM", () => void shutdown("SIGTERM"));
+process.on("SIGINT", () => void shutdown("SIGINT"));
 
 //──────────────────────────────────────────────────────────────────────────────
 // Server Startup
@@ -24174,7 +24196,7 @@ function runWorkspaceCommand(args: string[]): void {
  * deliberately reloaded from the configured durable store instead of becoming
  * command-line authority.
  */
-function runMcpArtifactCommand(args: string[]): void {
+async function runMcpArtifactCommand(args: string[]): Promise<void> {
   const [action, jobId, acknowledgement] = args;
   if (
     action !== "recover" ||
@@ -24198,15 +24220,15 @@ function runMcpArtifactCommand(args: string[]): void {
     throw new Error("MCP artifact recovery could not open the configured durable job store");
   }
   try {
-    const result = recoverMcpArtifactCleanupPin({
+    const result = await recoverMcpArtifactCleanupPin({
       store,
       jobId,
       acknowledgement: MCP_ARTIFACT_RECOVERY_ACKNOWLEDGEMENT,
     });
     printJsonLine(result);
-    if (!result.ok) process.exitCode = 2;
+    if (!(result).ok) process.exitCode = 2;
   } finally {
-    store.close();
+    await store.close();
   }
 }
 
@@ -24272,7 +24294,9 @@ async function main() {
     return;
   }
   if (args[0] === "mcp-artifact") {
-    runMcpArtifactCommand(args.slice(1));
+    // Awaited: the command sets process.exitCode, and a floating promise lets
+    // main() return before that assignment happens.
+    await runMcpArtifactCommand(args.slice(1));
     return;
   }
   if (args[0] === "contracts") {

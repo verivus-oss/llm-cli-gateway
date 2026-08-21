@@ -329,6 +329,7 @@ export async function startHttpGateway(options: HttpTransportOptions): Promise<H
     return payload;
   }
 
+  // eslint-disable-next-line @typescript-eslint/no-misused-promises -- node:http does not await its request handler; the handler owns its own errors
   const httpServer = createServer(async (req, res) => {
     try {
       const url = new URL(req.url || "/", `http://${req.headers.host || `${host}:${port}`}`);
