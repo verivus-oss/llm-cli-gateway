@@ -20,9 +20,9 @@ write_visibility = "TWENTY instances of one class, censused at c518e3f: a call t
 schema_gap = "`requests` and `gateway_metadata` exist ONLY in SQLite. The Postgres transcript schema is new authorship, not a migration."
 
 [non_goals]
+gate_output_is_not_a_control = "A gate reporting `0 production, 8 tests` was read as a clean production number with a tail, by BOTH the track and the controller, for hours. All eight were live defects of the exact class the gate was built to find, including a receipt helper that returned a promise typed as a record and caused 15 downstream failures. Work every gate's output to zero or say why a finding is not one. Output nobody acts on is not a control."
 no_postgres_mandate = "Decided 2026-08-13. SQLite stays as a driver. 'Postgres only' is a deployment property via config, never a package property via removal; the 2.0.0 node:sqlite move exists to keep zero-config npm installs working."
 no_transcript_move_yet = "Bodies do NOT enter Postgres until postgres-security-hardening.md section 6 is complete through step 8. It is at step 2 of 10. Moving 1.2 GB of plaintext prompts into a store one superuser role reads in cleartext is a regression over a 0600 file."
-no_behaviour_change_before_s5 = "s2 through s4 are refactors. If any of them changes what is written or read, the slice is wrong."
 
 [[node]]
 id = "b1.sqlite-async-benchmark"
