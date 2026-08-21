@@ -16,7 +16,11 @@ import {
 import { assertMcpArtifactAdmissionInvariant } from "./mcp-artifact-admission.js";
 import type { PersonalKitTerminalMetadata } from "./provider-output-metadata.js";
 import { principalCanAccess } from "./request-context.js";
-import { nodePostgresPoolFactory, PostgresStorageDriver } from "./storage/drivers/postgres.js";
+import {
+  nodePostgresPoolFactory,
+  PostgresStorageDriver,
+  type PostgresRoleDsns,
+} from "./storage/drivers/postgres.js";
 import { SqliteStorageDriver } from "./storage/drivers/sqlite.js";
 import type { StorageConnection } from "./storage/store.js";
 import {
@@ -1491,6 +1495,31 @@ export class SqliteJobStore implements JobStore, ValidationRunStore {
     return this.driver.transaction("write", run);
   }
 
+  /**
+   * The one job-store statement that is NOT `write`.
+   *
+   * postgres-security-hardening.md 4.3 rules that job expiry is a retention
+   * operation and routes to `llmgw_retention`, which is what lets `llmgw_app`
+   * hold no `DELETE` on `jobs` at all. Kept as its own method rather than a
+   * defaulted operation-class parameter on `execSql`, so the exception is
+   * visible at the call site instead of being a parameter 40 other callers
+   * silently leave at `write`.
+   *
+   * On SQLite this changes nothing observable: `READ_ONLY_OPERATIONS` in
+   * drivers/sqlite.ts is {transcript_read, analytics_read}, so `retention`
+   * resolves to the same writable handle and nothing here newly touches
+   * `openReadOnly`. Moving a READ class would be the different question.
+   */
+  private async execRetentionSql(
+    sql: string,
+    params: readonly unknown[] = []
+  ): Promise<{ changes: number }> {
+    await this.ensureSchema();
+    return this.driver.transaction("retention", async c => ({
+      changes: (await c.execute(sql, params)).rowsAffected,
+    }));
+  }
+
   private async allSql<T>(
     sql: string,
     params: readonly unknown[] = [],
@@ -2094,7 +2123,7 @@ export class SqliteJobStore implements JobStore, ValidationRunStore {
    */
   async evictExpired(): Promise<number> {
     const now = new Date().toISOString();
-    const result = await this.execSql(SQL_DELETE_EXPIRED, [now]);
+    const result = await this.execRetentionSql(SQL_DELETE_EXPIRED, [now]);
     return Number(result.changes);
   }
 
@@ -2901,6 +2930,7 @@ export class MemoryJobStore implements JobStore {
  */
 export class PostgresJobStore implements JobStore, ValidationRunStore {
   private readonly dsn: string;
+  private readonly roleDsns: PostgresRoleDsns;
   private readonly config: PostgresJobStoreOpsConfig;
   private driver: PostgresStorageDriver | null = null;
   private ops: PostgresJobStoreOps | null = null;
@@ -2910,12 +2940,21 @@ export class PostgresJobStore implements JobStore, ValidationRunStore {
   constructor(
     dsn: string,
     private logger: Logger = noopLogger,
-    options: { retentionMs?: number; dedupWindowMs?: number; leaseTtlMs?: number } = {}
+    options: {
+      retentionMs?: number;
+      dedupWindowMs?: number;
+      leaseTtlMs?: number;
+      roleDsns?: PostgresRoleDsns;
+    } = {}
   ) {
     if (!dsn) {
       throw new Error("PostgresJobStore requires a non-empty DSN");
     }
     this.dsn = dsn;
+    // `app` last, so `[persistence].dsn` is the single source for it however the
+    // map arrived. The other three are only ever present when an operator wrote
+    // `[persistence.roles]`.
+    this.roleDsns = { ...options.roleDsns, app: dsn };
     this.config = {
       retentionMs: options.retentionMs ?? resolveJobRetentionMs(),
       dedupWindowMs: options.dedupWindowMs ?? resolveDedupWindowMs(),
@@ -3000,10 +3039,10 @@ export class PostgresJobStore implements JobStore, ValidationRunStore {
   private async buildAndInit(): Promise<PostgresJobStoreOps> {
     if (!this.ops) {
       const driver = new PostgresStorageDriver(
-        { app: this.dsn },
-        // One role, `app`, matching today's single configured dsn. Per-role
-        // DSNs belong to s9, which owns [persistence.roles]; the driver already
-        // reports role separation as not in force rather than implying it is.
+        // Every credential `[persistence.roles]` configured. A deployment that
+        // configured none holds `app` alone and every class degrades onto it,
+        // which the driver reports rather than implying separation is in force.
+        this.roleDsns,
         await nodePostgresPoolFactory((role, error) =>
           this.logger.error(`PostgresJobStore pool error on role ${role}`, error)
         )
@@ -3355,7 +3394,10 @@ export function createJobStore(
     case "memory":
       return new MemoryJobStore(opts);
     case "postgres":
-      return new PostgresJobStore(config.dsn ?? "", logger, opts);
+      return new PostgresJobStore(config.dsn ?? "", logger, {
+        ...opts,
+        roleDsns: config.roleDsns,
+      });
     case "sqlite":
     default:
       if (!config.path) {

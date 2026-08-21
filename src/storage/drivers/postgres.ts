@@ -10,7 +10,12 @@
  * real one is imported dynamically. That also lets routing and translation be
  * tested without a server.
  */
-import { resolveStorageRole, type StorageOperationClass, type StorageRole } from "../roles.js";
+import {
+  resolveStorageRole,
+  type StorageOperationClass,
+  type StorageRole,
+  type StorageRoleDsns,
+} from "../roles.js";
 import { STORAGE_TRANSACTION_DEADLINE_MS, StorageTransactionDeadlineError } from "../deadline.js";
 import { inTransactionOn, nestedConnectionRefusal, runInTransaction } from "../reentrancy.js";
 import { isTransactionControl, transactionControlRefusal } from "../statements.js";
@@ -42,8 +47,8 @@ export interface PgPoolLike {
 
 export type PgPoolFactory = (role: StorageRole, dsn: string) => PgPoolLike;
 
-/** Per-role connection strings. A role with no DSN is simply not held. */
-export type PostgresRoleDsns = Partial<Record<StorageRole, string>>;
+/** Per-role connection strings, as `[persistence.roles]` resolves them. */
+export type PostgresRoleDsns = StorageRoleDsns;
 
 /**
  * Rewrite `?` placeholders to `$1`-style, skipping any `?` inside a string

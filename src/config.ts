@@ -10,6 +10,7 @@ import { hashSecret, isSecretHash } from "./oauth.js";
 import { isHttpsOrLoopbackUrl, isLoopbackUrl } from "./api-http.js";
 import type { ApiProviderKind } from "./api-provider.js";
 import { CLI_TYPES } from "./provider-types.js";
+import type { StorageRoleDsns } from "./storage/roles.js";
 import type { QualityTier } from "./least-cost-types.js";
 
 // Zod schemas for configuration validation
@@ -34,6 +35,12 @@ export const DEFAULT_SESSION_TTL_SECONDS = 2592000; // 30 days
 
 export interface Config {
   database?: DatabaseConfig;
+  /**
+   * Per-role credentials for the session store's driver, from
+   * `[persistence.roles]`. Empty unless `[persistence]` selected the database:
+   * a legacy `DATABASE_URL` deployment has one credential by definition.
+   */
+  roleDsns?: StorageRoleDsns;
   sessionTtl: number; // Session expiration in seconds
   /**
    * Which selector chose {@link Config.database}, so a startup failure can name
@@ -60,6 +67,95 @@ export interface SkillsConfig {
 
 let warnedSessionDatabaseUrl = false;
 
+/** What happened to a set `DATABASE_URL`. */
+export type DatabaseUrlOutcome =
+  /** Not set. */
+  | "absent"
+  /** No `[persistence]` at all, so the legacy variable is the only signal. */
+  | "honoured"
+  /** Set, and identical to `[persistence].dsn`. */
+  | "redundant"
+  /** Set, and pointing somewhere other than `[persistence].dsn`. */
+  | "ignored_conflict"
+  /** Set, under an explicitly configured non-postgres backend. */
+  | "ignored_explicit_backend";
+
+export interface DatabaseUrlDecision {
+  outcome: DatabaseUrlOutcome;
+  /** The DSN the session store will use, or null for file storage. */
+  connectionString: string | null;
+  /** Operator-facing explanation; null only when there is nothing to explain. */
+  reason: string | null;
+}
+
+/**
+ * The `DATABASE_URL` precedence rule, as DATA.
+ *
+ * It was a chain of `if`s inside `loadConfig`, so the only way to find out what
+ * a given combination does was to run the loader and read stderr. A conflict is
+ * REFUSED rather than resolved, which is the right answer, but a refusal an
+ * operator can only learn from a one-time warning at boot is not much better
+ * than a silent one. Returning the decision lets `loadConfig` warn and
+ * `storage-disposition.ts` report the same determination without restating the
+ * rule, and lets the precedence matrix be tested cell by cell.
+ */
+export function resolveDatabaseUrlPrecedence(input: {
+  databaseUrl: string | undefined;
+  persistenceDsn: string | null;
+  explicitBackend: boolean;
+  backend: PersistenceBackend;
+}): DatabaseUrlDecision {
+  const { databaseUrl, persistenceDsn, explicitBackend, backend } = input;
+  if (!databaseUrl || databaseUrl.length === 0) {
+    return { outcome: "absent", connectionString: persistenceDsn, reason: null };
+  }
+  if (persistenceDsn && databaseUrl !== persistenceDsn) {
+    return {
+      outcome: "ignored_conflict",
+      connectionString: persistenceDsn,
+      reason:
+        "DATABASE_URL is deprecated for session storage and disagrees with " +
+        "[persistence].dsn; ignoring it. The session store follows [persistence] " +
+        "so sessions and jobs cannot land in different databases.",
+    };
+  }
+  if (persistenceDsn) {
+    return {
+      outcome: "redundant",
+      connectionString: persistenceDsn,
+      reason:
+        "DATABASE_URL is deprecated for session storage and duplicates " +
+        "[persistence].dsn, which is what the session store follows. Remove the " +
+        "variable; it will stop being read in a later release.",
+    };
+  }
+  if (explicitBackend) {
+    // An operator who WROTE DOWN a non-postgres backend has chosen where
+    // durable state lives. Honouring DATABASE_URL here would put sessions in
+    // Postgres while jobs stayed on that backend: the exact split this
+    // selector exists to prevent, and reachable with `backend = "sqlite"`,
+    // `"memory"` or `"none"`.
+    return {
+      outcome: "ignored_explicit_backend",
+      connectionString: null,
+      reason:
+        "DATABASE_URL is set but [persistence].backend is explicitly configured as " +
+        `"${backend}"; ignoring it. Honouring it would put sessions in ` +
+        "Postgres while jobs stay on the configured backend. Remove the variable, or " +
+        'set [persistence] backend = "postgres" with a dsn.',
+    };
+  }
+  // No persistence configured at all: the legacy variable is still the only
+  // signal an older deployment has, so it is honoured with a warning.
+  return {
+    outcome: "honoured",
+    connectionString: databaseUrl,
+    reason:
+      "DATABASE_URL is deprecated for session storage; set [persistence] " +
+      'backend = "postgres" with a dsn in ~/.llm-cli-gateway/config.toml instead.',
+  };
+}
+
 /**
  * Load configuration for the session manager.
  *
@@ -77,6 +173,12 @@ let warnedSessionDatabaseUrl = false;
  * overriding another subsystem's explicit configuration is exactly the defect
  * fixed in 3.1.0-rc.3.
  *
+ * A conflict does NOT abort startup, deliberately. See
+ * `storage-unification.dag.toml`, node s9: the outcome is already fully
+ * determined and is the one the config file describes, so there is nothing left
+ * for an abort to protect, and refusing to boot would take down a working
+ * deployment over a variable the gateway is ignoring anyway.
+ *
  * @param persistence Resolved persistence config; omitted, it is loaded.
  * @param logger Logger for the one-time deprecation warning.
  */
@@ -84,8 +186,6 @@ export function loadConfig(
   persistence: PersistenceConfig = loadPersistenceConfig(),
   logger: Logger = noopLogger
 ): Config {
-  const databaseUrl = process.env.DATABASE_URL;
-
   const rawSessionTtl = parseInt(
     process.env.SESSION_TTL || String(DEFAULT_SESSION_TTL_SECONDS),
     10
@@ -96,50 +196,18 @@ export function loadConfig(
       : DEFAULT_SESSION_TTL_SECONDS;
 
   const persistenceDsn = persistence.backend === "postgres" ? persistence.dsn : null;
-
-  // Precedence. An explicitly configured Postgres backend wins; DATABASE_URL is
-  // refused rather than allowed to point the sessions at a different database
-  // from the jobs, which would recreate the split this change removes.
-  let connectionString: string | null = persistenceDsn;
-  if (databaseUrl && databaseUrl.length > 0) {
-    if (persistenceDsn && databaseUrl !== persistenceDsn) {
-      if (!warnedSessionDatabaseUrl) {
-        warnedSessionDatabaseUrl = true;
-        logger.warn?.(
-          "DATABASE_URL is deprecated for session storage and disagrees with " +
-            "[persistence].dsn; ignoring it. The session store follows [persistence] " +
-            "so sessions and jobs cannot land in different databases."
-        );
-      }
-    } else if (!persistenceDsn && persistence.explicitBackend) {
-      // An operator who WROTE DOWN a non-postgres backend has chosen where
-      // durable state lives. Honouring DATABASE_URL here would put sessions in
-      // Postgres while jobs stayed on that backend: the exact split this
-      // selector exists to prevent, and reachable with `backend = "sqlite"`,
-      // `"memory"` or `"none"`. Refused, matching the rule that an explicit
-      // backend wins over a variable named for a different subsystem.
-      if (!warnedSessionDatabaseUrl) {
-        warnedSessionDatabaseUrl = true;
-        logger.warn?.(
-          "DATABASE_URL is set but [persistence].backend is explicitly configured as " +
-            `"${persistence.backend}"; ignoring it. Honouring it would put sessions in ` +
-            "Postgres while jobs stay on the configured backend. Remove the variable, or " +
-            'set [persistence] backend = "postgres" with a dsn.'
-        );
-      }
-    } else if (!persistenceDsn) {
-      // No persistence configured at all: the legacy variable is still the
-      // only signal an older deployment has, so it is honoured with a warning.
-      if (!warnedSessionDatabaseUrl) {
-        warnedSessionDatabaseUrl = true;
-        logger.warn?.(
-          "DATABASE_URL is deprecated for session storage; set [persistence] " +
-            'backend = "postgres" with a dsn in ~/.llm-cli-gateway/config.toml instead.'
-        );
-      }
-      connectionString = databaseUrl;
-    }
+  const decision = resolveDatabaseUrlPrecedence({
+    databaseUrl: process.env.DATABASE_URL,
+    persistenceDsn,
+    explicitBackend: persistence.explicitBackend,
+    backend: persistence.backend,
+  });
+  if (decision.reason && !warnedSessionDatabaseUrl) {
+    warnedSessionDatabaseUrl = true;
+    logger.warn?.(decision.reason);
   }
+
+  const connectionString = decision.connectionString;
 
   // No Postgres selected: file-based storage.
   if (!connectionString) {
@@ -166,6 +234,10 @@ export function loadConfig(
         statementTimeout: 10000,
       },
     },
+    // Per-role credentials only ever come from `[persistence.roles]`, so a
+    // legacy DATABASE_URL deployment gets none and its driver holds `app`
+    // alone, which is what it holds today.
+    roleDsns: connectionString === persistenceDsn ? persistence.roleDsns : {},
     sessionTtl,
     databaseSource: connectionString === persistenceDsn ? "persistence" : "env",
   };
@@ -213,9 +285,40 @@ export const DEFAULT_HTTP_JOB_GRACE_MS = 300000;
 export const DEFAULT_ORPHAN_SWEEP_INTERVAL_MS = 30000;
 export const DEFAULT_INSTANCE_GC_MS = 3600000;
 
+/**
+ * `[persistence.roles]`: the credential per operation class, for a deployment
+ * that has provisioned the four-role RBAC in
+ * docs/plans/postgres-security-hardening.md section 4.3.
+ *
+ * `app` is NOT a key here. The runtime credential is `[persistence].dsn`, and
+ * accepting it twice would make "which one wins" a rule this table exists to
+ * remove. `migrate` is not a key either, for the reason `storage/roles.ts`
+ * gives: it is owner-equivalent and process-separated, so a long-running
+ * gateway holding it would be a privilege regression rather than a feature.
+ *
+ * `.strict()` is what makes a typo fail. `readr = "..."` under a permissive
+ * schema is silently no reader at all, so every transcript read quietly
+ * degrades onto `app` while the operator believes separation is in force.
+ */
+const PersistenceRolesSchema = z
+  .object({
+    reader: DatabaseUrlSchema.optional(),
+    analytics: DatabaseUrlSchema.optional(),
+    retention: DatabaseUrlSchema.optional(),
+  })
+  .strict();
+
+/** Keys refused with a reason rather than with zod's "unrecognized key". */
+const REFUSED_ROLE_KEYS: Readonly<Record<string, string>> = {
+  app: "the `app` credential is [persistence].dsn; remove it from [persistence.roles]",
+  migrate:
+    "the migrate credential is owner-equivalent and process-separated for `npm run migrate`; a running gateway must not hold it",
+};
+
 const PersistenceSchema = z
   .object({
     backend: z.enum(PERSISTENCE_BACKENDS).default("sqlite"),
+    roles: PersistenceRolesSchema.optional(),
     path: z.string().optional(),
     dsn: z.string().optional(),
     retentionDays: z.number().positive().default(DEFAULT_JOB_RETENTION_DAYS),
@@ -273,6 +376,16 @@ export interface PersistenceConfig {
   backend: PersistenceBackend;
   path: string | null;
   dsn: string | null;
+  /**
+   * Every credential the Postgres driver should hold, `app` included.
+   *
+   * Empty on a non-postgres backend. `PostgresStorageDriver` has accepted a
+   * per-role DSN map since s4 and nothing produced one, so its per-role pools
+   * were unreachable from configuration and every operation class degraded onto
+   * `app`. This is the half of design 3.1 that unifies the POOL rather than the
+   * selector.
+   */
+  roleDsns: StorageRoleDsns;
   retentionDays: number;
   dedupWindowMs: number;
   acknowledgeEphemeral: boolean;
@@ -544,6 +657,17 @@ export function loadPersistenceConfig(logger: Logger = noopLogger): PersistenceC
     );
   }
 
+  // Refused BEFORE the schema, so the two keys that look reasonable and are not
+  // get an answer instead of "unrecognized key(s)".
+  const rawRoles = merged.roles;
+  if (rawRoles && typeof rawRoles === "object") {
+    for (const [key, why] of Object.entries(REFUSED_ROLE_KEYS)) {
+      if (Object.hasOwn(rawRoles as Record<string, unknown>, key)) {
+        throw new Error(`Invalid [persistence.roles] config: ${key} is not accepted here; ${why}`);
+      }
+    }
+  }
+
   let parsed;
   try {
     parsed = PersistenceSchema.parse(merged);
@@ -563,6 +687,22 @@ export function loadPersistenceConfig(logger: Logger = noopLogger): PersistenceC
       "[persistence].backend = 'postgres' requires a non-empty 'dsn' (e.g. postgresql://user:pw@host/db)"
     );
   }
+
+  // A credential set that can never take effect is worse than none: it reads as
+  // role separation being in force on a deployment where there is one database
+  // identity, or one file. Refused rather than ignored.
+  const configuredRoles = parsed.roles ?? {};
+  const namedRoles = Object.entries(configuredRoles).filter(([, value]) => Boolean(value));
+  if (namedRoles.length > 0 && backend !== "postgres") {
+    throw new Error(
+      `[persistence.roles] is only meaningful with backend = "postgres"; this config has ` +
+        `backend = "${backend}", which has no per-role credentials. Remove the table or set the backend.`
+    );
+  }
+  const roleDsns: StorageRoleDsns =
+    backend === "postgres" && dsn
+      ? { ...(Object.fromEntries(namedRoles) as StorageRoleDsns), app: dsn }
+      : {};
 
   if (backend === "memory" && !parsed.acknowledgeEphemeral) {
     throw new Error(
@@ -585,6 +725,7 @@ export function loadPersistenceConfig(logger: Logger = noopLogger): PersistenceC
     backend,
     path: resolvedPath,
     dsn,
+    roleDsns,
     retentionDays: parsed.retentionDays,
     dedupWindowMs: parsed.dedupWindowMs,
     acknowledgeEphemeral: parsed.acknowledgeEphemeral,

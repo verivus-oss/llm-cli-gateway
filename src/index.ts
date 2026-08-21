@@ -287,6 +287,7 @@ import {
   FlightRecorderLike,
 } from "./flight-recorder.js";
 import { FlightOwnership } from "./flight-ownership.js";
+import { formatStorageDisposition, storageDisposition } from "./storage-disposition.js";
 import {
   resolvePromptInput,
   PromptPartsSchema,
@@ -22409,6 +22410,10 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
       const durableAdmission = asyncJobManager.getDurableAdmissionHealth();
       const asyncJobsConfigured = persistence.backend !== "none" && persistence.asyncJobsEnabled;
       const asyncJobsEffective = asyncJobsConfigured && storeAttached && durableAdmission.admitting;
+      const disposition = storageDisposition(
+        persistence,
+        !(flightRecorder instanceof NoopFlightRecorder)
+      );
       const persistenceBlock = {
         backend: persistence.backend,
         dbPath: persistence.path,
@@ -22421,6 +22426,14 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
         durableAdmission,
         acknowledgeEphemeral: persistence.acknowledgeEphemeral,
         sources: persistence.sources,
+        // Reachable per-role credentials, and which operation classes are
+        // running wider than they asked for. Without this, "role separation is
+        // configured" and "role separation is in force" are indistinguishable
+        // from outside the process.
+        roles: disposition.roles,
+        // What each deprecated input DID, rather than a warning emitted once at
+        // boot into a stderr stream nobody kept.
+        deprecatedInputs: disposition.deprecatedInputs,
         warning: asyncJobsEffective
           ? null
           : persistence.backend === "none"
@@ -24376,6 +24389,14 @@ async function main() {
   void warmProviderCapabilities({ logger }).catch(() => undefined);
 
   const persistence = getPersistenceConfig(logger);
+  // Built before the disposition is reported, so "request history is being
+  // written" is the recorder's real state and not the configured intent.
+  const startupRecorder = getFlightRecorder(logger);
+  for (const line of formatStorageDisposition(
+    storageDisposition(persistence, !(startupRecorder instanceof NoopFlightRecorder))
+  )) {
+    logger.info(line);
+  }
   const runtimeAsyncJobManager = getAsyncJobManager(logger);
   // A configured durable backend that cannot open must not leave a long-lived
   // process falsely alive but permanently unable to recover (there is no store

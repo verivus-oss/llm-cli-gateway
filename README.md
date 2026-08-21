@@ -863,6 +863,17 @@ httpJobGraceMs = 300000                     # extra grace for no-pid http jobs (
 orphanSweepIntervalMs = 30000               # reaper cadence
 instanceGcMs = 3600000                      # gateway_instances GC horizon
 # ownsOrphanRecovery = false                # DEPRECATED (#139): superseded by the lease; parsed + warned, no longer used
+
+# Optional, postgres only. One credential per class of work, for a deployment
+# that has provisioned the RBAC in docs/plans/postgres-security-hardening.md.
+# `app` is not a key here: the runtime credential is [persistence].dsn above.
+# `migrate` is not a key either, and must not be held by a running gateway.
+# A role left out degrades onto `app`, which llm_process_health reports as
+# `persistence.roles.degraded` rather than implying separation is in force.
+# [persistence.roles]
+# reader = "postgresql://llmgw_reader@host/db"       # transcript read-back
+# analytics = "postgresql://llmgw_analytics@host/db" # aggregates, no body text
+# retention = "postgresql://llmgw_retention@host/db" # job expiry
 ```
 
 Backends:
@@ -873,6 +884,10 @@ Backends:
 - **`none`** — no store. **`*_request_async`, `llm_job_status`, `llm_job_result`, and `llm_job_cancel` are NOT registered on the gateway.** This is a structural invariant: agents that try to call async tools against a gateway with `backend = "none"` get a clean "tool not found" at connect time instead of silent in-memory loss after the 1-hour TTL. Use `llm_process_health` to inspect the resolved persistence state programmatically.
 
 **This choice governs the job store, not the flight recorder.** Async jobs, dedup, orphan recovery, HTTP jobs and validation receipts follow `[persistence].backend`. Request history (the `requests` table that `llm_request_list` and `llm_request_result` read) is **always SQLite**, at `LLM_GATEWAY_LOGS_DB` or `~/.llm-cli-gateway/logs.db`; there is no PostgreSQL flight recorder, and `LLM_GATEWAY_LOGS_DB` no longer rewrites the job-store backend. Two consequences for a `postgres` deployment. The two halves of one request live in two engines, so no single database holds a complete picture. And because the SQLite default path for both subsystems is the same `logs.db`, a gateway switched from `sqlite` to `postgres` leaves its old `jobs` table behind in that file, where it keeps answering queries with data frozen at the switchover. Both are reasons to read through the tools, which span the split and are unaffected by it.
+
+**`backend = "none"` and `LLM_GATEWAY_LOGS_DB=none` are different switches.** The first disables async job persistence; the second disables request history. Setting the backend to `"none"` leaves the flight recorder writing, and disabling the recorder leaves the job store alone. Both are stated at startup, in a `Storage:` block on stderr that names the job-store backend, where request history is going (or that it is not being written), whether role separation is in force, and what each deprecated input did. `llm_process_health` carries the same determinations as `persistence.roles` and `persistence.deprecatedInputs`.
+
+**`DATABASE_URL` is deprecated and never wins.** It is honoured only when no `[persistence]` backend is written down at all. Against an explicit backend, or against a `dsn` it disagrees with, it is ignored with a reason: the gateway does not abort, because the outcome is fully determined and is the one the config file describes.
 
 For PostgreSQL, apply the schema with a schema-owner or dedicated migration role before starting a DML-only gateway role:
 

@@ -123,4 +123,46 @@ describe("llm_process_health discloses the storage split", () => {
     expect(res.flightRecorder.path).toBeNull();
     expect(res.flightRecorder.warning).toContain("not evidence");
   });
+
+  // s9. "Configured" and "in force" are different states, and a caller outside
+  // the process could not tell them apart: the driver degrades a missing
+  // credential onto `app` silently by design, so the health surface is the only
+  // place that can say separation is not actually holding.
+  it("says which operation classes are running wider than they asked for", async () => {
+    const res = await health(
+      mkPersistence({
+        backend: "postgres",
+        path: null,
+        dsn: "postgresql://app@x/gw",
+        roleDsns: { app: "postgresql://app@x/gw", reader: "postgresql://reader@x/gw" },
+      })
+    );
+
+    expect(res.persistence.roles.configured).toEqual(["app", "reader"]);
+    expect(res.persistence.roles.separationInForce).toBe(false);
+    expect(res.persistence.roles.degraded.map((d: { operation: string }) => d.operation)).toContain(
+      "retention"
+    );
+  });
+
+  it("reports role separation as not in force when nothing is configured", async () => {
+    const res = await health(mkPersistence({ backend: "sqlite", roleDsns: {} }));
+
+    expect(res.persistence.roles.configured).toEqual([]);
+    expect(res.persistence.roles.separationInForce).toBe(false);
+  });
+
+  // s9. A refusal an operator can only learn from a one-time boot warning is
+  // barely better than a silent one.
+  it("says what each deprecated input did", async () => {
+    const res = await health(mkPersistence({ backend: "sqlite" }));
+    const names = res.persistence.deprecatedInputs.map((i: { name: string }) => i.name);
+
+    expect(names).toContain("DATABASE_URL");
+    expect(names).toContain("LLM_GATEWAY_LOGS_DB");
+    const logsDb = res.persistence.deprecatedInputs.find(
+      (i: { name: string }) => i.name === "LLM_GATEWAY_LOGS_DB"
+    );
+    expect(logsDb).toMatchObject({ set: true, outcome: "recorder_path" });
+  });
 });
