@@ -890,7 +890,7 @@ describe("Personal Agent Config Kit compiler and release safety", () => {
     );
   });
 
-  it("reaps only an aged artifact whose owner job is positively absent", () => {
+  it("reaps only an aged artifact whose owner job is positively absent", async () => {
     const layout = newTestLayout();
     writeVerifiedRelease(layout, FIRST_RELEASE_ID, {
       "instructions.md": "Keep the rendered instructions stable.",

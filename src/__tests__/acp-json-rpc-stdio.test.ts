@@ -432,7 +432,7 @@ describe("JsonRpcStdioTransport", () => {
     // outbound requests AND inbound notifications/requests/responses as activity.
     const h = createHarness();
 
-    h.transport.request("session/prompt"); // outbound request -> +1
+    await h.transport.request("session/prompt"); // outbound request -> +1
     const id = decodeWritten(h.written, 0).id as number;
     expect(h.activity()).toBe(1);
 

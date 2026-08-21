@@ -189,7 +189,7 @@ describe("AsyncJobManager Claude MCP artifacts", () => {
       deadPid(),
       valid.path
     );
-    seedExpiredQueuedRow(
+    await seedExpiredQueuedRow(
       "queued",
       ["-p", "review", "--mcp-config", queued.path],
       os.hostname(),

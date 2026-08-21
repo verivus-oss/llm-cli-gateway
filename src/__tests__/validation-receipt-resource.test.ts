@@ -124,7 +124,7 @@ describe("validation-receipt:// MCP resource (Phase 3)", () => {
   }
 
   it("is registered under the sqlite backend and returns the minted receipt to its owner", async () => {
-    seedTerminalRun("local");
+    await seedTerminalRun("local");
     const server = buildServer(store, "sqlite");
     expect(templates(server)["validation-receipt"]).toBeDefined();
 
@@ -134,7 +134,7 @@ describe("validation-receipt:// MCP resource (Phase 3)", () => {
   });
 
   it("is own-or-not-found: another principal gets not_found, never the data", async () => {
-    seedTerminalRun("alice");
+    await seedTerminalRun("alice");
     const server = buildServer(store, "sqlite");
 
     const bob = await read(server, "v1", "bob");
@@ -249,7 +249,7 @@ describe("validation_receipt tool (Phase 1-2)", () => {
   });
 
   it("returns the minted receipt as JSON by default", async () => {
-    seedTerminalRun("local");
+    await seedTerminalRun("local");
     const server = buildServer(store, "sqlite");
     const res = await callTool(server, {
       validationId: "v1",
@@ -262,7 +262,7 @@ describe("validation_receipt tool (Phase 1-2)", () => {
   });
 
   it("returns the human-readable rendering for format=markdown", async () => {
-    seedTerminalRun("local");
+    await seedTerminalRun("local");
     const server = buildServer(store, "sqlite");
     const res = await callTool(server, {
       validationId: "v1",
@@ -275,7 +275,7 @@ describe("validation_receipt tool (Phase 1-2)", () => {
   });
 
   it("is own-or-not-found for another principal", async () => {
-    seedTerminalRun("alice");
+    await seedTerminalRun("alice");
     const server = buildServer(store, "sqlite");
     const res = await callTool(
       server,

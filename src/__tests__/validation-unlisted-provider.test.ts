@@ -115,39 +115,39 @@ function run(
   return { report, started: fake.started };
 }
 
-function statusOf(
+async function statusOf(
   report: ReturnType<typeof startValidationRun>,
   provider: ValidationProvider
-): { status: string; error: string | null } {
+): Promise<{ status: string; error: string | null }> {
   const found = (await report).results.find(r => r.provider === provider);
   if (!found) throw new Error(`No ${provider} result`);
   return { status: found.status, error: found.error };
 }
 
 describe("issue #271: an unlisted provider is skipped, not fatal", () => {
-  it("does not abort the call: the listed providers still start", () => {
+  it("does not abort the call: the listed providers still start", async () => {
     // THE REGRESSION TEST. Before the fix this threw out of startValidationRun
     // and the caller got nothing at all, including from providers that were
     // perfectly well configured.
     const { report, started } = run(["claude", "codex", "cursor"], cwdResolver("cursor"));
     expect(started).toEqual(["claude", "codex"]);
-    expect(statusOf(report, "claude").status).toBe("running");
-    expect(statusOf(report, "codex").status).toBe("running");
+    expect(await statusOf(report, "claude").status).toBe("running");
+    expect(await statusOf(report, "codex").status).toBe("running");
   });
 
-  it("marks the unlisted provider skipped, with the workspace reason", () => {
+  it("marks the unlisted provider skipped, with the workspace reason", async () => {
     const { report } = run(["claude", "cursor"], cwdResolver("cursor"));
-    const cursor = statusOf(report, "cursor");
+    const cursor = await statusOf(report, "cursor");
     expect(cursor.status).toBe("skipped");
     expect(cursor.error).toContain("does not allow provider");
   });
 
-  it("tells the operator how to fix THAT provider", () => {
+  it("tells the operator how to fix THAT provider", async () => {
     const { report } = run(["cursor"], cwdResolver("cursor"));
-    expect(statusOf(report, "cursor").error).toMatch(/providers list/);
+    expect(await statusOf(report, "cursor").error).toMatch(/providers list/);
   });
 
-  it("does not offer the providers-list remedy for an unrelated workspace error", () => {
+  it("does not offer the providers-list remedy for an unrelated workspace error", async () => {
     // Round 1 (grok): the suffix was appended to every WorkspaceRegistryError,
     // so "No workspace selected" was answered with "add it to that workspace's
     // providers list", which is not the setting that fixes it.
@@ -158,7 +158,7 @@ describe("issue #271: an unlisted provider is skipped, not fatal", () => {
         "No workspace selected. Configure [workspaces].default or pass a registered workspace alias."
       )
     );
-    const cursor = statusOf(report, "cursor");
+    const cursor = await statusOf(report, "cursor");
     expect(cursor.status).toBe("skipped");
     expect(cursor.error).toContain("No workspace selected");
     expect(cursor.error).not.toMatch(/providers list/);

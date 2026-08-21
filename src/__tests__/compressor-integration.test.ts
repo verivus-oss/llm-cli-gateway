@@ -261,7 +261,7 @@ describe("async llm_job_result wiring (spec 5.2 / 5.4 / 9.9)", () => {
   it("off keeps raw NDJSON, indented envelope, and parsed.text", async () => {
     const store = new MemoryJobStore();
     const nd = claudeNdjson(REPLY);
-    seed(store, "joff", false, nd);
+    await seed(store, "joff", false, nd);
     const env = await callJobResult(store, "joff");
     expect(env.result.stdout).toContain('"type":"assistant"');
     expect(typeof env.parsed.text).toBe("string");
@@ -270,7 +270,7 @@ describe("async llm_job_result wiring (spec 5.2 / 5.4 / 9.9)", () => {
   it("on swaps NDJSON for compressed prose, compacts the envelope, omits parsed.text, keeps usage", async () => {
     const store = new MemoryJobStore();
     const nd = claudeNdjson(REPLY);
-    seed(store, "jon", true, nd);
+    await seed(store, "jon", true, nd);
     const raw = await callJobResult(store, "jon");
     expect(raw.result.stdout.startsWith("[[gateway-note")).toBe(true);
     expect(raw.result.stdout).not.toContain('"type":"assistant"');
@@ -282,7 +282,7 @@ describe("async llm_job_result wiring (spec 5.2 / 5.4 / 9.9)", () => {
   it("returns concatenable raw pages for complete forensic retrieval", async () => {
     const store = new MemoryJobStore();
     const nd = claudeNdjson(REPLY);
-    seed(store, "jpages", false, nd);
+    await seed(store, "jpages", false, nd);
 
     const first = await callJobResult(store, "jpages", {
       maxChars: 20,
@@ -307,7 +307,7 @@ describe("async llm_job_result wiring (spec 5.2 / 5.4 / 9.9)", () => {
 
   it("rejects display-mode offsets because transformed pages cannot concatenate", async () => {
     const store = new MemoryJobStore();
-    seed(store, "jdisplay-offset", false, claudeNdjson(REPLY));
+    await seed(store, "jdisplay-offset", false, claudeNdjson(REPLY));
 
     const response = await callJobResult(store, "jdisplay-offset", {
       maxChars: 20,

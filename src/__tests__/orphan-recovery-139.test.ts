@@ -222,7 +222,7 @@ describe("#139 SqliteJobStore lease surface (U1-U11)", () => {
   }
 
   it("U7: recordStart persists queued + owner_instance + a non-null lease_deadline", async () => {
-    start("j", { ownerHostname: "host-A" });
+    await start("j", { ownerHostname: "host-A" });
     const row = await store.getById("j");
     expect(row?.status).toBe("queued");
     expect(row?.ownerInstance).toBe("inst-A");
@@ -232,12 +232,12 @@ describe("#139 SqliteJobStore lease surface (U1-U11)", () => {
   });
 
   it("U4: a live row never has a NULL lease immediately after recordStart", async () => {
-    start("j");
+    await start("j");
     expect((await store.getById("j"))?.leaseDeadline).toBeGreaterThan(Date.now() - 1000);
   });
 
   it("U8: markRunning transitions queued -> running and stamps the pid", async () => {
-    start("j", { transport: "process" });
+    await start("j", { transport: "process" });
     await store.markRunning("j", { pid: 4242 });
     const row = await store.getById("j");
     expect(row?.status).toBe("running");
@@ -248,7 +248,7 @@ describe("#139 SqliteJobStore lease surface (U1-U11)", () => {
   });
 
   it("U1: recoverStaleJobs orphans a running row whose lease has expired", async () => {
-    start("j", { transport: "process" });
+    await start("j", { transport: "process" });
     await store.markRunning("j", { pid: 100 });
     setLease("j", 1);
     const orphaned = await store.recoverStaleJobs(LEASE_TTL, 300000);
@@ -257,7 +257,7 @@ describe("#139 SqliteJobStore lease surface (U1-U11)", () => {
   });
 
   it("U2: recoverStaleJobs does NOT orphan a row whose lease is still valid", async () => {
-    start("j", { transport: "process" });
+    await start("j", { transport: "process" });
     await store.markRunning("j", { pid: 100 });
     const orphaned = store.recoverStaleJobs(LEASE_TTL, 300000);
     expect(await orphaned).toHaveLength(0);
@@ -265,7 +265,7 @@ describe("#139 SqliteJobStore lease surface (U1-U11)", () => {
   });
 
   it("U3: a legacy row with a NULL lease is orphaned (the NULL arm)", async () => {
-    start("j", { transport: "process" });
+    await start("j", { transport: "process" });
     await store.markRunning("j", { pid: 100 });
     setLease("j", null);
     const orphaned = await store.recoverStaleJobs(LEASE_TTL, 300000);
@@ -274,7 +274,7 @@ describe("#139 SqliteJobStore lease surface (U1-U11)", () => {
   });
 
   it("U9: recoverStaleJobs targets queued too (crash between enqueue and launch)", async () => {
-    start("j"); // never markRunning -> stays queued
+    await start("j"); // never markRunning -> stays queued
     setLease("j", 1);
     const orphaned = await store.recoverStaleJobs(LEASE_TTL, 300000);
     expect(orphaned.map(o => o.id)).toContain("j");
@@ -282,7 +282,7 @@ describe("#139 SqliteJobStore lease surface (U1-U11)", () => {
   });
 
   it("U5: guarded recordComplete lands a terminal status onto an orphaned row, and is a no-op on a terminal row", async () => {
-    start("j", { transport: "process" });
+    await start("j", { transport: "process" });
     await store.markRunning("j", { pid: 100 });
     setLease("j", 1);
     await store.recoverStaleJobs(LEASE_TTL, 300000);
@@ -314,9 +314,9 @@ describe("#139 SqliteJobStore lease surface (U1-U11)", () => {
   });
 
   it("U11: dedup treats a live queued job as eligible, but never an orphaned row", async () => {
-    start("live");
+    await start("live");
     expect((await store.findByRequestKey("key-live"))?.id).toBe("live");
-    start("dead");
+    await start("dead");
     setLease("dead", 1);
     await store.recoverStaleJobs(LEASE_TTL, 300000);
     expect((await store.getById("dead"))?.status).toBe("orphaned");
@@ -324,7 +324,7 @@ describe("#139 SqliteJobStore lease surface (U1-U11)", () => {
   });
 
   it("heartbeat advances the lease so a would-be-stale job is not swept", async () => {
-    start("j", { transport: "process" });
+    await start("j", { transport: "process" });
     await store.markRunning("j", { pid: 100 });
     setLease("j", 1); // simulate lease about to lapse
     await store.heartbeat("inst-A"); // owner heartbeats: re-extends the lease
@@ -334,7 +334,7 @@ describe("#139 SqliteJobStore lease surface (U1-U11)", () => {
   });
 
   it("http job past leaseTtl but within httpJobGrace is NOT orphaned (grace in predicate)", async () => {
-    start("h", { transport: "http" });
+    await start("h", { transport: "http" });
     setLease("h", 1); // lease expired, but started_at is recent (within grace)
     const orphaned = store.recoverStaleJobs(LEASE_TTL, 300000);
     expect(await orphaned).toHaveLength(0);
@@ -454,7 +454,7 @@ describe("#139 MemoryJobStore parity (U12)", () => {
   }
 
   it("recordStart persists queued with a non-null lease; markRunning flips to running", async () => {
-    start("j", { transport: "process" });
+    await start("j", { transport: "process" });
     expect((await store.getById("j"))?.status).toBe("queued");
     expect((await store.getById("j"))?.leaseDeadline).not.toBeNull();
     await store.markRunning("j", { pid: 7 });
@@ -463,7 +463,7 @@ describe("#139 MemoryJobStore parity (U12)", () => {
   });
 
   it("recoverStaleJobs is a per-process no-op; register/heartbeat/deregister no-op", async () => {
-    start("j");
+    await start("j");
     expect(await store.recoverStaleJobs(LEASE_TTL, 300000)).toHaveLength(0);
     expect(await store.selectStaleProcessCandidates(LEASE_TTL, 300000)).toHaveLength(0);
     await store.registerInstance({ instanceId: "inst-A", role: null, hostname: null, pid: null });
@@ -473,7 +473,7 @@ describe("#139 MemoryJobStore parity (U12)", () => {
   });
 
   it("guarded recordComplete is a no-op on an already-terminal row", async () => {
-    start("j");
+    await start("j");
     await store.recordComplete({
       id: "j",
       status: "completed",
@@ -499,7 +499,7 @@ describe("#139 MemoryJobStore parity (U12)", () => {
   });
 
   it("dedup treats a live queued job as eligible", async () => {
-    start("j");
+    await start("j");
     expect((await store.findByRequestKey("key-j"))?.id).toBe("j");
   });
 });

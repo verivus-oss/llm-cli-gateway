@@ -450,7 +450,7 @@ describe("config_recover_kit_attempt", () => {
 
       const release = vi
         .spyOn(sessions, "releaseKitSessionAttempt")
-        .mockImplementation((...input) => {
+        .mockImplementation(async (...input) => {
           // Another gateway commits the exact release between this finalizer's
           // session update and its release call. Its false result is therefore
           // a benign concurrent success, not a failed terminal hook.

@@ -75,7 +75,7 @@ describe("MCP artifact cleanup pin recovery", () => {
   it("safely removes the exact generated artifact then acknowledges its one row", async () => {
     const config = buildClaudeMcpConfig(["sqry"]);
     const id = randomUUID();
-    seedTerminalArtifactPin(id, config.path, config.artifactScope!);
+    await seedTerminalArtifactPin(id, config.path, config.artifactScope!);
 
     const result = recover(id);
 
@@ -87,7 +87,7 @@ describe("MCP artifact cleanup pin recovery", () => {
   it("allows explicit recovery of an already absent config only after scope proof", async () => {
     const config = buildClaudeMcpConfig(["sqry"]);
     const id = randomUUID();
-    seedTerminalArtifactPin(id, config.path, config.artifactScope!);
+    await seedTerminalArtifactPin(id, config.path, config.artifactScope!);
     config.cleanup?.();
     expect(existsSync(config.path)).toBe(false);
 
@@ -104,7 +104,7 @@ describe("MCP artifact cleanup pin recovery", () => {
   it("retains a pin when its captured request namespace is gone", async () => {
     const config = buildClaudeMcpConfig(["sqry"]);
     const id = randomUUID();
-    seedTerminalArtifactPin(id, config.path, config.artifactScope!);
+    await seedTerminalArtifactPin(id, config.path, config.artifactScope!);
     unlinkSync(config.path);
     rmSync(dirname(config.path), { recursive: true, force: true });
 
@@ -122,7 +122,7 @@ describe("MCP artifact cleanup pin recovery", () => {
   it("cannot authorize a foreign host or a same-host foreign scope", async () => {
     const foreignHostConfig = buildClaudeMcpConfig(["sqry"]);
     const foreignHostId = randomUUID();
-    seedTerminalArtifactPin(
+    await seedTerminalArtifactPin(
       foreignHostId,
       foreignHostConfig.path,
       foreignHostConfig.artifactScope!,
@@ -131,7 +131,7 @@ describe("MCP artifact cleanup pin recovery", () => {
 
     const foreignScopeConfig = buildClaudeMcpConfig(["sqry"]);
     const foreignScopeId = randomUUID();
-    seedTerminalArtifactPin(
+    await seedTerminalArtifactPin(
       foreignScopeId,
       foreignScopeConfig.path,
       "v2:foreign-installation:1:1:request.1.00000000-0000-4000-8000-000000000000:foreign:1:1"
@@ -155,7 +155,7 @@ describe("MCP artifact cleanup pin recovery", () => {
     const id = randomUUID();
     const sentinel = join(testHome, "must-not-delete.txt");
     writeFileSync(sentinel, "sentinel", "utf8");
-    seedTerminalArtifactPin(id, sentinel, "not-a-gateway-scope");
+    await seedTerminalArtifactPin(id, sentinel, "not-a-gateway-scope");
 
     const result = recover(id);
 

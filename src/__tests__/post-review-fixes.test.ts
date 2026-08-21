@@ -261,7 +261,7 @@ describe("U26 fix: AsyncJobManager.onComplete contract", () => {
       await manager.cancelJob(job.snapshot.id);
       expect(onComplete).toHaveBeenCalledTimes(1);
     } finally {
-      cleanup();
+      await cleanup();
     }
   });
 
@@ -289,7 +289,7 @@ describe("U26 fix: AsyncJobManager.onComplete contract", () => {
       // Duplicate's hook does not re-fire.
       expect(onComplete2).toHaveBeenCalledTimes(1);
     } finally {
-      cleanup();
+      await cleanup();
     }
   });
 
@@ -325,7 +325,7 @@ describe("U26 fix: AsyncJobManager.onComplete contract", () => {
         expect(fired).toBe(true);
       });
     } finally {
-      cleanup();
+      await cleanup();
     }
   });
 });

@@ -128,7 +128,7 @@ describe("Personal Agent Config Kit persistence", () => {
     testDir = null;
   });
 
-  it("keeps active Kit sessions scoped by provider and canonical workspace", () => {
+  it("keeps active Kit sessions scoped by provider and canonical workspace", async () => {
     testDir = join(
       tmpdir(),
       `kit-session-test-${Date.now()}-${Math.random().toString(16).slice(2)}`
@@ -976,7 +976,7 @@ describe("Personal Agent Config Kit persistence", () => {
     ).toBe(false);
   });
 
-  it("does not replace an expired durable attempt without an explicit release", () => {
+  it("does not replace an expired durable attempt without an explicit release", async () => {
     testDir = join(
       tmpdir(),
       `kit-session-expired-attempt-${Date.now()}-${Math.random().toString(16).slice(2)}`

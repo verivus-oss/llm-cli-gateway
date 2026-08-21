@@ -143,8 +143,8 @@ describe("Phase 7 B3: llm_job_result remote redaction of providerSessionId", () 
   }
 
   it("omits providerSessionId for a remote owner but keeps it for a local owner", async () => {
-    seedGrokJob("job-remote", "alice");
-    seedGrokJob("job-local", "local");
+    await seedGrokJob("job-remote", "alice");
+    await seedGrokJob("job-local", "local");
 
     // Remote OAuth caller who OWNS the job: succeeds, but providerSessionId is
     // redacted from the caller-facing result.
@@ -170,7 +170,7 @@ describe("Phase 7 B3: llm_job_result remote redaction of providerSessionId", () 
     // buildCliResponse path would reconstruct it). Flipping the readback flag to
     // true (an intentional asymmetry fix) makes stdout the reconstructed reply
     // and flips this red on purpose.
-    seedGrokJob("job-grok-display", "local");
+    await seedGrokJob("job-grok-display", "local");
     const res = await call(
       "llm_job_result",
       { jobId: "job-grok-display", maxChars: 200000 },
@@ -183,7 +183,7 @@ describe("Phase 7 B3: llm_job_result remote redaction of providerSessionId", () 
   });
 
   it("llm_job_status never carries a provider session id (remote or local)", async () => {
-    seedGrokJob("job-remote", "alice");
+    await seedGrokJob("job-remote", "alice");
 
     const remote = await call("llm_job_status", { jobId: "job-remote" }, "alice");
     expect(remote.success).toBe(true);
@@ -192,7 +192,7 @@ describe("Phase 7 B3: llm_job_result remote redaction of providerSessionId", () 
   });
 
   it("preserves async input_too_large classification through job status and result tools", async () => {
-    seedGrokJob("job-e2big", "local", "", "failed", "grok argv is too large", {
+    await seedGrokJob("job-e2big", "local", "", "failed", "grok argv is too large", {
       errorCategory: CLI_INPUT_TOO_LARGE_CATEGORY,
       retryable: false,
     });
@@ -236,7 +236,7 @@ describe("Phase 7 B3: llm_job_result remote redaction of providerSessionId", () 
     const idOffset = splitStdout.indexOf(PROVIDER_SESSION_ID);
     expect(idOffset).toBeGreaterThan(0);
     expect(idOffset + PROVIDER_SESSION_ID.length).toBeGreaterThan(1000);
-    seedGrokJob("job-split", "alice", splitStdout);
+    await seedGrokJob("job-split", "alice", splitStdout);
 
     const first = await call(
       "llm_job_result",
@@ -266,7 +266,7 @@ describe("Phase 7 B3: llm_job_result remote redaction of providerSessionId", () 
   it("redacts terminal failure output without exposing non-resumable metadata", async () => {
     for (const status of ["failed", "canceled", "orphaned"] as const) {
       const jobId = `job-${status}`;
-      seedGrokJob(jobId, "alice", GROK_STDOUT, status);
+      await seedGrokJob(jobId, "alice", GROK_STDOUT, status);
 
       const remote = await call(
         "llm_job_result",
@@ -285,8 +285,8 @@ describe("Phase 7 B3: llm_job_result remote redaction of providerSessionId", () 
 
   it("redacts a known provider id from remote job.error but preserves local diagnostics", async () => {
     const error = `provider failed while resuming ${PROVIDER_SESSION_ID}`;
-    seedGrokJob("job-error-remote", "alice", GROK_STDOUT, "failed", error);
-    seedGrokJob("job-error-local", "local", GROK_STDOUT, "failed", error);
+    await seedGrokJob("job-error-remote", "alice", GROK_STDOUT, "failed", error);
+    await seedGrokJob("job-error-local", "local", GROK_STDOUT, "failed", error);
 
     const remote = await call(
       "llm_job_result",

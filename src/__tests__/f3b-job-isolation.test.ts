@@ -103,7 +103,7 @@ describe("F3b-2 job / request ownership isolation", () => {
   }
 
   it("llm_job_status is own-or-not-found across principals", async () => {
-    seedAliceJob();
+    await seedAliceJob();
 
     const bob = await call("llm_job_status", { jobId: "job-alice" }, "bob");
     expect(bob.success).toBe(false);
@@ -115,7 +115,7 @@ describe("F3b-2 job / request ownership isolation", () => {
   });
 
   it("llm_job_result does not leak another principal's output", async () => {
-    seedAliceJob();
+    await seedAliceJob();
 
     const bob = await call("llm_job_result", { jobId: "job-alice", maxChars: 200000 }, "bob");
     expect(bob.success).toBe(false);
@@ -127,7 +127,7 @@ describe("F3b-2 job / request ownership isolation", () => {
   });
 
   it("validation job_status is own-or-not-found across principals (receipts §5a)", async () => {
-    seedAliceJob();
+    await seedAliceJob();
 
     const bob = await call("job_status", { jobId: "job-alice" }, "bob");
     expect(bob.success).toBe(false);
@@ -139,7 +139,7 @@ describe("F3b-2 job / request ownership isolation", () => {
   });
 
   it("validation job_result does not leak another principal's output (receipts §5a)", async () => {
-    seedAliceJob();
+    await seedAliceJob();
 
     const bob = await call("job_result", { jobId: "job-alice", maxChars: 200000 }, "bob");
     expect(bob.success).toBe(false);
@@ -151,7 +151,7 @@ describe("F3b-2 job / request ownership isolation", () => {
   });
 
   it("llm_job_cancel reports another principal's job as not found", async () => {
-    seedAliceJob();
+    await seedAliceJob();
     const bob = await call("llm_job_cancel", { jobId: "job-alice" }, "bob");
     expect(bob.success).toBe(false);
     expect(bob.reason).toMatch(/not found/i);

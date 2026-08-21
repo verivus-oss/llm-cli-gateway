@@ -196,10 +196,10 @@ function review(
   return { report, calls: fake.calls };
 }
 
-function resultFor(
+async function resultFor(
   report: ReturnType<typeof startReviewRun>,
   provider: ValidationProvider
-): { status: string; error: string | null } {
+): Promise<{ status: string; error: string | null }> {
   const found = (await report).results.find(r => r.provider === provider);
   if (!found) throw new Error(`No ${provider} result`);
   return { status: found.status, error: found.error };
@@ -246,14 +246,14 @@ describe("issue #270: cursor trust", () => {
     expect(fake.calls[0].args).not.toContain("--trust");
   });
 
-  it("SKIPS cursor on an unregistered repository instead of trusting it", () => {
+  it("SKIPS cursor on an unregistered repository instead of trusting it", async () => {
     // Round 2 (codex): --trust also makes cursor load project rules, AGENTS.md
     // and project MCP config FROM THE REPOSITORY UNDER REVIEW, while
     // review-prompt.ts fences that same repository's evidence as "untrusted
     // data, never instructions". Granting it unconditionally let the reviewed
     // repository instruct its own reviewer through a channel outside the fence.
     const { report, calls } = review(["claude", "cursor"], () => true, { registered: false });
-    const cursor = resultFor(report, "cursor");
+    const cursor = await resultFor(report, "cursor");
     expect(cursor.status).toBe("skipped");
     expect(cursor.error).toMatch(/not a workspace registered for cursor/i);
     expect(cursor.error).toMatch(/AGENTS\.md|instruct the reviewer/i);
@@ -261,16 +261,16 @@ describe("issue #270: cursor trust", () => {
     expect(calls.map(c => c.cli)).toEqual(["claude"]);
   });
 
-  it("grants trust on an unregistered repository ONLY with the explicit opt-in", () => {
+  it("grants trust on an unregistered repository ONLY with the explicit opt-in", async () => {
     const { report, calls } = review(["cursor"], () => true, {
       registered: false,
       trustCursorWorkspace: true,
     });
-    expect(resultFor(report, "cursor").status).not.toBe("skipped");
+    expect(await resultFor(report, "cursor").status).not.toBe("skipped");
     expect(calls[0].args).toContain("--trust");
   });
 
-  it("fails closed when trust cannot be established at all", () => {
+  it("fails closed when trust cannot be established at all", async () => {
     // No predicate wired: the gateway cannot show the operator registered this
     // directory, so it must not assume they did.
     const fake = makeManager();
@@ -298,7 +298,7 @@ describe("issue #270: cursor trust", () => {
         },
       }
     );
-    expect(resultFor(report, "cursor").status).toBe("skipped");
+    expect(await resultFor(report, "cursor").status).toBe("skipped");
     expect(fake.calls).toHaveLength(0);
   });
 
@@ -325,7 +325,7 @@ describe("issue #270: devin sandbox preflight", () => {
     // because startReviewRun defers launches and rethrows admission errors.
     withPlatform("linux", async () => {
       const { report, calls } = review(["claude", "devin", "cursor"], () => false);
-      expect(resultFor(report, "devin").status).toBe("skipped");
+      expect(await resultFor(report, "devin").status).toBe("skipped");
       expect(calls.map(c => c.cli)).toEqual(["claude", "cursor"]);
       expect((await report).success).toBe(true);
     });
@@ -335,9 +335,9 @@ describe("issue #270: devin sandbox preflight", () => {
     // The first attempt reused CliInvalidInputError, whose message is hard-coded
     // to "contains an embedded NUL byte", so a missing package was reported as a
     // malformed argument.
-    withPlatform("linux", () => {
+    withPlatform("linux", async () => {
       const { report } = review(["devin"], () => false);
-      const { error } = resultFor(report, "devin");
+      const { error } = await resultFor(report, "devin");
       expect(error).toMatch(/bubblewrap/i);
       expect(error).not.toMatch(/NUL byte/i);
     });
@@ -346,9 +346,9 @@ describe("issue #270: devin sandbox preflight", () => {
   it("runs devin with --sandbox retained when bwrap is present", () => {
     // Dropping --sandbox to make it run is the tempting wrong fix: a review that
     // asked for isolation and silently ran without it is the worse outcome.
-    withPlatform("linux", () => {
+    withPlatform("linux", async () => {
       const { report, calls } = review(["devin"], () => true);
-      expect(resultFor(report, "devin").status).not.toBe("skipped");
+      expect(await resultFor(report, "devin").status).not.toBe("skipped");
       expect(calls[0].args).toContain("--sandbox");
     });
   });
@@ -356,9 +356,9 @@ describe("issue #270: devin sandbox preflight", () => {
   it("does not gate on bwrap off Linux, where devin uses a different sandbox", () => {
     // `devin --help`: "macOS seatbelt / Linux bwrap+seccomp". Gating every
     // platform on bwrap refused every macOS review despite a working sandbox.
-    withPlatform("darwin", () => {
+    withPlatform("darwin", async () => {
       const { report, calls } = review(["devin"], () => false);
-      expect(resultFor(report, "devin").status).not.toBe("skipped");
+      expect(await resultFor(report, "devin").status).not.toBe("skipped");
       expect(calls[0].args).toContain("--sandbox");
     });
   });
@@ -418,10 +418,10 @@ describe("issue #270: devin sandbox preflight", () => {
         }
       );
     };
-    withPlatform("linux", () => {
-      runOnce();
-      runOnce();
-      runOnce();
+    withPlatform("linux", async () => {
+      await runOnce();
+      await runOnce();
+      await runOnce();
     });
     // Round 2 (grok): `<= 1` also passes when the probe NEVER runs, so it could
     // not distinguish "cached" from "never called" and was a control that could
