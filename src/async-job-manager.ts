@@ -1482,6 +1482,23 @@ export class AsyncJobManager {
   }
 
   /**
+   * Settles once every write this manager has STARTED has settled.
+   *
+   * s7 put the flight completion on the per-job terminal chain, so a caller
+   * that has just driven a job terminal can no longer observe the recorder row
+   * in the same tick. `dispose()` already drains this set, but a caller that
+   * only wants the writes settled should not have to shut the manager down to
+   * get there, and the alternative, a sleep, is a control that measures itself.
+   *
+   * @internal Lifecycle barrier, like `whenStartupSettled`. Not a tool surface.
+   */
+  async whenPendingWritesSettled(): Promise<void> {
+    while (this.pendingWrites.size > 0) {
+      await Promise.allSettled([...this.pendingWrites]);
+    }
+  }
+
+  /**
    * The barrier every public entry point that OBSERVES durable state must pass.
    *
    * Before the job store became asynchronous the constructor completed both
@@ -1915,7 +1932,13 @@ export class AsyncJobManager {
       await this.persistOrphanProgress(orphan.id);
       await this.cleanupConfirmedOrphanClaudeMcpArtifact(orphan.id, candidatesById.get(orphan.id));
       try {
-        this.flightRecorder.logComplete(orphan.correlationId, this.buildOrphanFlightResult(orphan));
+        // AWAIT INSIDE THE TRY. Without it the recorder's rejection escapes a
+        // catch that can no longer fire (s7: the recorder rejects now, it does
+        // not throw), and the #139 sweep would carry on as though it had written.
+        await this.flightRecorder.logComplete(
+          orphan.correlationId,
+          this.buildOrphanFlightResult(orphan)
+        );
       } catch (err) {
         this.logger.error(`#139 FR logComplete for orphaned job ${orphan.id} failed`, err);
       }
@@ -2865,7 +2888,7 @@ export class AsyncJobManager {
     await this.maybeFlushProgress(job, true);
     if (writeFlightStart && flightRecorderEntry) {
       try {
-        this.flightRecorder.logStart({
+        await this.flightRecorder.logStart({
           correlationId,
           cli: provider.name,
           model: flightRecorderEntry.model,
@@ -3096,6 +3119,43 @@ export class AsyncJobManager {
     finalStatus: "completed" | "failed",
     overrideErrorMessage?: string
   ): void {
+    // ON THE SAME PER-JOB CHAIN as persistComplete, for the same reason and
+    // against the same three hazards, all of which arrived with s7's async
+    // recorder and none of which existed while the write was synchronous.
+    //
+    // ORDER: the terminal row must be persisted before its flight completion,
+    // and a second flight completion (the late-output rescue at `close`) must
+    // run after the first, not beside it.
+    //
+    // RE-ENTRANCY: `flightRecorderComplete` is this method's own idempotence
+    // flag and is set AFTER the write. Two concurrent entrants would both pass
+    // the guard and both write. Run in order, the second sees it already true
+    // and returns, which is exactly what it always meant to do.
+    //
+    // DRAIN: the process close listener and the limiter timeout callbacks are
+    // void sinks that mark a job terminal before persistence settles.
+    // `trackPendingWrite` is what stops dispose() concluding the drain is over
+    // while a flight completion is still in flight.
+    //
+    // `void` at every call site is therefore safe by construction rather than
+    // by remembering: the body has its own catch and never rejects, the chain
+    // orders it, and the drain waits for it.
+    const previous = job.terminalWriteChain ?? Promise.resolve();
+    const write = previous
+      .catch(() => undefined)
+      .then(() => this.writeFlightCompleteBody(job, finalStatus, overrideErrorMessage));
+    job.terminalWriteChain = write.then(
+      () => undefined,
+      () => undefined
+    );
+    this.trackPendingWrite(write.catch(() => undefined));
+  }
+
+  private async writeFlightCompleteBody(
+    job: AsyncJobRecord,
+    finalStatus: "completed" | "failed",
+    overrideErrorMessage?: string
+  ): Promise<void> {
     if (!job.flightRecorderEntry) return; // never opted in
     // R2 Codex-Unit-B F1: only write when armed. Sync-inline requests are
     // NOT armed at startJob — the sync handler owns the rich-metadata
@@ -3160,7 +3220,10 @@ export class AsyncJobManager {
         : undefined;
 
     try {
-      this.flightRecorder.logComplete(job.correlationId, {
+      // AWAIT INSIDE THE TRY, and before `flightRecorderComplete` is set: the
+      // flag means "the row was written", so setting it on a promise that has
+      // not settled would disarm the retry the next terminal callback relies on.
+      await this.flightRecorder.logComplete(job.correlationId, {
         response,
         durationMs,
         retryCount: 0,
@@ -4192,7 +4255,7 @@ export class AsyncJobManager {
     // same correlationId; a duplicate INSERT would crash on the PK.
     if (writeFlightStart && durableFlightRecorderEntry) {
       try {
-        this.flightRecorder.logStart({
+        await this.flightRecorder.logStart({
           correlationId,
           cli,
           model: durableFlightRecorderEntry.model,

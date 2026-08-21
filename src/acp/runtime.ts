@@ -44,10 +44,40 @@ import type { Logger } from "../logger.js";
 import { noopLogger } from "../logger.js";
 import type { CliType, ISessionManager } from "../session-manager.js";
 
-/** Minimal flight-recorder surface the runtime writes to (logStart/logComplete). */
+/**
+ * The two recorder writes the ACP path performs.
+ *
+ * `Promise<void>`, not `void`, and that is the whole point of the type. While
+ * these read `void` the real recorder's async methods were accepted here in
+ * silence and every ACP flight write was dropped on the floor: a slot typed
+ * `void` takes an async thunk without complaint, and no lint rule can see a
+ * promise the type system has already discarded. Keeping the return type
+ * honest is what makes `safeAcpFlight` below reachable at all.
+ */
 export interface AcpFlightSink {
-  logStart(entry: FlightLogStart): void;
-  logComplete(correlationId: string, result: FlightLogResult): void;
+  logStart(entry: FlightLogStart): Promise<void>;
+  logComplete(correlationId: string, result: FlightLogResult): Promise<void>;
+}
+
+/**
+ * Write one ACP flight row without letting it fail the request.
+ *
+ * Design 3.4 via src/storage/write-ordering.ts: "logging must never FAIL a
+ * request". Before s7 these calls were synchronous and an engine error WOULD
+ * have propagated; swallowing here brings the ACP path in line with the sync
+ * CLI path's safeFlightStart/safeFlightComplete rather than leaving one
+ * transport that dies because its audit log did.
+ */
+async function safeAcpFlight(
+  logger: Logger,
+  what: string,
+  write: () => Promise<void>
+): Promise<void> {
+  try {
+    await write();
+  } catch (error) {
+    logger.error(`acp.flight.${what}.failed`, { error: String(error) });
+  }
 }
 
 /** Dependencies for {@link runAcpRequest}. */
@@ -205,15 +235,23 @@ export async function runAcpRequest(
   }
 
   const promptBlocks: ContentBlock[] = [{ type: "text", text: req.prompt }];
-  deps.flightRecorder?.logStart(
-    buildAcpFlightStart({
-      correlationId: req.correlationId,
-      provider: req.provider,
-      model: req.model ?? "default",
-      prompt: promptBlocks,
-      gatewaySessionId,
-    })
-  );
+  // AWAITED, and that await is the fence: the start row is on disk before the
+  // prompt is dispatched, so nothing can complete a row that does not exist.
+  // Same rule as FlightOwnership.start (src/flight-ownership.ts).
+  const flightSink = deps.flightRecorder;
+  if (flightSink) {
+    await safeAcpFlight(logger, "logStart", () =>
+      flightSink.logStart(
+        buildAcpFlightStart({
+          correlationId: req.correlationId,
+          provider: req.provider,
+          model: req.model ?? "default",
+          prompt: promptBlocks,
+          gatewaySessionId,
+        })
+      )
+    );
+  }
 
   // Devin-only: thread a validated `--agent-type` into the spawn argv. The value
   // must be a known enum member; an unknown value is dropped (never injected as
@@ -312,25 +350,27 @@ export async function runAcpRequest(
       costBasis = composed.cost_basis;
     }
 
-    deps.flightRecorder?.logComplete(
-      req.correlationId,
-      buildAcpFlightResult({
-        responseText: text,
-        durationMs,
-        status: "completed",
-        exitCode: 0,
-        // Phase 7: persist the provider session id (resume) + stop reason.
-        providerSessionId,
-        stopReason: normalizer.stopReason,
-        // Phase 7 / acceptance #1: per-request usage from `_meta` (when emitted).
-        inputTokens: usage.inputTokens,
-        outputTokens: usage.outputTokens,
-        cacheReadTokens: usage.cacheReadTokens,
-        // LCR phase_2b: derived cost (reasoningTokens folded in at output rate).
-        costUsd,
-        costBasis,
-      })
-    );
+    await safeAcpFlight(logger, "logComplete", async () => {
+      await deps.flightRecorder?.logComplete(
+        req.correlationId,
+        buildAcpFlightResult({
+          responseText: text,
+          durationMs,
+          status: "completed",
+          exitCode: 0,
+          // Phase 7: persist the provider session id (resume) + stop reason.
+          providerSessionId,
+          stopReason: normalizer.stopReason,
+          // Phase 7 / acceptance #1: per-request usage from `_meta` (when emitted).
+          inputTokens: usage.inputTokens,
+          outputTokens: usage.outputTokens,
+          cacheReadTokens: usage.cacheReadTokens,
+          // LCR phase_2b: derived cost (reasoningTokens folded in at output rate).
+          costUsd,
+          costBasis,
+        })
+      );
+    });
     logger.info("acp.request.success", { provider: req.provider, durationMs });
     return {
       text,
@@ -341,16 +381,18 @@ export async function runAcpRequest(
     };
   } catch (err) {
     const durationMs = elapsed();
-    deps.flightRecorder?.logComplete(
-      req.correlationId,
-      buildAcpFlightResult({
-        responseText: "",
-        durationMs,
-        status: "failed",
-        exitCode: 1,
-        errorMessage: isAcpError(err) ? err.userMessage : "ACP request failed.",
-      })
-    );
+    await safeAcpFlight(logger, "logComplete", async () => {
+      await deps.flightRecorder?.logComplete(
+        req.correlationId,
+        buildAcpFlightResult({
+          responseText: "",
+          durationMs,
+          status: "failed",
+          exitCode: 1,
+          errorMessage: isAcpError(err) ? err.userMessage : "ACP request failed.",
+        })
+      );
+    });
     logger.error("acp.request.failure", {
       provider: req.provider,
       durationMs,

@@ -1301,7 +1301,7 @@ describe("PostgresJobStore", () => {
       expect(body.receipt.validationId).toBe("val-pg-tool");
       expect(body.receipt.models).toEqual(["claude", "codex"]);
     } finally {
-      flight.close();
+      await flight.close();
     }
   });
 });

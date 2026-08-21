@@ -17,12 +17,12 @@ describe("FlightRecorder least-cost-routing telemetry (LCR phase_1)", () => {
   let tmpDir: string;
   let dbPath: string;
 
-  beforeEach(() => {
+  beforeEach(async () => {
     tmpDir = mkdtempSync(path.join(os.tmpdir(), "flight-routing-test-"));
     dbPath = path.join(tmpDir, "logs.db");
   });
 
-  afterEach(() => {
+  afterEach(async () => {
     rmSync(tmpDir, { recursive: true, force: true });
   });
 
@@ -56,13 +56,13 @@ describe("FlightRecorder least-cost-routing telemetry (LCR phase_1)", () => {
     }
   }
 
-  function seedStarted(rec: FlightRecorder, id: string): void {
-    rec.logStart({ correlationId: id, cli: "claude", model: "sonnet", prompt: "hi" });
+  async function seedStarted(rec: FlightRecorder, id: string): Promise<void> {
+    await rec.logStart({ correlationId: id, cli: "claude", model: "sonnet", prompt: "hi" });
   }
 
-  it("a fresh DB opens clean and has the new columns", () => {
+  it("a fresh DB opens clean and has the new columns", async () => {
     const rec = new FlightRecorder(dbPath);
-    rec.close();
+    await rec.close();
 
     expect(tableColumns(dbPath, "requests").has("cost_basis")).toBe(true);
     const metaCols = tableColumns(dbPath, "gateway_metadata");
@@ -78,10 +78,10 @@ describe("FlightRecorder least-cost-routing telemetry (LCR phase_1)", () => {
     }
   });
 
-  it("persists cost_basis and all route_* facts for a routed request", () => {
+  it("persists cost_basis and all route_* facts for a routed request", async () => {
     const rec = new FlightRecorder(dbPath);
-    seedStarted(rec, "r1");
-    rec.logComplete("r1", {
+    await seedStarted(rec, "r1");
+    await rec.logComplete("r1", {
       response: "routed body",
       durationMs: 12,
       retryCount: 0,
@@ -92,14 +92,14 @@ describe("FlightRecorder least-cost-routing telemetry (LCR phase_1)", () => {
       exitCode: 0,
       status: "completed",
     });
-    rec.recordRouting("r1", {
+    await rec.recordRouting("r1", {
       estCostUsd: 0.005,
       estConfidence: "high",
       reason: "cheapest-capable",
       considered: 4,
       reroutes: 1,
     });
-    rec.close();
+    await rec.close();
 
     const req = readRequest(dbPath, "r1");
     expect(req.cost_basis).toBe("provider-reported");
@@ -113,12 +113,12 @@ describe("FlightRecorder least-cost-routing telemetry (LCR phase_1)", () => {
     expect(meta.route_reroutes).toBe(1);
   });
 
-  it("round-trips both a T1 provider-reported and a T2 derived-from-tokens basis", () => {
+  it("round-trips both a T1 provider-reported and a T2 derived-from-tokens basis", async () => {
     const rec = new FlightRecorder(dbPath);
 
     // T1: provider reported the cost directly.
-    seedStarted(rec, "t1");
-    rec.logComplete("t1", {
+    await seedStarted(rec, "t1");
+    await rec.logComplete("t1", {
       response: "t1",
       durationMs: 1,
       retryCount: 0,
@@ -131,8 +131,8 @@ describe("FlightRecorder least-cost-routing telemetry (LCR phase_1)", () => {
     });
 
     // T2: gateway derived the cost from token counts.
-    seedStarted(rec, "t2");
-    rec.logComplete("t2", {
+    await seedStarted(rec, "t2");
+    await rec.logComplete("t2", {
       response: "t2",
       durationMs: 1,
       retryCount: 0,
@@ -144,16 +144,16 @@ describe("FlightRecorder least-cost-routing telemetry (LCR phase_1)", () => {
       status: "completed",
     });
 
-    rec.close();
+    await rec.close();
 
     expect(readRequest(dbPath, "t1").cost_basis).toBe("provider-reported");
     expect(readRequest(dbPath, "t2").cost_basis).toBe("derived-from-tokens");
   });
 
-  it("leaves cost_basis and route_* NULL for an unrouted request", () => {
+  it("leaves cost_basis and route_* NULL for an unrouted request", async () => {
     const rec = new FlightRecorder(dbPath);
-    seedStarted(rec, "n1");
-    rec.logComplete("n1", {
+    await seedStarted(rec, "n1");
+    await rec.logComplete("n1", {
       response: "plain",
       durationMs: 1,
       retryCount: 0,
@@ -162,7 +162,7 @@ describe("FlightRecorder least-cost-routing telemetry (LCR phase_1)", () => {
       exitCode: 0,
       status: "completed",
     });
-    rec.close();
+    await rec.close();
 
     expect(readRequest(dbPath, "n1").cost_basis).toBeNull();
     const meta = readMeta(dbPath, "n1");
@@ -171,10 +171,10 @@ describe("FlightRecorder least-cost-routing telemetry (LCR phase_1)", () => {
     expect(meta.route_reason).toBeNull();
   });
 
-  it("binds NULL for omitted RoutingRecord fields while still marking routed", () => {
+  it("binds NULL for omitted RoutingRecord fields while still marking routed", async () => {
     const rec = new FlightRecorder(dbPath);
-    seedStarted(rec, "p1");
-    rec.logComplete("p1", {
+    await seedStarted(rec, "p1");
+    await rec.logComplete("p1", {
       response: "partial",
       durationMs: 1,
       retryCount: 0,
@@ -183,8 +183,8 @@ describe("FlightRecorder least-cost-routing telemetry (LCR phase_1)", () => {
       exitCode: 0,
       status: "completed",
     });
-    rec.recordRouting("p1", { reason: "single-candidate" });
-    rec.close();
+    await rec.recordRouting("p1", { reason: "single-candidate" });
+    await rec.close();
 
     const meta = readMeta(dbPath, "p1");
     expect(meta.routed).toBe(1);
@@ -195,7 +195,7 @@ describe("FlightRecorder least-cost-routing telemetry (LCR phase_1)", () => {
     expect(meta.route_reroutes).toBeNull();
   });
 
-  it("auto-migrates a legacy DB created without the new columns", () => {
+  it("auto-migrates a legacy DB created without the new columns", async () => {
     const seed = new BetterSqlite3(dbPath);
     seed.exec(`
       CREATE TABLE _migrations (version INTEGER PRIMARY KEY, applied_at TEXT NOT NULL);
@@ -221,7 +221,7 @@ describe("FlightRecorder least-cost-routing telemetry (LCR phase_1)", () => {
     expect(tableColumns(dbPath, "gateway_metadata").has("routed")).toBe(false);
 
     const rec = new FlightRecorder(dbPath);
-    rec.close();
+    await rec.close();
 
     // Post-migration: the recorder added them without error.
     expect(tableColumns(dbPath, "requests").has("cost_basis")).toBe(true);
@@ -238,7 +238,7 @@ describe("FlightRecorder least-cost-routing telemetry (LCR phase_1)", () => {
     }
   });
 
-  it("upgraded legacy DB accepts routed writes end-to-end", () => {
+  it("upgraded legacy DB accepts routed writes end-to-end", async () => {
     const seed = new BetterSqlite3(dbPath);
     seed.exec(`
       CREATE TABLE _migrations (version INTEGER PRIMARY KEY, applied_at TEXT NOT NULL);
@@ -260,8 +260,8 @@ describe("FlightRecorder least-cost-routing telemetry (LCR phase_1)", () => {
     seed.close();
 
     const rec = new FlightRecorder(dbPath);
-    seedStarted(rec, "m1");
-    rec.logComplete("m1", {
+    await seedStarted(rec, "m1");
+    await rec.logComplete("m1", {
       response: "ok",
       durationMs: 1,
       retryCount: 0,
@@ -272,8 +272,8 @@ describe("FlightRecorder least-cost-routing telemetry (LCR phase_1)", () => {
       exitCode: 0,
       status: "completed",
     });
-    rec.recordRouting("m1", { estCostUsd: 0.031, estConfidence: "low", considered: 2 });
-    rec.close();
+    await rec.recordRouting("m1", { estCostUsd: 0.031, estConfidence: "low", considered: 2 });
+    await rec.close();
 
     expect(readRequest(dbPath, "m1").cost_basis).toBe("derived-from-tokens");
     const meta = readMeta(dbPath, "m1");
@@ -283,8 +283,10 @@ describe("FlightRecorder least-cost-routing telemetry (LCR phase_1)", () => {
     expect(meta.route_considered).toBe(2);
   });
 
-  it("NoopFlightRecorder tolerates recordRouting", () => {
+  it("NoopFlightRecorder tolerates recordRouting", async () => {
     const noop = new NoopFlightRecorder();
-    expect(() => noop.recordRouting("x", { estCostUsd: 1, reason: "noop" })).not.toThrow();
+    await expect(
+      noop.recordRouting("x", { estCostUsd: 1, reason: "noop" })
+    ).resolves.toBeUndefined();
   });
 });

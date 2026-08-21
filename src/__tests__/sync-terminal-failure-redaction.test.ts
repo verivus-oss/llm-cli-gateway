@@ -111,7 +111,7 @@ describe("synchronous terminal failure provider-session privacy", () => {
   let sessions: FileSessionManager;
   let server: ReturnType<typeof createGatewayServer> | undefined;
 
-  beforeEach(() => {
+  beforeEach(async () => {
     tmp = mkdtempSync(join(tmpdir(), "sync-failure-redaction-"));
     flight = new FlightRecorder(join(tmp, "logs.db"));
     manager = new AsyncJobManager(noopLogger);
@@ -122,7 +122,7 @@ describe("synchronous terminal failure provider-session privacy", () => {
   afterEach(async () => {
     await server?.close();
     await manager.dispose();
-    flight.close();
+    await flight.close();
     rmSync(tmp, { recursive: true, force: true });
   });
 
@@ -178,13 +178,13 @@ describe("synchronous terminal failure provider-session privacy", () => {
     expect(remote.content[0]?.text).toContain("[redacted-session-id]");
     expect(remote.structuredContent?.response).toContain("[redacted-session-id]");
 
-    const stored = flight.queryRequests<{ provider_session_id: string | null }>(
+    const stored = await flight.queryRequests<{ provider_session_id: string | null }>(
       "SELECT provider_session_id FROM gateway_metadata WHERE request_id = ?",
       "remote-grok-failure"
     );
     expect(stored[0]?.provider_session_id).toBe(PROVIDER_SESSION_ID);
 
-    const persisted = readPersistedRequest(flight, "remote-grok-failure", {
+    const persisted = await readPersistedRequest(flight, "remote-grok-failure", {
       includePrompt: true,
       redactProviderSessionId: true,
     });
@@ -235,13 +235,13 @@ describe("synchronous terminal failure provider-session privacy", () => {
     expect(JSON.stringify(remote)).not.toContain(PROVIDER_SESSION_ID);
     expect(remote.content[0]?.text).toContain("[redacted-session-id]");
 
-    const stored = flight.queryRequests<{ provider_session_id: string | null }>(
+    const stored = await flight.queryRequests<{ provider_session_id: string | null }>(
       "SELECT provider_session_id FROM gateway_metadata WHERE request_id = ?",
       "remote-claude-failure"
     );
     expect(stored[0]?.provider_session_id).toBe(PROVIDER_SESSION_ID);
 
-    const persisted = readPersistedRequest(flight, "remote-claude-failure", {
+    const persisted = await readPersistedRequest(flight, "remote-claude-failure", {
       includePrompt: true,
       redactProviderSessionId: true,
     });
@@ -309,13 +309,13 @@ describe("synchronous terminal failure provider-session privacy", () => {
     expect(JSON.stringify(result)).not.toContain(PROVIDER_SESSION_ID);
     expect(result.content[0]?.text).toContain("[redacted-session-id]");
 
-    const stored = flight.queryRequests<{ provider_session_id: string | null }>(
+    const stored = await flight.queryRequests<{ provider_session_id: string | null }>(
       "SELECT provider_session_id FROM gateway_metadata WHERE request_id = ?",
       "remote-routed-failure"
     );
     expect(stored[0]?.provider_session_id).toBe(PROVIDER_SESSION_ID);
 
-    const persisted = readPersistedRequest(flight, "remote-routed-failure", {
+    const persisted = await readPersistedRequest(flight, "remote-routed-failure", {
       includePrompt: true,
       redactProviderSessionId: true,
     });

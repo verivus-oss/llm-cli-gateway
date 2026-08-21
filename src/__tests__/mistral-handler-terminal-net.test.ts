@@ -135,7 +135,7 @@ describe("handleMistralRequest terminal net: inline (Mode A) + seam + retry", ()
   let recordRequest: ReturnType<typeof vi.fn>;
   const assertUpstreamCliArgsMock = vi.mocked(assertUpstreamCliArgs);
 
-  beforeEach(() => {
+  beforeEach(async () => {
     tmp = mkdtempSync(join(tmpdir(), "mistral-terminal-net-"));
     flight = new FlightRecorder(join(tmp, "logs.db"));
     manager = new AsyncJobManager(noopLogger);
@@ -147,7 +147,7 @@ describe("handleMistralRequest terminal net: inline (Mode A) + seam + retry", ()
 
   afterEach(async () => {
     await manager.dispose();
-    flight.close();
+    await flight.close();
     rmSync(tmp, { recursive: true, force: true });
     vi.restoreAllMocks();
   });
@@ -300,7 +300,7 @@ describe("handleMistralRequest terminal net: deferred (Mode B) + D4 split", () =
   let flight: FlightRecorder;
   let sessions: FileSessionManager;
 
-  beforeEach(() => {
+  beforeEach(async () => {
     originalDeadline = process.env.SYNC_DEADLINE_MS;
     process.env.SYNC_DEADLINE_MS = "25";
     tmp = mkdtempSync(join(tmpdir(), "mistral-terminal-net-defer-"));
@@ -310,10 +310,10 @@ describe("handleMistralRequest terminal net: deferred (Mode B) + D4 split", () =
     vi.resetModules();
   });
 
-  afterEach(() => {
+  afterEach(async () => {
     if (originalDeadline === undefined) delete process.env.SYNC_DEADLINE_MS;
     else process.env.SYNC_DEADLINE_MS = originalDeadline;
-    flight.close();
+    await flight.close();
     rmSync(tmp, { recursive: true, force: true });
     vi.resetModules();
     vi.restoreAllMocks();

@@ -163,7 +163,7 @@ describe("Claude Kit argv pre-admission", () => {
       personalConfig,
       workspaces: workspaceRegistry(root),
       approvalManager: new ApprovalManager(join(root, "approvals.jsonl"), noopLogger),
-      flightRecorder: { logStart() {}, logComplete() {} },
+      flightRecorder: { async logStart() {}, async logComplete() {} },
       logger: noopLogger,
     });
     tools = (server as unknown as Record<string, Record<string, RegisteredTool>>)._registeredTools;

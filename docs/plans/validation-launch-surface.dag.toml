@@ -57,7 +57,7 @@ flow_count = 9
 id = "tool.review_changes"
 kind = "mcp_tool"
 file = "src/validation-tools.ts"
-line = 417
+line = 420
 role = "Captures the Git artifact and starts the reviewer roster. Owns the trust CONSENT input."
 affects = ["fn.startReviewRun", "state.reviewRunAuthorization"]
 
@@ -65,7 +65,7 @@ affects = ["fn.startReviewRun", "state.reviewRunAuthorization"]
 id = "tool.synthesize_validation"
 kind = "mcp_tool"
 file = "src/validation-tools.ts"
-line = 870
+line = 873
 role = "Starts the judge in a LATER tool call than review_changes. This separation is what hid round 4: it cannot see the kickoff arguments, only durable state."
 affects = ["fn.startJudgeSynthesis", "state.reviewRunAuthorization"]
 
@@ -73,7 +73,7 @@ affects = ["fn.startJudgeSynthesis", "state.reviewRunAuthorization"]
 id = "tool.validate_with_models"
 kind = "mcp_tool"
 file = "src/validation-tools.ts"
-line = 636
+line = 639
 role = "Ask-path roster. review=false, so no trust is ever granted."
 affects = ["fn.startValidationRun"]
 
@@ -211,13 +211,13 @@ line = 24
 role = "Operator consent to trust an unregistered repository. Defaulted false so pre-existing runs still parse."
 affects = ["fn.startReviewRun", "fn.startJudgeSynthesis"]
 flow = [
-  { file = "src/validation-tools.ts", line = 434, token = "trustCursorWorkspace", role = "tool input schema" },
-  { file = "src/validation-tools.ts", line = 512, token = "trustCursorWorkspace", role = "handler destructure" },
-  { file = "src/validation-tools.ts", line = 578, token = "trustCursorWorkspace", role = "written into reviewAuthorization" },
+  { file = "src/validation-tools.ts", line = 437, token = "trustCursorWorkspace", role = "tool input schema" },
+  { file = "src/validation-tools.ts", line = 515, token = "trustCursorWorkspace", role = "handler destructure" },
+  { file = "src/validation-tools.ts", line = 581, token = "trustCursorWorkspace", role = "written into reviewAuthorization" },
   { file = "src/review-run-authorization.ts", line = 24, token = "trustCursorWorkspace", role = "durable schema field" },
   { file = "src/validation-orchestrator.ts", line = 926, token = "reviewAuthorization", role = "persisted into validation_runs.requestJson" },
-  { file = "src/validation-tools.ts", line = 935, token = "parseReviewRunAuthorization", role = "rehydrated for synthesis" },
-  { file = "src/validation-tools.ts", line = 1064, token = "trustCursorWorkspace", role = "passed to startJudgeSynthesis" },
+  { file = "src/validation-tools.ts", line = 938, token = "parseReviewRunAuthorization", role = "rehydrated for synthesis" },
+  { file = "src/validation-tools.ts", line = 1067, token = "trustCursorWorkspace", role = "passed to startJudgeSynthesis" },
   { file = "src/validation-orchestrator.ts", line = 608, token = "trustWorkspace", role = "judge seat launch option" },
   { file = "src/validation-orchestrator.ts", line = 459, token = "trustWorkspace", role = "roster seat launch option" },
 ]

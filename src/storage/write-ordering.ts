@@ -112,7 +112,7 @@ export const WRITE_ORDERING_RULES = {
   },
   telemetry_before_start_row: {
     mode: "recordRouting or compression telemetry racing a missing start row.",
-    rule: "Both are post-hoc updates keyed on the request id, so before the start row exists they match nothing and the telemetry is lost. They are not on FlightOwnership's chain: s6 did not convert them, deliberately.",
+    rule: "Both are post-hoc updates keyed on the request id, so before the start row exists they match nothing and the telemetry is lost. s7 moved them onto the port, so they are now transactions on the driver's single write queue and can no longer OVERTAKE a start write submitted before them. They are still not on FlightOwnership's request-scoped chain, and the loss when they are DECIDED before the start row is unchanged: the update matches nothing and says nothing.",
     owner: "s7",
     status: "characterised",
     verifiedBy: ["routing telemetry written before the start row is lost"],
@@ -147,11 +147,13 @@ export const WRITE_ORDERING_RULES = {
   },
   complete_timeout_semantics: {
     mode: "A bounded completion write, where a race-style timeout neither cancels the query nor establishes whether it committed.",
-    rule: "The bound must cancel the query and destroy the connection, never merely stop waiting. That is the same mechanism s13 owns for the whole-operation deadline, so the recorder inherits it rather than growing a second one.",
+    rule: "The bound must cancel the query and destroy the connection, never merely stop waiting. s7 applies s13's mechanism rather than growing a second one: every recorder write goes through driver.transaction, which arms STORAGE_TRANSACTION_DEADLINE_MS and, on SQLite, refuses the next statement and ROLLS BACK rather than abandoning anything. Two tests in a chain, because inheritance is the claim: one shows the recorder's four writes really do route through driver.transaction, the other shows what that bound does.",
     owner: "s7",
-    status: "unenforced",
-    unenforcedBecause:
-      "No bound exists on a recorder write today and adding one before the recorder is on the port would bound a synchronous call. s13 builds the cancelling deadline; s7 applies it.",
+    status: "enforced",
+    verifiedBy: [
+      "each operation routes with the class it declared",
+      "ends a transaction that outlives its bound, and the write does NOT land",
+    ],
   },
   unattached_completion_side_table: {
     mode: "A completion with no start row cannot fabricate one: FlightLogResult carries no cli, model, prompt or start time and those columns are not nullable.",
@@ -159,13 +161,17 @@ export const WRITE_ORDERING_RULES = {
     owner: "s7",
     status: "unenforced",
     unenforcedBecause:
-      "The side table is new authorship in the transcript schema s7 writes; defining it here would be a surface with no implementer, which this programme has paid for twice.",
+      "BLOCKED, not pending. The side table is part of the transcript schema, and operator decision 0a stops s7 before any transcript-schema authorship: bodies do not enter Postgres until postgres-security-hardening.md section 6 is complete through step 8, and it is at step 2 of 10. Writing a SQLite-only side table now would either be thrown away at the cutover or become a second schema to migrate. It stays a named, unimplemented rule rather than a surface with no implementer.",
   },
   merge_fence: {
     mode: "A delayed first completion arriving after the final one overwrites the final response.",
-    rule: "Completion is a merge, not a no-op: last writer wins on the response body, terminal status is monotonic. Today the body update is unfenced and the status update is fenced to started, which gives monotonic status and last-writer-wins bodies but NO revision fence, so out-of-order arrivals are not distinguished.",
+    rule: "SETTLED BY EXPERIMENT at s7, which is the first point it could be: with a synchronous recorder two completions could not arrive out of order. Driven both ways against a real database. ACROSS WRITERS the fence is REQUIRED: an earlier-decided completion landing second overwrites the final response body, silently, because the body update is unfenced last-writer-wins; the status stays monotonic because its half is fenced to `started`, which is what makes the loss invisible. WITHIN one recorder it is not reachable: the driver serialises transactions on one queue, so submission order is landing order. The fence is therefore owed to the two-writer case, which the #139 orphan sweep is, and it is not built here because the revision column is transcript-schema authorship that operator decision 0a stops.",
     owner: "s7",
     status: "characterised",
-    verifiedBy: ["a late second completion refreshes the response and leaves the status monotonic"],
+    verifiedBy: [
+      "a late second completion refreshes the response and leaves the status monotonic",
+      "REQUIRED across writers: an earlier-decided completion landing second overwrites the final body",
+      "NOT reachable within one recorder: submission order is landing order",
+    ],
   },
 } as const satisfies Record<WriteOrderingRuleId, WriteOrderingRule>;

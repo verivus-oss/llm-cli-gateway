@@ -15,12 +15,12 @@ describe("cache_state resources", () => {
   let rec: FlightRecorder;
   let provider: ResourceProvider;
 
-  beforeEach(() => {
+  beforeEach(async () => {
     tmpDir = mkdtempSync(path.join(os.tmpdir(), "cache-state-res-"));
     rec = new FlightRecorder(path.join(tmpDir, "logs.db"));
     provider = new ResourceProvider(sessionManagerStub, new PerformanceMetrics(), rec);
     // Seed: two sessions × two CLIs with cache hits.
-    rec.logStart({
+    await rec.logStart({
       correlationId: "r1",
       cli: "claude",
       model: "claude-sonnet-4-5",
@@ -29,7 +29,7 @@ describe("cache_state resources", () => {
       stablePrefixHash: "hash-abc",
       stablePrefixTokens: 100,
     });
-    rec.logComplete("r1", {
+    await rec.logComplete("r1", {
       response: "SECRET response content",
       durationMs: 1,
       retryCount: 0,
@@ -40,7 +40,7 @@ describe("cache_state resources", () => {
       cacheReadTokens: 50,
       cacheCreationTokens: 100,
     });
-    rec.logStart({
+    await rec.logStart({
       correlationId: "r2",
       cli: "claude",
       model: "claude-sonnet-4-5",
@@ -49,7 +49,7 @@ describe("cache_state resources", () => {
       stablePrefixHash: "hash-abc",
       stablePrefixTokens: 100,
     });
-    rec.logComplete("r2", {
+    await rec.logComplete("r2", {
       response: "SECRET response 2",
       durationMs: 1,
       retryCount: 0,
@@ -62,13 +62,13 @@ describe("cache_state resources", () => {
     });
   });
 
-  afterEach(() => {
-    rec.close();
+  afterEach(async () => {
+    await rec.close();
     rmSync(tmpDir, { recursive: true, force: true });
   });
 
-  it("readCacheStateGlobal returns aggregates without any raw prompt/response field", () => {
-    const stats = provider.readCacheStateGlobal();
+  it("readCacheStateGlobal returns aggregates without any raw prompt/response field", async () => {
+    const stats = await provider.readCacheStateGlobal();
     const json = JSON.stringify(stats);
     expect(json).not.toContain("SECRET");
     expect(stats.totalRequests).toBe(2);
@@ -83,7 +83,7 @@ describe("cache_state resources", () => {
     expect((stats as unknown as Record<string, unknown>).task).toBeUndefined();
   });
 
-  it("readCacheStateSession populates ttlRemainingMs from the configured TTL policy", () => {
+  it("readCacheStateSession populates ttlRemainingMs from the configured TTL policy", async () => {
     const claudeConfig = {
       emitAnthropicCacheControl: false,
       anthropicTtlSeconds: 300 as const,
@@ -102,13 +102,13 @@ describe("cache_state resources", () => {
       rec,
       claudeConfig
     );
-    const stats = providerWithConfig.readCacheStateSession("sess-A");
+    const stats = await providerWithConfig.readCacheStateSession("sess-A");
     // claude session → ttlRemainingMs is a number (or 0 if elapsed > policy).
     expect(typeof stats.ttlRemainingMs).toBe("number");
   });
 
-  it("readCacheStateSession returns aggregates without prompt text", () => {
-    const stats = provider.readCacheStateSession("sess-A");
+  it("readCacheStateSession returns aggregates without prompt text", async () => {
+    const stats = await provider.readCacheStateSession("sess-A");
     const json = JSON.stringify(stats);
     expect(json).not.toContain("SECRET");
     expect(stats.requestCount).toBe(2);
@@ -120,8 +120,8 @@ describe("cache_state resources", () => {
     expect((stats as unknown as Record<string, unknown>).response).toBeUndefined();
   });
 
-  it("readCacheStateForPrefix returns aggregates without prompt text", () => {
-    const stats = provider.readCacheStateForPrefix("hash-abc");
+  it("readCacheStateForPrefix returns aggregates without prompt text", async () => {
+    const stats = await provider.readCacheStateForPrefix("hash-abc");
     const json = JSON.stringify(stats);
     expect(json).not.toContain("SECRET");
     expect(stats.requestCount).toBe(2);
@@ -132,15 +132,15 @@ describe("cache_state resources", () => {
     expect((stats as unknown as Record<string, unknown>).response).toBeUndefined();
   });
 
-  it("readCacheStateSession returns empty defaults for unknown session (no error)", () => {
-    const stats = provider.readCacheStateSession("no-such-session");
+  it("readCacheStateSession returns empty defaults for unknown session (no error)", async () => {
+    const stats = await provider.readCacheStateSession("no-such-session");
     expect(stats.requestCount).toBe(0);
     expect(stats.hitRate).toBe(0);
     expect(stats.lastRequestAt).toBeNull();
   });
 
-  it("readCacheStateForPrefix returns empty defaults for unknown hash", () => {
-    const stats = provider.readCacheStateForPrefix("no-such-hash");
+  it("readCacheStateForPrefix returns empty defaults for unknown hash", async () => {
+    const stats = await provider.readCacheStateForPrefix("no-such-hash");
     expect(stats.requestCount).toBe(0);
     expect(stats.cliBreakdown).toEqual([]);
   });
@@ -149,8 +149,8 @@ describe("cache_state resources", () => {
   // AsyncJobManager writes its own logStart/logComplete with asyncJobId set.
   // Seed an async-flavoured row alongside the sync rows in beforeEach and
   // verify that the global + per-prefix aggregates include it.
-  it("readCacheStateGlobal aggregates async-job rows (slice 1.5)", () => {
-    rec.logStart({
+  it("readCacheStateGlobal aggregates async-job rows (slice 1.5)", async () => {
+    await rec.logStart({
       correlationId: "r-async-1",
       cli: "codex",
       model: "codex-mini",
@@ -160,7 +160,7 @@ describe("cache_state resources", () => {
       stablePrefixHash: "hash-async",
       stablePrefixTokens: 200,
     });
-    rec.logComplete("r-async-1", {
+    await rec.logComplete("r-async-1", {
       response: "SECRET async response",
       durationMs: 1,
       retryCount: 0,
@@ -172,7 +172,7 @@ describe("cache_state resources", () => {
       cacheCreationTokens: 0,
     });
 
-    const stats = provider.readCacheStateGlobal();
+    const stats = await provider.readCacheStateGlobal();
     // 2 sync claude rows from beforeEach + 1 async codex row.
     expect(stats.totalRequests).toBe(3);
     expect(stats.totalHits).toBe(3);
@@ -183,8 +183,8 @@ describe("cache_state resources", () => {
     expect(codexBreakdown!.totalCacheReadTokens).toBe(60);
   });
 
-  it("readCacheStateForPrefix aggregates async-job rows (slice 1.5)", () => {
-    rec.logStart({
+  it("readCacheStateForPrefix aggregates async-job rows (slice 1.5)", async () => {
+    await rec.logStart({
       correlationId: "r-async-2",
       cli: "claude",
       model: "claude-sonnet-4-5",
@@ -194,7 +194,7 @@ describe("cache_state resources", () => {
       stablePrefixHash: "hash-shared",
       stablePrefixTokens: 100,
     });
-    rec.logComplete("r-async-2", {
+    await rec.logComplete("r-async-2", {
       response: "SECRET",
       durationMs: 1,
       retryCount: 0,
@@ -205,7 +205,7 @@ describe("cache_state resources", () => {
       cacheReadTokens: 80,
     });
     // Same prefix from a sync row too.
-    rec.logStart({
+    await rec.logStart({
       correlationId: "r-sync-2",
       cli: "claude",
       model: "claude-sonnet-4-5",
@@ -214,7 +214,7 @@ describe("cache_state resources", () => {
       stablePrefixHash: "hash-shared",
       stablePrefixTokens: 100,
     });
-    rec.logComplete("r-sync-2", {
+    await rec.logComplete("r-sync-2", {
       response: "SECRET",
       durationMs: 1,
       retryCount: 0,
@@ -225,7 +225,7 @@ describe("cache_state resources", () => {
       cacheReadTokens: 20,
     });
 
-    const stats = provider.readCacheStateForPrefix("hash-shared");
+    const stats = await provider.readCacheStateForPrefix("hash-shared");
     expect(stats.requestCount).toBe(2); // one async + one sync share the hash
     expect(stats.totalCacheReadTokens).toBe(100);
   });

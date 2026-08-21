@@ -78,7 +78,7 @@ describe("Phase 7 B3: llm_job_result remote redaction of providerSessionId", () 
   let manager: AsyncJobManager;
   let server: ReturnType<typeof createGatewayServer>;
 
-  beforeEach(() => {
+  beforeEach(async () => {
     tmp = mkdtempSync(join(tmpdir(), "b3-"));
     store = new MemoryJobStore();
     flight = new FlightRecorder(join(tmp, "logs.db"));
@@ -91,8 +91,8 @@ describe("Phase 7 B3: llm_job_result remote redaction of providerSessionId", () 
     });
   });
 
-  afterEach(() => {
-    flight.close();
+  afterEach(async () => {
+    await flight.close();
     rmSync(tmp, { recursive: true, force: true });
   });
 

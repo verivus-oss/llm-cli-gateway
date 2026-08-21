@@ -147,7 +147,7 @@ describe("handleGeminiRequest terminal net: inline (Mode A) + state-4..8 boundar
   let recordRequest: ReturnType<typeof vi.fn>;
   const assertUpstreamCliArgsMock = vi.mocked(assertUpstreamCliArgs);
 
-  beforeEach(() => {
+  beforeEach(async () => {
     tmp = mkdtempSync(join(tmpdir(), "gemini-terminal-net-"));
     flight = new FlightRecorder(join(tmp, "logs.db"));
     manager = new AsyncJobManager(noopLogger);
@@ -159,7 +159,7 @@ describe("handleGeminiRequest terminal net: inline (Mode A) + state-4..8 boundar
 
   afterEach(async () => {
     await manager.dispose();
-    flight.close();
+    await flight.close();
     rmSync(tmp, { recursive: true, force: true });
     vi.restoreAllMocks();
   });
@@ -284,7 +284,7 @@ describe("handleGeminiRequest terminal net: deferred (Mode B) + H-DoubleComplete
   let sessions: FileSessionManager;
   const removeSpy = vi.mocked(removeWorktree);
 
-  beforeEach(() => {
+  beforeEach(async () => {
     originalDeadline = process.env.SYNC_DEADLINE_MS;
     process.env.SYNC_DEADLINE_MS = "25";
     tmp = mkdtempSync(join(tmpdir(), "gemini-terminal-net-defer-"));
@@ -296,10 +296,10 @@ describe("handleGeminiRequest terminal net: deferred (Mode B) + H-DoubleComplete
     vi.resetModules();
   });
 
-  afterEach(() => {
+  afterEach(async () => {
     if (originalDeadline === undefined) delete process.env.SYNC_DEADLINE_MS;
     else process.env.SYNC_DEADLINE_MS = originalDeadline;
-    flight.close();
+    await flight.close();
     rmSync(tmp, { recursive: true, force: true });
     vi.resetModules();
     vi.restoreAllMocks();

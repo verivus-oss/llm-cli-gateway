@@ -414,8 +414,8 @@ function toDerivation(row: LcrPriorRawRow): LcrPriorRow["derivation"] {
   return { promptChars: chars, contentClass: cls };
 }
 
-export function loadLcrPriorRows(db: FlightRecorderQuery): LcrPriorRow[] {
-  const raw = db.readLcrPriorRows();
+export async function loadLcrPriorRows(db: FlightRecorderQuery): Promise<LcrPriorRow[]> {
+  const raw = await db.readLcrPriorRows();
 
   const seenMistralSessions = new Set<string>();
 
@@ -450,9 +450,9 @@ export function loadLcrPriorRows(db: FlightRecorderQuery): LcrPriorRow[] {
  * the priors in one call. Reuses `loadLcrPriorRows` (the cache-stats read path)
  * and `computeLcrPriors` (the pure aggregation).
  */
-export function computeLcrPriorsFromDb(
+export async function computeLcrPriorsFromDb(
   db: FlightRecorderQuery,
   opts: ComputeLcrPriorsOptions
-): LcrPriors {
-  return computeLcrPriors(loadLcrPriorRows(db), opts);
+): Promise<LcrPriors> {
+  return computeLcrPriors(await loadLcrPriorRows(db), opts);
 }

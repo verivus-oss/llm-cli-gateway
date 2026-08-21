@@ -299,10 +299,10 @@ describe("Slice 2 — registration gating", () => {
 class CapturingFlightRecorder extends NoopFlightRecorder {
   starts: FlightLogStart[] = [];
   completes: Array<{ correlationId: string; result: FlightLogResult }> = [];
-  logStart(entry: FlightLogStart): void {
+  async logStart(entry: FlightLogStart): Promise<void> {
     this.starts.push(entry);
   }
-  logComplete(correlationId: string, result: FlightLogResult): void {
+  async logComplete(correlationId: string, result: FlightLogResult): Promise<void> {
     this.completes.push({ correlationId, result });
   }
 }

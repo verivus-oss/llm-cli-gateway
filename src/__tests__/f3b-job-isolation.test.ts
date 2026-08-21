@@ -50,7 +50,7 @@ describe("F3b-2 job / request ownership isolation", () => {
   let flight: FlightRecorder;
   let server: ReturnType<typeof createGatewayServer>;
 
-  beforeEach(() => {
+  beforeEach(async () => {
     tmp = mkdtempSync(join(tmpdir(), "f3b2-"));
     store = new MemoryJobStore();
     flight = new FlightRecorder(join(tmp, "logs.db"));
@@ -62,8 +62,8 @@ describe("F3b-2 job / request ownership isolation", () => {
     });
   });
 
-  afterEach(() => {
-    flight.close();
+  afterEach(async () => {
+    await flight.close();
     rmSync(tmp, { recursive: true, force: true });
   });
 
@@ -166,7 +166,7 @@ describe("F3b-2 job / request ownership isolation", () => {
         prompt: "alice secret prompt",
       })
     );
-    flight.logComplete("req-alice", {
+    await flight.logComplete("req-alice", {
       response: "resp",
       durationMs: 1,
       retryCount: 0,
@@ -203,7 +203,7 @@ describe("F3b-2 job / request ownership isolation", () => {
         prompt: `prompt ${PROVIDER_SESSION_ID}`,
       })
     );
-    flight.logComplete("req-native-id", {
+    await flight.logComplete("req-native-id", {
       response,
       durationMs: 1,
       retryCount: 0,
@@ -245,7 +245,7 @@ describe("F3b-2 job / request ownership isolation", () => {
         sessionId: PROVIDER_SESSION_ID,
       })
     );
-    flight.logComplete("req-native-failure-fields", {
+    await flight.logComplete("req-native-failure-fields", {
       response: `response ${PROVIDER_SESSION_ID}`,
       durationMs: 1,
       retryCount: 0,

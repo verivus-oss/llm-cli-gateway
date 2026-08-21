@@ -83,17 +83,32 @@ export interface RouterEnvDeps {
    */
   preferCatalogPrice?: boolean;
   /**
-   * Flight-recorder read handle for the calibration priors (token-estimator
-   * layer 3). Omitted / absent => calibration is neutral (k = 1). Priors are
-   * memoized with a short TTL so routing does not scan the recorder per request.
+   * Calibration priors (token-estimator layer 3), already loaded. Absent =>
+   * calibration is neutral (k = 1).
+   *
+   * s7: the recorder read that PRODUCES these moved out of this seam and into
+   * `resolveRouterPriors`, because the recorder is asynchronous now and
+   * `buildRouterEnv` is called from synchronous positions that must stay
+   * synchronous. The recorder handle is deliberately NOT still accepted here:
+   * a field this function silently stopped using would be an inert config key,
+   * which is a defect class this repository has already shipped once.
+   */
+  priors?: LcrPriors;
+}
+
+/** What `resolveRouterPriors` needs. Split from RouterEnvDeps because it is the
+ *  only half that touches the database. */
+export interface RouterPriorsDeps {
+  /**
+   * Flight-recorder read handle for the calibration priors. Omitted / absent =>
+   * neutral priors. Memoized with a short TTL so routing does not scan the
+   * recorder per request.
    */
   flightRecorder?: FlightRecorderQuery;
   /** Learning scope for priors (config `priors_scope`); default global. */
   priorsScope?: PriorsScope;
   /** Caller principal for `priors_scope = "principal"` scoping. */
   ownerPrincipal?: string;
-  /** Test override: supply priors directly, bypassing the recorder + cache. */
-  priors?: LcrPriors;
 }
 
 const EMPTY_PRIORS: LcrPriors = {
@@ -109,8 +124,16 @@ const EMPTY_PRIORS: LcrPriors = {
 const PRIORS_TTL_MS = 60_000;
 let priorsCacheEntry: { at: number; key: string; priors: LcrPriors } | null = null;
 
-function resolvePriors(deps: RouterEnvDeps): LcrPriors {
-  if (deps.priors) return deps.priors;
+/**
+ * Load the calibration priors, memoized. Await this and pass the result to
+ * `buildRouterEnv` as `priors`.
+ *
+ * The memo is written AFTER the await, so two concurrent first calls both scan.
+ * That is the pre-existing behaviour cost (a duplicated read, never a wrong
+ * answer) rather than a new one, and it is preferred over memoizing the
+ * in-flight promise, which would hold a rejected scan for the whole TTL.
+ */
+export async function resolveRouterPriors(deps: RouterPriorsDeps): Promise<LcrPriors> {
   const scope: PriorsScope = deps.priorsScope ?? "global";
   if (scope === "off" || !deps.flightRecorder) return EMPTY_PRIORS;
   const key = `${scope}:${deps.ownerPrincipal ?? ""}`;
@@ -122,7 +145,7 @@ function resolvePriors(deps: RouterEnvDeps): LcrPriors {
   ) {
     return priorsCacheEntry.priors;
   }
-  const priors = computeLcrPriorsFromDb(deps.flightRecorder, {
+  const priors = await computeLcrPriorsFromDb(deps.flightRecorder, {
     priorsScope: scope,
     ownerPrincipal: deps.ownerPrincipal,
   });
@@ -167,8 +190,9 @@ export function buildRouterEnv(deps: RouterEnvDeps): RouterEnv {
     string,
     { successRate: number; averageResponseTimeMs: number }
   >;
-  // Resolve priors ONCE per build (memoized), so calibrationK is O(1) per candidate.
-  const priors = resolvePriors(deps);
+  // Priors are resolved ONCE by the caller (resolveRouterPriors, memoized), so
+  // calibrationK is O(1) per candidate and this function does no I/O.
+  const priors = deps.priors ?? EMPTY_PRIORS;
 
   const isAuthed =
     deps.isAuthed ??

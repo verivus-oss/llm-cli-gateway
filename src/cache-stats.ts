@@ -150,11 +150,11 @@ function normalizeCacheStatsCli(s: string): CacheStatsCli | null {
   return isCacheStatsCli(s) ? s : null;
 }
 
-export function computeSessionCacheStats(
+export async function computeSessionCacheStats(
   db: FlightRecorderQuery,
   sessionId: string
-): SessionCacheStats {
-  const rows = db.readCacheRowsBySession(sessionId);
+): Promise<SessionCacheStats> {
+  const rows = await db.readCacheRowsBySession(sessionId);
 
   let totalRead = 0;
   let totalCreation = 0;
@@ -255,11 +255,11 @@ export function computeTtlRemaining(
   return Math.max(0, ttlMs - elapsedMs);
 }
 
-export function computePrefixCacheStats(
+export async function computePrefixCacheStats(
   db: FlightRecorderQuery,
   stablePrefixHash: string
-): PrefixCacheStats {
-  const rows = db.readCacheRowsByPrefix(stablePrefixHash);
+): Promise<PrefixCacheStats> {
+  const rows = await db.readCacheRowsByPrefix(stablePrefixHash);
 
   let totalRead = 0;
   let totalCreation = 0;
@@ -309,17 +309,17 @@ export interface GlobalCacheStatsOpts {
   lastNHours?: number;
 }
 
-export function computeGlobalCacheStats(
+export async function computeGlobalCacheStats(
   db: FlightRecorderQuery,
   opts: GlobalCacheStatsOpts = {}
-): GlobalCacheStats {
+): Promise<GlobalCacheStats> {
   const windowHours = opts.lastNHours ?? null;
   const sinceIso =
     windowHours !== null && windowHours > 0
       ? new Date(Date.now() - windowHours * 3600_000).toISOString()
       : undefined;
 
-  const rows = db.readCacheRowsGlobal(sinceIso);
+  const rows = await db.readCacheRowsGlobal(sinceIso);
 
   interface CliAgg {
     requestCount: number;
@@ -526,13 +526,13 @@ function parseThinkingBlocks(
  * yields no rows — i.e. flight recording disabled). The response is truncated
  * to `maxChars`; the full pre-truncation length is reported via responseChars.
  */
-export function readPersistedRequest(
+export async function readPersistedRequest(
   db: FlightRecorderQuery,
   correlationId: string,
   opts: ReadPersistedRequestOptions = {}
-): PersistedRequestRecord | null {
+): Promise<PersistedRequestRecord | null> {
   const maxChars = opts.maxChars ?? PERSISTED_REQUEST_DEFAULT_MAX_CHARS;
-  const row = db.readRequestById(correlationId);
+  const row = await db.readRequestById(correlationId);
   if (!row) return null;
 
   // Scrub complete caller-visible text before calculating or applying the
@@ -647,16 +647,16 @@ export interface ListPersistedRequestsOptions {
  * actual control. Under a NoopFlightRecorder (flight recording disabled) the
  * query yields no rows and this returns `[]`.
  */
-export function listPersistedRequests(
+export async function listPersistedRequests(
   db: FlightRecorderQuery,
   opts: ListPersistedRequestsOptions
-): PersistedRequestSummary[] {
+): Promise<PersistedRequestSummary[]> {
   const limit = Math.min(
     Math.max(1, Math.floor(opts.limit ?? PERSISTED_REQUEST_LIST_DEFAULT_LIMIT)),
     PERSISTED_REQUEST_LIST_MAX_LIMIT
   );
 
-  const rows = db.listRequestSummaries({
+  const rows = await db.listRequestSummaries({
     ownerPrincipal: opts.callerPrincipal,
     limit,
     sinceIso: opts.since,

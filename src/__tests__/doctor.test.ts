@@ -16,6 +16,7 @@ import type { ApiProviderConfig, LeastCostConfig, ProvidersConfig } from "../con
 import { defaultLeastCostConfig } from "../config.js";
 import { PRICING_AS_OF, API_CATALOG_AS_OF } from "../pricing.js";
 import type { FlightRecorderQuery } from "../flight-recorder.js";
+import { computeLcrPriorsFromDb } from "../lcr-priors.js";
 import type { AuthConfig, RemoteOAuthConfig } from "../auth.js";
 import type { EndpointExposureReport } from "../endpoint-exposure.js";
 import { PERSONAL_CONFIG_SYNC_ERROR_WITHHELD } from "../personal-config.js";
@@ -1087,13 +1088,13 @@ describe("LCR phase_3 doctor least_cost block", () => {
   // only method computeLcrPriorsFromDb touches.
   function fakeRecorderWithOneRow(): FlightRecorderQuery {
     return {
-      readCacheRowsBySession: () => [],
-      readCacheRowsByPrefix: () => [],
-      readCacheRowsGlobal: () => [],
-      readRequestById: () => null,
-      listRequestSummaries: () => [],
-      readRoutingDecisions: () => [],
-      readLcrPriorRows: () => [
+      readCacheRowsBySession: async () => [],
+      readCacheRowsByPrefix: async () => [],
+      readCacheRowsGlobal: async () => [],
+      readRequestById: async () => null,
+      listRequestSummaries: async () => [],
+      readRoutingDecisions: async () => [],
+      readLcrPriorRows: async () => [
         {
           cli: "claude",
           model: "sonnet",
@@ -1183,10 +1184,16 @@ describe("LCR phase_3 doctor least_cost block", () => {
     }
   });
 
-  it("populates calibrationQuality from the flight recorder when routing is enabled", () => {
+  it("populates calibrationQuality from the flight recorder when routing is enabled", async () => {
+    // s7: the recorder is asynchronous, so `printDoctorJson` does the scan and
+    // `createDoctorReport` takes the result. The fake recorder is still the
+    // source, and computeLcrPriorsFromDb is still the only thing that reads it,
+    // so this keeps testing what it always tested.
     const report = createDoctorReport({
       leastCost: enabledConfig({ priorsScope: "global" }),
-      flightRecorder: fakeRecorderWithOneRow(),
+      lcrPriors: await computeLcrPriorsFromDb(fakeRecorderWithOneRow(), {
+        priorsScope: "global",
+      }),
     });
     const lcSchema = (schema.properties as Record<string, JsonSchemaNode>).least_cost;
     validateAgainstSchema(report.least_cost, lcSchema, "doctor.least_cost");
@@ -1201,10 +1208,12 @@ describe("LCR phase_3 doctor least_cost block", () => {
     expect(["high", "medium", "low"]).toContain(bucket?.confidence);
   });
 
-  it("keeps calibrationQuality empty when priors_scope is off", () => {
+  it("keeps calibrationQuality empty when priors_scope is off", async () => {
     const report = createDoctorReport({
       leastCost: enabledConfig({ priorsScope: "off" }),
-      flightRecorder: fakeRecorderWithOneRow(),
+      lcrPriors: await computeLcrPriorsFromDb(fakeRecorderWithOneRow(), {
+        priorsScope: "off",
+      }),
     });
     expect(report.least_cost.calibrationQuality).toEqual([]);
   });
@@ -1225,10 +1234,12 @@ describe("LCR phase_3 doctor least_cost block", () => {
     expect(report.least_cost.calibrationQuality).toEqual([]);
   });
 
-  it("carries no secrets, prompts, or filesystem paths in the least_cost block", () => {
+  it("carries no secrets, prompts, or filesystem paths in the least_cost block", async () => {
     const report = createDoctorReport({
       leastCost: enabledConfig(),
-      flightRecorder: fakeRecorderWithOneRow(),
+      lcrPriors: await computeLcrPriorsFromDb(fakeRecorderWithOneRow(), {
+        priorsScope: "global",
+      }),
     });
     const serialized = JSON.stringify(report.least_cost);
     // The fake row's prompt text must never leak into the economics block.

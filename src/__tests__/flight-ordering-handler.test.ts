@@ -51,19 +51,19 @@ function persistenceNone(): PersistenceConfig {
 /** Every write is observable and every read is empty: this is a sink, not a store. */
 function recorderStub(overrides: Partial<Record<string, unknown>>): FlightRecorderLike {
   return {
-    logStart: () => {},
-    logComplete: () => {},
-    recordCompressionTelemetry: () => {},
-    recordRouting: () => {},
-    readCacheRowsBySession: () => [],
-    readCacheRowsByPrefix: () => [],
-    readCacheRowsGlobal: () => [],
-    readRequestById: () => null,
-    listRequestSummaries: () => [],
-    readLcrPriorRows: () => [],
-    readRoutingDecisions: () => [],
-    flush: () => {},
-    close: () => {},
+    logStart: async () => {},
+    logComplete: async () => {},
+    recordCompressionTelemetry: async () => {},
+    recordRouting: async () => {},
+    readCacheRowsBySession: async () => [],
+    readCacheRowsByPrefix: async () => [],
+    readCacheRowsGlobal: async () => [],
+    readRequestById: async () => null,
+    listRequestSummaries: async () => [],
+    readLcrPriorRows: async () => [],
+    readRoutingDecisions: async () => [],
+    flush: async () => {},
+    close: async () => {},
     ...overrides,
   } as unknown as FlightRecorderLike;
 }
@@ -156,12 +156,12 @@ describe("flight write ordering through a handler (s6)", () => {
     });
 
     const recorder = recorderStub({
-      logStart: () => {
+      logStart: async () => {
         calls.push("start");
         announceStartCalled();
         return startGate;
       },
-      logComplete: () => {
+      logComplete: async () => {
         calls.push("complete");
       },
     });
@@ -195,7 +195,7 @@ describe("flight write ordering through a handler (s6)", () => {
     executeCliMock.mockResolvedValue({ stdout: "answer", stderr: "", code: 0 });
 
     const recorder = recorderStub({
-      logStart: () => Promise.reject(new Error("recorder unavailable")),
+      logStart: async () => Promise.reject(new Error("recorder unavailable")),
     });
 
     const response = await runWithRequestContext(LOCAL, () =>

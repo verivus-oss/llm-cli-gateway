@@ -66,7 +66,7 @@ class InMemoryFlightRecorder implements FlightRecorderLike {
     datetime_utc: string;
   }> = [];
 
-  logStart(entry: FlightLogStart): void {
+  async logStart(entry: FlightLogStart): Promise<void> {
     this.rows.push({
       id: entry.correlationId,
       cli: entry.cli,
@@ -80,7 +80,7 @@ class InMemoryFlightRecorder implements FlightRecorderLike {
       datetime_utc: new Date().toISOString(),
     });
   }
-  logComplete(correlationId: string, result: FlightLogResult): void {
+  async logComplete(correlationId: string, result: FlightLogResult): Promise<void> {
     const row = this.rows.find(r => r.id === correlationId);
     if (row) {
       row.cache_read_tokens = result.cacheReadTokens ?? null;
@@ -90,29 +90,29 @@ class InMemoryFlightRecorder implements FlightRecorderLike {
   // s2: the fake used to sniff the SQL string (`sql.includes("session_id = ?")`)
   // to decide what to return, which is what a caller-supplied-SQL surface forces
   // a test double to do. Named reads make the double say what it means.
-  readCacheRowsBySession(sessionId: string): CacheAggregateRow[] {
+  async readCacheRowsBySession(sessionId: string): Promise<CacheAggregateRow[]> {
     return this.rows.filter(r => r.session_id === sessionId).map(cacheProjection);
   }
-  readCacheRowsByPrefix(stablePrefixHash: string): CacheAggregateRow[] {
+  async readCacheRowsByPrefix(stablePrefixHash: string): Promise<CacheAggregateRow[]> {
     return this.rows.filter(r => r.stable_prefix_hash === stablePrefixHash).map(cacheProjection);
   }
-  readCacheRowsGlobal(_sinceIso?: string): CacheAggregateRow[] {
+  async readCacheRowsGlobal(_sinceIso?: string): Promise<CacheAggregateRow[]> {
     return this.rows.map(cacheProjection);
   }
-  readRequestById(): null {
+  async readRequestById(): Promise<null> {
     return null;
   }
-  listRequestSummaries(): [] {
+  async listRequestSummaries(): Promise<[]> {
     return [];
   }
-  readLcrPriorRows(): [] {
+  async readLcrPriorRows(): Promise<[]> {
     return [];
   }
-  readRoutingDecisions(): [] {
+  async readRoutingDecisions(): Promise<[]> {
     return [];
   }
-  flush(): void {}
-  close(): void {}
+  async flush(): Promise<void> {}
+  async close(): Promise<void> {}
 }
 
 interface RegisteredTool {

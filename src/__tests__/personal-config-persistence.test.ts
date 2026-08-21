@@ -112,10 +112,10 @@ function persistence(path: string): PersistenceConfig {
 class CompressionCapturingFlightRecorder extends NoopFlightRecorder {
   readonly compression: Array<{ correlationId: string; telemetry: CompressionTelemetry }> = [];
 
-  override recordCompressionTelemetry(
+  override async recordCompressionTelemetry(
     correlationId: string,
     telemetry: CompressionTelemetry
-  ): void {
+  ): Promise<void> {
     this.compression.push({ correlationId, telemetry });
   }
 }
@@ -1259,21 +1259,21 @@ describe("Personal Agent Config Kit persistence", () => {
     let flightComplete: FlightLogResult | null = null;
     let flightStart: FlightLogStart | null = null;
     const flightRecorder = {
-      logStart: (entry: FlightLogStart) => {
+      logStart: async (entry: FlightLogStart) => {
         flightStart = entry;
       },
-      logComplete: (_correlationId: string, result: FlightLogResult) => {
+      logComplete: async (_correlationId: string, result: FlightLogResult) => {
         flightComplete = result;
       },
-      readCacheRowsBySession: () => [],
-      readCacheRowsByPrefix: () => [],
-      readCacheRowsGlobal: () => [],
-      readRequestById: () => null,
-      listRequestSummaries: () => [],
-      readLcrPriorRows: () => [],
-      readRoutingDecisions: () => [],
-      flush: () => {},
-      close: () => {},
+      readCacheRowsBySession: async () => [],
+      readCacheRowsByPrefix: async () => [],
+      readCacheRowsGlobal: async () => [],
+      readRequestById: async () => null,
+      listRequestSummaries: async () => [],
+      readLcrPriorRows: async () => [],
+      readRoutingDecisions: async () => [],
+      flush: async () => {},
+      close: async () => {},
     } as unknown as FlightRecorderLike;
     const manager = new AsyncJobManager(undefined, undefined, store, flightRecorder);
     const privateContext = "PRIVATE_KIT_STDIN_SENTINEL";
