@@ -42,7 +42,7 @@ function createSessionManager(): ISessionManager {
     getSession: async id => sessions.get(id) ?? null,
     listSessions: async () => [...sessions.values()],
     deleteSession: async id => sessions.delete(id),
-    setActiveSession: async () => true,
+    setActiveSession: () => true,
     getActiveSession: async () => null,
     updateSessionUsage: async () => {},
     updateSessionMetadata: async (id, metadata) => {

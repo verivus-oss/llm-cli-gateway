@@ -41,11 +41,11 @@ function sessionManagerSpies(): ISessionManager {
     createSession: vi.fn(),
     getSession: vi.fn(async () => null),
     listSessions: vi.fn(async () => []),
-    deleteSession: vi.fn(async () => false),
-    setActiveSession: vi.fn(async () => false),
+    deleteSession: vi.fn(() => false),
+    setActiveSession: vi.fn(() => false),
     getActiveSession: vi.fn(async () => null),
     updateSessionUsage: vi.fn(),
-    updateSessionMetadata: vi.fn(async () => false),
+    updateSessionMetadata: vi.fn(() => false),
     clearAllSessions: vi.fn(async () => 0),
   } as ISessionManager;
 }

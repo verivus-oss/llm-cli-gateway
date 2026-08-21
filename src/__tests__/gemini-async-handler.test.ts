@@ -74,10 +74,10 @@ function createMockSessionManager(sessions: Map<string, Session> = new Map()): I
     getSession: vi.fn(async id => sessions.get(id) || null),
     listSessions: vi.fn(async () => [...sessions.values()]),
     deleteSession: vi.fn(async id => sessions.delete(id)),
-    setActiveSession: vi.fn(async () => true),
+    setActiveSession: vi.fn(() => true),
     getActiveSession: vi.fn(async () => null),
     updateSessionUsage: vi.fn(async () => {}),
-    updateSessionMetadata: vi.fn(async () => true),
+    updateSessionMetadata: vi.fn(() => true),
     clearAllSessions: vi.fn(async () => 0),
   };
 }

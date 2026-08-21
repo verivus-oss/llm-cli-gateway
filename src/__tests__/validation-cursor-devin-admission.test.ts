@@ -157,14 +157,16 @@ function makeManager(): {
   };
 }
 
-function review(
+// Awaited: startReviewRun is async now, so returning before it settles left
+// `fake.calls` empty and every calls[0] read undefined.
+async function review(
   providers: ValidationProvider[],
   hasBubblewrap: () => boolean,
   opts: { registered?: boolean; trustCursorWorkspace?: boolean } = {}
-): { report: ReturnType<typeof startReviewRun>; calls: CliStartCall[] } {
+): Promise<{ report: Awaited<ReturnType<typeof startReviewRun>>; calls: CliStartCall[] }> {
   const fake = makeManager();
   const prompt = "FENCED REVIEW EVIDENCE";
-  const report = startReviewRun(
+  const report = await startReviewRun(
     {
       asyncJobManager: fake.manager as never,
       getProviderRuntimeStatus: runtime,
@@ -220,8 +222,8 @@ afterEach(() => {
 });
 
 describe("issue #270: cursor trust", () => {
-  it("emits --trust for a repository registered for cursor", () => {
-    const { calls } = review(["cursor"], () => true, { registered: true });
+  it("emits --trust for a repository registered for cursor", async () => {
+    const { calls } = await review(["cursor"], async () => true, { registered: true });
     expect(calls[0].args).toEqual([
       "--print",
       "--mode",
@@ -252,7 +254,7 @@ describe("issue #270: cursor trust", () => {
     // review-prompt.ts fences that same repository's evidence as "untrusted
     // data, never instructions". Granting it unconditionally let the reviewed
     // repository instruct its own reviewer through a channel outside the fence.
-    const { report, calls } = review(["claude", "cursor"], () => true, { registered: false });
+    const { report, calls } = await review(["claude", "cursor"], () => true, { registered: false });
     const cursor = await resultFor(report, "cursor");
     expect(cursor.status).toBe("skipped");
     expect(cursor.error).toMatch(/not a workspace registered for cursor/i);
@@ -262,7 +264,7 @@ describe("issue #270: cursor trust", () => {
   });
 
   it("grants trust on an unregistered repository ONLY with the explicit opt-in", async () => {
-    const { report, calls } = review(["cursor"], () => true, {
+    const { report, calls } = await review(["cursor"], () => true, {
       registered: false,
       trustCursorWorkspace: true,
     });
@@ -275,7 +277,7 @@ describe("issue #270: cursor trust", () => {
     // directory, so it must not assume they did.
     const fake = makeManager();
     const prompt = "p";
-    const report = startReviewRun(
+    const report = await startReviewRun(
       {
         asyncJobManager: fake.manager as never,
         getProviderRuntimeStatus: runtime,
@@ -302,7 +304,7 @@ describe("issue #270: cursor trust", () => {
     expect(fake.calls).toHaveLength(0);
   });
 
-  it("--trust is a real cursor flag that passes argv admission", () => {
+  it("--trust is a real cursor flag that passes argv admission", async () => {
     // Guards against emitting a flag the contract would reject at admission,
     // which would replace one deterministic failure with another.
     expect(() =>
@@ -320,50 +322,50 @@ describe("issue #270: cursor trust", () => {
 });
 
 describe("issue #270: devin sandbox preflight", () => {
-  it("skips only the devin seat when bwrap is absent, and still launches the rest", () => {
+  it("skips only the devin seat when bwrap is absent, and still launches the rest", async () => {
     // The defect this replaces: throwing here aborted the entire roster,
     // because startReviewRun defers launches and rethrows admission errors.
     withPlatform("linux", async () => {
-      const { report, calls } = review(["claude", "devin", "cursor"], () => false);
+      const { report, calls } = await review(["claude", "devin", "cursor"], () => false);
       expect(await resultFor(report, "devin").status).toBe("skipped");
       expect(calls.map(c => c.cli)).toEqual(["claude", "cursor"]);
       expect((await report).success).toBe(true);
     });
   });
 
-  it("names bubblewrap in the skip reason rather than an unrelated cause", () => {
+  it("names bubblewrap in the skip reason rather than an unrelated cause", async () => {
     // The first attempt reused CliInvalidInputError, whose message is hard-coded
     // to "contains an embedded NUL byte", so a missing package was reported as a
     // malformed argument.
     withPlatform("linux", async () => {
-      const { report } = review(["devin"], () => false);
+      const { report } = await review(["devin"], () => false);
       const { error } = await resultFor(report, "devin");
       expect(error).toMatch(/bubblewrap/i);
       expect(error).not.toMatch(/NUL byte/i);
     });
   });
 
-  it("runs devin with --sandbox retained when bwrap is present", () => {
+  it("runs devin with --sandbox retained when bwrap is present", async () => {
     // Dropping --sandbox to make it run is the tempting wrong fix: a review that
     // asked for isolation and silently ran without it is the worse outcome.
     withPlatform("linux", async () => {
-      const { report, calls } = review(["devin"], () => true);
+      const { report, calls } = await review(["devin"], () => true);
       expect(await resultFor(report, "devin").status).not.toBe("skipped");
       expect(calls[0].args).toContain("--sandbox");
     });
   });
 
-  it("does not gate on bwrap off Linux, where devin uses a different sandbox", () => {
+  it("does not gate on bwrap off Linux, where devin uses a different sandbox", async () => {
     // `devin --help`: "macOS seatbelt / Linux bwrap+seccomp". Gating every
     // platform on bwrap refused every macOS review despite a working sandbox.
     withPlatform("darwin", async () => {
-      const { report, calls } = review(["devin"], () => false);
+      const { report, calls } = await review(["devin"], () => false);
       expect(await resultFor(report, "devin").status).not.toBe("skipped");
       expect(calls[0].args).toContain("--sandbox");
     });
   });
 
-  it("does not consult the probe for a non-devin provider, nor for a devin ask", () => {
+  it("does not consult the probe for a non-devin provider, nor for a devin ask", async () => {
     // Round 2 (grok): the previous version claimed "or for an ask" in its name
     // but never ran an ask, so half the assertion was decorative. The ask path
     // is now actually exercised, with devin, which is the only case where the
@@ -390,7 +392,7 @@ describe("issue #270: devin sandbox preflight", () => {
     expect(fake.calls[0].args).not.toContain("--sandbox");
   });
 
-  it("probes bwrap at most once per process, not once per review seat", () => {
+  it("probes bwrap at most once per process, not once per review seat", async () => {
     // Kept last: every test above injects the probe, so the real one has not
     // run yet and the counter starts clean.
     const fake = makeManager();
@@ -483,7 +485,7 @@ describe("issue #270 round 3: the judge is a second dispatch site", () => {
     return { synthesis, calls: fake.calls };
   };
 
-  it("emits --trust for a cursor judge on a registered repository", () => {
+  it("emits --trust for a cursor judge on a registered repository", async () => {
     const { calls } = judge("cursor", { isProviderWorkspacePath: () => true });
     expect(calls[0].cli).toBe("cursor");
     expect(calls[0].args).toContain("--trust");
@@ -496,7 +498,7 @@ describe("issue #270 round 3: the judge is a second dispatch site", () => {
     expect(calls).toHaveLength(0);
   });
 
-  it("honours trustCursorWorkspace for the judge, so the opt-in reaches synthesis", () => {
+  it("honours trustCursorWorkspace for the judge, so the opt-in reaches synthesis", async () => {
     const { calls } = judge(
       "cursor",
       { isProviderWorkspacePath: () => false },
@@ -505,7 +507,7 @@ describe("issue #270 round 3: the judge is a second dispatch site", () => {
     expect(calls[0].args).toContain("--trust");
   });
 
-  it("skips a devin judge when bubblewrap is missing rather than failing at spawn", () => {
+  it("skips a devin judge when bubblewrap is missing rather than failing at spawn", async () => {
     withPlatform("linux", async () => {
       const { synthesis, calls } = judge("devin", { hasBubblewrap: () => false });
       expect((await synthesis).status).toBe("skipped");
