@@ -172,6 +172,12 @@ describe("Codex Kit argv pre-admission", () => {
     sessions = new FileSessionManager(join(root, "sessions.json"));
     store = new SqliteJobStore(join(root, "jobs.db"));
     jobs = new AsyncJobManager(noopLogger, undefined, store);
+    // Durable admission is restored asynchronously, and Kit requests refuse to
+    // start until it is. C5 made the store's own initialisation genuinely
+    // async, so without this the test runs INSIDE the startup window and every
+    // Kit request is correctly refused as kit_busy before reaching the argv
+    // check it is meant to exercise.
+    await jobs.whenReady();
     const personalConfig = new PersonalConfigManager(
       { enabled: true, baselinePath: join(root, "baseline"), maxStaleHours: 168 },
       layout(root)

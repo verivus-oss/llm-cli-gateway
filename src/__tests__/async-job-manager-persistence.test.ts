@@ -32,11 +32,17 @@ describe("AsyncJobManager + JobStore (durability + dedup)", () => {
   let store: JobStore;
   let manager: AsyncJobManager;
 
-  beforeEach(() => {
+  beforeEach(async () => {
     tempDir = mkdtempSync(join(tmpdir(), "ajm-store-test-"));
     dbPath = join(tempDir, "jobs.db");
     store = new SqliteJobStore(dbPath);
     manager = new AsyncJobManager(undefined, undefined, store);
+    // Durable admission is restored asynchronously and Kit/durable paths refuse
+    // to start until it settles. C5 made the store's own initialisation genuinely
+    // async, so without this the test runs INSIDE the startup window that
+    // design section 4.1 describes, and the refusal it sees is correct behaviour
+    // rather than the thing under test.
+    await manager.whenReady();
   });
 
   afterEach(async () => {
@@ -138,6 +144,12 @@ describe("AsyncJobManager + JobStore (durability + dedup)", () => {
 
     // Spin up a fresh manager; its constructor runs the lease sweep.
     const fresh = new AsyncJobManager(undefined, undefined, store);
+    // Durable admission is restored asynchronously and Kit/durable paths refuse
+    // to start until it settles. C5 made the store's own initialisation genuinely
+    // async, so without this the test runs INSIDE the startup window that
+    // design section 4.1 describes, and the refusal it sees is correct behaviour
+    // rather than the thing under test.
+    await fresh.whenReady();
 
     const snapshot = await fresh.getJobSnapshot("orphan-candidate");
     expect(snapshot?.status).toBe("orphaned");
@@ -161,6 +173,12 @@ describe("AsyncJobManager + JobStore (durability + dedup)", () => {
     // A fresh instance (e.g. an ephemeral stdio spawn on a shared postgres store)
     // must NOT orphan another instance's live-lease job. This is the #139 fix.
     const b = new AsyncJobManager(undefined, undefined, store);
+    // Durable admission is restored asynchronously and Kit/durable paths refuse
+    // to start until it settles. C5 made the store's own initialisation genuinely
+    // async, so without this the test runs INSIDE the startup window that
+    // design section 4.1 describes, and the refusal it sees is correct behaviour
+    // rather than the thing under test.
+    await b.whenReady();
     expect((await b.getJobSnapshot("other-instance-running"))?.status).toBe("queued");
 
     // Now the owner dies (lease lapses): a subsequent instance's sweep recovers it.

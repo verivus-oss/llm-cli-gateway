@@ -60,13 +60,19 @@ describe("AsyncJobManager Claude MCP artifacts", () => {
   let store: SqliteJobStore;
   let manager: AsyncJobManager;
 
-  beforeEach(() => {
+  beforeEach(async () => {
     originalHome = process.env.HOME;
     testHome = mkdtempSync(join(tmpdir(), "async-mcp-artifact-home-"));
     process.env.HOME = testHome;
     dbPath = join(testHome, "jobs.db");
     store = new SqliteJobStore(dbPath);
     manager = new AsyncJobManager(noopLogger, undefined, store);
+    // Durable admission is restored asynchronously and Kit/durable paths refuse
+    // to start until it settles. C5 made the store's own initialisation genuinely
+    // async, so without this the test runs INSIDE the startup window that
+    // design section 4.1 describes, and the refusal it sees is correct behaviour
+    // rather than the thing under test.
+    await manager.whenReady();
   });
 
   afterEach(async () => {
@@ -292,6 +298,12 @@ describe("AsyncJobManager Claude MCP artifacts", () => {
 
     await manager.dispose();
     const restarted = new AsyncJobManager(noopLogger, undefined, store);
+    // Durable admission is restored asynchronously and Kit/durable paths refuse
+    // to start until it settles. C5 made the store's own initialisation genuinely
+    // async, so without this the test runs INSIDE the startup window that
+    // design section 4.1 describes, and the refusal it sees is correct behaviour
+    // rather than the thing under test.
+    await restarted.whenReady();
     try {
       expect(existsSync(config.path)).toBe(false);
     } finally {
@@ -331,6 +343,12 @@ describe("AsyncJobManager Claude MCP artifacts", () => {
 
     await manager.dispose();
     const restarted = new AsyncJobManager(noopLogger, undefined, store);
+    // Durable admission is restored asynchronously and Kit/durable paths refuse
+    // to start until it settles. C5 made the store's own initialisation genuinely
+    // async, so without this the test runs INSIDE the startup window that
+    // design section 4.1 describes, and the refusal it sees is correct behaviour
+    // rather than the thing under test.
+    await restarted.whenReady();
     try {
       expect(existsSync(config.path)).toBe(false);
       expect((await store.getById("retention-pinned-cross-host"))?.mcpArtifactCleanupPending).toBe(
@@ -372,6 +390,12 @@ describe("AsyncJobManager Claude MCP artifacts", () => {
     expect(existsSync(config.path)).toBe(false);
     await manager.dispose();
     const restarted = new AsyncJobManager(noopLogger, undefined, store);
+    // Durable admission is restored asynchronously and Kit/durable paths refuse
+    // to start until it settles. C5 made the store's own initialisation genuinely
+    // async, so without this the test runs INSIDE the startup window that
+    // design section 4.1 describes, and the refusal it sees is correct behaviour
+    // rather than the thing under test.
+    await restarted.whenReady();
     try {
       expect(existsSync(config.path)).toBe(false);
       expect(await store.getById("same-host-foreign-scope")).toMatchObject({
@@ -410,6 +434,12 @@ describe("AsyncJobManager Claude MCP artifacts", () => {
 
     await manager.dispose();
     const restarted = new AsyncJobManager(noopLogger, undefined, store);
+    // Durable admission is restored asynchronously and Kit/durable paths refuse
+    // to start until it settles. C5 made the store's own initialisation genuinely
+    // async, so without this the test runs INSIDE the startup window that
+    // design section 4.1 describes, and the refusal it sees is correct behaviour
+    // rather than the thing under test.
+    await restarted.whenReady();
     try {
       expect((await store.getById("same-scope-absent"))?.mcpArtifactCleanupPending).toBe(true);
       expect(await store.evictExpired()).toBe(0);
@@ -629,6 +659,12 @@ describe("AsyncJobManager Claude MCP artifacts", () => {
     // the original file in the renamed directory.
     await manager.dispose();
     const restarted = new AsyncJobManager(noopLogger, undefined, store);
+    // Durable admission is restored asynchronously and Kit/durable paths refuse
+    // to start until it settles. C5 made the store's own initialisation genuinely
+    // async, so without this the test runs INSIDE the startup window that
+    // design section 4.1 describes, and the refusal it sees is correct behaviour
+    // rather than the thing under test.
+    await restarted.whenReady();
     try {
       expect(existsSync(config.path)).toBe(false);
       expect(existsSync(originalArtifactPath)).toBe(true);
@@ -663,6 +699,12 @@ describe("AsyncJobManager Claude MCP artifacts", () => {
 
     await manager.dispose();
     const restarted = new AsyncJobManager(noopLogger, undefined, store);
+    // Durable admission is restored asynchronously and Kit/durable paths refuse
+    // to start until it settles. C5 made the store's own initialisation genuinely
+    // async, so without this the test runs INSIDE the startup window that
+    // design section 4.1 describes, and the refusal it sees is correct behaviour
+    // rather than the thing under test.
+    await restarted.whenReady();
     try {
       expect(existsSync(config.path)).toBe(true);
       expect(await store.getById("missing-artifact-scope")).toMatchObject({

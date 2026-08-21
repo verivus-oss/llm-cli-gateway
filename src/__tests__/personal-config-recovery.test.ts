@@ -130,12 +130,18 @@ describe("config_recover_kit_attempt", () => {
   let server: ReturnType<typeof createGatewayServer>;
   let personalConfig: PersonalConfigManager;
 
-  beforeEach(() => {
+  beforeEach(async () => {
     root = mkdtempSync(join(tmpdir(), "kit-recovery-tool-"));
     mkdirSync(root, { recursive: true });
     sessions = new FileSessionManager(join(root, "sessions.json"));
     store = new SqliteJobStore(join(root, "jobs.db"));
     jobs = new AsyncJobManager(noopLogger, undefined, store);
+    // Durable admission is restored asynchronously and Kit/durable paths refuse
+    // to start until it settles. C5 made the store's own initialisation genuinely
+    // async, so without this the test runs INSIDE the startup window that
+    // design section 4.1 describes, and the refusal it sees is correct behaviour
+    // rather than the thing under test.
+    await jobs.whenReady();
     personalConfig = new PersonalConfigManager(
       { enabled: true, baselinePath: join(root, "baseline"), maxStaleHours: 168 },
       layout(root)
@@ -555,6 +561,12 @@ describe("config_recover_kit_attempt", () => {
     });
 
     const restartedJobs = new AsyncJobManager(noopLogger, undefined, store);
+    // Durable admission is restored asynchronously and Kit/durable paths refuse
+    // to start until it settles. C5 made the store's own initialisation genuinely
+    // async, so without this the test runs INSIDE the startup window that
+    // design section 4.1 describes, and the refusal it sees is correct behaviour
+    // rather than the thing under test.
+    await restartedJobs.whenReady();
     try {
       createGatewayServer({
         sessionManager: sessions,

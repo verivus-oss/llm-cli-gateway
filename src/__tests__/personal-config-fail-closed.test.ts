@@ -570,11 +570,17 @@ describe("codex_request default-workspace scope wiring", () => {
   let store: SqliteJobStore;
   let jobs: AsyncJobManager;
 
-  beforeEach(() => {
+  beforeEach(async () => {
     root = mkdtempSync(join(tmpdir(), "kit-default-alias-wiring-"));
     sessions = new FileSessionManager(join(root, "sessions.json"));
     store = new SqliteJobStore(join(root, "jobs.db"));
     jobs = new AsyncJobManager(noopLogger, undefined, store);
+    // Durable admission is restored asynchronously and Kit/durable paths refuse
+    // to start until it settles. C5 made the store's own initialisation genuinely
+    // async, so without this the test runs INSIDE the startup window that
+    // design section 4.1 describes, and the refusal it sees is correct behaviour
+    // rather than the thing under test.
+    await jobs.whenReady();
   });
 
   afterEach(async () => {
@@ -675,11 +681,17 @@ describe("config_init enablement gate", () => {
     return init;
   }
 
-  beforeEach(() => {
+  beforeEach(async () => {
     root = mkdtempSync(join(tmpdir(), "kit-init-gate-"));
     sessions = new FileSessionManager(join(root, "sessions.json"));
     store = new SqliteJobStore(join(root, "jobs.db"));
     jobs = new AsyncJobManager(noopLogger, undefined, store);
+    // Durable admission is restored asynchronously and Kit/durable paths refuse
+    // to start until it settles. C5 made the store's own initialisation genuinely
+    // async, so without this the test runs INSIDE the startup window that
+    // design section 4.1 describes, and the refusal it sees is correct behaviour
+    // rather than the thing under test.
+    await jobs.whenReady();
   });
 
   afterEach(async () => {
