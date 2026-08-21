@@ -149,11 +149,6 @@ describe("Personal Agent Config Kit sync deadline", () => {
     root = mkdtempSync(join(tmpdir(), "kit-sync-deadline-"));
     store = new SqliteJobStore(join(root, "jobs.db"));
     jobs = new AsyncJobManager(noopLogger, undefined, store);
-    // Sequence like production: main() awaits this before connecting any
-    // transport. The Kit admission gate reads durable admission through a
-    // synchronous snapshot, so inside the startup window even a valid async
-    // Kit request is refused with kit_busy.
-    await jobs.whenStartupSettled();
   });
 
   afterEach(async () => {

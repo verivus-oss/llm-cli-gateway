@@ -558,9 +558,7 @@ describe("#139 AsyncJobManager lease lifecycle (M/N series)", () => {
   }
 
   async function runEviction(manager: AsyncJobManager): Promise<void> {
-    await (
-      manager as unknown as { evictCompletedJobs: () => Promise<void> }
-    ).evictCompletedJobs();
+    await (manager as unknown as { evictCompletedJobs: () => Promise<void> }).evictCompletedJobs();
   }
 
   it("M6: registers before admit; a job recorded after construction is stamped with the manager's instance id", async () => {

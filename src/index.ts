@@ -1768,6 +1768,14 @@ async function awaitJobOrDefer(
   // jobId would be a dead end — run to completion instead. A null-store
   // manager would otherwise still accept in-memory jobs (safeStoreCall
   // tolerates store === null), making the mismatch reachable.
+  // Cross the manager's startup barrier before reading its admission snapshot.
+  // canAdmitDurableJobs() is SYNCHRONOUS by design and cannot wait for
+  // anything, so inside the startup window it answers false and this request
+  // silently takes a different path: no deferral, and for a Kit attempt a
+  // kit_busy refusal. main() awaits the same barrier before connecting a
+  // transport, but createGatewayServer is an exported entry point that any
+  // embedder can drive without going through main().
+  await runtime.asyncJobManager.whenStartupSettled();
   const deferralAvailable =
     runtime.persistence.backend !== "none" &&
     runtime.persistence.asyncJobsEnabled &&
@@ -1965,6 +1973,14 @@ async function awaitApiJobOrDefer(
     }
   };
 
+  // Cross the manager's startup barrier before reading its admission snapshot.
+  // canAdmitDurableJobs() is SYNCHRONOUS by design and cannot wait for
+  // anything, so inside the startup window it answers false and this request
+  // silently takes a different path: no deferral, and for a Kit attempt a
+  // kit_busy refusal. main() awaits the same barrier before connecting a
+  // transport, but createGatewayServer is an exported entry point that any
+  // embedder can drive without going through main().
+  await runtime.asyncJobManager.whenStartupSettled();
   const deferralAvailable =
     runtime.persistence.backend !== "none" &&
     runtime.persistence.asyncJobsEnabled &&
@@ -8270,11 +8286,19 @@ function resolvePersonalKitContext(
   return { context };
 }
 
-function resolvePersonalKitRequest(
+/**
+ * Execution-mode Kit context. ASYNC solely to cross the job manager's startup
+ * barrier: `assertKitDurableAdmission` inside reads the deliberately
+ * SYNCHRONOUS `canAdmitDurableJobs()` snapshot, which answers false until
+ * startup settles, so a valid Kit request arriving early is refused `kit_busy`.
+ * The inspection wrapper stays synchronous because it never reaches that gate.
+ */
+async function resolvePersonalKitRequest(
   runtime: GatewayServerRuntime,
   provider: "claude" | "codex" | "mistral",
   params: Record<string, unknown>
-): PersonalKitRequestContext | null {
+): Promise<PersonalKitRequestContext | null> {
+  await runtime.asyncJobManager.whenStartupSettled();
   return resolvePersonalKitContext(runtime, provider, params, "execution");
 }
 
@@ -10566,7 +10590,7 @@ export async function handleClaudeRequest(
     // session allocation, and all provider preparation. Their only safe
     // execution path is durable async admission.
     if (runtime.personalConfig.settings.enabled) assertKitSyncDeferralEnabled();
-    kit = resolvePersonalKitRequest(runtime, "claude", {
+    kit = await resolvePersonalKitRequest(runtime, "claude", {
       prompt,
       promptParts,
       systemPrompt,
@@ -11302,7 +11326,7 @@ export async function handleCodexRequest(
     // even Codex isolation probes are provider work and must not run for a
     // request that will fail closed before durable deferral.
     if (runtime.personalConfig.settings.enabled) assertKitSyncDeferralEnabled();
-    kit = resolvePersonalKitRequest(runtime, "codex", {
+    kit = await resolvePersonalKitRequest(runtime, "codex", {
       prompt,
       promptParts,
       fullAuto,
@@ -14749,7 +14773,7 @@ export async function handleMistralRequest(
   let kitEnvFragment: NodeJS.ProcessEnv | undefined;
   try {
     if (runtime.personalConfig.settings.enabled) assertKitSyncDeferralEnabled();
-    kit = resolvePersonalKitRequest(runtime, "mistral", {
+    kit = await resolvePersonalKitRequest(runtime, "mistral", {
       prompt: params.prompt,
       promptParts: params.promptParts,
       model: params.model,
@@ -15586,7 +15610,7 @@ export async function handleCodexRequestAsync(
   let kitSession: PersonalKitSessionResolution | null = null;
   let kitPrefix: string | undefined;
   try {
-    kit = resolvePersonalKitRequest(runtime, "codex", params as Record<string, unknown>);
+    kit = await resolvePersonalKitRequest(runtime, "codex", params as Record<string, unknown>);
   } catch (err) {
     kit?.artifact?.cleanup();
     return runtime.personalConfig.settings.enabled
@@ -19880,7 +19904,7 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
         let kit: PersonalKitRequestContext | null = null;
         let kitSession: PersonalKitSessionResolution | null = null;
         try {
-          kit = resolvePersonalKitRequest(runtime, "claude", {
+          kit = await resolvePersonalKitRequest(runtime, "claude", {
             prompt,
             promptParts,
             systemPrompt,
@@ -22379,6 +22403,10 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
       openWorldHint: false,
     },
     async () => {
+      // Same barrier as the request paths: getDurableAdmissionHealth() reads the
+      // synchronous admission snapshot, and reporting "async jobs disabled"
+      // because startup has not settled is a false health answer, not a slow one.
+      await asyncJobManager.whenStartupSettled();
       const health = asyncJobManager.getJobHealth();
       // Report configured, attached, and currently admissible state separately.
       // A store can remain attached while its heartbeat circuit is fail-closed;
@@ -23712,6 +23740,7 @@ function registerHealthResource(server: McpServer): void {
     },
     async uri => {
       const manager = getAsyncJobManager();
+      await manager.whenStartupSettled();
       const health = manager.getJobHealth();
       return {
         contents: [
@@ -24368,6 +24397,12 @@ async function main() {
   // `kit_busy` or told async jobs are disabled, purely because startup had not
   // caught up. Awaiting here is cheap and once: it never rejects, and it runs
   // before any transport is connected, so no caller can observe the window.
+  //
+  // This restores the PRE-CONVERSION behaviour exactly, including its failure
+  // mode: while the store was synchronous the same work ran in the constructor
+  // and blocked startup the same way. A durable store that cannot be reached
+  // therefore delays readiness rather than producing a server that connects and
+  // refuses everything, which is what the branch had accidentally introduced.
   await runtimeAsyncJobManager.whenStartupSettled();
 
   const serverDeps: GatewayServerDeps = {

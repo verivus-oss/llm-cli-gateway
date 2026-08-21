@@ -791,11 +791,6 @@ describe("createGatewayServer — structural invariant on async tool registratio
 
   it("llm_process_health reports asyncJobsEnabled=true with no warning when a store is attached", async () => {
     const manager = new AsyncJobManager(noopLogger, undefined, new MemoryJobStore());
-    // Sequence like production: main() awaits the startup barrier before it
-    // connects a transport, because the health surface reads admission through
-    // the synchronous canAdmitDurableJobs() snapshot and would otherwise report
-    // async jobs disabled purely because startup had not caught up.
-    await manager.whenStartupSettled();
     const server = createGatewayServer({
       asyncJobManager: manager,
       persistence: mkPersistence({ backend: "sqlite", path: ":memory:", asyncJobsEnabled: true }),
@@ -811,9 +806,6 @@ describe("createGatewayServer — structural invariant on async tool registratio
       throw new Error("durable store temporarily unavailable");
     };
     const manager = new AsyncJobManager(noopLogger, undefined, store);
-    // As above: without the barrier the failing heartbeat has not been
-    // attempted yet, so lastHeartbeatErrorName is still null.
-    await manager.whenStartupSettled();
     const server = createGatewayServer({
       asyncJobManager: manager,
       persistence: mkPersistence({ backend: "sqlite", path: ":memory:", asyncJobsEnabled: true }),
