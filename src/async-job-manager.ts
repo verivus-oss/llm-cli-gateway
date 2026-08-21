@@ -1670,10 +1670,7 @@ export class AsyncJobManager {
   private startReaper(): void {
     // `void`: a timer cannot await its callback, and this tick is deliberately
     // fire-and-forget. The body below owns its own errors, so nothing escapes.
-    this.sweepTimer = setInterval(
-      () => void this.onSweepTick(),
-      this.lease.orphanSweepIntervalMs
-    );
+    this.sweepTimer = setInterval(() => void this.onSweepTick(), this.lease.orphanSweepIntervalMs);
     if (this.sweepTimer.unref) this.sweepTimer.unref();
   }
 
@@ -1704,9 +1701,7 @@ export class AsyncJobManager {
    * a sustained heartbeat outage, so an UPDATE that happened to affect zero
    * rows can never be mistaken for proof that this instance is live.
    */
-  private async restoreDurableAdmission(
-    reason: "startup" | "heartbeat recovery"
-  ): Promise<void> {
+  private async restoreDurableAdmission(reason: "startup" | "heartbeat recovery"): Promise<void> {
     if (!this.store || this.disposed) return;
     try {
       // AWAITED, and that is the whole point. Once the store became async these
@@ -1811,17 +1806,17 @@ export class AsyncJobManager {
     if (!this.store?.recordProgressIfStatus) return;
     try {
       const row = await this.store.getById(jobId);
-      if (!row || (row).status !== "orphaned") return;
+      if (!row || row.status !== "orphaned") return;
       const tracker = new JobProgressTracker(
-        (row).cli,
-        (row).outputFormat ?? undefined,
-        parseStoredJobProgress((row).progressJson),
-        (row).startedAt,
+        row.cli,
+        row.outputFormat ?? undefined,
+        parseStoredJobProgress(row.progressJson),
+        row.startedAt,
         resolveJobProgressCapability(
-          (row).cli,
-          parsePersistedJobArgs((row).argsJson),
-          (row).outputFormat ?? undefined,
-          (row).transport
+          row.cli,
+          parsePersistedJobArgs(row.argsJson),
+          row.outputFormat ?? undefined,
+          row.transport
         )
       );
       if (!tracker.snapshot().events.some(event => event.kind === "terminal")) {
@@ -1961,7 +1956,9 @@ export class AsyncJobManager {
    * turn the selector into a narrow hint only: the acknowledgement remains a
    * compare-and-set against the same job id, host, and artifact path.
    */
-  private async cleanupPendingClaudeMcpArtifact(candidate: PendingMcpArtifactCleanup): Promise<void> {
+  private async cleanupPendingClaudeMcpArtifact(
+    candidate: PendingMcpArtifactCleanup
+  ): Promise<void> {
     if (!this.store || candidate.hostname !== this.hostname) return;
     let row: JobRecord | null;
     try {
@@ -2052,7 +2049,9 @@ export class AsyncJobManager {
       );
       return;
     }
-    if (await this.acknowledgeMcpArtifactCleanup(job.id, this.hostname, artifactScope, artifactPath)) {
+    if (
+      await this.acknowledgeMcpArtifactCleanup(job.id, this.hostname, artifactScope, artifactPath)
+    ) {
       job.mcpArtifactPath = null;
       job.mcpArtifactScope = null;
     }
@@ -2128,7 +2127,11 @@ export class AsyncJobManager {
    * durable 'queued' row); best-effort otherwise (http: no OS process to strand,
    * the lease keeps the row alive and the guarded recordComplete still lands).
    */
-  private async markRunningDurable(job: AsyncJobRecord, pid: number | null, failClosed = false): Promise<void> {
+  private async markRunningDurable(
+    job: AsyncJobRecord,
+    pid: number | null,
+    failClosed = false
+  ): Promise<void> {
     if (!this.store) return;
     let transitioned: boolean;
     try {
@@ -2457,8 +2460,8 @@ export class AsyncJobManager {
       const existing = await this.store.findByRequestKey(requestKey);
       if (!existing) return null;
       // Prefer the in-memory record if we still have it (live process/abort, timers).
-      let record = this.jobs.get((existing).id);
-      if (!record) record = await this.hydrateFromStore((existing).id) ?? undefined;
+      let record = this.jobs.get(existing.id);
+      if (!record) record = (await this.hydrateFromStore(existing.id)) ?? undefined;
       if (!record) return null;
       // Issue #130 (defense-in-depth): even though the dedup key is now
       // principal-scoped, never hand back a record the current caller cannot
@@ -2469,12 +2472,12 @@ export class AsyncJobManager {
       const caller = resolveOwnerPrincipal(getRequestContext());
       if (!principalCanAccess(record.ownerPrincipal, caller)) {
         this.logger.debug(
-          `Dedup reuse refused for ${label}: caller cannot access job ${(existing).id}`,
+          `Dedup reuse refused for ${label}: caller cannot access job ${existing.id}`,
           { correlationId }
         );
         return null;
       }
-      this.logger.info(`Job ${(existing).id} reused via dedup for ${label}`, {
+      this.logger.info(`Job ${existing.id} reused via dedup for ${label}`, {
         correlationId,
         originalCorrelationId: record.correlationId,
         status: record.status,
@@ -2558,7 +2561,12 @@ export class AsyncJobManager {
       );
     }
     if (!forceRefresh) {
-      const reused = await this.tryReuseDedupedJob(requestKey, correlationId, provider.name, cleanup);
+      const reused = await this.tryReuseDedupedJob(
+        requestKey,
+        correlationId,
+        provider.name,
+        cleanup
+      );
       if (reused) return reused;
     }
 
@@ -2660,7 +2668,7 @@ export class AsyncJobManager {
         return;
       }
       job.status = "running";
-      this.emitProgress(job, "starting", "lifecycle", "Provider request started");
+      await this.emitProgress(job, "starting", "lifecycle", "Provider request started");
       // #139: flip the durable row queued -> running (http jobs have no pid).
       // Best-effort here: the row already exists (recordStart) and the lease
       // keeps it alive; an http row that fails to mark-running still carries a
@@ -2725,7 +2733,7 @@ export class AsyncJobManager {
       kitSessionId: stableKitSessionId,
       validationAdmission,
     });
-    this.maybeFlushProgress(job, true);
+    await this.maybeFlushProgress(job, true);
     if (writeFlightStart && flightRecorderEntry) {
       try {
         this.flightRecorder.logStart({
@@ -2757,7 +2765,7 @@ export class AsyncJobManager {
       });
     }
 
-    const deferredControl: DeferredJobLaunch | undefined = await await await deferLaunch
+    const deferredControl: DeferredJobLaunch | undefined = (await await await deferLaunch)
       ? {
           release: () => {
             if (launchReleased) return;
@@ -2835,8 +2843,7 @@ export class AsyncJobManager {
     // reconciliation instead of being acknowledged optimistically.
     if (success && job.kitExecution && job.kitSessionId) {
       success =
-        job.kitTerminalFinalized ||
-        (await this.markKitTerminalFinalized(job.id, job.kitSessionId));
+        job.kitTerminalFinalized || (await this.markKitTerminalFinalized(job.id, job.kitSessionId));
       if (!success) {
         this.logger.error(
           `Kit terminal-finalization acknowledgement failed for job ${job.id}; retaining it for reconciliation`
@@ -3176,28 +3183,31 @@ export class AsyncJobManager {
     );
   }
 
-  private emitProgress(
+  private async emitProgress(
     job: AsyncJobRecord,
     phase: JobProgressPhase,
     kind: JobProgressKind,
     message: string,
     source: "gateway" | "provider" = "gateway"
-  ): void {
+  ): Promise<void> {
     this.progressTracker(job).emit(phase, kind, message, source);
     job.progressDirty = true;
-    this.maybeFlushProgress(job);
+    await this.maybeFlushProgress(job);
   }
 
-  private maybeFlushProgress(job: AsyncJobRecord, force = false): void {
+  private async maybeFlushProgress(job: AsyncJobRecord, force = false): Promise<void> {
     if (!this.store || !job.progressDirty) return;
     const now = Date.now();
     if (!force && now - job.lastProgressFlushAt < OUTPUT_FLUSH_INTERVAL_MS) return;
     job.lastProgressFlushAt = now;
     try {
       const serialized = this.progressTracker(job).serialize();
+      // AWAITED: unawaited, `written` is a Promise and `!written` is always
+      // false, so progressDirty was cleared even when the status-guarded write
+      // reported that it had NOT written.
       const written = this.store.recordProgressIfStatus
-        ? this.store.recordProgressIfStatus(job.id, job.status, serialized)
-        : (this.store.recordProgress(job.id, serialized), true);
+        ? await this.store.recordProgressIfStatus(job.id, job.status, serialized)
+        : (await this.store.recordProgress(job.id, serialized), true);
       if (!written) return;
       job.progressDirty = false;
     } catch (err) {
@@ -3206,14 +3216,14 @@ export class AsyncJobManager {
     }
   }
 
-  private ensureTerminalProgress(job: AsyncJobRecord): void {
+  private async ensureTerminalProgress(job: AsyncJobRecord): Promise<void> {
     if (job.status === "running" || job.status === "queued") return;
     const current = this.progressTracker(job).snapshot();
     if (current.events.some(event => event.kind === "terminal")) return;
     if (job.status === "completed") {
-      this.emitProgress(job, "completed", "terminal", "Job completed");
+      await this.emitProgress(job, "completed", "terminal", "Job completed");
     } else {
-      this.emitProgress(job, "failed", "terminal", `Job ${job.status}`);
+      await this.emitProgress(job, "failed", "terminal", `Job ${job.status}`);
     }
   }
 
@@ -3223,8 +3233,8 @@ export class AsyncJobManager {
     // pre-execution, exactly like "running": neither has a terminal row to write.
     if (job.status === "running" || job.status === "queued") return false;
     if (!job.finishedAt) return false;
-    this.ensureTerminalProgress(job);
-    this.maybeFlushProgress(job, true);
+    await this.ensureTerminalProgress(job);
+    await this.maybeFlushProgress(job, true);
     // Cancellation, idle timeout and output overflow write the row terminal at
     // the moment the signal is REQUESTED, but the child keeps running until its
     // close event and may flush its entire accumulated answer in between.
@@ -3512,14 +3522,14 @@ export class AsyncJobManager {
    */
   async getJobOwner(jobId: string): Promise<string | null | undefined> {
     let job = this.jobs.get(jobId);
-    if (!job) job = await this.hydrateFromStore(jobId) ?? undefined;
+    if (!job) job = (await this.hydrateFromStore(jobId)) ?? undefined;
     return job?.ownerPrincipal;
   }
 
   /** Durable Kit context for internal continuation checks, never tool-projected. */
   async getJobKitExecution(jobId: string): Promise<KitExecutionRef | null | undefined> {
     let job = this.jobs.get(jobId);
-    if (!job) job = await this.hydrateFromStore(jobId) ?? undefined;
+    if (!job) job = (await this.hydrateFromStore(jobId)) ?? undefined;
     if (!job) return undefined;
     return job.kitExecution ? cloneKitExecutionRef(job.kitExecution) : null;
   }
@@ -3588,7 +3598,7 @@ export class AsyncJobManager {
   async getPinnedKitReleaseIds(): Promise<string[]> {
     const releases = new Set<string>();
     try {
-      for (const releaseId of await this.store?.getPinnedKitReleaseIds?.() ?? []) {
+      for (const releaseId of (await this.store?.getPinnedKitReleaseIds?.()) ?? []) {
         releases.add(releaseId);
       }
     } catch (err) {
@@ -3634,26 +3644,28 @@ export class AsyncJobManager {
     mcpArtifactPath?: string,
     mcpArtifactScope?: string
   ): Promise<AsyncJobSnapshot> {
-    return (await this.startJobWithDedup(cli, args, correlationId, {
-      cwd,
-      idleTimeoutMs,
-      outputFormat,
-      forceRefresh,
-      env,
-      stdin,
-      onComplete,
-      flightRecorderEntry,
-      extractUsage,
-      writeFlightStart,
-      compressResponse,
-      kitExecution,
-      onTerminal,
-      kitSessionId,
-      jobId,
-      dedupArgs,
-      mcpArtifactPath,
-      mcpArtifactScope,
-    })).snapshot;
+    return (
+      await this.startJobWithDedup(cli, args, correlationId, {
+        cwd,
+        idleTimeoutMs,
+        outputFormat,
+        forceRefresh,
+        env,
+        stdin,
+        onComplete,
+        flightRecorderEntry,
+        extractUsage,
+        writeFlightStart,
+        compressResponse,
+        kitExecution,
+        onTerminal,
+        kitSessionId,
+        jobId,
+        dedupArgs,
+        mcpArtifactPath,
+        mcpArtifactScope,
+      })
+    ).snapshot;
   }
 
   /**
@@ -3875,7 +3887,7 @@ export class AsyncJobManager {
         return;
       }
       job.status = "running";
-      this.emitProgress(job, "starting", "lifecycle", "Provider process started");
+      await this.emitProgress(job, "starting", "lifecycle", "Provider process started");
       try {
         // AWAITED: launchProcessJob performs the fail-closed durable
         // queued -> running transition. Unawaited, a rejection skipped this
@@ -3956,7 +3968,7 @@ export class AsyncJobManager {
       kitSessionId: stableKitSessionId,
       validationAdmission,
     });
-    this.maybeFlushProgress(job, true);
+    await this.maybeFlushProgress(job, true);
     // Slice 1.5: only opt-in callers (pure async handlers) write logStart
     // here. The sync-deferred path passes writeFlightStart=false because
     // the upstream sync handler already wrote a logStart row keyed on the
@@ -3994,7 +4006,7 @@ export class AsyncJobManager {
       this.logger.info(`Job ${id} queued for ${cli} (limiter saturated)`, { correlationId });
     }
 
-    const deferredControl: DeferredJobLaunch | undefined = await await await deferLaunch
+    const deferredControl: DeferredJobLaunch | undefined = (await await await deferLaunch)
       ? {
           release: () => {
             if (launchReleased) return;
@@ -4325,10 +4337,10 @@ export class AsyncJobManager {
   ): Promise<AsyncJobSnapshot | null> {
     let job = this.jobs.get(jobId);
     if (job) {
-      job = await this.refreshOpenHydratedJob(jobId, job) ?? undefined;
+      job = (await this.refreshOpenHydratedJob(jobId, job)) ?? undefined;
       if (!job) return null;
     } else {
-      job = await this.hydrateFromStore(jobId) ?? undefined;
+      job = (await this.hydrateFromStore(jobId)) ?? undefined;
       if (!job) return null;
     }
     return this.snapshot(job, options.afterProgressSeq ?? 0, options.progressLimit ?? 32);
@@ -4434,10 +4446,10 @@ export class AsyncJobManager {
   ): Promise<AsyncJobResult | null> {
     let job = this.jobs.get(jobId);
     if (job) {
-      job = await this.refreshOpenHydratedJob(jobId, job) ?? undefined;
+      job = (await this.refreshOpenHydratedJob(jobId, job)) ?? undefined;
       if (!job) return null;
     } else {
-      job = await this.hydrateFromStore(jobId) ?? undefined;
+      job = (await this.hydrateFromStore(jobId)) ?? undefined;
       if (!job) return null;
     }
 
@@ -4708,7 +4720,10 @@ export class AsyncJobManager {
    * storage. The owning instance may append progress or finish it at any time;
    * caching that projection forever makes cross-instance status and watch stale.
    */
-  private async refreshOpenHydratedJob(jobId: string, job: AsyncJobRecord): Promise<AsyncJobRecord | null> {
+  private async refreshOpenHydratedJob(
+    jobId: string,
+    job: AsyncJobRecord
+  ): Promise<AsyncJobRecord | null> {
     if (
       !this.store ||
       job.hydratedFromStore !== true ||
@@ -4772,7 +4787,11 @@ export class AsyncJobManager {
     };
   }
 
-  private async appendOutput(job: AsyncJobRecord, stream: "stdout" | "stderr", chunk: Buffer): Promise<void> {
+  private async appendOutput(
+    job: AsyncJobRecord,
+    stream: "stdout" | "stderr",
+    chunk: Buffer
+  ): Promise<void> {
     const totalBytes = Buffer.byteLength(job.stdout) + Buffer.byteLength(job.stderr) + chunk.length;
     if (totalBytes > this.maxJobOutputBytes) {
       job.outputTruncated = true;
@@ -4813,7 +4832,7 @@ export class AsyncJobManager {
     job.resetIdleTimer?.();
     this.progressTracker(job).ingest(stream, chunk);
     job.progressDirty = true;
-    this.maybeFlushProgress(job);
+    await this.maybeFlushProgress(job);
 
     const text = chunk.toString();
     if (stream === "stdout") {

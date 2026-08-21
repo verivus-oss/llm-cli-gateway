@@ -134,7 +134,8 @@
     "interface:floor:update": "node scripts/check-interface-floor.mjs --update",
     "storage:port:check": "node scripts/check-storage-port.mjs",
     "test:collection:check": "node scripts/check-test-collection.mjs",
-    "test:assertion-parity": "node scripts/check-test-assertion-parity.mjs"
+    "test:assertion-parity": "node scripts/check-test-assertion-parity.mjs",
+    "promise:conditions:check": "node scripts/check-promise-in-condition.mjs"
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.29.0",
