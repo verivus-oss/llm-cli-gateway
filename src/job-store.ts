@@ -2764,7 +2764,7 @@ export class PostgresJobStore implements JobStore, ValidationRunStore {
   private readonly config: PostgresJobStoreOpsConfig;
   private driver: PostgresStorageDriver | null = null;
   private ops: PostgresJobStoreOps | null = null;
-  private initPromise: Promise<void> | null = null;
+  private startupPromise: Promise<PostgresJobStoreOps> | null = null;
   private closed = false;
 
   constructor(
@@ -2808,8 +2808,39 @@ export class PostgresJobStore implements JobStore, ValidationRunStore {
    */
   private async ensureInit(): Promise<PostgresJobStoreOps> {
     if (this.closed) throw new Error("PostgresJobStore is closed");
+    // The memo is installed BEFORE any await, which is the whole point.
+    //
+    // A first version awaited the pool factory INSIDE an `if (!this.ops)` guard
+    // and only then assigned the memo. Two callers racing the very first call
+    // both passed that guard, both built a driver, and the second overwrote
+    // `this.driver` and `this.ops` before awaiting the FIRST caller's init. It
+    // then returned its OWN ops, on which init had never run, and the first
+    // driver's pool was orphaned where close() could not reach it.
+    //
+    // Found by review, not by P-RETRY, which exercises sequential retry only
+    // and is no substitute for a race.
+    this.startupPromise ??= this.buildAndInit();
+    try {
+      return await this.startupPromise;
+    } catch (error) {
+      // Clear so the NEXT call retries, matching the worker being retired and
+      // rebuilt so a later heartbeat retried the full init. Memoising the
+      // rejection would poison the store for the life of the process.
+      this.startupPromise = null;
+      throw error;
+    }
+  }
+
+  /**
+   * Build the driver once and run the schema bootstrap.
+   *
+   * Reached only through the memo above, so it never runs concurrently with
+   * itself. The driver is retained across a retry rather than rebuilt, so a
+   * failed init cannot leak a pool per attempt.
+   */
+  private async buildAndInit(): Promise<PostgresJobStoreOps> {
     if (!this.ops) {
-      this.driver = new PostgresStorageDriver(
+      const driver = new PostgresStorageDriver(
         { app: this.dsn },
         // One role, `app`, matching today's single configured dsn. Per-role
         // DSNs belong to s9, which owns [persistence.roles]; the driver already
@@ -2818,14 +2849,12 @@ export class PostgresJobStore implements JobStore, ValidationRunStore {
           this.logger.error(`PostgresJobStore pool error on role ${role}`, error)
         )
       );
-      this.ops = createPostgresJobStoreOps(this.driver, this.config);
+      // Assigned together, so close() can always reach a driver that exists.
+      this.driver = driver;
+      this.ops = createPostgresJobStoreOps(driver, this.config);
     }
     const ops = this.ops;
-    this.initPromise ??= ops.init().catch((error: unknown) => {
-      this.initPromise = null;
-      throw error;
-    });
-    await this.initPromise;
+    await ops.init();
     return ops;
   }
 

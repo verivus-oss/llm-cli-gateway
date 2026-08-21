@@ -717,7 +717,7 @@ describe("PostgresJobStore", () => {
     );
     const internals = isolated as unknown as {
       ops: { init: () => Promise<void>; op: (m: string, a: unknown[]) => Promise<unknown> } | null;
-      initPromise: Promise<void> | null;
+      startupPromise: Promise<unknown> | null;
     };
 
     try {
@@ -749,7 +749,7 @@ describe("PostgresJobStore", () => {
         },
         op: (method, args) => realOps.op(method, args),
       };
-      internals.initPromise = null;
+      internals.startupPromise = null;
 
       await expect(
         isolated.recordStart({
