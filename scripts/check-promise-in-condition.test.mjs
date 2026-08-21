@@ -72,6 +72,44 @@ describe("promise-in-condition gate", () => {
     expect(r.output).toMatch(/operand/);
   });
 
+  it("FIRES on an async predicate to .every()", () => {
+    // The gate cannot see this as a boolean position: the truthiness test is
+    // inside Array.prototype. It is caught by the shape of the call instead.
+    inject(`  probeEvery(xs: number[]): boolean {
+    return xs.every(async x => x > 0);
+  }`);
+    const r = runGate();
+    expect(r.exitCode).toBe(1);
+    expect(r.output).toMatch(/async predicate to \.every\(\)/);
+  });
+
+  it("FIRES on an async predicate to .find()", () => {
+    inject(`  probeFind(xs: number[]): number | undefined {
+    return xs.find(async x => x > 0);
+  }`);
+    const r = runGate();
+    expect(r.exitCode).toBe(1);
+    expect(r.output).toMatch(/async predicate to \.find\(\)/);
+  });
+
+  it("does NOT fire on a SYNC predicate", () => {
+    // The control. A gate that flagged every .every() would be noise at the
+    // sites where the idiom is correct, which is most of them.
+    inject(`  probeSync(xs: number[]): boolean {
+    return xs.every(x => x > 0);
+  }`);
+    expect(runGate().exitCode).toBe(0);
+  });
+
+  it("does NOT fire on .map(async ...), which is a different rule's problem", () => {
+    // map does not test truthiness, so an async callback there is legal and
+    // usually wrapped in Promise.all. Flagging it would be wrong.
+    inject(`  probeMap(xs: number[]): Promise<number>[] {
+    return xs.map(async x => x + 1);
+  }`);
+    expect(runGate().exitCode).toBe(0);
+  });
+
   it("does NOT fire on a nullable promise, the cached-promise idiom", () => {
     // The control that stops this becoming noise. Testing whether a memoised or
     // in-flight promise EXISTS is legitimate and this codebase does it

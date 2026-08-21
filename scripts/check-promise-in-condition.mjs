@@ -48,6 +48,34 @@ function isPromiseLike(type) {
   return /^Promise</.test(checker.typeToString(type));
 }
 
+/**
+ * Array methods that test their callback's return value for TRUTHINESS.
+ *
+ * An async callback returns a promise and every promise is truthy, so:
+ *   every  -> always true      some   -> always true
+ *   filter -> keeps everything find   -> first element, predicate ignored
+ *
+ * The gate above cannot see this: the truthiness test happens inside
+ * Array.prototype, so there is no boolean-position node in the source. Five of
+ * these were found by hand in s5, two of them sitting in assertions that read
+ * as though they still tested something.
+ *
+ * Worse than `.map(async ...)`, which at least leaves visible promises in the
+ * result for something downstream to complain about. A predicate silently
+ * answers YES.
+ *
+ * No legitimate idiom to exempt: an async predicate is unconditionally wrong.
+ */
+const TRUTHINESS_PREDICATES = new Set([
+  "every",
+  "some",
+  "filter",
+  "find",
+  "findIndex",
+  "findLast",
+  "findLastIndex",
+]);
+
 const violations = [];
 for (const sf of program.getSourceFiles()) {
   if (sf.isDeclarationFile) continue;
@@ -71,6 +99,25 @@ for (const sf of program.getSourceFiles()) {
   };
 
   const visit = node => {
+    if (
+      ts.isCallExpression(node) &&
+      ts.isPropertyAccessExpression(node.expression) &&
+      TRUTHINESS_PREDICATES.has(node.expression.name.text) &&
+      node.arguments.length >= 1
+    ) {
+      const cb = node.arguments[0];
+      const isAsync =
+        (ts.isArrowFunction(cb) || ts.isFunctionExpression(cb)) &&
+        cb.modifiers?.some(m => m.kind === ts.SyntaxKind.AsyncKeyword);
+      if (isAsync) {
+        const { line } = sf.getLineAndCharacterOfPosition(cb.getStart(sf));
+        violations.push({
+          site: `${rel}:${line + 1}`,
+          why: `async predicate to .${node.expression.name.text}()`,
+          code: node.getText(sf).replace(/\s+/g, " ").slice(0, 74),
+        });
+      }
+    }
     if (ts.isIfStatement(node)) flag(node.expression, "if condition");
     else if (ts.isWhileStatement(node) || ts.isDoStatement(node))
       flag(node.expression, "loop condition");
