@@ -2922,6 +2922,25 @@ export class PostgresJobStore implements JobStore, ValidationRunStore {
       leaseTtlMs: options.leaseTtlMs ?? DEFAULT_INSTANCE_LEASE_TTL_MS,
       farFutureIso: FAR_FUTURE_ISO,
     };
+
+    // STARTED here, not awaited here, matching SqliteJobStore.
+    //
+    // Review's objection to first-use initialisation was not about style: the
+    // legacy Kit privacy scrub runs inside init(), so deferring it until the
+    // first store call leaves private Kit material readable by any direct
+    // database reader for as long as no operation happens. That window is
+    // unbounded, and it is a contract change rather than an implementation
+    // detail. Starting at construction bounds it to the bootstrap itself.
+    //
+    // Every operation still awaits ensureInit(), so nothing observes a
+    // half-initialised store; starting early shortens the window without
+    // weakening the barrier. The retry-on-failure behaviour is unchanged.
+    void this.ensureInit().catch(() => {
+      // Swallowed HERE only. The rejection is retained by the memo and rethrown
+      // at the first operation that awaits it, which is where a caller can be
+      // told; letting it escape the constructor would be an unhandled rejection
+      // with no recipient.
+    });
   }
 
   /**
