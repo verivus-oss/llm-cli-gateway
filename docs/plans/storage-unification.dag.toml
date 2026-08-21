@@ -142,7 +142,7 @@ id = "s9.one-selector"
 depends_on = ["s7.flight-recorder-onto-the-port", "s8.sessions"]
 role = "The point of the whole exercise: one config value that actually moves everything."
 action = "Demote DATABASE_URL and LLM_GATEWAY_LOGS_DB to deprecated compatibility inputs, asymmetrically per design 3.3, AND carry [persistence.roles] through to PostgresStorageDriver. Design 3.1: unifying the config and unifying the pool are one task, and no node owned the second half."
-constraint = "DATABASE_URL is a DSN and today emits NO deprecation warning, unlike LLM_GATEWAY_LOGS_DB. Conflicts must be a startup error, never a silent precedence rule."
+constraint = "CORRECTED 2026-08-22, the premise was stale. DATABASE_URL DOES warn today, in three precedence cases at config.ts:109/:124/:136, and conflicts are already refused rather than silently resolved. b902ccf did that half. What is left is a real decision, not a fix: warn-and-ignore is not silent but it is not an error either, and this node must rule on whether a conflict SHOULD abort startup. The roles half is genuinely unbuilt: `[persistence.roles]` appears NOWHERE in config.ts, so PostgresStorageDriver accepts PostgresRoleDsns that nothing produces, and job-store.ts passes \"write\" at all 7 transaction sites, so on a four-credential deployment its reads still run as `app`. Verified 2026-08-22 before briefing, because two node premises I wrote from source text alone were disproved by tracks the day before."
 affects = ["s10.cutover"]
 
 [[node]]
