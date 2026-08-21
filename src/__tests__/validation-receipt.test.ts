@@ -339,8 +339,8 @@ describe("validation receipt mint + resolve", () => {
     expect(
       (await resolveValidationReceipt(deps, "v-owner-source", { caller: "alice" })).status
     ).toBe("minted");
-    const source = store.getValidationReceipt("v-owner-source");
-    expect(await source).not.toBeNull();
+    const source = await store.getValidationReceipt("v-owner-source");
+    expect(source).not.toBeNull();
     if (!source) return;
 
     const validationId = "v-forged-owner";
@@ -373,8 +373,12 @@ describe("validation receipt mint + resolve", () => {
     const mismatchedStore = new Proxy(store, {
       get(target, property, receiver) {
         if (property === "getValidationReceipt") {
-          return (validationId: string) => {
-            const receipt = target.getValidationReceipt(validationId);
+          // async + await: unawaited, `receipt` is a promise, which is truthy,
+          // and spreading it yields `{ validationId: "v-other" }` with none of
+          // the receipt's fields. The forgery this proxy exists to simulate
+          // became an empty object.
+          return async (validationId: string) => {
+            const receipt = await target.getValidationReceipt(validationId);
             return receipt ? { ...receipt, validationId: "v-other" } : null;
           };
         }
@@ -401,8 +405,8 @@ describe("validation receipt mint + resolve", () => {
     await seedJob("j-codex", { status: "completed" });
     await seedRun("v1");
     expect((await resolveValidationReceipt(deps, "v1", { caller: "local" })).status).toBe("minted");
-    const source = store.getValidationReceipt("v1");
-    expect(await source).not.toBeNull();
+    const source = await store.getValidationReceipt("v1");
+    expect(source).not.toBeNull();
     if (!source) return;
 
     const validationId = `v-corrupt-${field}`;
@@ -1099,8 +1103,8 @@ describe("validation receipt mint + resolve", () => {
       validationRunStore: store,
       asyncJobManager: {
         getJobOwner: (jobId: string) => realManager.getJobOwner(jobId),
-        getJobResult(jobId: string, maxChars: number) {
-          const result = realManager.getJobResult(jobId, maxChars);
+        async getJobResult(jobId: string, maxChars: number) {
+          const result = await realManager.getJobResult(jobId, maxChars);
           return result ? { ...result, id: "different-job" } : null;
         },
       } as AsyncJobManager,
@@ -1161,7 +1165,7 @@ describe("validation receipt mint + resolve", () => {
     if (!run) throw new Error(`Expected seeded run ${validationId}`);
     const request = JSON.parse(run.requestJson);
     const results = run.providerLinks.map(async link => {
-      const result = manager.getJobResult(link.jobId, Number.MAX_SAFE_INTEGER);
+      const result = await manager.getJobResult(link.jobId, Number.MAX_SAFE_INTEGER);
       if (!result) throw new Error(`Expected seeded job ${link.jobId}`);
       return await normalizeJobResult(link.provider as any, null, result);
     });
