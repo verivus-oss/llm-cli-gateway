@@ -53,6 +53,22 @@ describe("toDollarPlaceholders", () => {
   it("is a no-op on a statement with no placeholders", () => {
     expect(toDollarPlaceholders("SELECT 1")).toBe("SELECT 1");
   });
+
+  it("cannot tell jsonb's key-exists OPERATOR from a placeholder", () => {
+    // Not a defect in this function: `?` is both, and nothing in the statement
+    // says which. It is a trap for every caller, and the session store walked
+    // into it: eight `metadata ? 'kit'` predicates became `metadata $1 'kit'`
+    // and failed with `syntax error at or near "$1"` the moment they went
+    // through the driver. Recorded here so the next author writing a jsonb
+    // predicate finds the reason to spell it `jsonb_exists(metadata, 'kit')`,
+    // which is the same operator by its function name.
+    expect(toDollarPlaceholders("SELECT 1 WHERE metadata ? 'kit'")).toBe(
+      "SELECT 1 WHERE metadata $1 'kit'"
+    );
+    expect(toDollarPlaceholders("SELECT 1 WHERE jsonb_exists(metadata, 'kit')")).toBe(
+      "SELECT 1 WHERE jsonb_exists(metadata, 'kit')"
+    );
+  });
 });
 
 describe("SqliteStorageDriver", () => {

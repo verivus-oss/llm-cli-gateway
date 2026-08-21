@@ -3,15 +3,14 @@ import { PROVIDER_TYPES, sessionGenerationIdentity } from "../session-manager.js
 import { PostgreSQLSessionManager } from "../session-manager-pg.js";
 import { resolveGatewayServerRuntime, resolveWorktreeForRequest } from "../index.js";
 import { runWithRequestContext } from "../request-context.js";
-import { setupTestDatabase, cleanTestDatabase } from "./setup.js";
+import { cleanTestDatabase, setupTestStorageDriver } from "./setup.js";
 
 describe("PostgreSQLSessionManager", () => {
   let manager: PostgreSQLSessionManager;
 
   beforeEach(async () => {
     await cleanTestDatabase();
-    const { pool } = await setupTestDatabase();
-    manager = new PostgreSQLSessionManager(pool);
+    manager = new PostgreSQLSessionManager(await setupTestStorageDriver());
   });
 
   //──────────────────────────────────────────────────────────────────────────

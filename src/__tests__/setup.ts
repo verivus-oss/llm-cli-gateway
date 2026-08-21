@@ -4,6 +4,7 @@ import { join } from "path";
 import { Pool } from "pg";
 import { beforeAll, afterAll, beforeEach } from "vitest";
 import type { Logger } from "../logger.js";
+import { PostgresStorageDriver, type PgPoolLike } from "../storage/drivers/postgres.js";
 
 // Test database configuration
 const TEST_DATABASE_URL =
@@ -265,6 +266,20 @@ export async function setupTestDatabase(): Promise<{ pool: Pool }> {
   }
 
   return { pool: testPool };
+}
+
+/**
+ * The shared test pool, presented as a storage driver.
+ *
+ * The session store takes a `StorageDriver` rather than a `pg.Pool` since it
+ * moved onto the port. Tests keep the single shared pool (its schema bootstrap
+ * and cleanup locks are what let workers run in parallel) and wrap it, rather
+ * than opening a second pool per suite: the driver's `close()` is never called
+ * here, so ownership of the pool stays with the setup file.
+ */
+export async function setupTestStorageDriver(): Promise<PostgresStorageDriver> {
+  const { pool } = await setupTestDatabase();
+  return new PostgresStorageDriver({ app: TEST_DATABASE_URL }, () => pool as unknown as PgPoolLike);
 }
 
 /**

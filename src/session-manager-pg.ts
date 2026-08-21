@@ -1,4 +1,3 @@
-import type { Pool, PoolClient } from "pg";
 import { randomUUID } from "crypto";
 import { isDeepStrictEqual } from "node:util";
 import {
@@ -24,6 +23,7 @@ import {
   type KitSessionBinding,
   type KitSessionAttempt,
 } from "./personal-config-types.js";
+import type { StorageConnection, StorageDriver } from "./storage/store.js";
 
 export type { Logger } from "./logger.js";
 
@@ -91,12 +91,40 @@ const REQUIRED_SESSION_COLUMNS: ReadonlyArray<{ column: string; migration: strin
   { column: "session_generation", migration: "021_session_generation_fence" },
 ];
 
-/** Preserve the operation failure when a broken connection also rejects rollback. */
-async function rollbackPreservingFailure(client: PoolClient): Promise<void> {
+/**
+ * An early return that must ROLLBACK, not COMMIT.
+ *
+ * Eleven methods here read under `FOR UPDATE`, decide the caller loses a race,
+ * and issue `ROLLBACK` before returning `false`. `driver.transaction()` owns
+ * the terminator, so a body that issued its own `ROLLBACK` would be followed by
+ * the driver's `COMMIT` on a transaction that no longer exists: PostgreSQL
+ * answers that with a WARNING, not an error, so the method would return the
+ * right value and the abort would be silently downgraded.
+ *
+ * Throwing instead makes the driver roll back, and this wrapper turns the throw
+ * back into the return value. The value is carried rather than assumed, so a
+ * future non-boolean early return cannot quietly become `false`.
+ */
+class TransactionAbort<T> extends Error {
+  constructor(readonly value: T) {
+    super("storage: transaction aborted with a result");
+    this.name = "TransactionAbort";
+  }
+}
+
+function abortWith<T>(value: T): never {
+  throw new TransactionAbort(value);
+}
+
+async function transactionWithAbort<T>(
+  driver: StorageDriver,
+  body: (connection: StorageConnection) => Promise<T>
+): Promise<T> {
   try {
-    await client.query("ROLLBACK");
-  } catch {
-    // The original failed operation remains the actionable error.
+    return await driver.transaction("write", body);
+  } catch (error) {
+    if (error instanceof TransactionAbort) return error.value as T;
+    throw error;
   }
 }
 
@@ -131,7 +159,33 @@ export class PostgreSQLSessionManager
   private sessionSchemaReady: Promise<void> | null = null;
   private readonly removalObservers = new Set<SessionCleanupHook>();
 
-  constructor(private pool: Pool) {}
+  constructor(private driver: StorageDriver) {}
+
+  /**
+   * One statement outside a transaction.
+   *
+   * Every operation in this module declares the class `write`, including the
+   * reads, and that is deliberate rather than lazy. The class picks a
+   * CREDENTIAL, and the only credential this store has ever had is `app`.
+   * Routing session reads to the `reader` identity would be a grant decision
+   * about a role defined for transcript text, on tables it may hold no SELECT
+   * on; `[persistence.roles]` and the per-role DSNs belong to s9, which can
+   * make that decision once for every subsystem. Until then `write` resolves to
+   * `app`, which is exactly what the private pool did.
+   */
+  private query<T>(statement: string, params: readonly unknown[] = []): Promise<T[]> {
+    return this.driver.withConnection("write", connection =>
+      connection.query<T>(statement, params)
+    );
+  }
+
+  /** One mutation outside a transaction, returning the affected row count. */
+  private async execute(statement: string, params: readonly unknown[] = []): Promise<number> {
+    return this.driver.withConnection(
+      "write",
+      async connection => (await connection.execute(statement, params)).rowsAffected
+    );
+  }
 
   addSessionRemovalObserver(observer: SessionCleanupHook): () => void {
     this.removalObservers.add(observer);
@@ -164,7 +218,7 @@ export class PostgreSQLSessionManager
       // Resolve the unqualified relation once, then inspect attributes by its
       // OID. This matches the later DML resolution even when search_path has
       // more than one schema.
-      const attributes = await this.pool.query<{
+      const attributes = await this.query<{
         table_name: string | null;
         column_name: string | null;
       }>(`
@@ -179,14 +233,12 @@ export class PostgreSQLSessionManager
           AND attribute.attnum > 0
           AND NOT attribute.attisdropped
       `);
-      if (!attributes.rows[0]?.table_name) {
+      if (!attributes[0]?.table_name) {
         throw new Error(
           "Session PostgreSQL schema is missing sessions. Run `DATABASE_URL=... npm run migrate` with the migration role before using [persistence] backend = postgres."
         );
       }
-      const names = new Set(
-        attributes.rows.flatMap(row => (row.column_name ? [row.column_name] : []))
-      );
+      const names = new Set(attributes.flatMap(row => (row.column_name ? [row.column_name] : [])));
       const missing = REQUIRED_SESSION_COLUMNS.filter(required => !names.has(required.column));
       if (missing.length > 0) {
         const detail = missing
@@ -218,7 +270,7 @@ export class PostgreSQLSessionManager
       // Resolve the unqualified relation once, then inspect attributes by its
       // OID. This matches the later DML resolution even when search_path has
       // more than one schema.
-      const attributes = await this.pool.query<{
+      const attributes = await this.query<{
         table_name: string | null;
         column_name: string | null;
       }>(`
@@ -233,14 +285,12 @@ export class PostgreSQLSessionManager
           AND attribute.attnum > 0
           AND NOT attribute.attisdropped
       `);
-      if (!attributes.rows[0]?.table_name) {
+      if (!attributes[0]?.table_name) {
         throw new Error(
           "Personal Agent Config Kit PostgreSQL schema is missing kit_active_sessions. Run `npm run migrate` with the migration role before enabling [personal_config]."
         );
       }
-      const names = new Set(
-        attributes.rows.flatMap(row => (row.column_name ? [row.column_name] : []))
-      );
+      const names = new Set(attributes.flatMap(row => (row.column_name ? [row.column_name] : [])));
       for (const required of ["cli", "scope_key", "session_id", "updated_at"]) {
         if (!names.has(required)) {
           throw new Error(
@@ -251,7 +301,14 @@ export class PostgreSQLSessionManager
       // Runtime roles are DML-only, so privacy repair belongs on this startup
       // path as well as in migration 014. This makes a partially migrated
       // database fail closed before a Kit session can be resumed.
-      await this.pool.query(`
+      // `jsonb_exists(x, 'k')`, not `x ? 'k'`. The port's Postgres driver
+      // rewrites `?` placeholders into `$n`, and it cannot tell a placeholder
+      // from jsonb's key-exists OPERATOR, which is the same character. The
+      // operator form here became `metadata $1 'kit'` and failed as a syntax
+      // error the moment this statement went through the driver. Every such
+      // operator in this file is spelled as its function for that reason; they
+      // are the same operator, so the semantics are unchanged.
+      await this.execute(`
         UPDATE sessions AS session
         SET metadata = jsonb_set(
           COALESCE(session.metadata, '{}'::jsonb),
@@ -284,7 +341,7 @@ export class PostgreSQLSessionManager
           END,
           true
         )
-        WHERE session.metadata ? 'kit'
+        WHERE jsonb_exists(session.metadata, 'kit')
           AND jsonb_typeof(session.metadata -> 'kit') = 'object'
           AND (
             session.metadata -> 'kit' -> 'nativeSessionId' IS DISTINCT FROM 'null'::jsonb
@@ -307,11 +364,14 @@ export class PostgreSQLSessionManager
    * not cover the first-use case because no pointer row exists yet.
    */
   private async lockKitActivePointer(
-    client: PoolClient,
+    connection: StorageConnection,
     cli: ProviderType,
     scopeKey: string
   ): Promise<void> {
-    await client.query("SELECT pg_advisory_xact_lock(hashtext($1), hashtext($2))", [cli, scopeKey]);
+    await connection.query("SELECT pg_advisory_xact_lock(hashtext($1), hashtext($2))", [
+      cli,
+      scopeKey,
+    ]);
   }
 
   /** Return a binding only when its session matches one exact accessible context. */
@@ -348,24 +408,19 @@ export class PostgreSQLSessionManager
     const ownerPrincipal = resolveOwnerPrincipal(getRequestContext());
     const generation = randomUUID();
 
-    const client = await this.pool.connect();
-    try {
-      await client.query("BEGIN");
-
-      await client.query(
+    return transactionWithAbort(this.driver, async connection => {
+      await connection.execute(
         `INSERT INTO sessions (id, cli, description, created_at, last_used_at, owner_principal, session_generation)
          VALUES ($1, $2, $3, $4, $5, $6, $7)`,
         [id, cli, sessionDescription, now, now, ownerPrincipal, generation]
       );
 
-      await client.query(
+      await connection.execute(
         `INSERT INTO active_sessions (cli, session_id, updated_at)
          VALUES ($1, $2, $3)
          ON CONFLICT (cli) DO NOTHING`,
         [cli, id, now]
       );
-
-      await client.query("COMMIT");
 
       return {
         id,
@@ -376,12 +431,7 @@ export class PostgreSQLSessionManager
         ownerPrincipal,
         generation,
       };
-    } catch (error) {
-      await rollbackPreservingFailure(client);
-      throw error;
-    } finally {
-      client.release();
-    }
+    });
   }
 
   async createSessionWithMetadata(
@@ -399,10 +449,8 @@ export class PostgreSQLSessionManager
     const ownerPrincipal = resolveOwnerPrincipal(getRequestContext());
     const generation = randomUUID();
     const storedMetadata = { ...metadata };
-    const client = await this.pool.connect();
-    try {
-      await client.query("BEGIN");
-      await client.query(
+    return transactionWithAbort(this.driver, async connection => {
+      await connection.execute(
         `INSERT INTO sessions
            (id, cli, description, metadata, created_at, last_used_at, owner_principal, session_generation)
          VALUES ($1, $2, $3, $4::jsonb, $5, $6, $7, $8)`,
@@ -417,13 +465,12 @@ export class PostgreSQLSessionManager
           generation,
         ]
       );
-      await client.query(
+      await connection.execute(
         `INSERT INTO active_sessions (cli, session_id, updated_at)
          VALUES ($1, $2, $3)
          ON CONFLICT (cli) DO NOTHING`,
         [cli, sessionId, now]
       );
-      await client.query("COMMIT");
       return {
         id: sessionId,
         cli,
@@ -434,12 +481,7 @@ export class PostgreSQLSessionManager
         generation,
         metadata: storedMetadata,
       };
-    } catch (error) {
-      await rollbackPreservingFailure(client);
-      throw error;
-    } finally {
-      client.release();
-    }
+    });
   }
 
   /**
@@ -464,11 +506,9 @@ export class PostgreSQLSessionManager
       storedBinding.execution,
       ownerPrincipal
     );
-    const client = await this.pool.connect();
-    try {
-      await client.query("BEGIN");
-      await this.lockKitActivePointer(client, cli, scopeKey);
-      await client.query(
+    return transactionWithAbort(this.driver, async connection => {
+      await this.lockKitActivePointer(connection, cli, scopeKey);
+      await connection.execute(
         `INSERT INTO sessions
            (id, cli, description, metadata, created_at, last_used_at, owner_principal, session_generation)
          VALUES ($1, $2, $3, $4::jsonb, $5, $6, $7, $8)`,
@@ -483,13 +523,12 @@ export class PostgreSQLSessionManager
           generation,
         ]
       );
-      await client.query(
+      await connection.execute(
         `INSERT INTO kit_active_sessions (cli, scope_key, session_id, updated_at)
          VALUES ($1, $2, $3, $4)
          ON CONFLICT (cli, scope_key) DO NOTHING`,
         [cli, scopeKey, id, now]
       );
-      await client.query("COMMIT");
       return {
         id,
         cli,
@@ -500,12 +539,7 @@ export class PostgreSQLSessionManager
         generation,
         metadata: { kit: storedBinding },
       };
-    } catch (error) {
-      await rollbackPreservingFailure(client);
-      throw error;
-    } finally {
-      client.release();
-    }
+    });
   }
 
   /**
@@ -529,10 +563,8 @@ export class PostgreSQLSessionManager
     const generation = randomUUID();
     const storedBinding = cloneKitSessionBinding(binding);
     const storedMetadata = { ...metadata, kit: storedBinding };
-    const client = await this.pool.connect();
-    try {
-      await client.query("BEGIN");
-      await client.query(
+    return transactionWithAbort(this.driver, async connection => {
+      await connection.execute(
         `INSERT INTO sessions
            (id, cli, description, metadata, created_at, last_used_at, owner_principal, session_generation)
          VALUES ($1, $2, $3, $4::jsonb, $5, $6, $7, $8)`,
@@ -547,7 +579,6 @@ export class PostgreSQLSessionManager
           generation,
         ]
       );
-      await client.query("COMMIT");
       return {
         id,
         cli,
@@ -558,12 +589,7 @@ export class PostgreSQLSessionManager
         generation,
         metadata: storedMetadata,
       };
-    } catch (error) {
-      await rollbackPreservingFailure(client);
-      throw error;
-    } finally {
-      client.release();
-    }
+    });
   }
 
   /**
@@ -623,14 +649,10 @@ export class PostgreSQLSessionManager
       kitPointerTargets.set(targetKey, pointer.sessionId);
     }
 
-    const client = await this.pool.connect();
-    let transactionOpen = false;
-    try {
-      await client.query("BEGIN");
-      transactionOpen = true;
+    return transactionWithAbort(this.driver, async connection => {
       // Serializes two operator invocations against the same database. It also
       // makes a waiting workstation observe exact committed rows as replays.
-      await client.query("SELECT pg_advisory_xact_lock(hashtext($1), hashtext($2))", [
+      await connection.query("SELECT pg_advisory_xact_lock(hashtext($1), hashtext($2))", [
         FILE_SESSION_MIGRATION_LOCK_NAMESPACE,
         FILE_SESSION_MIGRATION_LOCK_KEY,
       ]);
@@ -639,14 +661,14 @@ export class PostgreSQLSessionManager
       let replayed = 0;
       for (const record of plan.sessions) {
         const metadata = storedMigrationMetadata(record);
-        const existingResult = await client.query<Session>(
+        const existingRows = await connection.query<Session>(
           `SELECT id, cli, description, metadata, created_at AS "createdAt",
                   last_used_at AS "lastUsedAt", owner_principal AS "ownerPrincipal",
                   session_generation AS generation
            FROM sessions WHERE id = $1 FOR UPDATE`,
           [record.id]
         );
-        const existing = existingResult.rows[0];
+        const existing = existingRows[0];
         if (existing) {
           if (!migrationRecordMatchesExisting(existing, record, metadata)) {
             throw new Error("A target session conflicts with the source migration");
@@ -658,7 +680,7 @@ export class PostgreSQLSessionManager
         // The SOURCE timestamps, not `now`. A migration is a copy; stamping the
         // import time makes every row look freshly created and destroys age,
         // ordering and TTL semantics in one pass.
-        await client.query(
+        await connection.execute(
           `INSERT INTO sessions
              (id, cli, description, metadata, created_at, last_used_at, owner_principal)
            VALUES ($1, $2, $3, $4::jsonb, $5, $6, $7)`,
@@ -680,7 +702,7 @@ export class PostgreSQLSessionManager
         // Never replace a target pointer selected by live traffic. An exact
         // replay is harmless, and an absent pointer may be restored, but a
         // different target is a migration conflict that rolls back all rows.
-        const restored = await client.query(
+        const restored = await connection.query(
           `INSERT INTO active_sessions (cli, session_id, updated_at)
            VALUES ($1, $2, $3)
            ON CONFLICT (cli) DO UPDATE
@@ -689,7 +711,7 @@ export class PostgreSQLSessionManager
            RETURNING session_id`,
           [pointer.cli, pointer.sessionId, pointerNow]
         );
-        if (restored.rowCount !== 1) {
+        if (restored.length !== 1) {
           throw new Error("A target active session pointer conflicts with the source migration");
         }
       }
@@ -700,12 +722,12 @@ export class PostgreSQLSessionManager
           pointer.execution,
           pointer.ownerPrincipal
         );
-        await this.lockKitActivePointer(client, pointer.cli, scopeKey);
+        await this.lockKitActivePointer(connection, pointer.cli, scopeKey);
         // Kit writers share the advisory lock above. The conditional upsert
         // additionally preserves a pointer that was established before this
         // import began, so a stale source snapshot can never displace a live
         // continuation.
-        const restored = await client.query(
+        const restored = await connection.query(
           `INSERT INTO kit_active_sessions (cli, scope_key, session_id, updated_at)
            VALUES ($1, $2, $3, $4)
            ON CONFLICT (cli, scope_key) DO UPDATE
@@ -714,7 +736,7 @@ export class PostgreSQLSessionManager
            RETURNING session_id`,
           [pointer.cli, scopeKey, pointer.sessionId, pointerNow]
         );
-        if (restored.rowCount !== 1) {
+        if (restored.length !== 1) {
           throw new Error(
             "A target Personal Agent Config Kit pointer conflicts with the source migration"
           );
@@ -727,7 +749,7 @@ export class PostgreSQLSessionManager
       // so a concurrent live selection always remains intact.
       for (const record of plan.sessions) {
         if (record.binding || activePointerTargets.has(record.cli)) continue;
-        await client.query(
+        await connection.execute(
           `INSERT INTO active_sessions (cli, session_id, updated_at)
            VALUES ($1, $2, $3)
            ON CONFLICT (cli) DO NOTHING`,
@@ -735,21 +757,8 @@ export class PostgreSQLSessionManager
         );
       }
 
-      await client.query("COMMIT");
-      transactionOpen = false;
       return { migrated, replayed };
-    } catch (error) {
-      if (transactionOpen) {
-        try {
-          await client.query("ROLLBACK");
-        } catch {
-          // Preserve the original migration failure when the connection fails.
-        }
-      }
-      throw error;
-    } finally {
-      client.release();
-    }
+    });
   }
 
   /**
@@ -768,16 +777,14 @@ export class PostgreSQLSessionManager
     const ownerPrincipal = resolveOwnerPrincipal(getRequestContext());
     const scopeRoot = requestedBinding.execution.scopeRoot;
     const scopeKey = kitActiveSessionKey(scopeRoot, requestedBinding.execution, ownerPrincipal);
-    const client = await this.pool.connect();
 
-    try {
-      await client.query("BEGIN");
+    return transactionWithAbort(this.driver, async connection => {
       // `kit_active_sessions` has no row on first use. Locking an advisory key
       // derived from its primary key prevents two first callers from both
       // creating a session before either can insert the pointer.
-      await this.lockKitActivePointer(client, cli, scopeKey);
+      await this.lockKitActivePointer(connection, cli, scopeKey);
 
-      const activeResult = await client.query<Session>(
+      const activeRows = await connection.query<Session>(
         `SELECT s.id, s.cli, s.description, s.metadata,
                 s.created_at AS "createdAt", s.last_used_at AS "lastUsedAt",
                 s.owner_principal AS "ownerPrincipal", s.session_generation AS generation
@@ -787,41 +794,39 @@ export class PostgreSQLSessionManager
          FOR UPDATE OF active, s`,
         [cli, scopeKey]
       );
-      const active = activeResult.rows[0];
+      const active = activeRows[0];
       if (active && sessionMatchesKitBinding(active, cli, requestedBinding, ownerPrincipal)) {
-        await client.query("COMMIT");
         return active;
       }
       if (active) {
-        await client.query(
+        await connection.execute(
           "DELETE FROM kit_active_sessions WHERE cli = $1 AND scope_key = $2 AND session_id = $3",
           [cli, scopeKey, active.id]
         );
       }
 
       if (sessionId) {
-        const identifiedResult = await client.query<Session>(
+        const identifiedRows = await connection.query<Session>(
           `SELECT id, cli, description, metadata, created_at AS "createdAt",
                   last_used_at AS "lastUsedAt", owner_principal AS "ownerPrincipal",
                   session_generation AS generation
            FROM sessions WHERE id = $1 FOR UPDATE`,
           [sessionId]
         );
-        const identified = identifiedResult.rows[0];
+        const identified = identifiedRows[0];
         if (identified) {
           if (!sessionMatchesKitBinding(identified, cli, requestedBinding, ownerPrincipal)) {
             throw new Error(
               `Kit session id ${sessionId} is already bound to a different execution`
             );
           }
-          await client.query(
+          await connection.execute(
             `INSERT INTO kit_active_sessions (cli, scope_key, session_id, updated_at)
              VALUES ($1, $2, $3, $4)
              ON CONFLICT (cli, scope_key) DO UPDATE
                SET session_id = EXCLUDED.session_id, updated_at = EXCLUDED.updated_at`,
             [cli, scopeKey, identified.id, new Date().toISOString()]
           );
-          await client.query("COMMIT");
           return identified;
         }
       }
@@ -830,7 +835,7 @@ export class PostgreSQLSessionManager
       const now = new Date().toISOString();
       const generation = randomUUID();
       const sessionDescription = description ?? defaultSessionDescription(cli);
-      await client.query(
+      await connection.execute(
         `INSERT INTO sessions
            (id, cli, description, metadata, created_at, last_used_at, owner_principal, session_generation)
          VALUES ($1, $2, $3, $4::jsonb, $5, $6, $7, $8)`,
@@ -845,12 +850,11 @@ export class PostgreSQLSessionManager
           generation,
         ]
       );
-      await client.query(
+      await connection.execute(
         `INSERT INTO kit_active_sessions (cli, scope_key, session_id, updated_at)
          VALUES ($1, $2, $3, $4)`,
         [cli, scopeKey, id, now]
       );
-      await client.query("COMMIT");
       return {
         id,
         cli,
@@ -861,16 +865,7 @@ export class PostgreSQLSessionManager
         generation,
         metadata: { kit: requestedBinding },
       };
-    } catch (error) {
-      try {
-        await client.query("ROLLBACK");
-      } catch {
-        // The query may have failed before BEGIN; retain the original error.
-      }
-      throw error;
-    } finally {
-      client.release();
-    }
+    });
   }
 
   /**
@@ -888,18 +883,16 @@ export class PostgreSQLSessionManager
     await this.ensureKitPointerSchema();
     const ownerPrincipal = resolveOwnerPrincipal(getRequestContext());
     const scopeKey = kitActiveSessionKey(scopeRoot, execution, ownerPrincipal);
-    const client = await this.pool.connect();
-    try {
-      await client.query("BEGIN");
-      await this.lockKitActivePointer(client, cli, scopeKey);
-      const sessionResult = await client.query<Session>(
+    return transactionWithAbort(this.driver, async connection => {
+      await this.lockKitActivePointer(connection, cli, scopeKey);
+      const sessionRows = await connection.query<Session>(
         `SELECT id, cli, description, metadata, created_at AS "createdAt",
                 last_used_at AS "lastUsedAt", owner_principal AS "ownerPrincipal",
                 session_generation AS generation
          FROM sessions WHERE id = $1 FOR UPDATE`,
         [sessionId]
       );
-      const session = sessionResult.rows[0];
+      const session = sessionRows[0];
       const binding = session ? getKitSessionBinding(session) : null;
       if (
         !session ||
@@ -908,26 +901,15 @@ export class PostgreSQLSessionManager
         !binding ||
         !sameKitExecutionRef(binding.execution, execution)
       ) {
-        await client.query("ROLLBACK");
-        return false;
+        abortWith(false);
       }
-      const result = await client.query(
+      const result = await connection.execute(
         `DELETE FROM kit_active_sessions
          WHERE cli = $1 AND scope_key = $2 AND session_id = $3`,
         [cli, scopeKey, sessionId]
       );
-      await client.query("COMMIT");
-      return result.rowCount === 1;
-    } catch (error) {
-      try {
-        await client.query("ROLLBACK");
-      } catch {
-        // The query may have failed before BEGIN; retain the original error.
-      }
-      throw error;
-    } finally {
-      client.release();
-    }
+      return result.rowsAffected === 1;
+    });
   }
 
   /**
@@ -948,45 +930,32 @@ export class PostgreSQLSessionManager
     await this.ensureKitPointerSchema();
     const ownerPrincipal = resolveOwnerPrincipal(getRequestContext());
     const scopeKey = kitActiveSessionKey(scopeRoot, execution, ownerPrincipal);
-    const client = await this.pool.connect();
-    try {
-      await client.query("BEGIN");
-      await this.lockKitActivePointer(client, cli, scopeKey);
-      const result = await client.query<Session>(
+    return transactionWithAbort(this.driver, async connection => {
+      await this.lockKitActivePointer(connection, cli, scopeKey);
+      const rows = await connection.query<Session>(
         `SELECT id, cli, description, metadata, created_at AS "createdAt",
                 last_used_at AS "lastUsedAt", owner_principal AS "ownerPrincipal",
                 session_generation AS generation
          FROM sessions WHERE id = $1 FOR UPDATE`,
         [sessionId]
       );
-      const session = result.rows[0];
+      const session = rows[0];
       const binding = this.getExactKitBinding(session, cli, execution, ownerPrincipal);
       if (
         !binding ||
         binding.attempt ||
         binding.nativeSessionId !== nextAttempt.expectedNativeSessionId
       ) {
-        await client.query("ROLLBACK");
-        return false;
+        abortWith(false);
       }
-      await client.query(
+      await connection.execute(
         `UPDATE sessions
          SET metadata = jsonb_set(COALESCE(metadata, '{}'::jsonb), '{kit}', $1::jsonb, true)
          WHERE id = $2`,
         [JSON.stringify({ ...binding, attempt: nextAttempt }), sessionId]
       );
-      await client.query("COMMIT");
       return true;
-    } catch (error) {
-      try {
-        await client.query("ROLLBACK");
-      } catch {
-        // The query may have failed before BEGIN; retain the original error.
-      }
-      throw error;
-    } finally {
-      client.release();
-    }
+    });
   }
 
   /** Renew one exact held attempt without accepting a different holder. */
@@ -1002,50 +971,36 @@ export class PostgreSQLSessionManager
     await this.ensureKitPointerSchema();
     const ownerPrincipal = resolveOwnerPrincipal(getRequestContext());
     const scopeKey = kitActiveSessionKey(scopeRoot, execution, ownerPrincipal);
-    const client = await this.pool.connect();
-    try {
-      await client.query("BEGIN");
-      await this.lockKitActivePointer(client, cli, scopeKey);
-      const result = await client.query<Session>(
+    return transactionWithAbort(this.driver, async connection => {
+      await this.lockKitActivePointer(connection, cli, scopeKey);
+      const rows = await connection.query<Session>(
         `SELECT id, cli, description, metadata, created_at AS "createdAt",
                 last_used_at AS "lastUsedAt", owner_principal AS "ownerPrincipal",
                 session_generation AS generation
          FROM sessions WHERE id = $1 FOR UPDATE`,
         [sessionId]
       );
-      const session = result.rows[0];
+      const session = rows[0];
       const binding = this.getExactKitBinding(session, cli, execution, ownerPrincipal);
       const currentAttempt = binding?.attempt;
       if (!binding || !currentAttempt || currentAttempt.id !== attemptId) {
-        await client.query("ROLLBACK");
-        return false;
+        abortWith(false);
       }
       const renewedAttempt = cloneKitSessionAttempt({ ...currentAttempt, expiresAt });
       if (
         !isKitSessionAttemptActive(renewedAttempt) ||
         Date.parse(renewedAttempt.expiresAt) <= Date.parse(currentAttempt.expiresAt)
       ) {
-        await client.query("ROLLBACK");
-        return false;
+        abortWith(false);
       }
-      await client.query(
+      await connection.execute(
         `UPDATE sessions
          SET metadata = jsonb_set(COALESCE(metadata, '{}'::jsonb), '{kit}', $1::jsonb, true)
          WHERE id = $2`,
         [JSON.stringify({ ...binding, attempt: renewedAttempt }), sessionId]
       );
-      await client.query("COMMIT");
       return true;
-    } catch (error) {
-      try {
-        await client.query("ROLLBACK");
-      } catch {
-        // The query may have failed before BEGIN; retain the original error.
-      }
-      throw error;
-    } finally {
-      client.release();
-    }
+    });
   }
 
   /** Release one exact attempt without disturbing another lease generation. */
@@ -1060,43 +1015,30 @@ export class PostgreSQLSessionManager
     await this.ensureKitPointerSchema();
     const ownerPrincipal = resolveOwnerPrincipal(getRequestContext());
     const scopeKey = kitActiveSessionKey(scopeRoot, execution, ownerPrincipal);
-    const client = await this.pool.connect();
-    try {
-      await client.query("BEGIN");
-      await this.lockKitActivePointer(client, cli, scopeKey);
-      const result = await client.query<Session>(
+    return transactionWithAbort(this.driver, async connection => {
+      await this.lockKitActivePointer(connection, cli, scopeKey);
+      const rows = await connection.query<Session>(
         `SELECT id, cli, description, metadata, created_at AS "createdAt",
                 last_used_at AS "lastUsedAt", owner_principal AS "ownerPrincipal",
                 session_generation AS generation
          FROM sessions WHERE id = $1 FOR UPDATE`,
         [sessionId]
       );
-      const session = result.rows[0];
+      const session = rows[0];
       const binding = this.getExactKitBinding(session, cli, execution, ownerPrincipal);
       if (!binding || binding.attempt?.id !== attemptId) {
-        await client.query("ROLLBACK");
-        return false;
+        abortWith(false);
       }
       const bindingWithoutAttempt = { ...binding };
       delete bindingWithoutAttempt.attempt;
-      await client.query(
+      await connection.execute(
         `UPDATE sessions
          SET metadata = jsonb_set(COALESCE(metadata, '{}'::jsonb), '{kit}', $1::jsonb, true)
          WHERE id = $2`,
         [JSON.stringify(bindingWithoutAttempt), sessionId]
       );
-      await client.query("COMMIT");
       return true;
-    } catch (error) {
-      try {
-        await client.query("ROLLBACK");
-      } catch {
-        // The query may have failed before BEGIN; retain the original error.
-      }
-      throw error;
-    } finally {
-      client.release();
-    }
+    });
   }
 
   /**
@@ -1104,14 +1046,14 @@ export class PostgreSQLSessionManager
    */
   async getSession(sessionId: string): Promise<Session | null> {
     await this.ensureSessionSchema();
-    const result = await this.pool.query<Session>(
+    const rows = await this.query<Session>(
       `SELECT id, cli, description, metadata, created_at AS "createdAt", last_used_at AS "lastUsedAt", owner_principal AS "ownerPrincipal", session_generation AS generation
        FROM sessions
        WHERE id = $1`,
       [sessionId]
     );
 
-    return result.rows[0] ?? null;
+    return rows[0] ?? null;
   }
 
   /**
@@ -1128,11 +1070,7 @@ export class PostgreSQLSessionManager
          FROM sessions
          ORDER BY last_used_at DESC`;
 
-    const result = cli
-      ? await this.pool.query<Session>(query, [cli])
-      : await this.pool.query<Session>(query);
-
-    return result.rows;
+    return cli ? await this.query<Session>(query, [cli]) : await this.query<Session>(query);
   }
 
   /**
@@ -1147,14 +1085,14 @@ export class PostgreSQLSessionManager
     if (getKitSessionBinding(session)?.attempt) return false;
     // Recheck the JSON binding in the DELETE itself. A concurrent Kit claim
     // between getSession() and this statement must win over user deletion.
-    const result = await this.pool.query(
+    const rowsAffected = await this.execute(
       `DELETE FROM sessions
        WHERE id = $1
-         AND (NOT (COALESCE(metadata, '{}'::jsonb) ? 'kit')
-              OR NOT (COALESCE(metadata, '{}'::jsonb)->'kit' ? 'attempt'))`,
+         AND (NOT jsonb_exists(COALESCE(metadata, '{}'::jsonb), 'kit')
+              OR NOT jsonb_exists(COALESCE(metadata, '{}'::jsonb)->'kit', 'attempt'))`,
       [sessionId]
     );
-    if (result.rowCount === 0) return false;
+    if (rowsAffected === 0) return false;
     this.notifySessionRemoved(session);
     return true;
   }
@@ -1172,7 +1110,7 @@ export class PostgreSQLSessionManager
     }
 
     const now = new Date().toISOString();
-    await this.pool.query(
+    await this.execute(
       `INSERT INTO active_sessions (cli, session_id, updated_at)
        VALUES ($1, $2, $3)
        ON CONFLICT (cli) DO UPDATE SET session_id = $2, updated_at = $3`,
@@ -1186,12 +1124,12 @@ export class PostgreSQLSessionManager
    * Get active session for a CLI.
    */
   async getActiveSession(cli: ProviderType): Promise<Session | null> {
-    const result = await this.pool.query<{ session_id: string | null }>(
+    const rows = await this.query<{ session_id: string | null }>(
       "SELECT session_id FROM active_sessions WHERE cli = $1",
       [cli]
     );
 
-    const sessionId = result.rows[0]?.session_id;
+    const sessionId = rows[0]?.session_id;
     if (!sessionId) {
       return null;
     }
@@ -1209,30 +1147,27 @@ export class PostgreSQLSessionManager
     if (expectedExecution && expectedExecution.scopeRoot !== scopeRoot) return false;
     await this.ensureKitPointerSchema();
     const ownerPrincipal = resolveOwnerPrincipal(getRequestContext());
-    const client = await this.pool.connect();
-    try {
-      await client.query("BEGIN");
+    return transactionWithAbort(this.driver, async connection => {
       if (sessionId === null) {
         const scopeKey = kitActiveSessionKey(scopeRoot, expectedExecution!, ownerPrincipal);
-        await this.lockKitActivePointer(client, cli, scopeKey);
-        await client.query("DELETE FROM kit_active_sessions WHERE cli = $1 AND scope_key = $2", [
-          cli,
-          scopeKey,
-        ]);
-        await client.query("COMMIT");
+        await this.lockKitActivePointer(connection, cli, scopeKey);
+        await connection.execute(
+          "DELETE FROM kit_active_sessions WHERE cli = $1 AND scope_key = $2",
+          [cli, scopeKey]
+        );
         return true;
       }
       // Read without a row lock to derive the exact pointer key, then take the
       // advisory lock before taking the row lock. This matches get-or-create
       // and createKitSession's lock order, avoiding a pointer/session deadlock.
-      const candidateResult = await client.query<Session>(
+      const candidateRows = await connection.query<Session>(
         `SELECT id, cli, description, metadata, created_at AS "createdAt",
                 last_used_at AS "lastUsedAt", owner_principal AS "ownerPrincipal",
                 session_generation AS generation
          FROM sessions WHERE id = $1`,
         [sessionId]
       );
-      const candidate = candidateResult.rows[0];
+      const candidate = candidateRows[0];
       const candidateBinding = candidate ? getKitSessionBinding(candidate) : null;
       if (
         !candidate ||
@@ -1243,19 +1178,18 @@ export class PostgreSQLSessionManager
           !sameKitExecutionRef(candidateBinding.execution, expectedExecution)) ||
         !principalCanAccess(candidate.ownerPrincipal, ownerPrincipal)
       ) {
-        await client.query("ROLLBACK");
-        return false;
+        abortWith(false);
       }
       const scopeKey = kitActiveSessionKey(scopeRoot, candidateBinding.execution, ownerPrincipal);
-      await this.lockKitActivePointer(client, cli, scopeKey);
-      const sessionResult = await client.query<Session>(
+      await this.lockKitActivePointer(connection, cli, scopeKey);
+      const sessionRows = await connection.query<Session>(
         `SELECT id, cli, description, metadata, created_at AS "createdAt",
                 last_used_at AS "lastUsedAt", owner_principal AS "ownerPrincipal",
                 session_generation AS generation
          FROM sessions WHERE id = $1 FOR UPDATE`,
         [sessionId]
       );
-      const session = sessionResult.rows[0];
+      const session = sessionRows[0];
       const binding = session ? getKitSessionBinding(session) : null;
       if (
         !session ||
@@ -1266,28 +1200,17 @@ export class PostgreSQLSessionManager
         (expectedExecution && !sameKitExecutionRef(binding.execution, expectedExecution)) ||
         !principalCanAccess(session.ownerPrincipal, ownerPrincipal)
       ) {
-        await client.query("ROLLBACK");
-        return false;
+        abortWith(false);
       }
-      await client.query(
+      await connection.execute(
         `INSERT INTO kit_active_sessions (cli, scope_key, session_id, updated_at)
          VALUES ($1, $2, $3, $4)
          ON CONFLICT (cli, scope_key) DO UPDATE
            SET session_id = EXCLUDED.session_id, updated_at = EXCLUDED.updated_at`,
         [cli, scopeKey, sessionId, new Date().toISOString()]
       );
-      await client.query("COMMIT");
       return true;
-    } catch (error) {
-      try {
-        await client.query("ROLLBACK");
-      } catch {
-        // The query may have failed before BEGIN; retain the original error.
-      }
-      throw error;
-    } finally {
-      client.release();
-    }
+    });
   }
 
   async getActiveKitSession(
@@ -1299,12 +1222,12 @@ export class PostgreSQLSessionManager
     await this.ensureKitPointerSchema();
     const ownerPrincipal = resolveOwnerPrincipal(getRequestContext());
     const scopeKey = kitActiveSessionKey(scopeRoot, expectedExecution, ownerPrincipal);
-    const result = await this.pool.query<{ session_id: string }>(
+    const rows = await this.query<{ session_id: string }>(
       `SELECT session_id FROM kit_active_sessions
        WHERE cli = $1 AND scope_key = $2`,
       [cli, scopeKey]
     );
-    const sessionId = result.rows[0]?.session_id;
+    const sessionId = rows[0]?.session_id;
     if (!sessionId) return null;
     const session = await this.getSession(sessionId);
     const binding = session ? getKitSessionBinding(session) : null;
@@ -1321,7 +1244,7 @@ export class PostgreSQLSessionManager
       return null;
     }
     if (!session || session.cli !== cli || !binding || binding.execution.scopeRoot !== scopeRoot) {
-      await this.pool.query(
+      await this.execute(
         "DELETE FROM kit_active_sessions WHERE cli = $1 AND scope_key = $2 AND session_id = $3",
         [cli, scopeKey, sessionId]
       );
@@ -1336,7 +1259,7 @@ export class PostgreSQLSessionManager
    */
   async updateSessionUsage(sessionId: string): Promise<void> {
     const now = new Date().toISOString();
-    await this.pool.query("UPDATE sessions SET last_used_at = $1 WHERE id = $2", [now, sessionId]);
+    await this.execute("UPDATE sessions SET last_used_at = $1 WHERE id = $2", [now, sessionId]);
   }
 
   /**
@@ -1346,7 +1269,7 @@ export class PostgreSQLSessionManager
     // Kit metadata carries ownership leases and immutable continuation guards.
     // It must only be written by the dedicated, compare-and-swap APIs below.
     if (Object.prototype.hasOwnProperty.call(metadata, "kit")) return false;
-    const result = await this.pool.query(
+    const rowsAffected = await this.execute(
       `UPDATE sessions
        SET metadata = COALESCE(metadata, '{}'::jsonb) || $1::jsonb
        WHERE id = $2
@@ -1354,7 +1277,7 @@ export class PostgreSQLSessionManager
       [JSON.stringify(metadata), sessionId]
     );
 
-    return result.rowCount !== 0;
+    return rowsAffected !== 0;
   }
 
   async compareAndSetSession(
@@ -1381,14 +1304,14 @@ export class PostgreSQLSessionManager
 
     if (mutation.kind === "replace_metadata") {
       if (!isDeepStrictEqual(expectedMetadata.kit, mutation.metadata?.kit)) return false;
-      const result = await this.pool.query(
+      const rowsAffected = await this.execute(
         `UPDATE sessions
          SET metadata = $1::jsonb
          WHERE ${identityPredicate}
          RETURNING id`,
         parameters
       );
-      return result.rowCount !== 0;
+      return rowsAffected !== 0;
     }
 
     const deleteIdentityPredicate = `id = $1
@@ -1397,17 +1320,17 @@ export class PostgreSQLSessionManager
        AND created_at = $4::timestamptz
        AND session_generation = $5::uuid
        AND COALESCE(metadata, '{}'::jsonb) = $6::jsonb`;
-    const result = await this.pool.query<Session>(
+    const rows = await this.query<Session>(
       `DELETE FROM sessions
        WHERE ${deleteIdentityPredicate}
-         AND (NOT (COALESCE(metadata, '{}'::jsonb) ? 'kit')
-              OR NOT (COALESCE(metadata, '{}'::jsonb)->'kit' ? 'attempt'))
+         AND (NOT jsonb_exists(COALESCE(metadata, '{}'::jsonb), 'kit')
+              OR NOT jsonb_exists(COALESCE(metadata, '{}'::jsonb)->'kit', 'attempt'))
        RETURNING id, cli, description, metadata, created_at AS "createdAt",
                  last_used_at AS "lastUsedAt", owner_principal AS "ownerPrincipal",
                  session_generation AS generation`,
       parameters.slice(1)
     );
-    const removed = result.rows[0];
+    const removed = rows[0];
     if (!removed) return false;
     this.notifySessionRemoved(removed);
     return true;
@@ -1425,31 +1348,26 @@ export class PostgreSQLSessionManager
     await this.ensureKitPointerSchema();
     const next = cloneKitSessionBinding(binding);
     const ownerPrincipal = resolveOwnerPrincipal(getRequestContext());
-    const client = await this.pool.connect();
-    try {
-      await client.query("BEGIN");
-      const result = await client.query<Session>(
+    return transactionWithAbort(this.driver, async connection => {
+      const rows = await connection.query<Session>(
         `SELECT id, cli, description, metadata, created_at AS "createdAt",
                 last_used_at AS "lastUsedAt", owner_principal AS "ownerPrincipal",
                 session_generation AS generation
          FROM sessions WHERE id = $1 FOR UPDATE`,
         [sessionId]
       );
-      const session = result.rows[0];
+      const session = rows[0];
       if (!session) {
-        await client.query("ROLLBACK");
-        return false;
+        abortWith(false);
       }
       const existing = getKitSessionBinding(session);
       // Binding creation is intentionally limited to createKitSession, whose
       // transaction also writes the scoped active pointer before execution.
       if (!existing || !sameKitExecutionRef(existing.execution, next.execution)) {
-        await client.query("ROLLBACK");
-        return false;
+        abortWith(false);
       }
       if (existing.attempt && expectedAttemptId === undefined) {
-        await client.query("ROLLBACK");
-        return false;
+        abortWith(false);
       }
       if (expectedAttemptId !== undefined) {
         const currentAttempt = existing.attempt;
@@ -1460,36 +1378,25 @@ export class PostgreSQLSessionManager
           currentAttempt.id !== expectedAttemptId ||
           existing.nativeSessionId !== currentAttempt.expectedNativeSessionId
         ) {
-          await client.query("ROLLBACK");
-          return false;
+          abortWith(false);
         }
       }
-      await client.query(
+      await connection.execute(
         `UPDATE sessions
          SET metadata = jsonb_set(COALESCE(metadata, '{}'::jsonb), '{kit}', $1::jsonb, true)
          WHERE id = $2`,
         [JSON.stringify(next), sessionId]
       );
-      await client.query("COMMIT");
       return true;
-    } catch (error) {
-      try {
-        await client.query("ROLLBACK");
-      } catch {
-        // The query may have failed before BEGIN; retain the original error.
-      }
-      throw error;
-    } finally {
-      client.release();
-    }
+    });
   }
 
   async getPinnedKitReleaseIds(): Promise<string[]> {
-    const result = await this.pool.query<{ metadata: Record<string, unknown> | null }>(
-      "SELECT metadata FROM sessions WHERE metadata ? 'kit'"
+    const rows = await this.query<{ metadata: Record<string, unknown> | null }>(
+      "SELECT metadata FROM sessions WHERE jsonb_exists(metadata, 'kit')"
     );
     const releases = new Set<string>();
-    for (const row of result.rows) {
+    for (const row of rows) {
       const binding = getKitSessionBinding({
         id: "kit-release-query",
         cli: "claude",
@@ -1513,17 +1420,19 @@ export class PostgreSQLSessionManager
    */
   async clearAllSessions(cli?: ProviderType): Promise<number> {
     await this.ensureSessionSchema();
-    const protectedAttempt = `(NOT (COALESCE(metadata, '{}'::jsonb) ? 'kit')
-      OR NOT (COALESCE(metadata, '{}'::jsonb)->'kit' ? 'attempt'))`;
+    const protectedAttempt = `(NOT jsonb_exists(COALESCE(metadata, '{}'::jsonb), 'kit')
+      OR NOT jsonb_exists(COALESCE(metadata, '{}'::jsonb)->'kit', 'attempt'))`;
     const query = cli
       ? `DELETE FROM sessions WHERE cli = $1 AND ${protectedAttempt}
          RETURNING id, cli, description, metadata, created_at AS "createdAt", last_used_at AS "lastUsedAt", owner_principal AS "ownerPrincipal", session_generation AS generation`
       : `DELETE FROM sessions WHERE ${protectedAttempt}
          RETURNING id, cli, description, metadata, created_at AS "createdAt", last_used_at AS "lastUsedAt", owner_principal AS "ownerPrincipal", session_generation AS generation`;
-    const result = cli ? await this.pool.query(query, [cli]) : await this.pool.query(query);
+    const removed = cli
+      ? await this.query<Session>(query, [cli])
+      : await this.query<Session>(query);
 
-    for (const session of result.rows as Session[]) this.notifySessionRemoved(session);
-    return result.rowCount || 0;
+    for (const session of removed) this.notifySessionRemoved(session);
+    return removed.length;
   }
 
   /**
@@ -1541,14 +1450,13 @@ export class PostgreSQLSessionManager
   async listPendingWorktreeCleanupSessions(ownerHostname?: string): Promise<Session[]> {
     if (!ownerHostname) return [];
     await this.ensureSessionSchema();
-    const result = await this.pool.query<Session>(
+    return await this.query<Session>(
       `SELECT id, cli, description, metadata, created_at AS "createdAt", last_used_at AS "lastUsedAt", owner_principal AS "ownerPrincipal", session_generation AS generation
        FROM sessions
        WHERE metadata->>'worktreeCleanupPendingDeletion' = 'true'
          AND metadata->>'worktreeOwnerHostname' = $1`,
       [ownerHostname]
     );
-    return result.rows;
   }
 
   /**
@@ -1563,7 +1471,7 @@ export class PostgreSQLSessionManager
     await this.ensureSessionSchema();
     const ownerHostname = session.metadata?.worktreeOwnerHostname;
     if (typeof ownerHostname !== "string" || ownerHostname.length === 0) return false;
-    const result = await this.pool.query(
+    const rowsAffected = await this.execute(
       `DELETE FROM sessions
        WHERE id = $1
          AND session_generation IS NOT DISTINCT FROM $2
@@ -1571,6 +1479,6 @@ export class PostgreSQLSessionManager
          AND metadata->>'worktreeOwnerHostname' = $3`,
       [session.id, session.generation ?? null, ownerHostname]
     );
-    return (result.rowCount ?? 0) === 1;
+    return rowsAffected === 1;
   }
 }

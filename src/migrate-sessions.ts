@@ -320,7 +320,7 @@ Environment Variables:
   // Connect to database
   console.error("Connecting to database...");
   const db = await createDatabaseConnection(config, logger);
-  const pgManager = new PostgreSQLSessionManager(db.getPool());
+  const pgManager = new PostgreSQLSessionManager(db.getDriver());
   console.error("✓ Connected to database\n");
 
   try {

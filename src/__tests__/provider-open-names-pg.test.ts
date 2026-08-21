@@ -7,15 +7,14 @@
  */
 import { describe, it, expect, beforeEach } from "vitest";
 import { PostgreSQLSessionManager } from "../session-manager-pg.js";
-import { setupTestDatabase, cleanTestDatabase } from "./setup.js";
+import { cleanTestDatabase, setupTestStorageDriver } from "./setup.js";
 
 describe("Slice 0.5 open API provider names (Postgres)", () => {
   let pgManager: PostgreSQLSessionManager;
 
   beforeEach(async () => {
     await cleanTestDatabase();
-    const { pool } = await setupTestDatabase();
-    pgManager = new PostgreSQLSessionManager(pool);
+    pgManager = new PostgreSQLSessionManager(await setupTestStorageDriver());
   });
 
   it("round-trips a session whose provider is an arbitrary api name", async () => {

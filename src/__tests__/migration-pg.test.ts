@@ -23,7 +23,7 @@ import {
   type KitSessionBinding,
 } from "../personal-config-types.js";
 import { runWithRequestContext } from "../request-context.js";
-import { setupTestDatabase, cleanTestDatabase } from "./setup.js";
+import { setupTestDatabase, setupTestStorageDriver, cleanTestDatabase } from "./setup.js";
 import { readFileSync, writeFileSync, mkdirSync, rmSync } from "fs";
 import { join } from "path";
 import { tmpdir } from "os";
@@ -258,8 +258,7 @@ describe("Session Migration", () => {
 
   beforeEach(async () => {
     await cleanTestDatabase();
-    const { pool } = await setupTestDatabase();
-    pgManager = new PostgreSQLSessionManager(pool);
+    pgManager = new PostgreSQLSessionManager(await setupTestStorageDriver());
 
     // Create test directory
     testDir = join(
