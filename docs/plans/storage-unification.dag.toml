@@ -32,7 +32,7 @@ id = "b1.sqlite-async-benchmark"
 depends_on = []
 role = "Design section 9's outstanding deliverable. Until it exists, whether wrapping a synchronous engine in promises costs anything at the recorder's call rate is UNKNOWN, and the design says so."
 action = "Measure p50/p99 request latency, event-loop delay, WAL contention and shutdown drain on a representative 1.2 GB copy, at measured and worst-case rates."
-status = "done 2026-08-21. Async wrapping measures ZERO (-0.001ms, sign-unstable over 3 processes); the whole +0.016ms delta is the driver's non-async choices, so s7 proceeds and the driver needs a statement cache. Buried twice: 10.8ms fsync/request and a 2x cold-start penalty at real rates. Shutdown is the real async cost: JobStore.close() is `void` so no caller can await a drain, and the 2s bound cannot fire because setTimeout never preempts the queue's microtask chain."
+status = "done 2026-08-21, 4 review rounds. Async wrapping is not a stable effect (-1.3us, sign-unstable over 3 processes); the stable +17us delta is the driver's non-async bundle, so s7 proceeds on performance. Buried under 10.8ms fsync/request and an 11ms low-rate cold-service penalty, not shown independent. Shutdown is the real async cost: JobStore.close() is `void` so no caller can await a drain, and a setTimeout bound cannot preempt the queue's microtask chain (500 queued, 2598ms, 0 rejected)."
 affects = ["s7.flight-recorder-onto-the-port"]
 
 [[node]]
