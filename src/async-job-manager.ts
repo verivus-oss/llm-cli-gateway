@@ -1319,6 +1319,27 @@ export class AsyncJobManager {
    * deregister so a job being finalized is never orphaned mid-write.
    */
   private readonly pendingWrites = new Set<Promise<unknown>>();
+  /**
+   * Startup registration, as a promise the admission path can await.
+   *
+   * The constructor cannot await, but the register-before-admit invariant below
+   * requires that no job row is written before this instance's row exists. So
+   * the constructor STARTS registration and every admission awaits it. It
+   * always RESOLVES: `restoreDurableAdmission` catches its own failure and
+   * leaves `durableAdmission` false, so a rejected `ready` would fail every
+   * later admission for the life of the process instead of failing closed once.
+   */
+  private ready: Promise<void> = Promise.resolve();
+  /**
+   * Single-flight guard for the heartbeat tick.
+   *
+   * A synchronous timer body could not re-enter itself. An async one can, and
+   * this body mutates the drift clock and the consecutive success/failure
+   * counters, so two overlapping ticks would corrupt the fail-closed logic.
+   * Skipping is safe at the configured cadences: the lease TTL floor is twice
+   * the heartbeat interval, so one dropped refresh stays well inside it.
+   */
+  private heartbeatTickInFlight = false;
 
   constructor(
     private logger: Logger = noopLogger,
@@ -1359,7 +1380,7 @@ export class AsyncJobManager {
     // so a transient durable-store outage can recover without a process restart.
     this.durableAdmission = false;
     if (this.store) {
-      this.restoreDurableAdmission("startup");
+      this.ready = this.restoreDurableAdmission("startup");
       this.startHeartbeat();
       this.startReaper();
     }
@@ -1412,7 +1433,13 @@ export class AsyncJobManager {
    * but this instance cannot prove its own liveness. A null-store manager
    * (isolate-mode / tests without persistence) is unaffected.
    */
-  private assertDurableAdmission(provider: string): void {
+  private async assertDurableAdmission(provider: string): Promise<void> {
+    // Await startup registration before judging admission. The constructor can
+    // no longer complete registration before it returns, so without this the
+    // register-before-admit invariant documented above would hold only by
+    // timing luck: a job row could be written before this instance's row exists
+    // and orphan recovery would have nothing to fence it against.
+    await this.ready;
     if (this.disposed) {
       throw new Error(`Async admission is disabled for ${provider}: gateway is shutting down.`);
     }
@@ -1553,12 +1580,23 @@ export class AsyncJobManager {
   private startHeartbeat(): void {
     const intervalMs = this.lease.instanceHeartbeatMs;
     this.nextHeartbeatExpectedAt = Number(hrtime.bigint() / 1_000_000n) + intervalMs;
-    this.heartbeatTimer = setInterval(() => this.onHeartbeatTick(intervalMs), intervalMs);
+    this.heartbeatTimer = setInterval(() => void this.onHeartbeatTick(intervalMs), intervalMs);
     if (this.heartbeatTimer.unref) this.heartbeatTimer.unref();
   }
 
-  private onHeartbeatTick(intervalMs: number): void {
+  private async onHeartbeatTick(intervalMs: number): Promise<void> {
     if (this.disposed || !this.store) return;
+    if (this.heartbeatTickInFlight) return;
+    this.heartbeatTickInFlight = true;
+    try {
+      await this.runHeartbeatTick(intervalMs);
+    } finally {
+      this.heartbeatTickInFlight = false;
+    }
+  }
+
+  private async runHeartbeatTick(intervalMs: number): Promise<void> {
+    if (!this.store) return;
     // Scheduling-drift measurement (monotonic clock): if this tick fired far
     // later than scheduled, the event loop was blocked.
     const nowMonoMs = Number(hrtime.bigint() / 1_000_000n);
@@ -1572,12 +1610,15 @@ export class AsyncJobManager {
       );
     }
     try {
-      this.store.heartbeat(this.instanceId);
+      // AWAITED: unawaited, a rejected heartbeat skipped this catch entirely and
+      // the failure counters below were reset as though it had succeeded, so a
+      // dead lease kept reporting healthy.
+      await this.store.heartbeat(this.instanceId);
       this.consecutiveHeartbeatFailures = 0;
       if (!this.durableAdmission) {
         this.consecutiveHeartbeatSuccesses++;
         if (this.consecutiveHeartbeatSuccesses >= MIN_CONSECUTIVE_HEARTBEAT_SUCCESSES_TO_RECOVER) {
-          this.restoreDurableAdmission("heartbeat recovery");
+          await this.restoreDurableAdmission("heartbeat recovery");
         }
       }
     } catch (err) {
@@ -1634,16 +1675,23 @@ export class AsyncJobManager {
    * a sustained heartbeat outage, so an UPDATE that happened to affect zero
    * rows can never be mistaken for proof that this instance is live.
    */
-  private restoreDurableAdmission(reason: "startup" | "heartbeat recovery"): void {
+  private async restoreDurableAdmission(
+    reason: "startup" | "heartbeat recovery"
+  ): Promise<void> {
     if (!this.store || this.disposed) return;
     try {
-      this.store.registerInstance({
+      // AWAITED, and that is the whole point. Once the store became async these
+      // calls stopped throwing synchronously, so the catch below could no
+      // longer fire and `durableAdmission = true` ran even when registration
+      // had failed: a fail-CLOSED admission gate silently became fail-OPEN, and
+      // the failure surfaced only as an unhandled rejection.
+      await this.store.registerInstance({
         instanceId: this.instanceId,
         role: this.lease.role ?? "gateway",
         hostname: this.hostname,
         pid: this.instancePid,
       });
-      this.store.heartbeat(this.instanceId);
+      await this.store.heartbeat(this.instanceId);
       const wasDisabled = !this.durableAdmission;
       this.durableAdmission = true;
       this.consecutiveHeartbeatFailures = 0;
@@ -1655,8 +1703,11 @@ export class AsyncJobManager {
         );
       }
       // Startup and recovery both use the same guarded per-job lease sweep.
-      this.runOrphanSweep();
-      this.reconcileLocalOrphanedClaudeMcpArtifacts();
+      // These are called from INSIDE initialisation, so they must never await
+      // `this.ready`: that is the promise this method is resolving, and
+      // awaiting it here would deadlock initialisation against itself.
+      await this.runOrphanSweep();
+      await this.reconcileLocalOrphanedClaudeMcpArtifacts();
     } catch (err) {
       this.durableAdmission = false;
       this.consecutiveHeartbeatSuccesses = 0;
@@ -1678,7 +1729,7 @@ export class AsyncJobManager {
    * sweep excluding those ids, and (5) emit a flight-recorder completion for
    * each orphaned row.
    */
-  private runOrphanSweep(): void {
+  private async runOrphanSweep(): Promise<void> {
     if (!this.store || this.disposed || !this.durableAdmission) return;
     if (this.skipSweepThisCycle) {
       this.skipSweepThisCycle = false;
@@ -1689,7 +1740,7 @@ export class AsyncJobManager {
     let candidates: SweepCandidate[];
     let liveConfirmedIds: string[];
     try {
-      candidates = this.store.selectStaleProcessCandidates(leaseTtl, httpGrace);
+      candidates = await this.store.selectStaleProcessCandidates(leaseTtl, httpGrace);
       liveConfirmedIds = this.confirmLiveProcessCandidates(candidates);
     } catch (err) {
       this.logger.error("#139 selecting stale process candidates failed", err);
@@ -1700,7 +1751,7 @@ export class AsyncJobManager {
     }
     let orphaned: OrphanedJobSnapshot[];
     try {
-      orphaned = this.store.recoverStaleJobs(leaseTtl, httpGrace, liveConfirmedIds);
+      orphaned = await this.store.recoverStaleJobs(leaseTtl, httpGrace, liveConfirmedIds);
     } catch (err) {
       this.logger.error("#139 recoverStaleJobs failed", err);
       return;
@@ -1727,21 +1778,21 @@ export class AsyncJobManager {
    * status-guarded write is a no-op if the row has already advanced beyond the
    * orphaned state.
    */
-  private persistOrphanProgress(jobId: string): void {
+  private async persistOrphanProgress(jobId: string): Promise<void> {
     if (!this.store?.recordProgressIfStatus) return;
     try {
-      const row = this.store.getById(jobId);
-      if (!row || row.status !== "orphaned") return;
+      const row = await this.store.getById(jobId);
+      if (!row || (row).status !== "orphaned") return;
       const tracker = new JobProgressTracker(
-        row.cli,
-        row.outputFormat ?? undefined,
-        parseStoredJobProgress(row.progressJson),
-        row.startedAt,
+        (row).cli,
+        (row).outputFormat ?? undefined,
+        parseStoredJobProgress((row).progressJson),
+        (row).startedAt,
         resolveJobProgressCapability(
-          row.cli,
-          parsePersistedJobArgs(row.argsJson),
-          row.outputFormat ?? undefined,
-          row.transport
+          (row).cli,
+          parsePersistedJobArgs((row).argsJson),
+          (row).outputFormat ?? undefined,
+          (row).transport
         )
       );
       if (!tracker.snapshot().events.some(event => event.kind === "terminal")) {
@@ -1759,7 +1810,7 @@ export class AsyncJobManager {
    * host. There is no globbing or remote-path cleanup: every row is validated
    * again by the same strict artifact predicate below.
    */
-  private reconcileLocalOrphanedClaudeMcpArtifacts(): void {
+  private async reconcileLocalOrphanedClaudeMcpArtifacts(): Promise<void> {
     if (!this.store || this.disposed || !this.durableAdmission) return;
     // Legacy rows predate exact-path provenance, so retain the old orphan-only
     // projection for their best-effort cleanup. New rows use the durable
@@ -1767,7 +1818,7 @@ export class AsyncJobManager {
     const selectCandidates = this.store.selectOrphanedProcessCandidates;
     if (typeof selectCandidates === "function") {
       try {
-        const candidates = selectCandidates.call(this.store, this.hostname);
+        const candidates = await selectCandidates.call(this.store, this.hostname);
         for (const candidate of candidates) {
           this.cleanupConfirmedOrphanClaudeMcpArtifact(candidate.id, candidate);
         }
@@ -1785,7 +1836,7 @@ export class AsyncJobManager {
     const selectPending = this.store.selectPendingMcpArtifactCleanups;
     if (typeof selectPending !== "function") return;
     try {
-      const pending = selectPending.call(this.store, this.hostname);
+      const pending = await selectPending.call(this.store, this.hostname);
       for (const candidate of pending) {
         this.cleanupPendingClaudeMcpArtifact(candidate);
       }
@@ -1801,10 +1852,10 @@ export class AsyncJobManager {
    * with no pid, in which case no child was started. A shared store may contain
    * remote jobs whose argv paths are meaningful only on their owner host.
    */
-  private cleanupConfirmedOrphanClaudeMcpArtifact(
+  private async cleanupConfirmedOrphanClaudeMcpArtifact(
     jobId: string,
     candidate: SweepCandidate | undefined
-  ): void {
+  ): Promise<void> {
     if (
       !this.store ||
       !candidate ||
@@ -1816,7 +1867,7 @@ export class AsyncJobManager {
 
     let row: JobRecord | null;
     try {
-      row = this.store.getById(jobId);
+      row = await this.store.getById(jobId);
     } catch (err) {
       this.logger.error(`#139 failed to read orphaned job ${jobId} for MCP artifact cleanup`, err);
       return;
@@ -1881,11 +1932,11 @@ export class AsyncJobManager {
    * turn the selector into a narrow hint only: the acknowledgement remains a
    * compare-and-set against the same job id, host, and artifact path.
    */
-  private cleanupPendingClaudeMcpArtifact(candidate: PendingMcpArtifactCleanup): void {
+  private async cleanupPendingClaudeMcpArtifact(candidate: PendingMcpArtifactCleanup): Promise<void> {
     if (!this.store || candidate.hostname !== this.hostname) return;
     let row: JobRecord | null;
     try {
-      row = this.store.getById(candidate.id);
+      row = await this.store.getById(candidate.id);
     } catch (err) {
       this.logger.error(`#139 failed to read pending MCP artifact job ${candidate.id}`, err);
       return;
@@ -1921,16 +1972,16 @@ export class AsyncJobManager {
     );
   }
 
-  private acknowledgeMcpArtifactCleanup(
+  private async acknowledgeMcpArtifactCleanup(
     jobId: string,
     hostname: string,
     artifactScope: string,
     artifactPath: string
-  ): boolean {
+  ): Promise<boolean> {
     const acknowledge = this.store?.acknowledgeMcpArtifactCleanup;
     if (typeof acknowledge !== "function") return false;
     try {
-      const acknowledged = acknowledge.call(
+      const acknowledged = await acknowledge.call(
         this.store,
         jobId,
         hostname,
@@ -1958,7 +2009,7 @@ export class AsyncJobManager {
    * scan the directory. A failed durable acknowledgement stays pinned and is
    * retried by the origin-host startup reconciliation.
    */
-  private finalizeMcpArtifactCleanup(job: AsyncJobRecord): void {
+  private async finalizeMcpArtifactCleanup(job: AsyncJobRecord): Promise<void> {
     const artifactPath = job.mcpArtifactPath;
     const artifactScope = job.mcpArtifactScope;
     if (!artifactPath || !artifactScope) return;
@@ -1972,7 +2023,7 @@ export class AsyncJobManager {
       );
       return;
     }
-    if (this.acknowledgeMcpArtifactCleanup(job.id, this.hostname, artifactScope, artifactPath)) {
+    if (await this.acknowledgeMcpArtifactCleanup(job.id, this.hostname, artifactScope, artifactPath)) {
       job.mcpArtifactPath = null;
       job.mcpArtifactScope = null;
     }
@@ -2048,11 +2099,11 @@ export class AsyncJobManager {
    * durable 'queued' row); best-effort otherwise (http: no OS process to strand,
    * the lease keeps the row alive and the guarded recordComplete still lands).
    */
-  private markRunningDurable(job: AsyncJobRecord, pid: number | null, failClosed = false): void {
+  private async markRunningDurable(job: AsyncJobRecord, pid: number | null, failClosed = false): Promise<void> {
     if (!this.store) return;
     let transitioned: boolean;
     try {
-      transitioned = this.store.markRunning(job.id, { pid });
+      transitioned = await this.store.markRunning(job.id, { pid });
     } catch (err) {
       if (failClosed) throw err;
       this.logger.error(`#139 markRunning (best-effort) failed for job ${job.id}`, err);
@@ -2201,7 +2252,7 @@ export class AsyncJobManager {
     }
   }
 
-  private evictCompletedJobs(): void {
+  private async evictCompletedJobs(): Promise<void> {
     const now = Date.now();
     let evicted = 0;
 
@@ -2265,7 +2316,7 @@ export class AsyncJobManager {
     // conservative state is deliberately quiescent until recovery succeeds.
     if (this.store && this.durableAdmission) {
       try {
-        const removed = this.store.evictExpired();
+        const removed = await this.store.evictExpired();
         if (removed > 0) {
           this.logger.debug(`Evicted ${removed} expired jobs from durable store`);
         }
@@ -2366,19 +2417,19 @@ export class AsyncJobManager {
    * recent matching job exists, else null. Keeps process and http dedup on one
    * runtime path (the only difference is how `requestKey` was computed).
    */
-  private tryReuseDedupedJob(
+  private async tryReuseDedupedJob(
     requestKey: string,
     correlationId: string,
     label: string,
     artifactCleanup?: () => void
-  ): StartJobOutcome | null {
+  ): Promise<StartJobOutcome | null> {
     if (!this.store) return null;
     try {
-      const existing = this.store.findByRequestKey(requestKey);
+      const existing = await this.store.findByRequestKey(requestKey);
       if (!existing) return null;
       // Prefer the in-memory record if we still have it (live process/abort, timers).
-      let record = this.jobs.get(existing.id);
-      if (!record) record = this.hydrateFromStore(existing.id) ?? undefined;
+      let record = this.jobs.get((existing).id);
+      if (!record) record = await this.hydrateFromStore((existing).id) ?? undefined;
       if (!record) return null;
       // Issue #130 (defense-in-depth): even though the dedup key is now
       // principal-scoped, never hand back a record the current caller cannot
@@ -2389,12 +2440,12 @@ export class AsyncJobManager {
       const caller = resolveOwnerPrincipal(getRequestContext());
       if (!principalCanAccess(record.ownerPrincipal, caller)) {
         this.logger.debug(
-          `Dedup reuse refused for ${label}: caller cannot access job ${existing.id}`,
+          `Dedup reuse refused for ${label}: caller cannot access job ${(existing).id}`,
           { correlationId }
         );
         return null;
       }
-      this.logger.info(`Job ${existing.id} reused via dedup for ${label}`, {
+      this.logger.info(`Job ${(existing).id} reused via dedup for ${label}`, {
         correlationId,
         originalCorrelationId: record.correlationId,
         status: record.status,
@@ -2427,7 +2478,7 @@ export class AsyncJobManager {
    * idle/stall/process-group timers. Ships dormant (no tool calls it until
    * Slice 2).
    */
-  startHttpJob(params: {
+  async startHttpJob(params: {
     provider: ApiProvider;
     apiRequest: ApiRequest;
     correlationId: string;
@@ -2443,7 +2494,7 @@ export class AsyncJobManager {
     extractUsage?: AsyncJobUsageExtractor;
     deferLaunch?: boolean;
     validationAdmission?: ValidationJobAdmission;
-  }): StartJobOutcome {
+  }): Promise<StartJobOutcome> {
     const {
       provider,
       apiRequest,
@@ -2478,14 +2529,14 @@ export class AsyncJobManager {
       );
     }
     if (!forceRefresh) {
-      const reused = this.tryReuseDedupedJob(requestKey, correlationId, provider.name, cleanup);
+      const reused = await this.tryReuseDedupedJob(requestKey, correlationId, provider.name, cleanup);
       if (reused) return reused;
     }
 
     // #139: fail-closed admission gate. A dedup reuse above is a read and is
     // fine, but a NEW durable job must not be admitted when this instance cannot
     // prove its own liveness (registration failed or sustained heartbeat loss).
-    this.assertDurableAdmission(provider.name);
+    await this.assertDurableAdmission(provider.name);
 
     const id = randomUUID();
     const startedAt = new Date().toISOString();
@@ -2746,13 +2797,15 @@ export class AsyncJobManager {
     this.fireOnComplete(job);
   }
 
-  private settleTerminalHook(job: AsyncJobRecord, success: boolean): void {
+  private async settleTerminalHook(job: AsyncJobRecord, success: boolean): Promise<void> {
     if (job.terminalHookOutcome !== undefined) return;
     // The session-side terminal hook must finish before the job row can lose
     // its durable finalization pin. A failed hook remains pending for restart
     // reconciliation instead of being acknowledged optimistically.
     if (success && job.kitExecution && job.kitSessionId) {
-      success = job.kitTerminalFinalized || this.markKitTerminalFinalized(job.id, job.kitSessionId);
+      success =
+        job.kitTerminalFinalized ||
+        (await this.markKitTerminalFinalized(job.id, job.kitSessionId));
       if (!success) {
         this.logger.error(
           `Kit terminal-finalization acknowledgement failed for job ${job.id}; retaining it for reconciliation`
@@ -3029,10 +3082,23 @@ export class AsyncJobManager {
     this.writeFlightComplete(job, finalStatus, override);
   }
 
-  private safeStoreCall(label: string, fn: () => void): void {
+  /**
+   * Run one durable store write, logging rather than propagating its failure.
+   *
+   * `fn` returns a PROMISE deliberately. It used to be `() => void`, and
+   * TypeScript accepts `() => Promise<T>` in a `() => void` slot without a
+   * word, so once the store became async this method silently stopped awaiting
+   * the write: the row was never guaranteed to land, and a rejection escaped
+   * the try/catch as an unhandled rejection instead of being logged. A tree
+   * that compiled with zero errors was dropping recordOutput writes.
+   *
+   * Typing the parameter is the fix, not auditing the two call sites: a sync
+   * thunk is now a compile error, so the next one cannot reintroduce it.
+   */
+  private async safeStoreCall(label: string, fn: () => Promise<void>): Promise<void> {
     if (!this.store) return;
     try {
-      fn();
+      await fn();
     } catch (err) {
       this.logger.error(`JobStore.${label} failed`, err);
     }
@@ -3055,7 +3121,7 @@ export class AsyncJobManager {
    * since the last flush. Throttled by OUTPUT_FLUSH_INTERVAL_MS to avoid
    * pounding sqlite on every chunk of streaming output.
    */
-  private maybeFlushOutput(job: AsyncJobRecord, force = false): void {
+  private async maybeFlushOutput(job: AsyncJobRecord, force = false): Promise<void> {
     if (!this.store) return;
     if (!job.outputDirty) return;
     // A Kit provider can echo the full compiled instruction context from stdin.
@@ -3074,7 +3140,7 @@ export class AsyncJobManager {
     if (!force && now - job.lastOutputFlushAt < OUTPUT_FLUSH_INTERVAL_MS) return;
     job.outputDirty = false;
     job.lastOutputFlushAt = now;
-    this.safeStoreCall("recordOutput", () =>
+    await this.safeStoreCall("recordOutput", () =>
       this.store!.recordOutput(job.id, job.stdout, job.stderr, job.outputTruncated)
     );
   }
@@ -3120,7 +3186,7 @@ export class AsyncJobManager {
     }
   }
 
-  private persistComplete(job: AsyncJobRecord): boolean {
+  private async persistComplete(job: AsyncJobRecord): Promise<boolean> {
     if (!this.store) return !job.kitExecution;
     // Never persist a non-terminal job as complete. "queued" (issue #130) is
     // pre-execution, exactly like "running": neither has a terminal row to write.
@@ -3152,7 +3218,7 @@ export class AsyncJobManager {
     job.outputDirty = false;
     const isKit = Boolean(job.kitExecution);
     try {
-      const applied = this.store.recordComplete({
+      const applied = await this.store.recordComplete({
         id: job.id,
         status: job.status,
         exitCode: job.exitCode,
@@ -3206,10 +3272,10 @@ export class AsyncJobManager {
    * has no owner predicate and could otherwise clobber another instance's
    * result on a shared Postgres store.
    */
-  private persistLateOutput(job: AsyncJobRecord): void {
+  private async persistLateOutput(job: AsyncJobRecord): Promise<void> {
     job.outputDirty = false;
     if (!this.store || job.kitExecution) return;
-    this.safeStoreCall("recordOutput", () =>
+    await this.safeStoreCall("recordOutput", () =>
       this.store!.recordOutput(job.id, job.stdout, job.stderr, job.outputTruncated)
     );
   }
@@ -3307,11 +3373,11 @@ export class AsyncJobManager {
    * getJobSnapshot/getJobResult calls hit the in-memory cache.
    * The reconstituted record has process=null — it represents historical data only.
    */
-  private hydrateFromStore(jobId: string): AsyncJobRecord | null {
+  private async hydrateFromStore(jobId: string): Promise<AsyncJobRecord | null> {
     if (!this.store) return null;
     let row: JobRecord | null;
     try {
-      row = this.store.getById(jobId);
+      row = await this.store.getById(jobId);
     } catch (err) {
       this.logger.error("JobStore.getById failed", err);
       return null;
@@ -3401,16 +3467,16 @@ export class AsyncJobManager {
    * Returns undefined when the job does not exist; null/undefined owner means a
    * legacy-unowned row. Used by the llm_job_* handlers to enforce isolation.
    */
-  getJobOwner(jobId: string): string | null | undefined {
+  async getJobOwner(jobId: string): Promise<string | null | undefined> {
     let job = this.jobs.get(jobId);
-    if (!job) job = this.hydrateFromStore(jobId) ?? undefined;
+    if (!job) job = await this.hydrateFromStore(jobId) ?? undefined;
     return job?.ownerPrincipal;
   }
 
   /** Durable Kit context for internal continuation checks, never tool-projected. */
-  getJobKitExecution(jobId: string): KitExecutionRef | null | undefined {
+  async getJobKitExecution(jobId: string): Promise<KitExecutionRef | null | undefined> {
     let job = this.jobs.get(jobId);
-    if (!job) job = this.hydrateFromStore(jobId) ?? undefined;
+    if (!job) job = await this.hydrateFromStore(jobId) ?? undefined;
     if (!job) return undefined;
     return job.kitExecution ? cloneKitExecutionRef(job.kitExecution) : null;
   }
@@ -3419,10 +3485,10 @@ export class AsyncJobManager {
    * Return terminal Kit outputs that survived a process restart before their
    * provider metadata was attached to the bound gateway session.
    */
-  getPendingKitFinalizations(): AsyncKitTerminalFinalization[] {
+  async getPendingKitFinalizations(): Promise<AsyncKitTerminalFinalization[]> {
     if (!this.store) return [];
     try {
-      return this.store.getPendingKitFinalizations().map(entry => ({
+      return (await this.store.getPendingKitFinalizations()).map(entry => ({
         ...entry,
         kitExecution: cloneKitExecutionRef(entry.kitExecution),
       }));
@@ -3437,10 +3503,10 @@ export class AsyncJobManager {
    * their exact session attempt from being released. This is internal-only
    * maintenance metadata and never reaches an MCP tool response.
    */
-  getAcknowledgedKitAttemptReleases(): AsyncAcknowledgedKitAttemptRelease[] {
+  async getAcknowledgedKitAttemptReleases(): Promise<AsyncAcknowledgedKitAttemptRelease[]> {
     if (!this.store) return [];
     try {
-      return this.store.getAcknowledgedKitAttemptReleases().map(entry => ({
+      return (await this.store.getAcknowledgedKitAttemptReleases()).map(entry => ({
         ...entry,
         kitExecution: cloneKitExecutionRef(entry.kitExecution),
       }));
@@ -3455,10 +3521,10 @@ export class AsyncJobManager {
    * compare-and-set includes the gateway session id, so a stale caller cannot
    * clear a pending result for another session.
    */
-  markKitTerminalFinalized(jobId: string, kitSessionId: string): boolean {
+  async markKitTerminalFinalized(jobId: string, kitSessionId: string): Promise<boolean> {
     if (!this.store) return false;
     try {
-      const marked = this.store.markKitTerminalFinalized(jobId, kitSessionId);
+      const marked = await this.store.markKitTerminalFinalized(jobId, kitSessionId);
       if (marked) {
         const job = this.jobs.get(jobId);
         if (job && job.kitSessionId === kitSessionId) {
@@ -3476,10 +3542,10 @@ export class AsyncJobManager {
    * Release-GC query. Durable store rows are authoritative across restarts;
    * scan memory too in case a test/ephemeral backend has not exposed the query.
    */
-  getPinnedKitReleaseIds(): string[] {
+  async getPinnedKitReleaseIds(): Promise<string[]> {
     const releases = new Set<string>();
     try {
-      for (const releaseId of this.store?.getPinnedKitReleaseIds?.() ?? []) {
+      for (const releaseId of await this.store?.getPinnedKitReleaseIds?.() ?? []) {
         releases.add(releaseId);
       }
     } catch (err) {
@@ -3493,8 +3559,8 @@ export class AsyncJobManager {
     return [...releases].sort();
   }
 
-  getReferencedKitReleaseIds(): string[] {
-    return this.getPinnedKitReleaseIds();
+  async getReferencedKitReleaseIds(): Promise<string[]> {
+    return await this.getPinnedKitReleaseIds();
   }
 
   /**
@@ -3502,7 +3568,7 @@ export class AsyncJobManager {
    * Existing callers keep working unchanged; forceRefresh is exposed as a trailing
    * optional param for the dedup-aware path.
    */
-  startJob(
+  async startJob(
     cli: LlmCli,
     args: string[],
     correlationId: string,
@@ -3524,8 +3590,8 @@ export class AsyncJobManager {
     dedupArgs?: string[],
     mcpArtifactPath?: string,
     mcpArtifactScope?: string
-  ): AsyncJobSnapshot {
-    return this.startJobWithDedup(cli, args, correlationId, {
+  ): Promise<AsyncJobSnapshot> {
+    return (await this.startJobWithDedup(cli, args, correlationId, {
       cwd,
       idleTimeoutMs,
       outputFormat,
@@ -3544,7 +3610,7 @@ export class AsyncJobManager {
       dedupArgs,
       mcpArtifactPath,
       mcpArtifactScope,
-    }).snapshot;
+    })).snapshot;
   }
 
   /**
@@ -3555,12 +3621,12 @@ export class AsyncJobManager {
    * the dedup window (default 1h) and is still running or completed, its snapshot
    * is returned without spawning a new process. forceRefresh skips dedup entirely.
    */
-  startJobWithDedup(
+  async startJobWithDedup(
     cli: LlmCli,
     args: string[],
     correlationId: string,
     opts: StartJobOptions = {}
-  ): StartJobOutcome {
+  ): Promise<StartJobOutcome> {
     const {
       cwd,
       idleTimeoutMs,
@@ -3655,12 +3721,12 @@ export class AsyncJobManager {
       );
     }
     if (!forceRefresh) {
-      const reused = this.tryReuseDedupedJob(requestKey, correlationId, cli, cleanup);
+      const reused = await this.tryReuseDedupedJob(requestKey, correlationId, cli, cleanup);
       if (reused) return reused;
     }
 
     // #139: fail-closed admission gate (see startHttpJob).
-    this.assertDurableAdmission(cli);
+    await this.assertDurableAdmission(cli);
 
     const id = reservedKitJobId ?? randomUUID();
     if (this.jobs.has(id) || this.store?.getById(id)) {
@@ -4197,16 +4263,16 @@ export class AsyncJobManager {
     this.fireOnComplete(job);
   }
 
-  getJobSnapshot(
+  async getJobSnapshot(
     jobId: string,
     options: { afterProgressSeq?: number; progressLimit?: number } = {}
-  ): AsyncJobSnapshot | null {
+  ): Promise<AsyncJobSnapshot | null> {
     let job = this.jobs.get(jobId);
     if (job) {
-      job = this.refreshOpenHydratedJob(jobId, job) ?? undefined;
+      job = await this.refreshOpenHydratedJob(jobId, job) ?? undefined;
       if (!job) return null;
     } else {
-      job = this.hydrateFromStore(jobId) ?? undefined;
+      job = await this.hydrateFromStore(jobId) ?? undefined;
       if (!job) return null;
     }
     return this.snapshot(job, options.afterProgressSeq ?? 0, options.progressLimit ?? 32);
@@ -4216,7 +4282,7 @@ export class AsyncJobManager {
    * Fail-closed durable lookup for Kit attempt recovery. Unlike
    * getJobSnapshot(), a database exception is not collapsed into "not found".
    */
-  lookupJobSnapshot(jobId: string): AsyncJobSnapshotLookup {
+  async lookupJobSnapshot(jobId: string): Promise<AsyncJobSnapshotLookup> {
     const inMemory = this.jobs.get(jobId);
     if (inMemory) {
       return {
@@ -4230,7 +4296,7 @@ export class AsyncJobManager {
     if (!this.store) return { state: "unavailable" };
     let row: JobRecord | null;
     try {
-      row = this.store.getById(jobId);
+      row = await this.store.getById(jobId);
     } catch (err) {
       this.logger.error(`JobStore.getById failed during Kit recovery for ${jobId}`, err);
       return { state: "unavailable" };
@@ -4252,16 +4318,16 @@ export class AsyncJobManager {
    * recordStart, so a gateway paused before admission cannot later launch the
    * old provider turn after its session lease is explicitly released.
    */
-  fenceUnadmittedKitAttempt(input: {
+  async fenceUnadmittedKitAttempt(input: {
     attemptId: string;
     cli: LlmCli;
     kitExecution: KitExecutionRef;
     kitSessionId: string;
-  }): KitAttemptFenceResult {
+  }): Promise<KitAttemptFenceResult> {
     if (!this.store || !this.durableAdmission) {
       throw new Error("Durable Kit attempt fencing is unavailable");
     }
-    return this.store.fenceUnadmittedKitAttempt({
+    return await this.store.fenceUnadmittedKitAttempt({
       attemptId: input.attemptId,
       cli: input.cli,
       kitExecution: cloneKitExecutionRef(input.kitExecution),
@@ -4291,11 +4357,17 @@ export class AsyncJobManager {
     });
   }
 
-  getJobSnapshots(jobIds: string[]): Record<string, AsyncJobSnapshot | null> {
-    return Object.fromEntries(jobIds.map(jobId => [jobId, this.getJobSnapshot(jobId)]));
+  async getJobSnapshots(jobIds: string[]): Promise<Record<string, AsyncJobSnapshot | null>> {
+    // Object.fromEntries over async callbacks would build an object of PROMISES
+    // and still type-check at the callback boundary, so the pairs are resolved
+    // before the object is assembled.
+    const pairs = await Promise.all(
+      jobIds.map(async jobId => [jobId, await this.getJobSnapshot(jobId)] as const)
+    );
+    return Object.fromEntries(pairs);
   }
 
-  getJobResult(
+  async getJobResult(
     jobId: string,
     maxChars = 200000,
     options: {
@@ -4303,13 +4375,13 @@ export class AsyncJobManager {
       stderrOffsetChars?: number;
       redactProviderSessionIds?: boolean;
     } = {}
-  ): AsyncJobResult | null {
+  ): Promise<AsyncJobResult | null> {
     let job = this.jobs.get(jobId);
     if (job) {
-      job = this.refreshOpenHydratedJob(jobId, job) ?? undefined;
+      job = await this.refreshOpenHydratedJob(jobId, job) ?? undefined;
       if (!job) return null;
     } else {
-      job = this.hydrateFromStore(jobId) ?? undefined;
+      job = await this.hydrateFromStore(jobId) ?? undefined;
       if (!job) return null;
     }
 
@@ -4580,7 +4652,7 @@ export class AsyncJobManager {
    * storage. The owning instance may append progress or finish it at any time;
    * caching that projection forever makes cross-instance status and watch stale.
    */
-  private refreshOpenHydratedJob(jobId: string, job: AsyncJobRecord): AsyncJobRecord | null {
+  private async refreshOpenHydratedJob(jobId: string, job: AsyncJobRecord): Promise<AsyncJobRecord | null> {
     if (
       !this.store ||
       job.hydratedFromStore !== true ||
@@ -4591,13 +4663,13 @@ export class AsyncJobManager {
       return job;
     }
     try {
-      const row = this.store.getById(jobId);
+      const row = await this.store.getById(jobId);
       if (!row) {
         this.jobs.delete(jobId);
         return null;
       }
       this.jobs.delete(jobId);
-      return this.hydrateJobRecord(row);
+      return await this.hydrateJobRecord(row);
     } catch (err) {
       this.logger.error(`JobStore.getById failed while refreshing shared job ${jobId}`, err);
       return job;
