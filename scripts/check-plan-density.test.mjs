@@ -1,5 +1,5 @@
 import { execFileSync } from "node:child_process";
-import { readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { readFileSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 
@@ -23,7 +23,18 @@ function run() {
 
 describe("plan-density ratchet", () => {
   const baseline = JSON.parse(readFileSync(BASELINE, "utf8"));
-  const present = readdirSync(PLANS).filter(f => f.endsWith(".dag.toml"));
+  // TRACKED files, deliberately not a directory listing and deliberately not the
+  // checker's wider scan set. The baseline is committed, so the contract it must
+  // match is what git carries: a gitignored plan file must not earn a ceiling,
+  // and an untracked one has no ceiling yet by definition. The checker also
+  // scans untracked-not-ignored files, because that is what NEW_FILE_CAP is for.
+  const present = execFileSync("git", ["ls-files", "--", "docs/plans/*.dag.toml"], {
+    cwd: ROOT,
+    encoding: "utf8",
+  })
+    .split("\n")
+    .filter(Boolean)
+    .map(f => f.slice("docs/plans/".length));
 
   it("passes on the tree as committed", () => {
     expect(run().code).toBe(0);

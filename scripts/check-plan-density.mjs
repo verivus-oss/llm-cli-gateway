@@ -25,14 +25,24 @@ const UPDATE = process.argv.includes("--update");
 
 const lines = f => readFileSync(join(PLANS, f), "utf8").split("\n").length;
 
-// Tracked files, not a directory listing. A gitignored plan file is visible to
+// Git's view, not a directory listing. A gitignored plan file is visible to
 // readdirSync on the checkout that authored it and to nobody else, so it earned
 // a baseline entry here that failed as GONE in every other worktree and in CI.
 // src/__tests__/skill-packaging.test.ts already learned this; the gate did not.
-const tracked = execFileSync("git", ["ls-files", "docs/plans/*.dag.toml"], {
-  cwd: ROOT,
-  encoding: "utf8",
-})
+//
+// `--cached --others --exclude-standard` is tracked UNION untracked-not-ignored,
+// and both halves are load-bearing. Tracked alone was the first fix, and it
+// silently disabled NEW_FILE_CAP: a plan file being written is untracked, so the
+// cap stopped applying at the one moment it exists for. The cap's own test
+// caught that; the gate's green exit did not.
+const scanned = execFileSync(
+  "git",
+  ["ls-files", "--cached", "--others", "--exclude-standard", "--", "docs/plans/*.dag.toml"],
+  {
+    cwd: ROOT,
+    encoding: "utf8",
+  }
+)
   .split("\n")
   .filter(Boolean)
   .map(p => p.slice("docs/plans/".length))
@@ -41,7 +51,7 @@ const tracked = execFileSync("git", ["ls-files", "docs/plans/*.dag.toml"], {
   // an ENOENT stack trace, which is a gate that fails without diagnosing.
   .filter(f => existsSync(join(PLANS, f)))
   .sort();
-const current = Object.fromEntries(tracked.map(f => [f, lines(f)]));
+const current = Object.fromEntries(scanned.map(f => [f, lines(f)]));
 
 if (UPDATE) {
   writeFileSync(BASELINE, `${JSON.stringify(current, null, 2)}\n`);
