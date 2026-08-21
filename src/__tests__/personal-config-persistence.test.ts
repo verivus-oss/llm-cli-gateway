@@ -158,7 +158,7 @@ describe("Personal Agent Config Kit persistence", () => {
     // A mismatched request does not erase the valid pointer for the original stamp.
     expect(manager.getActiveKitSession("claude", "/workspace/a", one.execution)?.id).toBe(first.id);
     expect(manager.getActiveSession("claude")).toBeNull();
-    expect(manager.getPinnedKitReleaseIds()).toEqual([]);
+    expect(await manager.getPinnedKitReleaseIds()).toEqual([]);
   });
 
   it("rewrites exact historical Kit pointer keys without crossing owners", async () => {
@@ -818,7 +818,7 @@ describe("Personal Agent Config Kit persistence", () => {
         heldAttempt
       )
     ).toBe(true);
-    expect(manager.getPinnedKitReleaseIds()).toEqual(["release-a"]);
+    expect(await manager.getPinnedKitReleaseIds()).toEqual(["release-a"]);
     expect(
       manager.claimKitSessionAttempt(
         "claude",
@@ -870,7 +870,7 @@ describe("Personal Agent Config Kit persistence", () => {
     ).toBe(true);
     expect(manager.updateKitSessionBinding(session.id, terminalBinding, heldAttempt.id)).toBe(true);
     expect(manager.getSession(session.id)?.metadata?.kit?.attempt).toBeUndefined();
-    expect(manager.getPinnedKitReleaseIds()).toEqual([]);
+    expect(await manager.getPinnedKitReleaseIds()).toEqual([]);
     expect(
       manager.releaseKitSessionAttempt(
         "claude",
@@ -1006,7 +1006,7 @@ describe("Personal Agent Config Kit persistence", () => {
         replacement
       )
     ).toBe(false);
-    expect(manager.getPinnedKitReleaseIds()).toEqual(["release-a"]);
+    expect(await manager.getPinnedKitReleaseIds()).toEqual(["release-a"]);
     expect(
       manager.releaseKitSessionAttempt(
         "claude",

@@ -186,16 +186,18 @@ describe("the checker's own parsing", () => {
     // rejects everything is as useless as one that accepts everything.
     expect(normaliseSubject("() => store.recordStart({ id: 1 })")).toEqual({
       subject: "store.recordStart({ id: 1 })",
+      matchKey: "store.recordStart{ id: 1 }",
       thunk: true,
-      awaited: false,
+      awaitCount: 0,
     });
     // `awaited` is reported rather than normalised away: it is part of the
     // assertion's identity, because removing an await is not a permitted
     // rewrite even though it leaves the matcher untouched.
     expect(normaliseSubject("await store.recordStart({ id: 1 })")).toEqual({
       subject: "store.recordStart({ id: 1 })",
+      matchKey: "store.recordStart{ id: 1 }",
       thunk: false,
-      awaited: true,
+      awaitCount: 1,
     });
   });
 

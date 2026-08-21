@@ -35,9 +35,23 @@ export function normaliseSubject(text) {
     t = arrow[1].trim();
     if (t.startsWith("{") && t.endsWith("}")) t = t.slice(1, -1).trim();
   }
-  const awaited = /^await\s+/.test(t);
-  t = t.replace(/^await\s+/, "");
-  return { subject: t.replace(/\s+/g, " ").trim(), thunk, awaited };
+  // Strip EVERY await, not just a leading one, and count them.
+  //
+  // An inserted await often lands INSIDE the subject:
+  //   expect(store.getById(x)?.stdout)  ->  expect((await store.getById(x))?.stdout)
+  // Comparing raw text then finds no match and reports a violation at exactly
+  // the sites the allowlist exists to permit. Stripping all awaits makes the
+  // subject comparable; the COUNT is what distinguishes an insertion (allowed)
+  // from a removal (not).
+  const awaitCount = (t.match(/\bawait\s+/g) ?? []).length;
+  t = t.replace(/\bawait\s+/g, "");
+  const subject = t.replace(/\s+/g, " ").trim();
+  // Separate key for COMPARISON only. Inserting an await usually adds a paren
+  // pair (`x?.y` becomes `(await x)?.y`), so parens are ignored when matching.
+  // They are kept in `subject`, because a violation message has to be readable
+  // and `store.recordStart{ id: 1 }` is not.
+  const matchKey = subject.replace(/[()]/g, "");
+  return { subject, matchKey, thunk, awaitCount };
 }
 
 function collapse(text) {
@@ -55,7 +69,9 @@ export function extractAssertions(source, filename = "f.ts") {
       node.expression.text === "expect" &&
       node.arguments.length > 0
     ) {
-      const { subject, thunk, awaited } = normaliseSubject(node.arguments[0].getText(sf));
+      const { subject, matchKey, thunk, awaitCount } = normaliseSubject(
+        node.arguments[0].getText(sf)
+      );
       const chain = [];
       let cursor = node;
       let matcher = null;
@@ -75,8 +91,9 @@ export function extractAssertions(source, filename = "f.ts") {
       if (matcher) {
         out.push({
           subject,
+          matchKey,
           thunk,
-          awaited,
+          awaitCount,
           modifiers: chain,
           matcher,
           args,
@@ -129,14 +146,14 @@ function sameArgs(a, b) {
  * thunk wrapper are stripped before comparison.
  */
 export function permittedRewrite(base, head) {
-  if (base.subject !== head.subject) return false;
+  if (base.matchKey !== head.matchKey) return false;
   // Removing an await is NOT on the allowlist. It looked harmless until it was
   // measured: hoisting an await off an assertion subject and onto its
   // declaration turned two concurrently-submitted transactions into sequential
   // ones, so a test named "serialises transactions" stopped exercising the
   // queue while still passing. The matcher and the expected value were
   // identical either side, which is exactly why the checker has to look here.
-  if (base.awaited && !head.awaited) return false;
+  if (head.awaitCount < base.awaitCount) return false;
   if (base.matcher !== head.matcher) return false;
   if (!sameArgs(base.args, head.args)) return false;
   const sameModifiers =
@@ -156,7 +173,7 @@ function key(a) {
   // `awaited` is part of identity. Without it an await REMOVED from a subject
   // produces a byte-identical fingerprint and takes the exact-match fast path,
   // which is how 106 removals once passed this checker unclassified.
-  return `${a.subject}|${a.awaited ? "await" : "sync"}|${a.modifiers.join(".")}|${a.matcher}|${(a.args ?? []).join(",")}`;
+  return `${a.matchKey}|${a.awaitCount}|${a.modifiers.join(".")}|${a.matcher}|${(a.args ?? []).join(",")}`;
 }
 
 /**
@@ -223,7 +240,7 @@ export function compareTestFile(baseSource, headSource, filename) {
       pool.splice(rewritten, 1);
       continue;
     }
-    const nearby = headAssertions.find(h => h.subject === b.subject);
+    const nearby = headAssertions.find(h => h.matchKey === b.matchKey);
     violations.push(
       `${filename}:${b.line}: assertion changed outside the allowlist. ` +
         `was expect(${b.subject}).${[...b.modifiers, b.matcher].join(".")}(${(b.args ?? []).join(", ")})` +
