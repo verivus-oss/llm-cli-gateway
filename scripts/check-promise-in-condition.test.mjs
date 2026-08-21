@@ -14,9 +14,9 @@ import { afterEach, describe, expect, it } from "vitest";
 const TARGET = "src/metrics.ts";
 const ANCHOR = "export class PerformanceMetrics {";
 
-// EVERY probe this file injects starts with this marker, so a pristine
-// src/metrics.ts can never contain it.
-const PROBE_MARKER = "probe";
+// Every probe this file injects declares a method named probeSomething, so a
+// pristine src/metrics.ts can never match this.
+const PROBE_SHAPE = /\bprobe[A-Z]/;
 
 const original = readFileSync(TARGET, "utf8");
 
@@ -30,7 +30,7 @@ const original = readFileSync(TARGET, "utf8");
 // So refuse to start rather than bake it in. This does not make two concurrent
 // runs safe against each other, it makes them fail loudly instead of corrupting.
 // The full fix is a per-run probe file rather than a shared tracked one.
-if (/\bprobe[A-Z]/.test(original)) {
+if (PROBE_SHAPE.test(original)) {
   throw new Error(
     `${TARGET} already contains an injected probe. A previous run of this file ` +
       `crashed, or two runs overlapped. Restore it with \`git checkout -- ${TARGET}\` ` +
