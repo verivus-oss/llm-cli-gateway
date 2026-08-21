@@ -63,6 +63,26 @@ describe.skipIf(!existsSync(entrypoint))("CLI metadata entrypoint", () => {
     expect(result.status).toBe(0);
   });
 
+  // s9. The formatter is unit-tested, but a formatter nothing calls tells an
+  // operator nothing. This is the only assertion that the block reaches stderr
+  // on a real boot, and registration is not reachability.
+  it("states on startup what happened to request history", () => {
+    const result = spawnSync(process.execPath, [entrypoint], {
+      encoding: "utf8",
+      input: "",
+      timeout: 60_000,
+      env: {
+        ...process.env,
+        LLM_GATEWAY_LOGS_DB: "none",
+        LLM_GATEWAY_JOBS_DB: "none",
+      },
+    });
+    expect(result.error).toBeUndefined();
+    expect(result.stderr).toContain("Storage: job store backend=");
+    expect(result.stderr).toContain("Storage: request history is NOT being written");
+    expect(result.stderr).toContain("role separation is NOT in force");
+  });
+
   it("fails startup when a configured durable store cannot be opened", () => {
     const dir = mkdtempSync(join(tmpdir(), "cli-unavailable-postgres-"));
     const config = join(dir, "config.toml");
