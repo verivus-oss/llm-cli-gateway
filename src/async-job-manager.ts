@@ -854,6 +854,11 @@ interface AsyncJobRecord {
    */
   outputWriteChain?: Promise<void>;
   /**
+   * Serialises this job's TERMINAL writes, the way outputWriteChain serialises
+   * its output writes. See persistComplete for why joining is not enough.
+   */
+  terminalWriteChain?: Promise<void>;
+  /**
    * The in-flight spawn, when one has been started.
    *
    * `launch` became async, so `startJob` began returning a snapshot BEFORE the
@@ -3381,7 +3386,52 @@ export class AsyncJobManager {
     }
   }
 
-  private async persistComplete(job: AsyncJobRecord): Promise<boolean> {
+  /**
+   * Serialise terminal persistence PER JOB, and register it for the shutdown
+   * drain. Two defects, one wrapper, because both come from the body having
+   * become async while its callers stayed fire-and-forget.
+   *
+   * RE-ENTRANCY. Cancellation writes the row terminal when the signal is
+   * REQUESTED, and the child's close event writes it again. Once the body could
+   * yield, both calls passed the `terminalPersisted` check before either set
+   * it: the first `recordComplete` was applied, the second was guard-rejected,
+   * and `terminalRowOwned = applied` then overwrote true with FALSE.
+   * `mayWriteOutputFor` reads that flag, so the late-output rescue switched off
+   * and every byte the child flushed between the signal and its close was
+   * dropped, on the belief that another writer owned the row. The other writer
+   * was this same instance.
+   *
+   * A CHAIN, not a single-flight: the second caller must RUN after the first,
+   * not join it. Joining returns the first call's result and skips the
+   * late-output rescue, which is the only reason the second call exists. Run in
+   * order, the second call sees `terminalPersisted === true` and takes the
+   * rescue branch, which is what it always meant to do.
+   *
+   * DRAIN. The process close listener and both limiter timeout callbacks are
+   * `void` sinks that mark a job terminal BEFORE awaiting persistence, and
+   * dispose() treats a job as inactive as soon as it is no longer queued or
+   * running. `hasPendingTerminalPersistence()` covers only Kit retries, so a
+   * NON-Kit terminal write could still be in flight when shutdown decided
+   * finalisation was drained, deregistered, and left the durable row open for
+   * another instance to orphan. Registering here, at the single funnel every
+   * terminal write passes through, bounds all of them at once rather than at
+   * the three call sites that happen to be known today.
+   */
+  private persistComplete(job: AsyncJobRecord): Promise<boolean> {
+    const previous = job.terminalWriteChain ?? Promise.resolve();
+    const write = previous.catch(() => undefined).then(() => this.persistCompleteBody(job));
+    job.terminalWriteChain = write.then(
+      () => undefined,
+      () => undefined
+    );
+    // A swallowed copy: pendingWrites only needs to know when this SETTLES, and
+    // trackPendingWrite's `void p.finally(...)` would otherwise turn a rejection
+    // into an unhandled one on top of whatever the caller already does with it.
+    this.trackPendingWrite(write.catch(() => undefined));
+    return write;
+  }
+
+  private async persistCompleteBody(job: AsyncJobRecord): Promise<boolean> {
     if (!this.store) return !job.kitExecution;
     // Never persist a non-terminal job as complete. "queued" (issue #130) is
     // pre-execution, exactly like "running": neither has a terminal row to write.
