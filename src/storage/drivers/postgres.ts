@@ -11,6 +11,7 @@
  * tested without a server.
  */
 import { resolveStorageRole, type StorageOperationClass, type StorageRole } from "../roles.js";
+import { inTransactionOn, nestedConnectionRefusal, runInTransaction } from "../reentrancy.js";
 import { isTransactionControl, transactionControlRefusal } from "../statements.js";
 import type { StorageConnection, StorageDriver, StorageEngine } from "../store.js";
 
@@ -164,6 +165,7 @@ export class PostgresStorageDriver implements StorageDriver {
     operation: StorageOperationClass,
     fn: (connection: StorageConnection) => Promise<T>
   ): Promise<T> {
+    if (inTransactionOn(this)) throw nestedConnectionRefusal(this);
     return fn(connectionOver(this.poolFor(operation), false));
   }
 
@@ -183,6 +185,7 @@ export class PostgresStorageDriver implements StorageDriver {
     if (operation === "transcript_read" || operation === "analytics_read") {
       throw new Error(`storage: ${operation} is a read class and cannot open a transaction`);
     }
+    if (inTransactionOn(this)) throw nestedConnectionRefusal(this);
     const client = await this.poolFor(operation).connect();
     // A client whose ROLLBACK itself failed may still be inside a transaction.
     // `release(err)` destroys it instead of returning it to the pool, so the
@@ -192,7 +195,7 @@ export class PostgresStorageDriver implements StorageDriver {
       const connection = connectionOver(client, true);
       await connection.execute("BEGIN");
       try {
-        const result = await fn(connection);
+        const result = await runInTransaction(this, () => fn(connection));
         await connection.execute("COMMIT");
         return result;
       } catch (error) {

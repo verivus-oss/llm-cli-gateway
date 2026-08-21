@@ -264,6 +264,45 @@ describe("SqliteStorageDriver", () => {
     await expect(stranded).rejects.toThrow(/did NOT land/);
   });
 
+  it("refuses a nested connection request instead of hanging on its own queue", async () => {
+    // SQLite deadlocks for a different reason with the same shape: transaction()
+    // serialises on `queue`, so a nested transaction waits behind the very
+    // transaction that is calling it. Same guard, keyed by driver instance.
+    await expect(
+      driver.transaction("write", async () => {
+        await driver.withConnection("write", c => c.query("SELECT 1"));
+      })
+    ).rejects.toThrow(/transaction is already open/);
+
+    await expect(
+      driver.transaction("write", async () => {
+        await driver.transaction("write", c => c.execute("SELECT 1"));
+      })
+    ).rejects.toThrow(/transaction is already open/);
+
+    // The queue is not poisoned by the refusals.
+    await driver.transaction("write", c => c.execute("INSERT INTO t VALUES (?, ?)", ["ok", "1"]));
+    const rows = await driver.withConnection("write", c => c.query("SELECT id FROM t"));
+    expect(rows).toEqual([{ id: "ok" }]);
+  });
+
+  it("does not refuse a nested call on a DIFFERENT driver", async () => {
+    // The guard is keyed by driver instance, so a body that legitimately
+    // touches another store is unaffected. Keying it on a module-level flag
+    // would have broken this.
+    const other = new SqliteStorageDriver(join(dir, "other.db"));
+    await other.withConnection("write", c => c.execute("CREATE TABLE o (id TEXT)"));
+
+    await driver.transaction("write", async c => {
+      await c.execute("INSERT INTO t VALUES (?, ?)", ["outer", "1"]);
+      await other.withConnection("write", inner => inner.execute("INSERT INTO o VALUES (?)", ["x"]));
+    });
+
+    const rows = await other.withConnection("write", c => c.query("SELECT id FROM o"));
+    expect(rows).toEqual([{ id: "x" }]);
+    await other.close();
+  });
+
   it("refuses work after close", async () => {
     await driver.close();
     await expect(driver.withConnection("write", c => c.query("SELECT 1"))).rejects.toThrow(

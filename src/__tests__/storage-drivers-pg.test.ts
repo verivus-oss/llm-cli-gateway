@@ -87,24 +87,25 @@ describe("PostgresStorageDriver against a real server", () => {
     // postgres-job-store-worker.ts:341-343 would protect nothing while
     // appearing to work.
     //
-    // ONE transaction, and the interference uses the remaining backends. A
-    // transaction body must never ask the same pool for more connections than
-    // it has spare: each transaction holds one for its whole body, so nesting
-    // deadlocks rather than failing. That is a real constraint of the port and
-    // it is why this reads the way it does.
+    // The churn runs OUTSIDE the transaction body and is only awaited inside
+    // it. Requesting a connection from inside the body is refused now, and
+    // before it was refused it deadlocked: a body holds its connection for the
+    // whole body, so asking the same pool for another one waits on itself.
+    const churn = Promise.all(
+      Array.from({ length: POOL_MAX - 1 }, () =>
+        driver.withConnection("write", other => other.query("SELECT pg_backend_pid()"))
+      )
+    );
+
     await driver.transaction("write", async c => {
       await c.execute("SET LOCAL application_name = 's5_tx_probe'");
 
-      // Churn the pool's idle stack so the next statement would be served by a
-      // different backend if it were served by the pool at all. Without this
-      // the pool returns the most recently released connection and the read
-      // finds its own backend by luck, which makes the assertion pass in both
-      // states and prove nothing.
-      await Promise.all(
-        Array.from({ length: POOL_MAX - 1 }, () =>
-          driver.withConnection("write", other => other.query("SELECT pg_backend_pid()"))
-        )
-      );
+      // Let the churn cycle the pool's idle stack, so a statement served by
+      // the POOL would now come back on a different backend. Without this the
+      // pool returns the most recently released connection and a split
+      // transaction reads its own backend by luck, which made this assertion
+      // pass in both states and prove nothing.
+      await churn;
 
       const name = await c.query<{ v: string }>("SELECT current_setting('application_name') AS v");
       expect(name[0].v).toBe("s5_tx_probe");
@@ -115,6 +116,54 @@ describe("PostgresStorageDriver against a real server", () => {
       );
       expect(Number(held[0].n)).toBe(1);
     });
+  });
+
+  it("refuses a nested connection request instead of deadlocking on itself", async () => {
+    // Measured before the guard: eight transactions each requesting six more
+    // connections from a six-connection pool hung for 150s and ended in a test
+    // timeout, not an error. With the job store's max: 1 a single nested call
+    // deadlocks at once. A rule would not have stopped it; this does.
+    await expect(
+      driver.transaction("write", async () => {
+        await driver.withConnection("write", c => c.query("SELECT 1"));
+      })
+    ).rejects.toThrow(/transaction is already open/);
+
+    await expect(
+      driver.transaction("write", async () => {
+        await driver.transaction("write", c => c.execute("SELECT 1"));
+      })
+    ).rejects.toThrow(/transaction is already open/);
+
+    // The driver is still usable: the guard refuses the nested call, it does
+    // not poison the driver or leak the outer transaction's client.
+    await driver.transaction("write", c =>
+      c.execute(`INSERT INTO ${table} (id, v) VALUES (?, ?)`, [7, "after-nested"])
+    );
+    const rows = await driver.withConnection("write", c =>
+      c.query<{ v: string }>(`SELECT v FROM ${table} WHERE id = ?`, [7])
+    );
+    expect(rows[0].v).toBe("after-nested");
+  });
+
+  it("refuses the nested call on a max:1 pool, which is the job store's own shape", async () => {
+    // POOL_MAX above leaves spare connections, so a single nested request there
+    // merely succeeds when the guard is off. The job store runs max: 1
+    // (postgres-job-store-worker.ts:24), where the nested request waits on the
+    // connection the body is holding and never returns. This is that shape.
+    const single = new PostgresStorageDriver({ app: TEST_DATABASE_URL }, (_role, dsn) => {
+      const pool = new Pool({ connectionString: dsn, max: 1 });
+      pools.push(pool);
+      return pool as unknown as PgPoolLike;
+    });
+
+    await expect(
+      single.transaction("write", async () => {
+        await single.withConnection("write", c => c.query("SELECT 1"));
+      })
+    ).rejects.toThrow(/transaction is already open/);
+
+    await single.close();
   });
 
   it("releases the client on failure, so the pool is not exhausted", async () => {

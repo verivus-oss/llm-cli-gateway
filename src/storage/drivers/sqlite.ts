@@ -14,6 +14,7 @@
  */
 import { openDatabase, openReadOnly, type GatewayDatabase } from "../../sqlite-driver.js";
 import { resolveStorageRole, type StorageOperationClass, type StorageRole } from "../roles.js";
+import { inTransactionOn, nestedConnectionRefusal, runInTransaction } from "../reentrancy.js";
 import { isTransactionControl, transactionControlRefusal } from "../statements.js";
 import type { StorageConnection, StorageDriver, StorageEngine } from "../store.js";
 
@@ -108,6 +109,7 @@ export class SqliteStorageDriver implements StorageDriver {
   ): Promise<T> {
     // `closed` wins over `closing`: once the handles are shut the honest answer
     // is "closed", and connectionFor already says so.
+    if (inTransactionOn(this)) throw nestedConnectionRefusal(this);
     if (this.closing && !this.closed) throw new Error(CLOSING_MESSAGE);
     return fn(this.connectionFor(operation));
   }
@@ -134,6 +136,9 @@ export class SqliteStorageDriver implements StorageDriver {
     }
     // Refused at SUBMISSION once closing, so the queue cannot grow while the
     // drain is trying to empty it.
+    // Checked BEFORE the queue: a nested transaction would otherwise wait behind
+    // the very transaction that is calling it, forever.
+    if (inTransactionOn(this)) return Promise.reject(nestedConnectionRefusal(this));
     if (this.closing && !this.closed) return Promise.reject(new Error(CLOSING_MESSAGE));
     const run = async (): Promise<T> => {
       // Reached only when the drain expired with this transaction still queued.
@@ -148,7 +153,7 @@ export class SqliteStorageDriver implements StorageDriver {
       const connection = this.connectionFor(operation, true);
       await connection.execute("BEGIN IMMEDIATE");
       try {
-        const result = await fn(connection);
+        const result = await runInTransaction(this, () => fn(connection));
         await connection.execute("COMMIT");
         return result;
       } catch (error) {
