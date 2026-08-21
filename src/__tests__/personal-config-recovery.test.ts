@@ -141,7 +141,7 @@ describe("config_recover_kit_attempt", () => {
     // async, so without this the test runs INSIDE the startup window that
     // design section 4.1 describes, and the refusal it sees is correct behaviour
     // rather than the thing under test.
-    await jobs.whenReady();
+    await jobs.whenStartupSettled();
     personalConfig = new PersonalConfigManager(
       { enabled: true, baselinePath: join(root, "baseline"), maxStaleHours: 168 },
       layout(root)
@@ -566,7 +566,7 @@ describe("config_recover_kit_attempt", () => {
     // async, so without this the test runs INSIDE the startup window that
     // design section 4.1 describes, and the refusal it sees is correct behaviour
     // rather than the thing under test.
-    await restartedJobs.whenReady();
+    await restartedJobs.whenStartupSettled();
     try {
       createGatewayServer({
         sessionManager: sessions,

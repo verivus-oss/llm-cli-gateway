@@ -177,7 +177,7 @@ describe("Codex Kit argv pre-admission", () => {
     // async, so without this the test runs INSIDE the startup window and every
     // Kit request is correctly refused as kit_busy before reaching the argv
     // check it is meant to exercise.
-    await jobs.whenReady();
+    await jobs.whenStartupSettled();
     const personalConfig = new PersonalConfigManager(
       { enabled: true, baselinePath: join(root, "baseline"), maxStaleHours: 168 },
       layout(root)

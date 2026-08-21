@@ -42,7 +42,7 @@ describe("AsyncJobManager + JobStore (durability + dedup)", () => {
     // async, so without this the test runs INSIDE the startup window that
     // design section 4.1 describes, and the refusal it sees is correct behaviour
     // rather than the thing under test.
-    await manager.whenReady();
+    await manager.whenStartupSettled();
   });
 
   afterEach(async () => {
@@ -149,7 +149,7 @@ describe("AsyncJobManager + JobStore (durability + dedup)", () => {
     // async, so without this the test runs INSIDE the startup window that
     // design section 4.1 describes, and the refusal it sees is correct behaviour
     // rather than the thing under test.
-    await fresh.whenReady();
+    await fresh.whenStartupSettled();
 
     const snapshot = await fresh.getJobSnapshot("orphan-candidate");
     expect(snapshot?.status).toBe("orphaned");
@@ -178,7 +178,7 @@ describe("AsyncJobManager + JobStore (durability + dedup)", () => {
     // async, so without this the test runs INSIDE the startup window that
     // design section 4.1 describes, and the refusal it sees is correct behaviour
     // rather than the thing under test.
-    await b.whenReady();
+    await b.whenStartupSettled();
     expect((await b.getJobSnapshot("other-instance-running"))?.status).toBe("queued");
 
     // Now the owner dies (lease lapses): a subsequent instance's sweep recovers it.

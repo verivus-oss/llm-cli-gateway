@@ -416,14 +416,14 @@ describe("AsyncJobManager + flight-recorder (slice 1.5)", () => {
       // row will NOT be flipped on construction. Use the sqlite-backed
       // assertions for the real orphan path; here we cover the contract that
       // memory's no-op produces zero FR writes.
-      await new AsyncJobManager(noopLogger, undefined, store, fr).whenReady();
+      await new AsyncJobManager(noopLogger, undefined, store, fr).whenStartupSettled();
       expect(fr.completes).toHaveLength(0);
     });
 
     it("no in-flight rows → zero logComplete calls (case h)", async () => {
       const fr = new CapturingFlightRecorder();
       const store = new MemoryJobStore();
-      await new AsyncJobManager(noopLogger, undefined, store, fr).whenReady();
+      await new AsyncJobManager(noopLogger, undefined, store, fr).whenStartupSettled();
       expect(fr.completes).toHaveLength(0);
     });
 
@@ -498,7 +498,7 @@ describe("AsyncJobManager + flight-recorder (slice 1.5)", () => {
         undefined,
         fakeStore as unknown as MemoryJobStore,
         fr
-      ).whenReady();
+      ).whenStartupSettled();
       expect(fr.completes).toHaveLength(4);
       const c1 = fr.completes.find(c => c.correlationId === "corr-j1");
       expect(c1?.result.status).toBe("completed");
@@ -566,7 +566,7 @@ describe("AsyncJobManager + flight-recorder (slice 1.5)", () => {
         undefined,
         fakeStore as unknown as MemoryJobStore,
         fr
-      ).whenReady();
+      ).whenStartupSettled();
 
       const completion = fr.completes.find(
         entry => entry.correlationId === "corr-legacy-kit-orphan"

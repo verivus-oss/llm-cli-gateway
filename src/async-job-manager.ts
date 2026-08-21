@@ -1446,7 +1446,9 @@ export class AsyncJobManager {
   }
 
   /**
-   * Resolve once startup registration has settled.
+   * Resolve once the startup attempt has SETTLED: registered or failed to, and
+   * the startup orphan sweep either ran or did not. It deliberately does not
+   * say which, so "ready" would be a false claim about what the caller learns.
    *
    * The constructor cannot await, so it STARTS registration and keeps the
    * promise. Anything that needs to observe post-registration state, rather
@@ -1464,11 +1466,33 @@ export class AsyncJobManager {
    * post-registration state rather than merely be sequenced after it, which
    * `canAdmitDurableJobs()` cannot offer because it is a synchronous snapshot
    * by design. Without it a caller can only weaken its check or spin on
-   * microtasks, and spinning is a flake generator. s6 and s7 both convert
-   * initialisation paths and will want the same handle.
+   * microtasks, and spinning is a flake generator.
+   *
+   * @internal Lifecycle barrier for callers that hold the manager itself and
+   * must observe its post-startup state. Not part of the tool surface.
    */
-  whenReady(): Promise<void> {
+  whenStartupSettled(): Promise<void> {
     return this.ready;
+  }
+
+  /**
+   * The barrier every public entry point that OBSERVES durable state must pass.
+   *
+   * Before the job store became asynchronous the constructor completed both
+   * instance registration and the startup orphan sweep before it returned, so
+   * every call on a fresh manager saw post-recovery state for free. A
+   * constructor cannot await, so that guarantee is no longer structural and has
+   * to be re-asserted here: without it a read can report `queued` for a row the
+   * startup sweep is about to mark `orphaned`, and a `queued` row looks
+   * runnable. That is the durability guarantee the store exists to provide.
+   *
+   * NEVER call this from inside initialisation. `this.ready` is the promise
+   * `restoreDurableAdmission` is resolving, so awaiting it there deadlocks
+   * initialisation against itself. Internal init paths use `this.store`
+   * directly, as `runOrphanSweepBody` and `persistOrphanProgress` do.
+   */
+  private async awaitStartupBarrier(): Promise<void> {
+    await this.ready;
   }
 
   /** #139: true iff this instance may admit durable async jobs right now. */
@@ -1512,7 +1536,7 @@ export class AsyncJobManager {
     // register-before-admit invariant documented above would hold only by
     // timing luck: a job row could be written before this instance's row exists
     // and orphan recovery would have nothing to fence it against.
-    await this.ready;
+    await this.awaitStartupBarrier();
     if (this.disposed) {
       throw new Error(`Async admission is disabled for ${provider}: gateway is shutting down.`);
     }
@@ -1725,6 +1749,7 @@ export class AsyncJobManager {
    * `checkStalledJobs`). Production code uses the startup call + reaper timer.
    */
   async runOrphanSweepNow(): Promise<void> {
+    await this.awaitStartupBarrier();
     await this.runOrphanSweep();
   }
 
@@ -2624,7 +2649,7 @@ export class AsyncJobManager {
     // See startJobWithDedup: reads of `this.durableAdmission` below happen
     // before any later admission gate, and the constructor no longer finishes
     // registering before it returns.
-    await this.ready;
+    await this.awaitStartupBarrier();
     const {
       provider,
       apiRequest,
@@ -3649,6 +3674,7 @@ export class AsyncJobManager {
    * legacy-unowned row. Used by the llm_job_* handlers to enforce isolation.
    */
   async getJobOwner(jobId: string): Promise<string | null | undefined> {
+    await this.awaitStartupBarrier();
     let job = this.jobs.get(jobId);
     if (!job) job = (await this.hydrateFromStore(jobId)) ?? undefined;
     return job?.ownerPrincipal;
@@ -3656,6 +3682,7 @@ export class AsyncJobManager {
 
   /** Durable Kit context for internal continuation checks, never tool-projected. */
   async getJobKitExecution(jobId: string): Promise<KitExecutionRef | null | undefined> {
+    await this.awaitStartupBarrier();
     let job = this.jobs.get(jobId);
     if (!job) job = (await this.hydrateFromStore(jobId)) ?? undefined;
     if (!job) return undefined;
@@ -3667,6 +3694,7 @@ export class AsyncJobManager {
    * provider metadata was attached to the bound gateway session.
    */
   async getPendingKitFinalizations(): Promise<AsyncKitTerminalFinalization[]> {
+    await this.awaitStartupBarrier();
     if (!this.store) return [];
     try {
       return (await this.store.getPendingKitFinalizations()).map(entry => ({
@@ -3685,6 +3713,7 @@ export class AsyncJobManager {
    * maintenance metadata and never reaches an MCP tool response.
    */
   async getAcknowledgedKitAttemptReleases(): Promise<AsyncAcknowledgedKitAttemptRelease[]> {
+    await this.awaitStartupBarrier();
     if (!this.store) return [];
     try {
       return (await this.store.getAcknowledgedKitAttemptReleases()).map(entry => ({
@@ -3703,6 +3732,7 @@ export class AsyncJobManager {
    * clear a pending result for another session.
    */
   async markKitTerminalFinalized(jobId: string, kitSessionId: string): Promise<boolean> {
+    await this.awaitStartupBarrier();
     if (!this.store) return false;
     try {
       const marked = await this.store.markKitTerminalFinalized(jobId, kitSessionId);
@@ -3724,6 +3754,7 @@ export class AsyncJobManager {
    * scan memory too in case a test/ephemeral backend has not exposed the query.
    */
   async getPinnedKitReleaseIds(): Promise<string[]> {
+    await this.awaitStartupBarrier();
     const releases = new Set<string>();
     try {
       for (const releaseId of (await this.store?.getPinnedKitReleaseIds?.()) ?? []) {
@@ -3816,7 +3847,7 @@ export class AsyncJobManager {
     // the store was async the constructor had already finished registering so
     // the flag was always settled by then. Gating only at the later call left
     // those earlier reads racing initialisation.
-    await this.ready;
+    await this.awaitStartupBarrier();
     const {
       cwd,
       idleTimeoutMs,
@@ -4482,6 +4513,7 @@ export class AsyncJobManager {
     jobId: string,
     options: { afterProgressSeq?: number; progressLimit?: number } = {}
   ): Promise<AsyncJobSnapshot | null> {
+    await this.awaitStartupBarrier();
     let job = this.jobs.get(jobId);
     if (job) {
       job = (await this.refreshOpenHydratedJob(jobId, job)) ?? undefined;
@@ -4498,6 +4530,7 @@ export class AsyncJobManager {
    * getJobSnapshot(), a database exception is not collapsed into "not found".
    */
   async lookupJobSnapshot(jobId: string): Promise<AsyncJobSnapshotLookup> {
+    await this.awaitStartupBarrier();
     const inMemory = this.jobs.get(jobId);
     if (inMemory) {
       return {
@@ -4539,7 +4572,7 @@ export class AsyncJobManager {
     kitExecution: KitExecutionRef;
     kitSessionId: string;
   }): Promise<KitAttemptFenceResult> {
-    await this.ready;
+    await this.awaitStartupBarrier();
     if (!this.store || !this.durableAdmission) {
       throw new Error("Durable Kit attempt fencing is unavailable");
     }
@@ -4559,6 +4592,7 @@ export class AsyncJobManager {
    * the durable reconciliation path instead.
    */
   async awaitTerminalHook(jobId: string): Promise<boolean> {
+    await this.awaitStartupBarrier();
     const job = this.jobs.get(jobId);
     if (!job) return false;
     if (job.terminalHookOutcome !== undefined) return job.terminalHookOutcome;
@@ -4574,6 +4608,7 @@ export class AsyncJobManager {
   }
 
   async getJobSnapshots(jobIds: string[]): Promise<Record<string, AsyncJobSnapshot | null>> {
+    await this.awaitStartupBarrier();
     // Object.fromEntries over async callbacks would build an object of PROMISES
     // and still type-check at the callback boundary, so the pairs are resolved
     // before the object is assembled.
@@ -4592,6 +4627,7 @@ export class AsyncJobManager {
       redactProviderSessionIds?: boolean;
     } = {}
   ): Promise<AsyncJobResult | null> {
+    await this.awaitStartupBarrier();
     let job = this.jobs.get(jobId);
     if (job) {
       job = (await this.refreshOpenHydratedJob(jobId, job)) ?? undefined;
@@ -4662,6 +4698,7 @@ export class AsyncJobManager {
   }
 
   async cancelJob(jobId: string): Promise<{ canceled: boolean; reason?: string }> {
+    await this.awaitStartupBarrier();
     const job = this.jobs.get(jobId);
     if (!job) {
       return { canceled: false, reason: "Job not found" };

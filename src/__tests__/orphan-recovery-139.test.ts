@@ -564,7 +564,7 @@ describe("#139 AsyncJobManager lease lifecycle (M/N series)", () => {
   it("M6: registers before admit; a job recorded after construction is stamped with the manager's instance id", async () => {
     const store = new SqliteJobStore(dbPath);
     const mgr = new AsyncJobManager(noopLogger, undefined, store);
-    await mgr.whenReady();
+    await mgr.whenStartupSettled();
     expect(instanceRows()).toBe(1);
     // recordStart via the store using the manager's instance id (the manager
     // stamps this on every job it admits).
@@ -584,7 +584,7 @@ describe("#139 AsyncJobManager lease lifecycle (M/N series)", () => {
 
   it("M7: a null-store (isolate-mode) manager registers nothing and disposes as a no-op", async () => {
     const mgr = new AsyncJobManager(noopLogger, undefined, null);
-    await mgr.whenReady();
+    await mgr.whenStartupSettled();
     expect(mgr.canAdmitDurableJobs()).toBe(false);
     await expect(mgr.dispose()).resolves.toBeUndefined();
   });
@@ -592,7 +592,7 @@ describe("#139 AsyncJobManager lease lifecycle (M/N series)", () => {
   it("M8: a durable queued row hydrates with exited=false", async () => {
     const store = new SqliteJobStore(dbPath);
     const mgr = new AsyncJobManager(noopLogger, undefined, store);
-    await mgr.whenReady();
+    await mgr.whenStartupSettled();
     await store.recordStart({
       id: "q",
       correlationId: "c",
@@ -617,7 +617,7 @@ describe("#139 AsyncJobManager lease lifecycle (M/N series)", () => {
       },
     });
     const mgr = new AsyncJobManager(noopLogger, undefined, store);
-    await mgr.whenReady();
+    await mgr.whenStartupSettled();
     await expect(mgr.startJobWithDedup("claude", ["-p", "x"], "corr")).rejects.toThrow(
       /Durable job admission failed/
     );
@@ -633,7 +633,7 @@ describe("#139 AsyncJobManager lease lifecycle (M/N series)", () => {
       },
     });
     const mgr = new AsyncJobManager(noopLogger, undefined, store);
-    await mgr.whenReady();
+    await mgr.whenStartupSettled();
     expect(mgr.canAdmitDurableJobs()).toBe(false);
     await expect(mgr.startJobWithDedup("claude", ["-p", "x"], "corr")).rejects.toThrow(
       /Durable async admission is disabled/
@@ -652,7 +652,7 @@ describe("#139 AsyncJobManager lease lifecycle (M/N series)", () => {
       },
     });
     const mgr = new AsyncJobManager(noopLogger, undefined, store);
-    await mgr.whenReady();
+    await mgr.whenStartupSettled();
     try {
       // Construction runs one guarded sweep, and the explicit call exercises a
       // later periodic/startup-style cycle. Neither may sweep without having
@@ -677,7 +677,7 @@ describe("#139 AsyncJobManager lease lifecycle (M/N series)", () => {
       },
     });
     const mgr = new AsyncJobManager(noopLogger, undefined, store);
-    await mgr.whenReady();
+    await mgr.whenStartupSettled();
     expect(mgr.canAdmitDurableJobs()).toBe(true);
 
     failHeartbeat = true;
@@ -717,7 +717,7 @@ describe("#139 AsyncJobManager lease lifecycle (M/N series)", () => {
       },
     });
     const mgr = new AsyncJobManager(noopLogger, undefined, store);
-    await mgr.whenReady();
+    await mgr.whenStartupSettled();
     expect(mgr.canAdmitDurableJobs()).toBe(false);
 
     registrationAvailable = true;
@@ -779,7 +779,7 @@ describe("#139 AsyncJobManager lease lifecycle (M/N series)", () => {
       },
     });
     const mgr = new AsyncJobManager(noopLogger, undefined, store);
-    await mgr.whenReady();
+    await mgr.whenStartupSettled();
 
     try {
       failHeartbeat = true;
@@ -798,7 +798,7 @@ describe("#139 AsyncJobManager lease lifecycle (M/N series)", () => {
   it("M9/M10: dispose deregisters the instance when no owned work remains, and is idempotent", async () => {
     const store = new SqliteJobStore(dbPath);
     const mgr = new AsyncJobManager(noopLogger, undefined, store);
-    await mgr.whenReady();
+    await mgr.whenStartupSettled();
     expect(instanceRows()).toBe(1);
     await mgr.dispose();
     expect(instanceRows()).toBe(0);
@@ -890,7 +890,7 @@ describe("#139 cross-LLM review round-1 regressions", () => {
   it("the advisory pid grace is one-shot: advance+clear pid, then orphaned next sweep", async () => {
     const store = new SqliteJobStore(dbPath, undefined, { leaseTtlMs: 90000 });
     const mgr = new AsyncJobManager(noopLogger, undefined, store);
-    await mgr.whenReady();
+    await mgr.whenStartupSettled();
     try {
       // A dead owner's process job whose recorded pid is alive on THIS host.
       await store.registerInstance({

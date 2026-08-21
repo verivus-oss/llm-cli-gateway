@@ -580,7 +580,7 @@ describe("codex_request default-workspace scope wiring", () => {
     // async, so without this the test runs INSIDE the startup window that
     // design section 4.1 describes, and the refusal it sees is correct behaviour
     // rather than the thing under test.
-    await jobs.whenReady();
+    await jobs.whenStartupSettled();
   });
 
   afterEach(async () => {
@@ -691,7 +691,7 @@ describe("config_init enablement gate", () => {
     // async, so without this the test runs INSIDE the startup window that
     // design section 4.1 describes, and the refusal it sees is correct behaviour
     // rather than the thing under test.
-    await jobs.whenReady();
+    await jobs.whenStartupSettled();
   });
 
   afterEach(async () => {

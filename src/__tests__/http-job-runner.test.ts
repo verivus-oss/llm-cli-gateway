@@ -239,6 +239,12 @@ describe("Slice 1 — http job persistence + orphan + migration (SqliteJobStore)
     // New gateway boot: a fresh store + manager flips the dead-owner row to orphaned.
     const store2 = new SqliteJobStore(dbPath, mockLogger);
     const mgr = new AsyncJobManager(mockLogger, undefined, store2);
+    // The store is read DIRECTLY here, so it does not pass the manager's own
+    // startup barrier. A constructor cannot await an asynchronous store, so
+    // construction no longer implies that the startup orphan sweep has run;
+    // the barrier is the contract that replaced it. Every read THROUGH the
+    // manager below (getJobSnapshot, cancelJob) crosses it without this line.
+    await mgr.whenStartupSettled();
     const row = (await store2.getById("job-http-1"))!;
     expect(row.status).toBe("orphaned");
     expect(row.transport).toBe("http");
