@@ -7,10 +7,10 @@ import { JobProgressTracker, parseStoredJobProgress } from "../job-progress.js";
 import { MemoryJobStore, SqliteJobStore, type JobStoreStatus } from "../job-store.js";
 import { noopLogger } from "../logger.js";
 
-async function waitFor(condition: () => boolean | Promise<boolean>, label: string): Promise<void> {
+async function waitFor(condition: () => boolean | Promise<boolean> | Promise<boolean>, label: string): Promise<void> {
   const deadline = Date.now() + 5_000;
   while (Date.now() < deadline) {
-    if (condition()) return;
+    if (await condition()) return;
     await new Promise(resolve => setTimeout(resolve, 10));
   }
   throw new Error(`Timed out waiting for ${label}`);

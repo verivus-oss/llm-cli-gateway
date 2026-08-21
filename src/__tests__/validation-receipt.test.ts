@@ -59,6 +59,12 @@ describe("validation receipt mint + resolve", () => {
 
   afterEach(async () => {
     try {
+      // Dispose BEFORE closing the store. The manager owns heartbeat, sweep and
+      // eviction timers, and those writes are asynchronous now, so a tick still
+      // in flight lands on a closed database ("database is not open"). While
+      // the store was synchronous the timer body finished inside its own tick
+      // and could never overlap teardown.
+      await manager.dispose({ timeoutMs: 500 });
       await store.close();
     } catch {
       /* ignore */
@@ -148,8 +154,11 @@ describe("validation receipt mint + resolve", () => {
   }
 
   async function requireStoredReceipt(validationId: string): Promise<ValidationReceiptRecord> {
-    const receipt = store.getValidationReceipt(validationId);
-    expect(await receipt).not.toBeNull();
+    // Awaited at the source. Unawaited, `!receipt` tested a promise and was
+    // always false, so the guard never fired and this returned the PROMISE
+    // typed as a record: every caller then read undefined off it.
+    const receipt = await store.getValidationReceipt(validationId);
+    expect(receipt).not.toBeNull();
     if (!receipt) throw new Error(`Expected stored receipt ${validationId}`);
     return receipt;
   }
@@ -288,7 +297,7 @@ describe("validation receipt mint + resolve", () => {
   it.each(["stored report", "stored hash"])(
     "fails closed when an existing receipt has a corrupted %s",
     async corruption => {
-      const source = mintDefaultSourceReceipt();
+      const source = await mintDefaultSourceReceipt();
       const validationId = `v-corrupt-${corruption.replace(" ", "-")}`;
       await recordCoherentReceiptClone(
         source,
@@ -314,7 +323,7 @@ describe("validation receipt mint + resolve", () => {
   );
 
   it("accepts an unmodified coherent receipt clone", async () => {
-    const source = mintDefaultSourceReceipt();
+    const source = await mintDefaultSourceReceipt();
     const validationId = "v-coherent-clone-control";
     await recordCoherentReceiptClone(source, validationId);
 
@@ -419,7 +428,7 @@ describe("validation receipt mint + resolve", () => {
     ["focus", (report: any) => (report.originalRequest.focus = "Forged focus")],
     ["modelList", (report: any) => (report.modelList = [...report.modelList].reverse())],
   ])("rejects a coherently rehashed receipt with mismatched run %s", async (field, mutate) => {
-    const source = mintDefaultSourceReceipt();
+    const source = await mintDefaultSourceReceipt();
     const validationId = `v-binding-${field}`;
     await recordCoherentReceiptClone(source, validationId, mutate);
 
@@ -440,7 +449,7 @@ describe("validation receipt mint + resolve", () => {
     ["top-level job roster", (report: any) => report.jobIds.reverse()],
     ["linked status", (report: any) => (report.perModelOutputs[0].status = "running")],
   ])("rejects a coherently rehashed receipt with mismatched provider %s", async (field, mutate) => {
-    const source = mintDefaultSourceReceipt();
+    const source = await mintDefaultSourceReceipt();
     const validationId = `v-provider-binding-${field.replaceAll(" ", "-")}`;
     await recordCoherentReceiptClone(source, validationId, mutate);
 
@@ -480,7 +489,7 @@ describe("validation receipt mint + resolve", () => {
   });
 
   it("rejects a coherently rehashed unplanned judge synthesis", async () => {
-    const source = mintDefaultSourceReceipt();
+    const source = await mintDefaultSourceReceipt();
     const validationId = "v-unplanned-judge-binding";
     await recordCoherentReceiptClone(source, validationId, async report => {
       report.synthesis = {
@@ -895,7 +904,7 @@ describe("validation receipt mint + resolve", () => {
       },
     ],
   ])("fails closed without a receipt for a provider-link %s mismatch", async (_name, arrange) => {
-    arrange();
+    await arrange();
     expect((await resolveValidationReceipt(deps, "v-integrity", { caller: "local" })).status).toBe(
       "expired_unminted"
     );

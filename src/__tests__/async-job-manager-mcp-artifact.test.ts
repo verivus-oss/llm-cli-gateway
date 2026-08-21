@@ -21,11 +21,11 @@ import { SqliteJobStore } from "../job-store.js";
 import { noopLogger } from "../logger.js";
 import { openDatabase } from "../sqlite-driver.js";
 
-function waitFor(predicate: () => boolean | Promise<boolean>, timeoutMs = 5000): Promise<void> {
+function waitFor(predicate: () => boolean | Promise<boolean> | Promise<boolean>, timeoutMs = 5000): Promise<void> {
   return new Promise((resolve, reject) => {
     const deadline = Date.now() + timeoutMs;
-    const check = (): void => {
-      if (predicate()) {
+    const check = async (): Promise<void> => {
+      if (await predicate()) {
         resolve();
         return;
       }
