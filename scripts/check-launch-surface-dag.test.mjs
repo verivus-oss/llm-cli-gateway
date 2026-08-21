@@ -98,10 +98,19 @@ describe("launch-surface DAG checker", () => {
 
   it("rejects a same-count substitution by checking caller identity", () => {
     mutate("src/validation-orchestrator.ts", source => {
+      // The call gained an `await` when the launch path became asynchronous.
+      // Matching the OLD text silently stopped substituting anything, so the
+      // real caller survived and this control started firing on a caller COUNT
+      // of two rather than on the identity substitution it exists to catch. It
+      // still failed the checker, which is why nothing noticed. Asserted below
+      // rather than trusted: the replace must actually change the source.
       const withoutRealCaller = source.replace(
-        "const outcome = dispatchProviderJob(",
-        "const outcome = dispatchProviderJobRenamed("
+        "const outcome = await dispatchProviderJob(",
+        "const outcome = await dispatchProviderJobRenamed("
       );
+      if (withoutRealCaller === source) {
+        throw new Error("fixture stale: the real dispatchProviderJob caller was not substituted");
+      }
       return `${withoutRealCaller}\nfunction forgedDispatch() { dispatchProviderJob(undefined, "codex", "", "", {}, {}); }\n`;
     });
 
@@ -119,7 +128,7 @@ describe("launch-surface DAG checker", () => {
     );
 
     expect(problemText()).toContain(
-      'field.trustCursorWorkspace.flow[4]: src/validation-orchestrator.ts:905 no longer carries "reviewAuthorization"'
+      'field.trustCursorWorkspace.flow[4]: src/validation-orchestrator.ts:926 no longer carries "reviewAuthorization"'
     );
   });
 
