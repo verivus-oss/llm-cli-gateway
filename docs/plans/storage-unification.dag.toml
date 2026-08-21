@@ -18,7 +18,6 @@ retirement_0b = "Superseded state is proposed per file and may be moved to a qua
 [facts]
 write_visibility = "TWENTY instances of one class, censused at c518e3f: a call that stopped throwing and started rejecting, inside a try whose catch can therefore no longer fire. ELEVEN lost a control, not a log line, including recordStartOrFailClosed inverting on the path every async job takes, and index.ts:23778 never awaiting jobStore.close() so the bounded drain defeats itself. Ask both: after this returns, what row exists, and which guard has quietly stopped guarding? Type-aware lint is the detector; two hand censuses had already missed these."
 schema_gap = "`requests` and `gateway_metadata` exist ONLY in SQLite. The Postgres transcript schema is new authorship, not a migration."
-the_choke_point = "every inline flight write funnels through ONE sync class, FlightOwnership at index.ts:2587, whose started/managerOwnsCompletion flags are idempotence fences"
 
 [non_goals]
 no_postgres_mandate = "Decided 2026-08-13. SQLite stays as a driver. 'Postgres only' is a deployment property via config, never a package property via removal; the 2.0.0 node:sqlite move exists to keep zero-config npm installs working."
@@ -98,7 +97,7 @@ critical = true
 depends_on = ["s3sig.operation-signatures"]
 role = "Design 3.4, and revision 1 got this wrong: a per-correlation in-process queue does NOT cover crash between start and complete, nor orphan completion by a different instance."
 action = "Specify and test ordering across every 3.4 failure mode, including cross-process orphan completion and crash-restart."
-constraint = "FlightOwnership's fences are the failure site. Awaiting inside a state machine whose idempotence is a boolean makes the boolean a race."
+constraint = "FlightOwnership (index.ts:2587) is the failure site: every inline flight write funnels through that ONE sync class, and its started/managerOwnsCompletion flags are idempotence fences. Awaiting inside a state machine whose idempotence is a boolean makes the boolean a race."
 affects = ["s7.flight-recorder-onto-the-port"]
 
 [[node]]
@@ -108,6 +107,7 @@ depends_on = ["s2.kill-the-raw-sql-read-path", "s6.write-ordering", "b1.sqlite-a
 role = "Closes the original defect: the recorder starts obeying [persistence].backend."
 action = "Author the Postgres transcript schema (new, not a migration), move the recorder onto the port, convert FlightOwnership to async."
 constraint = "HARD GATE: transcript BODIES do not enter Postgres until postgres-security-hardening.md section 6 is complete through step 8, inheriting that sequence in full rather than naming a cut-off that can drift."
+pre_positioned = "performShutdown awaits activeHttpGateway.close, activeServer.close and jobStore.close, but NOT flightRecorder.close, which is harmless only while the recorder is synchronous. s7 makes it async and the line becomes jobStore's defect exactly: exit mid-close, and a log line asserting a close that did not finish. s5's no-floating-promises ratchet is the control that makes it impossible to introduce silently."
 scope_0a = "This run stops with the recorder on the port under the SQLite driver, and authors nothing that moves bodies. Security section 6 is at step 2 of 10."
 affects = ["s9.one-selector"]
 
