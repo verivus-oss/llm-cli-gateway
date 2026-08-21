@@ -144,13 +144,19 @@ describe("Mistral Kit M3 admission + wiring", () => {
   let startJobWithDedup: ReturnType<typeof vi.spyOn>;
   let savedApiKey: string | undefined;
 
-  beforeEach(() => {
+  beforeEach(async () => {
     root = mkdtempSync(join(tmpdir(), "mistral-kit-m3-"));
     savedApiKey = process.env.MISTRAL_API_KEY;
     process.env.MISTRAL_API_KEY = "sk-mistral-kit-m3-fixture";
     sessions = new FileSessionManager(join(root, "sessions.json"));
     store = new SqliteJobStore(join(root, "jobs.db"));
     jobs = new AsyncJobManager(noopLogger, undefined, store);
+    // Sequence like production: main() awaits this before connecting any
+    // transport, because the Kit admission gate reads durable admission through
+    // a synchronous snapshot and would answer kit_busy inside the startup
+    // window. A test that invokes a tool in the construction tick is the only
+    // caller that can still see that window.
+    await jobs.whenStartupSettled();
     const personalConfig = new PersonalConfigManager(
       { enabled: true, baselinePath: join(root, "baseline"), maxStaleHours: 168 },
       layout(root)

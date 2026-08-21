@@ -1164,11 +1164,13 @@ describe("validation receipt mint + resolve", () => {
     const run = await store.getValidationRun(validationId);
     if (!run) throw new Error(`Expected seeded run ${validationId}`);
     const request = JSON.parse(run.requestJson);
-    const results = run.providerLinks.map(async link => {
-      const result = await manager.getJobResult(link.jobId, Number.MAX_SAFE_INTEGER);
-      if (!result) throw new Error(`Expected seeded job ${link.jobId}`);
-      return await normalizeJobResult(link.provider as any, null, result);
-    });
+    const results = await Promise.all(
+      run.providerLinks.map(async link => {
+        const result = await manager.getJobResult(link.jobId, Number.MAX_SAFE_INTEGER);
+        if (!result) throw new Error(`Expected seeded job ${link.jobId}`);
+        return await normalizeJobResult(link.provider as any, null, result);
+      })
+    );
     // The exact legacy synthesis object: no plannedJudge branch existed.
     const synthesis = {
       status: "not_requested" as const,

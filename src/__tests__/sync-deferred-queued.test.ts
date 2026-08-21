@@ -77,6 +77,12 @@ describe("sync/deferred queued jobs", () => {
       undefined,
       limits()
     );
+    // Sequence like production: main() awaits the startup barrier before it
+    // connects a transport. `deferralAvailable` is computed from the
+    // deliberately synchronous canAdmitDurableJobs() snapshot, so inside the
+    // startup window the request takes the INLINE branch, blocks on the
+    // saturated limiter and returns a queue timeout instead of deferring.
+    await manager.whenStartupSettled();
     const slot = await manager.acquireProcessSlot("grok");
     const sessionManager = new FileSessionManager(join(tempDir, "sessions.json"));
     const runtime = resolveGatewayServerRuntime(
@@ -115,6 +121,12 @@ describe("sync/deferred queued jobs", () => {
       undefined,
       limits()
     );
+    // Sequence like production: main() awaits the startup barrier before it
+    // connects a transport. `deferralAvailable` is computed from the
+    // deliberately synchronous canAdmitDurableJobs() snapshot, so inside the
+    // startup window the request takes the INLINE branch, blocks on the
+    // saturated limiter and returns a queue timeout instead of deferring.
+    await manager.whenStartupSettled();
     const slot = await manager.acquireProcessSlot("ollama");
     const sessionManager = new FileSessionManager(join(tempDir, "sessions.json"));
     const baseUrl = "http://127.0.0.1:1/v1";

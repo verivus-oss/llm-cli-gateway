@@ -216,12 +216,14 @@ describe("Layer 4 validation orchestration", () => {
     );
 
     expect(report.synthesis.status).toBe("waiting_for_provider_results");
-    const normalized = (await report.results.map(result =>
-      collectValidationJobResult(
-        { asyncJobManager: fake.manager as any },
-        result.provider,
-        result.rawJobReference!.jobId,
-        result.model
+    const normalized = (await Promise.all(
+      report.results.map(result =>
+        collectValidationJobResult(
+          { asyncJobManager: fake.manager as any },
+          result.provider,
+          result.rawJobReference!.jobId,
+          result.model
+        )
       )
     )) as NormalizedValidationResult[];
     const synthesis = await startJudgeSynthesis(

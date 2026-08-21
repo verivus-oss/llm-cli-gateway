@@ -353,13 +353,16 @@ describe("Layer 6 validation orchestrator (U20)", () => {
 
     expect(run.synthesis.status).toBe("waiting_for_provider_results");
 
-    const collected = run.results.map(result =>
-      collectValidationJobResult(
-        { asyncJobManager: fake.manager as any },
-        result.provider,
-        result.rawJobReference!.jobId,
-        result.provider
-      )!
+    const collected = await Promise.all(
+      run.results.map(
+        async result =>
+          (await collectValidationJobResult(
+            { asyncJobManager: fake.manager as any },
+            result.provider,
+            result.rawJobReference!.jobId,
+            result.provider
+          ))!
+      )
     );
     const synthesis = await startJudgeSynthesis(
       {

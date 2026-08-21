@@ -1460,13 +1460,14 @@ export class AsyncJobManager {
    * Never rejects: a failed registration leaves `durableAdmission` false rather
    * than poisoning every later call.
    *
-   * HAS NO PRODUCTION CALLER TODAY, deliberately and disclosed. The promise
-   * exists whether or not anything reads it, and the internal admission path
-   * already awaits it; what this accessor adds is the ability to OBSERVE
-   * post-registration state rather than merely be sequenced after it, which
-   * `canAdmitDurableJobs()` cannot offer because it is a synchronous snapshot
-   * by design. Without it a caller can only weaken its check or spin on
-   * microtasks, and spinning is a flake generator.
+   * IT HAS ONE PRODUCTION CALLER: `main()` awaits it before connecting any
+   * transport, so no client request can observe the startup window. That is
+   * not decoration. Several fail-closed gates read admission through the
+   * deliberately SYNCHRONOUS `canAdmitDurableJobs()` snapshot and cannot await
+   * anything themselves, so without that one await the first Kit request after
+   * boot is refused with `kit_busy` and the health surface reports async jobs
+   * disabled. The earlier revision of this comment disclosed that there was no
+   * production caller; there is now, and the reason is a measured defect.
    *
    * @internal Lifecycle barrier for callers that hold the manager itself and
    * must observe its post-startup state. Not part of the tool surface.

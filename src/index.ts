@@ -24356,6 +24356,20 @@ async function main() {
     );
   }
 
+  // Serve nothing until the manager's startup attempt has settled.
+  //
+  // While the job store was synchronous the constructor finished registering
+  // this instance and running the startup orphan sweep before it returned, so
+  // the first request always met a settled `durableAdmission`. An asynchronous
+  // store cannot be awaited in a constructor, and several fail-closed gates
+  // read that flag through the deliberately SYNCHRONOUS `canAdmitDurableJobs()`
+  // snapshot (`assertKitDurableAdmission`, the sync-deferral gate, the health
+  // surface). Without this line the first requests after boot are refused with
+  // `kit_busy` or told async jobs are disabled, purely because startup had not
+  // caught up. Awaiting here is cheap and once: it never rejects, and it runs
+  // before any transport is connected, so no caller can observe the window.
+  await runtimeAsyncJobManager.whenStartupSettled();
+
   const serverDeps: GatewayServerDeps = {
     sessionManager,
     resourceProvider,

@@ -23,17 +23,17 @@ class FlakyProgressStore extends MemoryJobStore {
   nextFailure: "status_mismatch" | "throw" | null = null;
   guardedWrites = 0;
 
-  override recordProgressIfStatus(
+  override async recordProgressIfStatus(
     id: string,
     status: JobStoreStatus,
     progressJson: string
-  ): boolean {
+  ): Promise<boolean> {
     this.guardedWrites += 1;
     const failure = this.nextFailure;
     this.nextFailure = null;
     if (failure === "status_mismatch") return false;
     if (failure === "throw") throw new Error("injected progress persistence failure");
-    return super.recordProgressIfStatus(id, status, progressJson);
+    return await super.recordProgressIfStatus(id, status, progressJson);
   }
 }
 
@@ -44,7 +44,7 @@ interface ProgressJobHarness {
 
 interface ProgressManagerHarness {
   jobs: Map<string, ProgressJobHarness>;
-  maybeFlushProgress(job: ProgressJobHarness, force?: boolean): void;
+  maybeFlushProgress(job: ProgressJobHarness, force?: boolean): Promise<void>;
 }
 
 const temporaryDirectories: string[] = [];
@@ -83,10 +83,10 @@ describe("job progress durability", () => {
       job!.progress.emit("starting", "lifecycle", "Provider request started");
       job!.progressDirty = true;
       store.nextFailure = "status_mismatch";
-      internals.maybeFlushProgress(job!, true);
+      await internals.maybeFlushProgress(job!, true);
       expect(job!.progressDirty).toBe(true);
 
-      internals.maybeFlushProgress(job!, true);
+      await internals.maybeFlushProgress(job!, true);
       expect(job!.progressDirty).toBe(false);
       expect(parseStoredJobProgress((await store.getById(started.id))?.progressJson)?.lastSeq).toBe(
         job!.progress.snapshot().lastSeq
@@ -95,10 +95,10 @@ describe("job progress durability", () => {
       job!.progress.emit("starting", "lifecycle", "Provider request started");
       job!.progressDirty = true;
       store.nextFailure = "throw";
-      internals.maybeFlushProgress(job!, true);
+      await internals.maybeFlushProgress(job!, true);
       expect(job!.progressDirty).toBe(true);
 
-      internals.maybeFlushProgress(job!, true);
+      await internals.maybeFlushProgress(job!, true);
       expect(job!.progressDirty).toBe(false);
       expect(store.guardedWrites).toBeGreaterThanOrEqual(5);
       expect(parseStoredJobProgress((await store.getById(started.id))?.progressJson)?.lastSeq).toBe(
