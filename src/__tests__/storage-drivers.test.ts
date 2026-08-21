@@ -454,16 +454,27 @@ describe("SqliteStorageDriver", () => {
       );
 
       let seenInsideTransaction = -1;
+      let refusedAt = "nothing was refused";
       await expect(
         bounded.transaction("write", async c => {
           await c.execute("INSERT INTO t VALUES (?)", [1]);
           const inside = await c.query<{ n: number }>("SELECT count(*) AS n FROM t");
           seenInsideTransaction = Number(inside[0].n);
           vi.advanceTimersByTime(1500);
-          await c.execute("INSERT INTO t VALUES (?)", [2]);
+          try {
+            await c.execute("INSERT INTO t VALUES (?)", [2]);
+          } catch (error) {
+            refusedAt = "the statement";
+            throw error;
+          }
         })
       ).rejects.toBeInstanceOf(StorageTransactionDeadlineError);
 
+      // Refused where the bound is meant to bite, at the NEXT statement. The
+      // check before COMMIT would end this transaction too, and would leave the
+      // same rows behind, so without this the boundary check is untested: every
+      // further statement it stops can block for another busy_timeout.
+      expect(refusedAt).toBe("the statement");
       // The first write really did happen inside the transaction, so the zero
       // below is a ROLLBACK and not an insert that never ran.
       expect(seenInsideTransaction).toBe(1);
