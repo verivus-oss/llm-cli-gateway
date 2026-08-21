@@ -2553,6 +2553,10 @@ export class AsyncJobManager {
     deferLaunch?: boolean;
     validationAdmission?: ValidationJobAdmission;
   }): Promise<StartJobOutcome> {
+    // See startJobWithDedup: reads of `this.durableAdmission` below happen
+    // before any later admission gate, and the constructor no longer finishes
+    // registering before it returns.
+    await this.ready;
     const {
       provider,
       apiRequest,
@@ -3708,6 +3712,13 @@ export class AsyncJobManager {
     correlationId: string,
     opts: StartJobOptions = {}
   ): Promise<StartJobOutcome> {
+    // Awaited HERE, at the top, not at the assertDurableAdmission call further
+    // down. Several checks in this method read `this.durableAdmission` directly
+    // BEFORE reaching that gate, including the Kit admission check, and before
+    // the store was async the constructor had already finished registering so
+    // the flag was always settled by then. Gating only at the later call left
+    // those earlier reads racing initialisation.
+    await this.ready;
     const {
       cwd,
       idleTimeoutMs,
@@ -4418,6 +4429,7 @@ export class AsyncJobManager {
     kitExecution: KitExecutionRef;
     kitSessionId: string;
   }): Promise<KitAttemptFenceResult> {
+    await this.ready;
     if (!this.store || !this.durableAdmission) {
       throw new Error("Durable Kit attempt fencing is unavailable");
     }
