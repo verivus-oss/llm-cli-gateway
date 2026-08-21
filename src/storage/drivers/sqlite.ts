@@ -95,6 +95,14 @@ function connectionOver(db: GatewayDatabase, transactionControl: boolean): Stora
       guard(statement);
       return { rowsAffected: preparedFor(db, statement).run(...params).changes };
     },
+    async executeScript(script: string): Promise<void> {
+      guard(script);
+      // db.exec, NOT prepare().run(): prepare compiles one statement and would
+      // silently drop the rest of a DDL batch. Not cached, because a script is
+      // run once at bootstrap and caching it would pin a compiled statement for
+      // a string nothing repeats.
+      db.exec(script);
+    },
   };
 }
 

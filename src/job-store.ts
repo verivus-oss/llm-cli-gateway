@@ -2,8 +2,6 @@ import { chmodSync } from "fs";
 import os from "os";
 import path from "path";
 import { createHash } from "crypto";
-import { openDatabase } from "./sqlite-driver.js";
-import type { GatewayDatabase, GatewayStatement } from "./sqlite-driver.js";
 import type { Logger } from "./logger.js";
 import { noopLogger } from "./logger.js";
 import type { PersistenceConfig } from "./config.js";
@@ -19,6 +17,8 @@ import { assertMcpArtifactAdmissionInvariant } from "./mcp-artifact-admission.js
 import type { PersonalKitTerminalMetadata } from "./provider-output-metadata.js";
 import { principalCanAccess } from "./request-context.js";
 import { nodePostgresPoolFactory, PostgresStorageDriver } from "./storage/drivers/postgres.js";
+import { SqliteStorageDriver } from "./storage/drivers/sqlite.js";
+import type { StorageConnection } from "./storage/store.js";
 import {
   createPostgresJobStoreOps,
   type PostgresJobStoreOps,
@@ -396,11 +396,11 @@ function toAcknowledgedKitAttemptRelease(record: JobRecord): AcknowledgedKitAtte
  * table (fresh tables already include it via CREATE TABLE). Safe to call on
  * every open; ALTER is skipped when the column already exists.
  */
-function ensureJobsOwnerColumn(db: GatewayDatabase): void {
-  const cols = db.prepare("PRAGMA table_info(jobs)").all() as Array<{ name?: string }>;
+async function ensureJobsOwnerColumn(conn: StorageConnection): Promise<void> {
+  const cols = (await conn.query("PRAGMA table_info(jobs)")) as Array<{ name?: string }>;
   const hasOwner = cols.some(col => col?.name === "owner_principal");
   if (!hasOwner) {
-    db.exec("ALTER TABLE jobs ADD COLUMN owner_principal TEXT");
+    await conn.execute("ALTER TABLE jobs ADD COLUMN owner_principal TEXT");
   }
 }
 
@@ -411,37 +411,37 @@ function ensureJobsOwnerColumn(db: GatewayDatabase): void {
  * prepared statement is compiled — the INSERT/UPDATE column lists bind at
  * prepare time.
  */
-function ensureJobsTransportColumns(db: GatewayDatabase): void {
-  const cols = db.prepare("PRAGMA table_info(jobs)").all() as Array<{ name?: string }>;
+async function ensureJobsTransportColumns(conn: StorageConnection): Promise<void> {
+  const cols = (await conn.query("PRAGMA table_info(jobs)")) as Array<{ name?: string }>;
   const names = new Set(cols.map(col => col?.name));
   if (!names.has("transport")) {
-    db.exec("ALTER TABLE jobs ADD COLUMN transport TEXT NOT NULL DEFAULT 'process'");
+    await conn.execute("ALTER TABLE jobs ADD COLUMN transport TEXT NOT NULL DEFAULT 'process'");
   }
   if (!names.has("http_status")) {
-    db.exec("ALTER TABLE jobs ADD COLUMN http_status INTEGER");
+    await conn.execute("ALTER TABLE jobs ADD COLUMN http_status INTEGER");
   }
   if (!names.has("payload_json")) {
-    db.exec("ALTER TABLE jobs ADD COLUMN payload_json TEXT");
+    await conn.execute("ALTER TABLE jobs ADD COLUMN payload_json TEXT");
   }
 }
 
 /** #192: add bounded normalized progress storage to legacy SQLite job tables. */
-function ensureJobsProgressColumn(db: GatewayDatabase): void {
-  const cols = db.prepare("PRAGMA table_info(jobs)").all() as Array<{ name?: string }>;
+async function ensureJobsProgressColumn(conn: StorageConnection): Promise<void> {
+  const cols = (await conn.query("PRAGMA table_info(jobs)")) as Array<{ name?: string }>;
   if (!cols.some(col => col?.name === "progress_json")) {
-    db.exec("ALTER TABLE jobs ADD COLUMN progress_json TEXT");
+    await conn.execute("ALTER TABLE jobs ADD COLUMN progress_json TEXT");
   }
 }
 
 /** #189: preserve typed async failure classification across gateway restarts. */
-function ensureJobsErrorClassificationColumns(db: GatewayDatabase): void {
-  const cols = db.prepare("PRAGMA table_info(jobs)").all() as Array<{ name?: string }>;
+async function ensureJobsErrorClassificationColumns(conn: StorageConnection): Promise<void> {
+  const cols = (await conn.query("PRAGMA table_info(jobs)")) as Array<{ name?: string }>;
   const names = new Set(cols.map(col => col?.name));
   if (!names.has("error_category")) {
-    db.exec("ALTER TABLE jobs ADD COLUMN error_category TEXT");
+    await conn.execute("ALTER TABLE jobs ADD COLUMN error_category TEXT");
   }
   if (!names.has("retryable")) {
-    db.exec("ALTER TABLE jobs ADD COLUMN retryable INTEGER");
+    await conn.execute("ALTER TABLE jobs ADD COLUMN retryable INTEGER");
   }
 }
 
@@ -456,17 +456,17 @@ function ensureJobsErrorClassificationColumns(db: GatewayDatabase): void {
  * which is correct because those rows are genuinely stale (they survived a
  * restart). MUST run before the prepared statements below compile.
  */
-function ensureJobsLeaseColumns(db: GatewayDatabase): void {
-  const cols = db.prepare("PRAGMA table_info(jobs)").all() as Array<{ name?: string }>;
+async function ensureJobsLeaseColumns(conn: StorageConnection): Promise<void> {
+  const cols = (await conn.query("PRAGMA table_info(jobs)")) as Array<{ name?: string }>;
   const names = new Set(cols.map(col => col?.name));
   if (!names.has("owner_instance")) {
-    db.exec("ALTER TABLE jobs ADD COLUMN owner_instance TEXT");
+    await conn.execute("ALTER TABLE jobs ADD COLUMN owner_instance TEXT");
   }
   if (!names.has("owner_hostname")) {
-    db.exec("ALTER TABLE jobs ADD COLUMN owner_hostname TEXT");
+    await conn.execute("ALTER TABLE jobs ADD COLUMN owner_hostname TEXT");
   }
   if (!names.has("lease_deadline")) {
-    db.exec("ALTER TABLE jobs ADD COLUMN lease_deadline INTEGER");
+    await conn.execute("ALTER TABLE jobs ADD COLUMN lease_deadline INTEGER");
   }
 }
 
@@ -477,17 +477,19 @@ function ensureJobsLeaseColumns(db: GatewayDatabase): void {
  * rows remain unpinned because they were created before exact-path provenance
  * existed.
  */
-function ensureJobsMcpArtifactCleanupColumns(db: GatewayDatabase): void {
-  const cols = db.prepare("PRAGMA table_info(jobs)").all() as Array<{ name?: string }>;
+async function ensureJobsMcpArtifactCleanupColumns(conn: StorageConnection): Promise<void> {
+  const cols = (await conn.query("PRAGMA table_info(jobs)")) as Array<{ name?: string }>;
   const names = new Set(cols.map(col => col?.name));
   if (!names.has("mcp_artifact_path")) {
-    db.exec("ALTER TABLE jobs ADD COLUMN mcp_artifact_path TEXT");
+    await conn.execute("ALTER TABLE jobs ADD COLUMN mcp_artifact_path TEXT");
   }
   if (!names.has("mcp_artifact_scope")) {
-    db.exec("ALTER TABLE jobs ADD COLUMN mcp_artifact_scope TEXT");
+    await conn.execute("ALTER TABLE jobs ADD COLUMN mcp_artifact_scope TEXT");
   }
   if (!names.has("mcp_artifact_cleanup_pending")) {
-    db.exec("ALTER TABLE jobs ADD COLUMN mcp_artifact_cleanup_pending INTEGER NOT NULL DEFAULT 0");
+    await conn.execute(
+      "ALTER TABLE jobs ADD COLUMN mcp_artifact_cleanup_pending INTEGER NOT NULL DEFAULT 0"
+    );
   }
 }
 
@@ -498,8 +500,8 @@ function ensureJobsMcpArtifactCleanupColumns(db: GatewayDatabase): void {
  * NULL is intentionally retained and local artifact reconciliation fails
  * closed.
  */
-function backfillLegacyOwnerHostnames(db: GatewayDatabase): void {
-  db.exec(`
+async function backfillLegacyOwnerHostnames(conn: StorageConnection): Promise<void> {
+  await conn.execute(`
     UPDATE jobs
     SET owner_hostname = (
       SELECT gi.hostname
@@ -524,11 +526,11 @@ function backfillLegacyOwnerHostnames(db: GatewayDatabase): void {
  * handling. Legacy rows keep NULL ("not requested"). MUST run before any
  * prepared statement is compiled.
  */
-function ensureJobsCompressResponseColumn(db: GatewayDatabase): void {
-  const cols = db.prepare("PRAGMA table_info(jobs)").all() as Array<{ name?: string }>;
+async function ensureJobsCompressResponseColumn(conn: StorageConnection): Promise<void> {
+  const cols = (await conn.query("PRAGMA table_info(jobs)")) as Array<{ name?: string }>;
   const names = new Set(cols.map(col => col?.name));
   if (!names.has("compress_response")) {
-    db.exec("ALTER TABLE jobs ADD COLUMN compress_response INTEGER");
+    await conn.execute("ALTER TABLE jobs ADD COLUMN compress_response INTEGER");
   }
 }
 
@@ -537,11 +539,11 @@ function ensureJobsCompressResponseColumn(db: GatewayDatabase): void {
  * without exposing individual fields as ad-hoc mutable columns. Legacy rows
  * remain NULL and therefore retain their exact disabled-mode behavior.
  */
-function ensureJobsKitExecutionColumn(db: GatewayDatabase): void {
-  const cols = db.prepare("PRAGMA table_info(jobs)").all() as Array<{ name?: string }>;
+async function ensureJobsKitExecutionColumn(conn: StorageConnection): Promise<void> {
+  const cols = (await conn.query("PRAGMA table_info(jobs)")) as Array<{ name?: string }>;
   const names = new Set(cols.map(col => col?.name));
   if (!names.has("kit_execution_json")) {
-    db.exec("ALTER TABLE jobs ADD COLUMN kit_execution_json TEXT");
+    await conn.execute("ALTER TABLE jobs ADD COLUMN kit_execution_json TEXT");
   }
 }
 
@@ -551,17 +553,19 @@ function ensureJobsKitExecutionColumn(db: GatewayDatabase): void {
  * the finalized marker is deliberately independent from job status so an
  * output can be durable before its session update succeeds.
  */
-function ensureJobsKitFinalizationColumns(db: GatewayDatabase): void {
-  const cols = db.prepare("PRAGMA table_info(jobs)").all() as Array<{ name?: string }>;
+async function ensureJobsKitFinalizationColumns(conn: StorageConnection): Promise<void> {
+  const cols = (await conn.query("PRAGMA table_info(jobs)")) as Array<{ name?: string }>;
   const names = new Set(cols.map(col => col?.name));
   if (!names.has("kit_session_id")) {
-    db.exec("ALTER TABLE jobs ADD COLUMN kit_session_id TEXT");
+    await conn.execute("ALTER TABLE jobs ADD COLUMN kit_session_id TEXT");
   }
   if (!names.has("kit_terminal_finalized")) {
-    db.exec("ALTER TABLE jobs ADD COLUMN kit_terminal_finalized INTEGER NOT NULL DEFAULT 0");
+    await conn.execute(
+      "ALTER TABLE jobs ADD COLUMN kit_terminal_finalized INTEGER NOT NULL DEFAULT 0"
+    );
   }
   if (!names.has("kit_terminal_finalized_at")) {
-    db.exec("ALTER TABLE jobs ADD COLUMN kit_terminal_finalized_at TEXT");
+    await conn.execute("ALTER TABLE jobs ADD COLUMN kit_terminal_finalized_at TEXT");
   }
 }
 
@@ -571,17 +575,17 @@ function ensureJobsKitFinalizationColumns(db: GatewayDatabase): void {
  * handles are intentionally retired rather than retaining instruction-derived
  * material in a durable database.
  */
-function ensureJobsKitTerminalMetadataColumn(db: GatewayDatabase): void {
-  const cols = db.prepare("PRAGMA table_info(jobs)").all() as Array<{ name?: string }>;
+async function ensureJobsKitTerminalMetadataColumn(conn: StorageConnection): Promise<void> {
+  const cols = (await conn.query("PRAGMA table_info(jobs)")) as Array<{ name?: string }>;
   const names = new Set(cols.map(col => col?.name));
   if (!names.has("kit_terminal_metadata_json")) {
-    db.exec("ALTER TABLE jobs ADD COLUMN kit_terminal_metadata_json TEXT");
+    await conn.execute("ALTER TABLE jobs ADD COLUMN kit_terminal_metadata_json TEXT");
   }
   // SQLite DDL can commit before a following data update. Run the scrub on
   // every open so a crash between the additive ALTER and this update heals on
   // the next startup instead of preserving legacy Kit context indefinitely.
   // The guarded predicate leaves already-clean rows untouched.
-  db.prepare(
+  await conn.execute(
     `UPDATE jobs
      SET args_json = '${PERSONAL_KIT_REDACTED_ARGS_JSON.replace(/'/g, "''")}',
          request_key = 'kit:' || id,
@@ -608,7 +612,7 @@ function ensureJobsKitTerminalMetadataColumn(db: GatewayDatabase): void {
            END
          )
        )`
-  ).run();
+  );
 }
 
 /**
@@ -997,39 +1001,235 @@ export function isValidationRunStore(store: unknown): store is ValidationRunStor
  * SQLite-backed job store. Default backend for production. Durable across
  * gateway restarts; safe for single-instance deployments.
  */
+const SQL_INSERT = `
+      INSERT INTO jobs (id, correlation_id, request_key, cli, args_json, output_format,
+                        compress_response,
+                        status, exit_code, stdout, stderr, output_truncated, error,
+                        started_at, finished_at, pid, expires_at, owner_principal,
+                        transport, http_status, payload_json, owner_instance, owner_hostname,
+                        mcp_artifact_path, mcp_artifact_scope, mcp_artifact_cleanup_pending, lease_deadline,
+                        kit_execution_json, kit_session_id, kit_terminal_finalized,
+                        kit_terminal_finalized_at, kit_terminal_metadata_json)
+      VALUES (@id, @correlation_id, @request_key, @cli, @args_json, @output_format,
+              @compress_response,
+              'queued', @exit_code, @stdout, @stderr, @output_truncated, @error,
+              @started_at, @finished_at, @pid, @expires_at, @owner_principal,
+              @transport, @http_status, @payload_json, @owner_instance, @owner_hostname,
+              @mcp_artifact_path, @mcp_artifact_scope, @mcp_artifact_cleanup_pending,
+              ${SQLITE_NOW_MS} + @lease_ttl_ms, @kit_execution_json, @kit_session_id,
+              0, NULL, NULL)
+    `;
+
+const SQL_INSERT_KIT_ATTEMPT_FENCE = `
+      INSERT OR IGNORE INTO kit_attempt_fences
+        (attempt_id, state, cli, kit_execution_json, kit_session_id, owner_principal, fenced_at)
+      VALUES
+        (@attempt_id, @state, @cli, @kit_execution_json, @kit_session_id, @owner_principal, @fenced_at)
+    `;
+
+const SQL_GET_KIT_ATTEMPT_FENCE = `
+      SELECT state, cli, kit_execution_json, kit_session_id, owner_principal
+      FROM kit_attempt_fences
+      WHERE attempt_id = ?
+    `;
+
+const SQL_UPDATE_OUTPUT = `
+      UPDATE jobs
+      SET stdout = CASE WHEN kit_execution_json IS NULL THEN @stdout ELSE '' END,
+          stderr = CASE WHEN kit_execution_json IS NULL THEN @stderr ELSE '' END,
+          output_truncated = @output_truncated
+      WHERE id = @id
+    `;
+
+const SQL_UPDATE_PROGRESS = `
+      UPDATE jobs SET progress_json = @progress_json WHERE id = @id
+    `;
+
+const SQL_UPDATE_PROGRESS_IF_STATUS = `
+      UPDATE jobs SET progress_json = @progress_json
+      WHERE id = @id AND status = @status
+    `;
+
+const SQL_UPDATE_COMPLETE = `
+      UPDATE jobs SET status = @status, exit_code = @exit_code,
+                      stdout = CASE WHEN kit_execution_json IS NULL THEN @stdout ELSE '' END,
+                      stderr = CASE WHEN kit_execution_json IS NULL THEN @stderr ELSE '' END,
+                      output_truncated = @output_truncated,
+                      error = CASE
+                        WHEN kit_execution_json IS NULL THEN @error
+                        WHEN @status = 'completed' THEN NULL
+                        ELSE '${PERSONAL_KIT_FAILURE_WITHHELD}'
+                      END,
+                      error_category = @error_category,
+                      retryable = @retryable,
+                      finished_at = @finished_at, expires_at = @expires_at,
+                      http_status = @http_status, lease_deadline = NULL,
+                      kit_terminal_metadata_json = @kit_terminal_metadata_json,
+                      progress_json = COALESCE(@progress_json, progress_json)
+      WHERE id = @id AND status IN ('queued', 'running', 'orphaned')
+    `;
+
+const SQL_GET_BY_ID = `SELECT * FROM jobs WHERE id = ?`;
+
+const SQL_SELECT_PENDING_KIT_FINALIZATIONS = `
+      SELECT * FROM jobs
+      WHERE kit_execution_json IS NOT NULL
+        AND kit_session_id IS NOT NULL
+        AND COALESCE(kit_terminal_finalized, 0) = 0
+        AND status IN ('completed', 'failed', 'canceled')
+      ORDER BY finished_at ASC, id ASC
+    `;
+
+const SQL_SELECT_ACKNOWLEDGED_KIT_ATTEMPT_RELEASES = `
+      SELECT * FROM jobs
+      WHERE kit_execution_json IS NOT NULL
+        AND kit_session_id IS NOT NULL
+        AND COALESCE(kit_terminal_finalized, 0) = 1
+        AND status IN ('completed', 'failed', 'canceled')
+      ORDER BY finished_at ASC, id ASC
+    `;
+
+const SQL_MARK_KIT_TERMINAL_FINALIZED = `
+      UPDATE jobs
+      SET kit_terminal_finalized = 1,
+          kit_terminal_finalized_at = COALESCE(kit_terminal_finalized_at, @finalized_at)
+      WHERE id = @id
+        AND kit_session_id = @kit_session_id
+        AND kit_execution_json IS NOT NULL
+        AND status IN ('completed', 'failed', 'canceled')
+    `;
+
+const SQL_FIND_BY_REQUEST_KEY = `
+      SELECT * FROM jobs
+      WHERE request_key = ?
+        AND started_at >= ?
+        AND (
+          status IN ('running', 'completed')
+          OR (status = 'queued' AND lease_deadline IS NOT NULL AND lease_deadline >= ${SQLITE_NOW_MS})
+        )
+      ORDER BY started_at DESC
+      LIMIT 1
+    `;
+
+const SQL_DELETE_EXPIRED = `
+      DELETE FROM jobs
+      WHERE expires_at < ?
+        AND (
+          kit_execution_json IS NULL
+          OR COALESCE(kit_terminal_finalized, 0) = 1
+        )
+        AND COALESCE(mcp_artifact_cleanup_pending, 0) = 0
+    `;
+
+const SQL_MARK_RUNNING = `
+      UPDATE jobs
+      SET status = 'running', pid = @pid, lease_deadline = ${SQLITE_NOW_MS} + @lease_ttl_ms
+      WHERE id = @id AND status = 'queued'
+    `;
+
+const SQL_REGISTER_INSTANCE = `
+      INSERT INTO gateway_instances (instance_id, role, hostname, pid, started_at, last_heartbeat)
+      VALUES (@instance_id, @role, @hostname, @pid, ${SQLITE_NOW_MS}, ${SQLITE_NOW_MS})
+      ON CONFLICT(instance_id) DO UPDATE SET
+        role = excluded.role, hostname = excluded.hostname, pid = excluded.pid,
+        last_heartbeat = excluded.last_heartbeat
+    `;
+
+const SQL_HEARTBEAT_INSTANCE = `
+      UPDATE gateway_instances SET last_heartbeat = ${SQLITE_NOW_MS} WHERE instance_id = @instance_id
+    `;
+
+const SQL_HEARTBEAT_JOBS = `
+      UPDATE jobs SET lease_deadline = ${SQLITE_NOW_MS} + @lease_ttl_ms
+      WHERE owner_instance = @instance_id AND status IN ('queued', 'running')
+    `;
+
+const SQL_DEREGISTER_INSTANCE = `DELETE FROM gateway_instances WHERE instance_id = @instance_id`;
+
+const SQL_SELECT_STALE_CANDIDATES = `
+      SELECT j.id AS id, j.pid AS pid, j.transport AS transport,
+             j.owner_instance AS owner_instance,
+             COALESCE(j.owner_hostname, gi.hostname) AS hostname
+      FROM jobs j
+      LEFT JOIN gateway_instances gi ON gi.instance_id = j.owner_instance
+      WHERE j.status IN ('queued', 'running')
+        AND j.transport = 'process'
+        AND (j.lease_deadline IS NULL OR j.lease_deadline < ${SQLITE_NOW_MS})
+    `;
+
+const SQL_SELECT_ORPHANED_CANDIDATES = `
+      SELECT j.id AS id, j.pid AS pid, j.transport AS transport,
+             j.owner_instance AS owner_instance, j.owner_hostname AS hostname
+      FROM jobs j
+      WHERE j.status = 'orphaned'
+        AND j.transport = 'process'
+        AND j.owner_hostname = @hostname
+    `;
+
+const SQL_SELECT_PENDING_MCP_ARTIFACT_CLEANUPS = `
+      SELECT j.id AS id, j.owner_instance AS owner_instance,
+             j.owner_hostname AS hostname, j.mcp_artifact_scope AS artifact_scope,
+             j.mcp_artifact_path AS artifact_path
+      FROM jobs j
+      WHERE j.owner_hostname = @hostname
+        AND j.cli = 'claude'
+        AND j.transport = 'process'
+        AND COALESCE(j.mcp_artifact_cleanup_pending, 0) = 1
+        AND j.mcp_artifact_path IS NOT NULL
+        AND j.mcp_artifact_scope IS NOT NULL
+        AND j.status IN ('completed', 'failed', 'canceled', 'orphaned')
+    `;
+
+const SQL_ACKNOWLEDGE_MCP_ARTIFACT_CLEANUP = `
+      UPDATE jobs
+      SET mcp_artifact_cleanup_pending = 0
+      WHERE id = @id
+        AND owner_hostname = @hostname
+        AND mcp_artifact_scope = @artifact_scope
+        AND mcp_artifact_path = @artifact_path
+        AND COALESCE(mcp_artifact_cleanup_pending, 0) = 1
+        AND status IN ('completed', 'failed', 'canceled', 'orphaned')
+    `;
+
+const SQL_ORPHAN_EXPIRED = `
+      UPDATE jobs
+      SET status = 'orphaned',
+          stdout = CASE WHEN kit_execution_json IS NULL THEN stdout ELSE '' END,
+          stderr = CASE WHEN kit_execution_json IS NULL THEN stderr ELSE '' END,
+          payload_json = CASE WHEN kit_execution_json IS NULL THEN payload_json ELSE NULL END,
+          error = CASE
+            WHEN kit_execution_json IS NULL THEN COALESCE(error, 'owning gateway instance is no longer alive')
+            ELSE '${PERSONAL_KIT_FAILURE_WITHHELD}'
+          END,
+          finished_at = COALESCE(finished_at, @now_iso),
+          expires_at = @expires_iso,
+          lease_deadline = NULL
+      WHERE status IN ('queued', 'running')
+        AND (lease_deadline IS NULL OR lease_deadline < ${SQLITE_NOW_MS})
+        AND (transport <> 'http'
+             OR started_at < strftime('%Y-%m-%dT%H:%M:%fZ', 'now', @http_grace_modifier))
+        AND id NOT IN (SELECT value FROM json_each(@exclude_json))
+      RETURNING id, correlation_id, started_at, stdout, stderr, exit_code, transport, http_status,
+                kit_execution_json IS NOT NULL AS is_personal_config_kit
+    `;
+
+const SQL_ADVANCE_LEASE = `
+      UPDATE jobs SET lease_deadline = ${SQLITE_NOW_MS} + @lease_ttl_ms, pid = NULL
+      WHERE status IN ('queued', 'running')
+        AND id IN (SELECT value FROM json_each(@ids_json))
+    `;
+
+const SQL_GC_INSTANCES = `DELETE FROM gateway_instances WHERE last_heartbeat < ${SQLITE_NOW_MS} - @gc_ms`;
+
 export class SqliteJobStore implements JobStore, ValidationRunStore {
-  private db: GatewayDatabase;
+  private readonly driver: SqliteStorageDriver;
+  private readonly dbPath: string;
+  private bootstrapPromise: Promise<void> | null = null;
+  private closed = false;
   private retentionMs: number;
   private dedupWindowMs: number;
   /** #139: initial lease TTL used by recordStart/markRunning/heartbeat (ms). */
   private leaseTtlMs: number;
-
-  private insertStmt: GatewayStatement;
-  private insertKitAttemptFenceStmt: GatewayStatement;
-  private getKitAttemptFenceStmt: GatewayStatement;
-  private updateOutputStmt: GatewayStatement;
-  private updateProgressStmt: GatewayStatement;
-  private updateProgressIfStatusStmt: GatewayStatement;
-  private updateCompleteStmt: GatewayStatement;
-  private getByIdStmt: GatewayStatement;
-  private findByRequestKeyStmt: GatewayStatement;
-  private selectPendingKitFinalizationsStmt: GatewayStatement;
-  private selectAcknowledgedKitAttemptReleasesStmt: GatewayStatement;
-  private markKitTerminalFinalizedStmt: GatewayStatement;
-  private deleteExpiredStmt: GatewayStatement;
-  // #139 lease surface.
-  private markRunningStmt: GatewayStatement;
-  private registerInstanceStmt: GatewayStatement;
-  private heartbeatInstanceStmt: GatewayStatement;
-  private heartbeatJobsStmt: GatewayStatement;
-  private deregisterInstanceStmt: GatewayStatement;
-  private selectStaleCandidatesStmt: GatewayStatement;
-  private selectOrphanedCandidatesStmt: GatewayStatement;
-  private selectPendingMcpArtifactCleanupsStmt: GatewayStatement;
-  private acknowledgeMcpArtifactCleanupStmt: GatewayStatement;
-  private orphanExpiredStmt: GatewayStatement;
-  private advanceLeaseStmt: GatewayStatement;
-  private gcInstancesStmt: GatewayStatement;
 
   constructor(
     dbPath: string,
@@ -1039,16 +1239,69 @@ export class SqliteJobStore implements JobStore, ValidationRunStore {
     // openDatabase owns parent-directory creation (mkdirSync recursive), so the
     // job store no longer does its own mkdir. Any open/DDL failure throws to
     // the caller (createJobStore), matching the prior require/open behaviour.
-    this.db = openDatabase(dbPath);
-    this.db.exec("PRAGMA journal_mode = WAL");
-    this.db.exec("PRAGMA synchronous = NORMAL");
-    // #139: a shared-file sqlite DB (multiple gateway processes on one host) can
-    // now have a heartbeat UPDATE and a sweep UPDATE contend for the write lock.
-    // busy_timeout makes a blocked writer wait rather than fail immediately with
-    // SQLITE_BUSY; the store also wraps heartbeat/sweep in a SQLITE_BUSY retry.
-    this.db.exec("PRAGMA busy_timeout = 5000");
+    // The DRIVER owns the handle now. The store keeps no second write path:
+    // that is the point of the port, and holding a GatewayDatabase alongside a
+    // driver would put two independent writers on one file.
+    this.driver = new SqliteStorageDriver(dbPath);
+    this.dbPath = dbPath;
+    this.retentionMs = options.retentionMs ?? resolveJobRetentionMs();
+    this.dedupWindowMs = options.dedupWindowMs ?? resolveDedupWindowMs();
+    this.leaseTtlMs = options.leaseTtlMs ?? DEFAULT_INSTANCE_LEASE_TTL_MS;
 
-    this.db.exec(`
+    // STARTED here, not awaited here. A constructor cannot await, but it can
+    // begin the work, and the difference matters for one reason above all: the
+    // legacy Kit privacy scrub runs inside this bootstrap. Deferring it to the
+    // first store call would leave private Kit material readable by anything
+    // looking directly at the file for as long as no operation happened. That
+    // is an unbounded window and a contract change, not an implementation
+    // detail, and "whenever SQLite reopens" is what the control asserts.
+    //
+    // Every operation still awaits ensureSchema(), so nothing can observe a
+    // half-built schema. Starting early shortens the window; it does not remove
+    // the barrier.
+    void this.ensureSchema().catch(() => {
+      // Swallowed HERE deliberately: the rejection is retained by the memo and
+      // rethrown at the first operation that awaits it, which is where a caller
+      // can be told. Letting it escape a constructor's async tail would be an
+      // unhandled rejection with nobody to receive it.
+    });
+  }
+
+  /**
+   * Schema, PRAGMAs and the idempotent column migrations, run ONCE.
+   *
+   * Lazy for the same reason as the Postgres store: the port is asynchronous
+   * and a constructor cannot await. The memo is installed BEFORE any await, so
+   * two callers racing the first store call share one bootstrap instead of both
+   * running the DDL. That race is not hypothetical: it is exactly the defect
+   * review found in PostgresJobStore.
+   *
+   * Cleared on failure so a later call retries, rather than memoising a
+   * rejection and refusing every later operation for the process lifetime.
+   */
+  private ensureSchema(): Promise<void> {
+    if (this.closed) return Promise.reject(new Error("SqliteJobStore is closed"));
+    this.bootstrapPromise ??= this.bootstrapSchema().catch((error: unknown) => {
+      this.bootstrapPromise = null;
+      throw error;
+    });
+    return this.bootstrapPromise;
+  }
+
+  private async bootstrapSchema(): Promise<void> {
+    // driver.bootstrap runs on the driver's own connection with transaction
+    // control, OUTSIDE operation-class routing, because DDL is none of the four
+    // classes. Same boundary as the Postgres driver, for the same reason.
+    await this.driver.bootstrap(async conn => {
+      await conn.execute("PRAGMA journal_mode = WAL");
+      await conn.execute("PRAGMA synchronous = NORMAL");
+      // #139: a shared-file sqlite DB (multiple gateway processes on one host) can
+      // now have a heartbeat UPDATE and a sweep UPDATE contend for the write lock.
+      // busy_timeout makes a blocked writer wait rather than fail immediately with
+      // SQLITE_BUSY; the store also wraps heartbeat/sweep in a SQLITE_BUSY retry.
+      await conn.execute("PRAGMA busy_timeout = 5000");
+
+      await conn.executeScript(`
       CREATE TABLE IF NOT EXISTS jobs (
         id TEXT PRIMARY KEY,
         correlation_id TEXT NOT NULL,
@@ -1117,11 +1370,11 @@ export class SqliteJobStore implements JobStore, ValidationRunStore {
       );
     `);
 
-    // Cross-LLM validation receipts (Phase 0): durable validation-run identity.
-    // Same idempotent CREATE TABLE IF NOT EXISTS idiom as the jobs table (NOT the
-    // flight recorder's versioned _migrations system). App-side ISO timestamps;
-    // owner_principal indexed for owner-scoped lookups.
-    this.db.exec(`
+      // Cross-LLM validation receipts (Phase 0): durable validation-run identity.
+      // Same idempotent CREATE TABLE IF NOT EXISTS idiom as the jobs table (NOT the
+      // flight recorder's versioned _migrations system). App-side ISO timestamps;
+      // owner_principal indexed for owner-scoped lookups.
+      await conn.executeScript(`
       CREATE TABLE IF NOT EXISTS validation_runs (
         validation_id TEXT PRIMARY KEY,
         owner_principal TEXT NOT NULL,
@@ -1135,11 +1388,11 @@ export class SqliteJobStore implements JobStore, ValidationRunStore {
       CREATE INDEX IF NOT EXISTS idx_validation_runs_owner ON validation_runs(owner_principal);
     `);
 
-    // Cross-LLM validation receipts (Phase 1): reverse index (job_id -> run) for
-    // eager mint when a provider/judge job result is collected, and the immutable
-    // receipts table (one row per terminal run). Same idempotent idiom; receipts
-    // indexed on owner_principal for owner-scoped queries.
-    this.db.exec(`
+      // Cross-LLM validation receipts (Phase 1): reverse index (job_id -> run) for
+      // eager mint when a provider/judge job result is collected, and the immutable
+      // receipts table (one row per terminal run). Same idempotent idiom; receipts
+      // indexed on owner_principal for owner-scoped queries.
+      await conn.executeScript(`
       CREATE TABLE IF NOT EXISTS validation_run_jobs (
         job_id TEXT PRIMARY KEY,
         validation_id TEXT NOT NULL,
@@ -1163,309 +1416,97 @@ export class SqliteJobStore implements JobStore, ValidationRunStore {
       CREATE INDEX IF NOT EXISTS idx_validation_receipts_owner ON validation_receipts(owner_principal);
     `);
 
-    // F3: idempotent migration — add owner_principal to a pre-existing jobs
-    // table. Legacy rows keep NULL (treated as legacy-unowned by enforcement).
-    ensureJobsOwnerColumn(this.db);
-    // Slice 1: idempotent migration for the http-transport columns. MUST run
-    // before the prepared statements below bind to the column list.
-    ensureJobsTransportColumns(this.db);
-    ensureJobsProgressColumn(this.db);
-    ensureJobsErrorClassificationColumns(this.db);
-    // #139: idempotent migration for durable ownership and lease columns.
-    // Same must-run-before-prepare ordering.
-    ensureJobsLeaseColumns(this.db);
-    // Exact-path request-artifact provenance must exist before the INSERT and
-    // retention statements below are prepared.
-    ensureJobsMcpArtifactCleanupColumns(this.db);
-    // Migration 017 equivalent for SQLite stores: repair only the rows whose
-    // retained instance metadata can prove their old hostname.
-    backfillLegacyOwnerHostnames(this.db);
-    // #139: the owner/status index references owner_instance, so it can only be
-    // created AFTER ensureJobsLeaseColumns adds that column to a legacy table.
-    this.db.exec(
-      "CREATE INDEX IF NOT EXISTS idx_jobs_owner_status ON jobs(owner_instance, status)"
-    );
-    this.db.exec(
-      "CREATE INDEX IF NOT EXISTS idx_jobs_owner_hostname_status ON jobs(owner_hostname, status)"
-    );
-    this.db.exec(
-      "CREATE INDEX IF NOT EXISTS idx_jobs_mcp_artifact_cleanup ON jobs(owner_hostname, mcp_artifact_cleanup_pending, status)"
-    );
-    this.db.exec(
-      "CREATE INDEX IF NOT EXISTS idx_jobs_mcp_artifact_scope_cleanup ON jobs(owner_hostname, mcp_artifact_scope, mcp_artifact_cleanup_pending, status)"
-    );
-    // Native compressor PR-1: nullable compress_response column.
-    ensureJobsCompressResponseColumn(this.db);
-    // Personal Agent Config Kit: nullable immutable execution identity.
-    ensureJobsKitExecutionColumn(this.db);
-    // Personal Agent Config Kit: restart-safe terminal session finalization.
-    ensureJobsKitFinalizationColumns(this.db);
-    // Personal Agent Config Kit: compatibility column, scrubbed to NULL.
-    ensureJobsKitTerminalMetadataColumn(this.db);
-    this.db.exec(
-      "CREATE INDEX IF NOT EXISTS idx_jobs_kit_finalization ON jobs(kit_terminal_finalized, status)"
-    );
+      // F3: idempotent migration — add owner_principal to a pre-existing jobs
+      // table. Legacy rows keep NULL (treated as legacy-unowned by enforcement).
+      await ensureJobsOwnerColumn(conn);
+      // Slice 1: idempotent migration for the http-transport columns. MUST run
+      // before the prepared statements below bind to the column list.
+      await ensureJobsTransportColumns(conn);
+      await ensureJobsProgressColumn(conn);
+      await ensureJobsErrorClassificationColumns(conn);
+      // #139: idempotent migration for durable ownership and lease columns.
+      // Same must-run-before-prepare ordering.
+      await ensureJobsLeaseColumns(conn);
+      // Exact-path request-artifact provenance must exist before the INSERT and
+      // retention statements below are prepared.
+      await ensureJobsMcpArtifactCleanupColumns(conn);
+      // Migration 017 equivalent for SQLite stores: repair only the rows whose
+      // retained instance metadata can prove their old hostname.
+      await backfillLegacyOwnerHostnames(conn);
+      // #139: the owner/status index references owner_instance, so it can only be
+      // created AFTER ensureJobsLeaseColumns adds that column to a legacy table.
+      await conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_jobs_owner_status ON jobs(owner_instance, status)"
+      );
+      await conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_jobs_owner_hostname_status ON jobs(owner_hostname, status)"
+      );
+      await conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_jobs_mcp_artifact_cleanup ON jobs(owner_hostname, mcp_artifact_cleanup_pending, status)"
+      );
+      await conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_jobs_mcp_artifact_scope_cleanup ON jobs(owner_hostname, mcp_artifact_scope, mcp_artifact_cleanup_pending, status)"
+      );
+      // Native compressor PR-1: nullable compress_response column.
+      await ensureJobsCompressResponseColumn(conn);
+      // Personal Agent Config Kit: nullable immutable execution identity.
+      await ensureJobsKitExecutionColumn(conn);
+      // Personal Agent Config Kit: restart-safe terminal session finalization.
+      await ensureJobsKitFinalizationColumns(conn);
+      // Personal Agent Config Kit: compatibility column, scrubbed to NULL.
+      await ensureJobsKitTerminalMetadataColumn(conn);
+      await conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_jobs_kit_finalization ON jobs(kit_terminal_finalized, status)"
+      );
+    });
 
     if (process.platform !== "win32") {
       try {
-        chmodSync(dbPath, 0o600);
+        chmodSync(this.dbPath, 0o600);
       } catch {
         // Best effort permissions hardening.
       }
     }
+  }
 
-    this.retentionMs = options.retentionMs ?? resolveJobRetentionMs();
-    this.dedupWindowMs = options.dedupWindowMs ?? resolveDedupWindowMs();
-    this.leaseTtlMs = options.leaseTtlMs ?? DEFAULT_INSTANCE_LEASE_TTL_MS;
+  /**
+   * Every statement now goes through the port. The `changes` shape is preserved
+   * because every caller reads `result.changes`, so no call site changed.
+   *
+   * `conn` is passed when the caller is already inside a transaction; otherwise
+   * the write gets its own. Writes go through `transaction()` rather than
+   * `withConnection`, because withConnection is deliberately NOT on the
+   * driver's queue and two concurrent writers would otherwise interleave.
+   */
+  private async execSql(
+    sql: string,
+    params: readonly unknown[] = [],
+    conn?: StorageConnection
+  ): Promise<{ changes: number }> {
+    const run = async (c: StorageConnection): Promise<{ changes: number }> => ({
+      changes: (await c.execute(sql, params)).rowsAffected,
+    });
+    if (conn) return run(conn);
+    await this.ensureSchema();
+    return this.driver.transaction("write", run);
+  }
 
-    // #139: recordStart persists status='queued' (markRunning flips it to
-    // 'running' at launch) with the owner instance stamped and an initial
-    // lease_deadline = db_now + leaseTtl, computed from the DB clock in the SAME
-    // insert so a live row NEVER has a NULL deadline.
-    this.insertStmt = this.db.prepare(`
-      INSERT INTO jobs (id, correlation_id, request_key, cli, args_json, output_format,
-                        compress_response,
-                        status, exit_code, stdout, stderr, output_truncated, error,
-                        started_at, finished_at, pid, expires_at, owner_principal,
-                        transport, http_status, payload_json, owner_instance, owner_hostname,
-                        mcp_artifact_path, mcp_artifact_scope, mcp_artifact_cleanup_pending, lease_deadline,
-                        kit_execution_json, kit_session_id, kit_terminal_finalized,
-                        kit_terminal_finalized_at, kit_terminal_metadata_json)
-      VALUES (@id, @correlation_id, @request_key, @cli, @args_json, @output_format,
-              @compress_response,
-              'queued', @exit_code, @stdout, @stderr, @output_truncated, @error,
-              @started_at, @finished_at, @pid, @expires_at, @owner_principal,
-              @transport, @http_status, @payload_json, @owner_instance, @owner_hostname,
-              @mcp_artifact_path, @mcp_artifact_scope, @mcp_artifact_cleanup_pending,
-              ${SQLITE_NOW_MS} + @lease_ttl_ms, @kit_execution_json, @kit_session_id,
-              0, NULL, NULL)
-    `);
-    this.insertKitAttemptFenceStmt = this.db.prepare(`
-      INSERT OR IGNORE INTO kit_attempt_fences
-        (attempt_id, state, cli, kit_execution_json, kit_session_id, owner_principal, fenced_at)
-      VALUES
-        (@attempt_id, @state, @cli, @kit_execution_json, @kit_session_id, @owner_principal, @fenced_at)
-    `);
-    this.getKitAttemptFenceStmt = this.db.prepare(`
-      SELECT state, cli, kit_execution_json, kit_session_id, owner_principal
-      FROM kit_attempt_fences
-      WHERE attempt_id = ?
-    `);
+  private async allSql<T>(
+    sql: string,
+    params: readonly unknown[] = [],
+    conn?: StorageConnection
+  ): Promise<T[]> {
+    if (conn) return conn.query<T>(sql, params);
+    await this.ensureSchema();
+    return this.driver.withConnection("write", c => c.query<T>(sql, params));
+  }
 
-    this.updateOutputStmt = this.db.prepare(`
-      UPDATE jobs
-      SET stdout = CASE WHEN kit_execution_json IS NULL THEN @stdout ELSE '' END,
-          stderr = CASE WHEN kit_execution_json IS NULL THEN @stderr ELSE '' END,
-          output_truncated = @output_truncated
-      WHERE id = @id
-    `);
-    this.updateProgressStmt = this.db.prepare(`
-      UPDATE jobs SET progress_json = @progress_json WHERE id = @id
-    `);
-    this.updateProgressIfStatusStmt = this.db.prepare(`
-      UPDATE jobs SET progress_json = @progress_json
-      WHERE id = @id AND status = @status
-    `);
-
-    // #139: guarded completion. A terminal result may only land on a still-open
-    // row (queued/running) or one a mistaken sweep marked orphaned; it is a
-    // no-op on an already-terminal row (last committed terminal state wins).
-    this.updateCompleteStmt = this.db.prepare(`
-      UPDATE jobs SET status = @status, exit_code = @exit_code,
-                      stdout = CASE WHEN kit_execution_json IS NULL THEN @stdout ELSE '' END,
-                      stderr = CASE WHEN kit_execution_json IS NULL THEN @stderr ELSE '' END,
-                      output_truncated = @output_truncated,
-                      error = CASE
-                        WHEN kit_execution_json IS NULL THEN @error
-                        WHEN @status = 'completed' THEN NULL
-                        ELSE '${PERSONAL_KIT_FAILURE_WITHHELD}'
-                      END,
-                      error_category = @error_category,
-                      retryable = @retryable,
-                      finished_at = @finished_at, expires_at = @expires_at,
-                      http_status = @http_status, lease_deadline = NULL,
-                      kit_terminal_metadata_json = @kit_terminal_metadata_json,
-                      progress_json = COALESCE(@progress_json, progress_json)
-      WHERE id = @id AND status IN ('queued', 'running', 'orphaned')
-    `);
-
-    this.getByIdStmt = this.db.prepare(`SELECT * FROM jobs WHERE id = ?`);
-
-    this.selectPendingKitFinalizationsStmt = this.db.prepare(`
-      SELECT * FROM jobs
-      WHERE kit_execution_json IS NOT NULL
-        AND kit_session_id IS NOT NULL
-        AND COALESCE(kit_terminal_finalized, 0) = 0
-        AND status IN ('completed', 'failed', 'canceled')
-      ORDER BY finished_at ASC, id ASC
-    `);
-    this.selectAcknowledgedKitAttemptReleasesStmt = this.db.prepare(`
-      SELECT * FROM jobs
-      WHERE kit_execution_json IS NOT NULL
-        AND kit_session_id IS NOT NULL
-        AND COALESCE(kit_terminal_finalized, 0) = 1
-        AND status IN ('completed', 'failed', 'canceled')
-      ORDER BY finished_at ASC, id ASC
-    `);
-    this.markKitTerminalFinalizedStmt = this.db.prepare(`
-      UPDATE jobs
-      SET kit_terminal_finalized = 1,
-          kit_terminal_finalized_at = COALESCE(kit_terminal_finalized_at, @finalized_at)
-      WHERE id = @id
-        AND kit_session_id = @kit_session_id
-        AND kit_execution_json IS NOT NULL
-        AND status IN ('completed', 'failed', 'canceled')
-    `);
-
-    // Dedup query: most recent reusable job with matching request_key, started
-    // within window. Reuse a completed job, a running job, or a still-live
-    // (lease-valid) queued job; NEVER an orphaned/canceled/failed row, and never
-    // a queued job whose lease has expired (it is a dead pre-launch row awaiting
-    // the sweep). The lease check uses the DB clock.
-    this.findByRequestKeyStmt = this.db.prepare(`
-      SELECT * FROM jobs
-      WHERE request_key = ?
-        AND started_at >= ?
-        AND (
-          status IN ('running', 'completed')
-          OR (status = 'queued' AND lease_deadline IS NOT NULL AND lease_deadline >= ${SQLITE_NOW_MS})
-        )
-      ORDER BY started_at DESC
-      LIMIT 1
-    `);
-
-    // A terminal Kit result is retained until its session binding is marked
-    // finalized, and an origin-host Claude MCP artifact is retained until its
-    // exact cleanup acknowledgement lands. Otherwise a long-lived outage could
-    // delete the only durable reconciliation handle before the owner returns.
-    this.deleteExpiredStmt = this.db.prepare(`
-      DELETE FROM jobs
-      WHERE expires_at < ?
-        AND (
-          kit_execution_json IS NULL
-          OR COALESCE(kit_terminal_finalized, 0) = 1
-        )
-        AND COALESCE(mcp_artifact_cleanup_pending, 0) = 0
-    `);
-
-    // #139 lease surface.
-    // markRunning: queued -> running, stamp the real pid, re-set the lease.
-    this.markRunningStmt = this.db.prepare(`
-      UPDATE jobs
-      SET status = 'running', pid = @pid, lease_deadline = ${SQLITE_NOW_MS} + @lease_ttl_ms
-      WHERE id = @id AND status = 'queued'
-    `);
-    // registerInstance: upsert (a restart with a fresh instance_id inserts; the
-    // same id refreshes its heartbeat). started_at/last_heartbeat = db_now.
-    this.registerInstanceStmt = this.db.prepare(`
-      INSERT INTO gateway_instances (instance_id, role, hostname, pid, started_at, last_heartbeat)
-      VALUES (@instance_id, @role, @hostname, @pid, ${SQLITE_NOW_MS}, ${SQLITE_NOW_MS})
-      ON CONFLICT(instance_id) DO UPDATE SET
-        role = excluded.role, hostname = excluded.hostname, pid = excluded.pid,
-        last_heartbeat = excluded.last_heartbeat
-    `);
-    this.heartbeatInstanceStmt = this.db.prepare(`
-      UPDATE gateway_instances SET last_heartbeat = ${SQLITE_NOW_MS} WHERE instance_id = @instance_id
-    `);
-    // The authoritative heartbeat: advance the fencing lease for every open job
-    // this instance owns, so heartbeat and sweep are same-row UPDATEs.
-    this.heartbeatJobsStmt = this.db.prepare(`
-      UPDATE jobs SET lease_deadline = ${SQLITE_NOW_MS} + @lease_ttl_ms
-      WHERE owner_instance = @instance_id AND status IN ('queued', 'running')
-    `);
-    this.deregisterInstanceStmt = this.db.prepare(
-      `DELETE FROM gateway_instances WHERE instance_id = @instance_id`
-    );
-    // Candidate read for the advisory pid check and same-host artifact cleanup:
-    // expired process-transport rows, including queued/pre-spawn rows with a
-    // null pid, using the durable owner-hostname snapshot and a live-instance
-    // fallback only for legacy rows. The fencing decision stays on lease_deadline.
-    this.selectStaleCandidatesStmt = this.db.prepare(`
-      SELECT j.id AS id, j.pid AS pid, j.transport AS transport,
-             j.owner_instance AS owner_instance,
-             COALESCE(j.owner_hostname, gi.hostname) AS hostname
-      FROM jobs j
-      LEFT JOIN gateway_instances gi ON gi.instance_id = j.owner_instance
-      WHERE j.status IN ('queued', 'running')
-        AND j.transport = 'process'
-        AND (j.lease_deadline IS NULL OR j.lease_deadline < ${SQLITE_NOW_MS})
-    `);
-    this.selectOrphanedCandidatesStmt = this.db.prepare(`
-      SELECT j.id AS id, j.pid AS pid, j.transport AS transport,
-             j.owner_instance AS owner_instance, j.owner_hostname AS hostname
-      FROM jobs j
-      WHERE j.status = 'orphaned'
-        AND j.transport = 'process'
-        AND j.owner_hostname = @hostname
-    `);
-    this.selectPendingMcpArtifactCleanupsStmt = this.db.prepare(`
-      SELECT j.id AS id, j.owner_instance AS owner_instance,
-             j.owner_hostname AS hostname, j.mcp_artifact_scope AS artifact_scope,
-             j.mcp_artifact_path AS artifact_path
-      FROM jobs j
-      WHERE j.owner_hostname = @hostname
-        AND j.cli = 'claude'
-        AND j.transport = 'process'
-        AND COALESCE(j.mcp_artifact_cleanup_pending, 0) = 1
-        AND j.mcp_artifact_path IS NOT NULL
-        AND j.mcp_artifact_scope IS NOT NULL
-        AND j.status IN ('completed', 'failed', 'canceled', 'orphaned')
-    `);
-    this.acknowledgeMcpArtifactCleanupStmt = this.db.prepare(`
-      UPDATE jobs
-      SET mcp_artifact_cleanup_pending = 0
-      WHERE id = @id
-        AND owner_hostname = @hostname
-        AND mcp_artifact_scope = @artifact_scope
-        AND mcp_artifact_path = @artifact_path
-        AND COALESCE(mcp_artifact_cleanup_pending, 0) = 1
-        AND status IN ('completed', 'failed', 'canceled', 'orphaned')
-    `);
-    // The fencing sweep is a SINGLE guarded UPDATE ... RETURNING (not a
-    // SELECT-then-blind-flip): the orphan predicate is re-evaluated in the same
-    // atomic statement that flips the row, so a heartbeat or completion that
-    // lands between candidate selection and the flip can never be stomped (the
-    // WHERE misses it). This mirrors the Postgres path. The http grace is IN the
-    // predicate (a row is never flipped then un-flipped); db_now is the DB clock;
-    // the @exclude_json guard removes advisory-live (pid-confirmed) ids. The
-    // http-grace cutoff is also DB-clock: strftime with the '%f' (SS.SSS,
-    // millisecond) fractional-seconds format yields exactly the toISOString shape
-    // stored in started_at, so the lexical TEXT comparison is chronologically
-    // correct without trusting the client clock.
-    this.orphanExpiredStmt = this.db.prepare(`
-      UPDATE jobs
-      SET status = 'orphaned',
-          stdout = CASE WHEN kit_execution_json IS NULL THEN stdout ELSE '' END,
-          stderr = CASE WHEN kit_execution_json IS NULL THEN stderr ELSE '' END,
-          payload_json = CASE WHEN kit_execution_json IS NULL THEN payload_json ELSE NULL END,
-          error = CASE
-            WHEN kit_execution_json IS NULL THEN COALESCE(error, 'owning gateway instance is no longer alive')
-            ELSE '${PERSONAL_KIT_FAILURE_WITHHELD}'
-          END,
-          finished_at = COALESCE(finished_at, @now_iso),
-          expires_at = @expires_iso,
-          lease_deadline = NULL
-      WHERE status IN ('queued', 'running')
-        AND (lease_deadline IS NULL OR lease_deadline < ${SQLITE_NOW_MS})
-        AND (transport <> 'http'
-             OR started_at < strftime('%Y-%m-%dT%H:%M:%fZ', 'now', @http_grace_modifier))
-        AND id NOT IN (SELECT value FROM json_each(@exclude_json))
-      RETURNING id, correlation_id, started_at, stdout, stderr, exit_code, transport, http_status,
-                kit_execution_json IS NOT NULL AS is_personal_config_kit
-    `);
-    // Advisory grace: advance the lease by ONE leaseTtl for pid-confirmed-live
-    // rows AND clear the pid. Clearing the pid makes the grace strictly one-shot:
-    // on the next sweep the row is no longer a process candidate (pid IS NULL),
-    // so it is not re-probed and is orphaned once the extended lease lapses. This
-    // bounds pid reuse to a single extra leaseTtl (it cannot strand a row).
-    this.advanceLeaseStmt = this.db.prepare(`
-      UPDATE jobs SET lease_deadline = ${SQLITE_NOW_MS} + @lease_ttl_ms, pid = NULL
-      WHERE status IN ('queued', 'running')
-        AND id IN (SELECT value FROM json_each(@ids_json))
-    `);
-    this.gcInstancesStmt = this.db.prepare(
-      `DELETE FROM gateway_instances WHERE last_heartbeat < ${SQLITE_NOW_MS} - @gc_ms`
-    );
+  private async getSql<T>(
+    sql: string,
+    params: readonly unknown[] = [],
+    conn?: StorageConnection
+  ): Promise<T | undefined> {
+    return (await this.allSql<T>(sql, params, conn))[0];
   }
 
   /**
@@ -1493,103 +1534,117 @@ export class SqliteJobStore implements JobStore, ValidationRunStore {
     validationAdmission?: ValidationJobAdmission;
   }): Promise<void> {
     assertMcpArtifactAdmissionInvariant(input);
-    const insertJob = (): void => {
-      this.insertStmt.run({
-        id: input.id,
-        correlation_id: input.correlationId,
-        request_key: input.kitExecution ? personalKitJobRequestKey(input.id) : input.requestKey,
-        cli: input.cli,
-        args_json: input.kitExecution
-          ? PERSONAL_KIT_REDACTED_ARGS_JSON
-          : JSON.stringify(input.args),
-        output_format: input.outputFormat ?? null,
-        compress_response:
-          input.compressResponse === undefined ? null : input.compressResponse ? 1 : 0,
-        // status is hard-coded 'queued' in the INSERT (see insertStmt).
-        exit_code: null,
-        stdout: "",
-        stderr: "",
-        error: null,
-        output_truncated: 0,
-        started_at: input.startedAt,
-        finished_at: null,
-        pid: input.pid,
-        // queued/running jobs never expire; only completed/failed/canceled do.
-        expires_at: FAR_FUTURE_ISO,
-        owner_principal: input.ownerPrincipal ?? null,
-        transport: input.transport ?? "process",
-        http_status: null,
-        payload_json: input.kitExecution ? null : (input.payloadJson ?? null),
-        owner_instance: input.ownerInstance ?? null,
-        owner_hostname: input.ownerHostname ?? null,
-        mcp_artifact_path: input.kitExecution ? null : (input.mcpArtifactPath ?? null),
-        mcp_artifact_scope: input.kitExecution ? null : (input.mcpArtifactScope ?? null),
-        mcp_artifact_cleanup_pending:
-          !input.kitExecution && input.mcpArtifactPath && input.mcpArtifactScope ? 1 : 0,
-        lease_ttl_ms: this.leaseTtlMs,
-        kit_execution_json: input.kitExecution
-          ? JSON.stringify(cloneKitExecutionRef(input.kitExecution))
-          : null,
-        kit_session_id: input.kitSessionId ?? null,
-      });
+    const insertJob = async (conn?: StorageConnection): Promise<void> => {
+      await this.execSql(
+        SQL_INSERT,
+        [
+          {
+            id: input.id,
+            correlation_id: input.correlationId,
+            request_key: input.kitExecution ? personalKitJobRequestKey(input.id) : input.requestKey,
+            cli: input.cli,
+            args_json: input.kitExecution
+              ? PERSONAL_KIT_REDACTED_ARGS_JSON
+              : JSON.stringify(input.args),
+            output_format: input.outputFormat ?? null,
+            compress_response:
+              input.compressResponse === undefined ? null : input.compressResponse ? 1 : 0,
+            // status is hard-coded 'queued' in the INSERT (see insertStmt).
+            exit_code: null,
+            stdout: "",
+            stderr: "",
+            error: null,
+            output_truncated: 0,
+            started_at: input.startedAt,
+            finished_at: null,
+            pid: input.pid,
+            // queued/running jobs never expire; only completed/failed/canceled do.
+            expires_at: FAR_FUTURE_ISO,
+            owner_principal: input.ownerPrincipal ?? null,
+            transport: input.transport ?? "process",
+            http_status: null,
+            payload_json: input.kitExecution ? null : (input.payloadJson ?? null),
+            owner_instance: input.ownerInstance ?? null,
+            owner_hostname: input.ownerHostname ?? null,
+            mcp_artifact_path: input.kitExecution ? null : (input.mcpArtifactPath ?? null),
+            mcp_artifact_scope: input.kitExecution ? null : (input.mcpArtifactScope ?? null),
+            mcp_artifact_cleanup_pending:
+              !input.kitExecution && input.mcpArtifactPath && input.mcpArtifactScope ? 1 : 0,
+            lease_ttl_ms: this.leaseTtlMs,
+            kit_execution_json: input.kitExecution
+              ? JSON.stringify(cloneKitExecutionRef(input.kitExecution))
+              : null,
+            kit_session_id: input.kitSessionId ?? null,
+          },
+        ],
+        conn
+      );
     };
     if (!input.kitExecution && !input.validationAdmission) {
-      insertJob();
+      // No connection: a lone insert takes its own transaction.
+      await insertJob();
       return;
     }
     if (input.validationAdmission) {
       if (input.kitExecution) {
         throw new Error("Validation job admission cannot be combined with a Kit execution");
       }
-      const run = this.db.withTransaction(() => {
-        insertJob();
-        this.appendValidationJobLink(
-          input.validationAdmission!,
-          {
-            provider: input.validationAdmission!.provider,
-            jobId: input.id,
-            correlationId: input.correlationId,
-          },
-          input.ownerPrincipal ?? null
-        );
-      });
-      run();
+      const run = () =>
+        this.driver.transaction("write", async conn => {
+          await insertJob(conn);
+          await this.appendValidationJobLink(
+            input.validationAdmission!,
+            {
+              provider: input.validationAdmission!.provider,
+              jobId: input.id,
+              correlationId: input.correlationId,
+            },
+            input.ownerPrincipal ?? null,
+            conn
+          );
+        });
+      await run();
       return;
     }
     const kitSessionId = input.kitSessionId?.trim();
     if (!kitSessionId) {
       throw new Error("Kit job admission requires a gateway kitSessionId");
     }
-    const run = this.db.withTransaction(() => {
-      if (
-        !this.insertKitAttemptFence({
-          attemptId: input.id,
-          state: "admitted",
-          cli: input.cli,
-          kitExecution: input.kitExecution!,
-          kitSessionId,
-          ownerPrincipal: input.ownerPrincipal,
-          fencedAt: input.startedAt,
-        })
-      ) {
-        throw new Error(`Kit job id ${input.id} is already admitted or permanently recovered`);
-      }
-      insertJob();
-    });
-    run();
+    const run = () =>
+      this.driver.transaction("write", async conn => {
+        if (
+          !(await this.insertKitAttemptFence(
+            {
+              attemptId: input.id,
+              state: "admitted",
+              cli: input.cli,
+              kitExecution: input.kitExecution!,
+              kitSessionId,
+              ownerPrincipal: input.ownerPrincipal,
+              fencedAt: input.startedAt,
+            },
+            conn
+          ))
+        ) {
+          throw new Error(`Kit job id ${input.id} is already admitted or permanently recovered`);
+        }
+        await insertJob(conn);
+      });
+    await run();
   }
 
-  private appendValidationJobLink(
+  private async appendValidationJobLink(
     admission: ValidationJobAdmission,
     link: ValidationRunLink,
-    ownerPrincipal: string | null
-  ): void {
-    const row = this.db
-      .prepare(
-        `SELECT owner_principal, intent, request_json, provider_links, judge_link, status
-         FROM validation_runs WHERE validation_id = ?`
-      )
-      .get(admission.validationId) as
+    ownerPrincipal: string | null,
+    conn?: StorageConnection
+  ): Promise<void> {
+    const row = (await this.getSql(
+      `SELECT owner_principal, intent, request_json, provider_links, judge_link, status
+         FROM validation_runs WHERE validation_id = ?`,
+      [admission.validationId],
+      conn
+    )) as
       | {
           owner_principal?: unknown;
           intent?: unknown;
@@ -1605,15 +1660,17 @@ export class SqliteJobStore implements JobStore, ValidationRunStore {
     const role = admission.role ?? "provider";
     if (role === "judge") {
       assertReviewJudgeClaim(row, admission.provider);
-      this.db
-        .prepare(`UPDATE validation_runs SET judge_link = ? WHERE validation_id = ?`)
-        .run(JSON.stringify(link), admission.validationId);
-      this.db
-        .prepare(
-          `INSERT INTO validation_run_jobs (job_id, validation_id, role)
-           VALUES (?, ?, 'judge')`
-        )
-        .run(link.jobId, admission.validationId);
+      await this.execSql(
+        `UPDATE validation_runs SET judge_link = ? WHERE validation_id = ?`,
+        [JSON.stringify(link), admission.validationId],
+        conn
+      );
+      await this.execSql(
+        `INSERT INTO validation_run_jobs (job_id, validation_id, role)
+           VALUES (?, ?, 'judge')`,
+        [link.jobId, admission.validationId],
+        conn
+      );
       return;
     }
     if (row.intent !== "review" || row.status !== "admitting") {
@@ -1630,22 +1687,24 @@ export class SqliteJobStore implements JobStore, ValidationRunStore {
       throw new Error(`Validation provider ${admission.provider} is already admitted`);
     }
     providerLinks.push(link);
-    this.db
-      .prepare(`UPDATE validation_runs SET provider_links = ? WHERE validation_id = ?`)
-      .run(JSON.stringify(providerLinks), admission.validationId);
-    this.db
-      .prepare(
-        `INSERT INTO validation_run_jobs (job_id, validation_id, role)
-         VALUES (?, ?, 'provider')`
-      )
-      .run(link.jobId, admission.validationId);
+    await this.execSql(
+      `UPDATE validation_runs SET provider_links = ? WHERE validation_id = ?`,
+      [JSON.stringify(providerLinks), admission.validationId],
+      conn
+    );
+    await this.execSql(
+      `INSERT INTO validation_run_jobs (job_id, validation_id, role)
+         VALUES (?, ?, 'provider')`,
+      [link.jobId, admission.validationId],
+      conn
+    );
   }
 
   /** Atomically reserve a never-reusable pre-admission attempt id for recovery. */
   async fenceUnadmittedKitAttempt(input: KitAttemptFenceInput): Promise<KitAttemptFenceResult> {
-    const inserted = this.insertKitAttemptFence({ ...input, state: "recovered" });
+    const inserted = await this.insertKitAttemptFence({ ...input, state: "recovered" });
     if (inserted) return "reserved";
-    const existing = this.getKitAttemptFenceStmt.get(input.attemptId) as
+    const existing = (await this.getSql(SQL_GET_KIT_ATTEMPT_FENCE, [input.attemptId])) as
       | {
           state?: unknown;
           cli?: unknown;
@@ -1669,18 +1728,25 @@ export class SqliteJobStore implements JobStore, ValidationRunStore {
     return "conflict";
   }
 
-  private insertKitAttemptFence(
-    input: KitAttemptFenceInput & { state: "admitted" | "recovered" }
-  ): boolean {
-    const result = this.insertKitAttemptFenceStmt.run({
-      attempt_id: input.attemptId,
-      state: input.state,
-      cli: input.cli,
-      kit_execution_json: JSON.stringify(cloneKitExecutionRef(input.kitExecution)),
-      kit_session_id: input.kitSessionId,
-      owner_principal: input.ownerPrincipal ?? null,
-      fenced_at: input.fencedAt,
-    });
+  private async insertKitAttemptFence(
+    input: KitAttemptFenceInput & { state: "admitted" | "recovered" },
+    conn?: StorageConnection
+  ): Promise<boolean> {
+    const result = await this.execSql(
+      SQL_INSERT_KIT_ATTEMPT_FENCE,
+      [
+        {
+          attempt_id: input.attemptId,
+          state: input.state,
+          cli: input.cli,
+          kit_execution_json: JSON.stringify(cloneKitExecutionRef(input.kitExecution)),
+          kit_session_id: input.kitSessionId,
+          owner_principal: input.ownerPrincipal ?? null,
+          fenced_at: input.fencedAt,
+        },
+      ],
+      conn
+    );
     return Number(result.changes) === 1;
   }
 
@@ -1690,39 +1756,45 @@ export class SqliteJobStore implements JobStore, ValidationRunStore {
     // already swept it to 'orphaned' while it waited in the limiter queue); the
     // caller uses this to fail-close a process launch rather than run a child
     // against a recovered row.
-    const result = this.markRunningStmt.run({
-      id,
-      pid: opts.pid,
-      lease_ttl_ms: this.leaseTtlMs,
-    });
+    const result = await this.execSql(SQL_MARK_RUNNING, [
+      {
+        id,
+        pid: opts.pid,
+        lease_ttl_ms: this.leaseTtlMs,
+      },
+    ]);
     return Number(result.changes) > 0;
   }
 
   async registerInstance(meta: GatewayInstanceMeta): Promise<void> {
-    this.registerInstanceStmt.run({
-      instance_id: meta.instanceId,
-      role: meta.role ?? null,
-      hostname: meta.hostname ?? null,
-      pid: meta.pid ?? null,
-    });
+    await this.execSql(SQL_REGISTER_INSTANCE, [
+      {
+        instance_id: meta.instanceId,
+        role: meta.role ?? null,
+        hostname: meta.hostname ?? null,
+        pid: meta.pid ?? null,
+      },
+    ]);
   }
 
   async heartbeat(instanceId: string): Promise<void> {
     // Advance the observability row AND the authoritative per-job lease. The
     // job-lease UPDATE is what serializes against the sweep on the row lock.
-    this.heartbeatInstanceStmt.run({ instance_id: instanceId });
-    this.heartbeatJobsStmt.run({ instance_id: instanceId, lease_ttl_ms: this.leaseTtlMs });
+    await this.execSql(SQL_HEARTBEAT_INSTANCE, [{ instance_id: instanceId }]);
+    await this.execSql(SQL_HEARTBEAT_JOBS, [
+      { instance_id: instanceId, lease_ttl_ms: this.leaseTtlMs },
+    ]);
   }
 
   async deregisterInstance(instanceId: string): Promise<void> {
-    this.deregisterInstanceStmt.run({ instance_id: instanceId });
+    await this.execSql(SQL_DEREGISTER_INSTANCE, [{ instance_id: instanceId }]);
   }
 
   async selectStaleProcessCandidates(
     _leaseTtlMs: number,
     _httpJobGraceMs: number
   ): Promise<SweepCandidate[]> {
-    const rows = this.selectStaleCandidatesStmt.all() as Array<{
+    const rows = (await this.allSql(SQL_SELECT_STALE_CANDIDATES, [])) as Array<{
       id: string;
       pid: number | null;
       transport: string | null;
@@ -1739,7 +1811,7 @@ export class SqliteJobStore implements JobStore, ValidationRunStore {
   }
 
   async selectOrphanedProcessCandidates(hostname: string): Promise<SweepCandidate[]> {
-    const rows = this.selectOrphanedCandidatesStmt.all({ hostname }) as Array<{
+    const rows = (await this.allSql(SQL_SELECT_ORPHANED_CANDIDATES, [{ hostname }])) as Array<{
       id: string;
       pid: number | null;
       transport: string | null;
@@ -1756,7 +1828,9 @@ export class SqliteJobStore implements JobStore, ValidationRunStore {
   }
 
   async selectPendingMcpArtifactCleanups(hostname: string): Promise<PendingMcpArtifactCleanup[]> {
-    const rows = this.selectPendingMcpArtifactCleanupsStmt.all({ hostname }) as Array<{
+    const rows = (await this.allSql(SQL_SELECT_PENDING_MCP_ARTIFACT_CLEANUPS, [
+      { hostname },
+    ])) as Array<{
       id: string;
       owner_instance: string | null;
       hostname: string;
@@ -1778,12 +1852,14 @@ export class SqliteJobStore implements JobStore, ValidationRunStore {
     artifactScope: string,
     artifactPath: string
   ): Promise<boolean> {
-    const result = this.acknowledgeMcpArtifactCleanupStmt.run({
-      id,
-      hostname,
-      artifact_scope: artifactScope,
-      artifact_path: artifactPath,
-    });
+    const result = await this.execSql(SQL_ACKNOWLEDGE_MCP_ARTIFACT_CLEANUP, [
+      {
+        id,
+        hostname,
+        artifact_scope: artifactScope,
+        artifact_path: artifactPath,
+      },
+    ]);
     return Number(result.changes) === 1;
   }
 
@@ -1800,45 +1876,56 @@ export class SqliteJobStore implements JobStore, ValidationRunStore {
     // SELECT-then-blind-flip window: a heartbeat or completion that lands before
     // the flip is not stomped (the predicate simply misses that row).
     // withTransaction forwards the callback's return value (the orphaned list).
-    const run = this.db.withTransaction((): OrphanedJobSnapshot[] => {
-      if (liveConfirmedIds.length > 0) {
-        this.advanceLeaseStmt.run({ ids_json: excludeJson, lease_ttl_ms: leaseTtlMs });
-      }
-      const nowIso = new Date().toISOString();
-      const expiresAt = new Date(Date.now() + this.retentionMs).toISOString();
-      const rows = this.orphanExpiredStmt.all({
-        now_iso: nowIso,
-        expires_iso: expiresAt,
-        http_grace_modifier: httpGraceModifier,
-        exclude_json: excludeJson,
-      }) as Array<{
-        id: string;
-        correlation_id: string;
-        started_at: string;
-        stdout: string | null;
-        stderr: string | null;
-        exit_code: number | null;
-        transport: string | null;
-        http_status: number | null;
-        is_personal_config_kit: number | boolean | null;
-      }>;
-      return rows.map(r => ({
-        id: r.id,
-        correlationId: r.correlation_id,
-        startedAt: r.started_at,
-        stdout: r.stdout ?? "",
-        stderr: r.stderr ?? "",
-        exitCode: r.exit_code,
-        transport: (r.transport as JobTransport) ?? "process",
-        httpStatus: r.http_status ?? null,
-        isPersonalConfigKit: Boolean(r.is_personal_config_kit),
-      }));
-    });
+    const run = () =>
+      this.driver.transaction("write", async conn => {
+        if (liveConfirmedIds.length > 0) {
+          await this.execSql(
+            SQL_ADVANCE_LEASE,
+            [{ ids_json: excludeJson, lease_ttl_ms: leaseTtlMs }],
+            conn
+          );
+        }
+        const nowIso = new Date().toISOString();
+        const expiresAt = new Date(Date.now() + this.retentionMs).toISOString();
+        const rows = (await this.allSql(
+          SQL_ORPHAN_EXPIRED,
+          [
+            {
+              now_iso: nowIso,
+              expires_iso: expiresAt,
+              http_grace_modifier: httpGraceModifier,
+              exclude_json: excludeJson,
+            },
+          ],
+          conn
+        )) as Array<{
+          id: string;
+          correlation_id: string;
+          started_at: string;
+          stdout: string | null;
+          stderr: string | null;
+          exit_code: number | null;
+          transport: string | null;
+          http_status: number | null;
+          is_personal_config_kit: number | boolean | null;
+        }>;
+        return rows.map(r => ({
+          id: r.id,
+          correlationId: r.correlation_id,
+          startedAt: r.started_at,
+          stdout: r.stdout ?? "",
+          stderr: r.stderr ?? "",
+          exitCode: r.exit_code,
+          transport: (r.transport as JobTransport) ?? "process",
+          httpStatus: r.http_status ?? null,
+          isPersonalConfigKit: Boolean(r.is_personal_config_kit),
+        }));
+      });
     return run();
   }
 
   async gcInstances(instanceGcMs: number): Promise<number> {
-    const result = this.gcInstancesStmt.run({ gc_ms: instanceGcMs });
+    const result = await this.execSql(SQL_GC_INSTANCES, [{ gc_ms: instanceGcMs }]);
     return Number(result.changes);
   }
 
@@ -1851,16 +1938,18 @@ export class SqliteJobStore implements JobStore, ValidationRunStore {
     stderr: string,
     outputTruncated: boolean
   ): Promise<void> {
-    this.updateOutputStmt.run({
-      id,
-      stdout,
-      stderr,
-      output_truncated: outputTruncated ? 1 : 0,
-    });
+    await this.execSql(SQL_UPDATE_OUTPUT, [
+      {
+        id,
+        stdout,
+        stderr,
+        output_truncated: outputTruncated ? 1 : 0,
+      },
+    ]);
   }
 
   async recordProgress(id: string, progressJson: string): Promise<void> {
-    this.updateProgressStmt.run({ id, progress_json: progressJson });
+    await this.execSql(SQL_UPDATE_PROGRESS, [{ id, progress_json: progressJson }]);
   }
 
   async recordProgressIfStatus(
@@ -1868,11 +1957,13 @@ export class SqliteJobStore implements JobStore, ValidationRunStore {
     status: JobStoreStatus,
     progressJson: string
   ): Promise<boolean> {
-    const result = this.updateProgressIfStatusStmt.run({
-      id,
-      status,
-      progress_json: progressJson,
-    });
+    const result = await this.execSql(SQL_UPDATE_PROGRESS_IF_STATUS, [
+      {
+        id,
+        status,
+        progress_json: progressJson,
+      },
+    ]);
     return Number(result.changes) === 1;
   }
 
@@ -1895,27 +1986,29 @@ export class SqliteJobStore implements JobStore, ValidationRunStore {
     kitTerminalMetadata?: PersonalKitTerminalMetadata | null;
   }): Promise<boolean> {
     const expiresAt = new Date(Date.parse(input.finishedAt) + this.retentionMs).toISOString();
-    const result = this.updateCompleteStmt.run({
-      id: input.id,
-      status: input.status,
-      exit_code: input.exitCode,
-      stdout: input.stdout,
-      stderr: input.stderr,
-      output_truncated: input.outputTruncated ? 1 : 0,
-      error: input.error,
-      error_category: input.errorCategory ?? null,
-      retryable: input.retryable == null ? null : input.retryable ? 1 : 0,
-      finished_at: input.finishedAt,
-      expires_at: expiresAt,
-      http_status: input.httpStatus ?? null,
-      progress_json: input.progressJson ?? null,
-      kit_terminal_metadata_json: serializeKitTerminalMetadata(input.kitTerminalMetadata),
-    });
+    const result = await this.execSql(SQL_UPDATE_COMPLETE, [
+      {
+        id: input.id,
+        status: input.status,
+        exit_code: input.exitCode,
+        stdout: input.stdout,
+        stderr: input.stderr,
+        output_truncated: input.outputTruncated ? 1 : 0,
+        error: input.error,
+        error_category: input.errorCategory ?? null,
+        retryable: input.retryable == null ? null : input.retryable ? 1 : 0,
+        finished_at: input.finishedAt,
+        expires_at: expiresAt,
+        http_status: input.httpStatus ?? null,
+        progress_json: input.progressJson ?? null,
+        kit_terminal_metadata_json: serializeKitTerminalMetadata(input.kitTerminalMetadata),
+      },
+    ]);
     return Number(result.changes) === 1;
   }
 
   async getById(id: string): Promise<JobRecord | null> {
-    const row = this.getByIdStmt.get(id);
+    const row = await this.getSql(SQL_GET_BY_ID, [id]);
     return row ? rowToRecord(row) : null;
   }
 
@@ -1925,37 +2018,38 @@ export class SqliteJobStore implements JobStore, ValidationRunStore {
    */
   async findByRequestKey(requestKey: string): Promise<JobRecord | null> {
     const cutoff = new Date(Date.now() - this.dedupWindowMs).toISOString();
-    const row = this.findByRequestKeyStmt.get(requestKey, cutoff);
+    const row = await this.getSql(SQL_FIND_BY_REQUEST_KEY, [requestKey, cutoff]);
     return row ? rowToRecord(row) : null;
   }
 
   async getPendingKitFinalizations(): Promise<PendingKitFinalization[]> {
-    const rows = this.selectPendingKitFinalizationsStmt.all();
+    const rows = await this.allSql(SQL_SELECT_PENDING_KIT_FINALIZATIONS, []);
     return rows
       .map(row => toPendingKitFinalization(rowToRecord(row)))
       .filter((entry): entry is PendingKitFinalization => entry !== null);
   }
 
   async getAcknowledgedKitAttemptReleases(): Promise<AcknowledgedKitAttemptRelease[]> {
-    const rows = this.selectAcknowledgedKitAttemptReleasesStmt.all();
+    const rows = await this.allSql(SQL_SELECT_ACKNOWLEDGED_KIT_ATTEMPT_RELEASES, []);
     return rows
       .map(row => toAcknowledgedKitAttemptRelease(rowToRecord(row)))
       .filter((entry): entry is AcknowledgedKitAttemptRelease => entry !== null);
   }
 
   async markKitTerminalFinalized(id: string, kitSessionId: string): Promise<boolean> {
-    const result = this.markKitTerminalFinalizedStmt.run({
-      id,
-      kit_session_id: kitSessionId,
-      finalized_at: new Date().toISOString(),
-    });
+    const result = await this.execSql(SQL_MARK_KIT_TERMINAL_FINALIZED, [
+      {
+        id,
+        kit_session_id: kitSessionId,
+        finalized_at: new Date().toISOString(),
+      },
+    ]);
     return Number(result.changes) > 0;
   }
 
-  async getPinnedKitReleaseIds(): Promise<string[]> {
-    const rows = this.db
-      .prepare(
-        `SELECT kit_execution_json FROM jobs
+  async getPinnedKitReleaseIds(conn?: StorageConnection): Promise<string[]> {
+    const rows = (await this.allSql(
+      `SELECT kit_execution_json FROM jobs
          WHERE kit_execution_json IS NOT NULL
            AND (
              status IN ('queued', 'running')
@@ -1963,9 +2057,10 @@ export class SqliteJobStore implements JobStore, ValidationRunStore {
                status NOT IN ('queued', 'running')
                AND COALESCE(kit_terminal_finalized, 0) = 0
              )
-           )`
-      )
-      .all() as Array<{ kit_execution_json?: string | null }>;
+           )`,
+      [],
+      conn
+    )) as Array<{ kit_execution_json?: string | null }>;
     const releases = new Set<string>();
     for (const row of rows) {
       const execution = parseKitExecution(row.kit_execution_json);
@@ -1999,61 +2094,75 @@ export class SqliteJobStore implements JobStore, ValidationRunStore {
    */
   async evictExpired(): Promise<number> {
     const now = new Date().toISOString();
-    const result = this.deleteExpiredStmt.run(now);
+    const result = await this.execSql(SQL_DELETE_EXPIRED, [now]);
     return Number(result.changes);
   }
 
   // --- ValidationRunStore (cross-LLM validation receipts, Phase 0) ---
 
-  async recordValidationRun(run: ValidationRunRecord): Promise<void> {
+  async recordValidationRun(run: ValidationRunRecord, conn?: StorageConnection): Promise<void> {
     // INSERT OR IGNORE: kickoff writes once; a re-run with the same validation_id
     // (a randomUUID collision is effectively impossible, but the guard keeps the
     // write idempotent and race-safe) is a no-op rather than an overwrite.
-    this.db
-      .prepare(
-        `INSERT OR IGNORE INTO validation_runs
+    await this.execSql(
+      `INSERT OR IGNORE INTO validation_runs
            (validation_id, owner_principal, intent, created_at, request_json,
             provider_links, judge_link, status)
          VALUES (@validation_id, @owner_principal, @intent, @created_at, @request_json,
-                 @provider_links, @judge_link, @status)`
-      )
-      .run({
-        validation_id: run.validationId,
-        owner_principal: run.ownerPrincipal,
-        intent: run.intent,
-        created_at: run.createdAt,
-        request_json: run.requestJson,
-        provider_links: JSON.stringify(run.providerLinks),
-        judge_link: run.judgeLink ? JSON.stringify(run.judgeLink) : null,
-        status: run.status,
-      });
+                 @provider_links, @judge_link, @status)`,
+      [
+        {
+          validation_id: run.validationId,
+          owner_principal: run.ownerPrincipal,
+          intent: run.intent,
+          created_at: run.createdAt,
+          request_json: run.requestJson,
+          provider_links: JSON.stringify(run.providerLinks),
+          judge_link: run.judgeLink ? JSON.stringify(run.judgeLink) : null,
+          status: run.status,
+        },
+      ],
+      conn
+    );
     // Populate the reverse index so eager mint can resolve the run from a
     // collected provider job id. INSERT OR IGNORE keeps it idempotent.
     for (const link of run.providerLinks) {
-      this.linkRunJob(run.validationId, link.jobId, "provider");
+      await this.linkRunJob(run.validationId, link.jobId, "provider", conn);
     }
   }
 
-  private linkRunJob(validationId: string, jobId: string, role: "provider" | "judge"): void {
-    this.db
-      .prepare(
-        `INSERT OR IGNORE INTO validation_run_jobs (job_id, validation_id, role)
-         VALUES (?, ?, ?)`
-      )
-      .run(jobId, validationId, role);
+  private async linkRunJob(
+    validationId: string,
+    jobId: string,
+    role: "provider" | "judge",
+    conn?: StorageConnection
+  ): Promise<void> {
+    await this.execSql(
+      `INSERT OR IGNORE INTO validation_run_jobs (job_id, validation_id, role)
+         VALUES (?, ?, ?)`,
+      [jobId, validationId, role],
+      conn
+    );
   }
 
-  async getValidationRunIdByJobId(jobId: string): Promise<string | null> {
-    const row = this.db
-      .prepare(`SELECT validation_id FROM validation_run_jobs WHERE job_id = ?`)
-      .get(jobId) as { validation_id?: string } | undefined;
+  async getValidationRunIdByJobId(jobId: string, conn?: StorageConnection): Promise<string | null> {
+    const row = (await this.getSql(
+      `SELECT validation_id FROM validation_run_jobs WHERE job_id = ?`,
+      [jobId],
+      conn
+    )) as { validation_id?: string } | undefined;
     return row?.validation_id ?? null;
   }
 
-  async getValidationRun(validationId: string): Promise<ValidationRunRecord | null> {
-    const row = this.db
-      .prepare(`SELECT * FROM validation_runs WHERE validation_id = ?`)
-      .get(validationId);
+  async getValidationRun(
+    validationId: string,
+    conn?: StorageConnection
+  ): Promise<ValidationRunRecord | null> {
+    const row = await this.getSql(
+      `SELECT * FROM validation_runs WHERE validation_id = ?`,
+      [validationId],
+      conn
+    );
     return row ? rowToValidationRunRecord(row) : null;
   }
 
@@ -2061,58 +2170,65 @@ export class SqliteJobStore implements JobStore, ValidationRunStore {
     validationId: string,
     providerLinks: ValidationRunLink[]
   ): Promise<void> {
-    const update = this.db.prepare(
-      `UPDATE validation_runs SET provider_links = ? WHERE validation_id = ?`
-    );
-    const removeOldLinks = this.db.prepare(
-      `DELETE FROM validation_run_jobs WHERE validation_id = ? AND role = 'provider'`
-    );
-    const insertLink = this.db.prepare(
-      `INSERT INTO validation_run_jobs (job_id, validation_id, role)
-       VALUES (?, ?, 'provider')`
-    );
-    this.db.withTransaction(() => {
-      const result = update.run(JSON.stringify(providerLinks), validationId);
+    await this.ensureSchema();
+    await this.driver.transaction("write", async tx => {
+      const result = await this.execSql(
+        `UPDATE validation_runs SET provider_links = ? WHERE validation_id = ?`,
+        [JSON.stringify(providerLinks), validationId],
+        tx
+      );
       if (Number(result.changes) !== 1) {
         throw new Error(`Unknown validation run: ${validationId}`);
       }
-      removeOldLinks.run(validationId);
-      for (const link of providerLinks) insertLink.run(link.jobId, validationId);
-    })();
+      await this.execSql(
+        `DELETE FROM validation_run_jobs WHERE validation_id = ? AND role = 'provider'`,
+        [validationId],
+        tx
+      );
+      for (const link of providerLinks) {
+        await this.execSql(
+          `INSERT INTO validation_run_jobs (job_id, validation_id, role)
+       VALUES (?, ?, 'provider')`,
+          [link.jobId, validationId],
+          tx
+        );
+      }
+    });
   }
 
   async setValidationJudgeLink(validationId: string, judgeLink: ValidationRunLink): Promise<void> {
-    this.db.withTransaction(() => {
-      const result = this.db
-        .prepare(
-          `UPDATE validation_runs SET judge_link = ?
+    await this.driver.transaction("write", async conn => {
+      const result = await this.execSql(
+        `UPDATE validation_runs SET judge_link = ?
            WHERE validation_id = ?
              AND status = 'running'
              AND judge_link IS NULL
              AND NOT EXISTS (
                SELECT 1 FROM validation_receipts WHERE validation_id = ?
-             )`
-        )
-        .run(JSON.stringify(judgeLink), validationId, validationId);
+             )`,
+        [JSON.stringify(judgeLink), validationId, validationId],
+        conn
+      );
       if (Number(result.changes) !== 1) {
         throw new Error("Validation judge link is not open for a one-shot claim");
       }
-      this.linkRunJob(validationId, judgeLink.jobId, "judge");
-    })();
+      await this.linkRunJob(validationId, judgeLink.jobId, "judge", conn);
+    });
   }
 
   async transitionValidationRunStatus(
     validationId: string,
     ownerPrincipal: string,
     expectedStatus: ValidationRunRecord["status"],
-    status: ValidationRunRecord["status"]
+    status: ValidationRunRecord["status"],
+    conn?: StorageConnection
   ): Promise<boolean> {
-    const result = this.db
-      .prepare(
-        `UPDATE validation_runs SET status = ?
-         WHERE validation_id = ? AND owner_principal = ? AND status = ?`
-      )
-      .run(status, validationId, ownerPrincipal, expectedStatus);
+    const result = await this.execSql(
+      `UPDATE validation_runs SET status = ?
+         WHERE validation_id = ? AND owner_principal = ? AND status = ?`,
+      [status, validationId, ownerPrincipal, expectedStatus],
+      conn
+    );
     return Number(result.changes) === 1;
   }
 
@@ -2121,13 +2237,13 @@ export class SqliteJobStore implements JobStore, ValidationRunStore {
     provider: string,
     ownerPrincipal: string
   ): Promise<void> {
-    this.db.withTransaction(() => {
-      const row = this.db
-        .prepare(
-          `SELECT owner_principal, intent, request_json, judge_link, status
-           FROM validation_runs WHERE validation_id = ?`
-        )
-        .get(validationId) as
+    await this.driver.transaction("write", async conn => {
+      const row = (await this.getSql(
+        `SELECT owner_principal, intent, request_json, judge_link, status
+           FROM validation_runs WHERE validation_id = ?`,
+        [validationId],
+        conn
+      )) as
         | {
             owner_principal?: unknown;
             intent?: unknown;
@@ -2140,61 +2256,85 @@ export class SqliteJobStore implements JobStore, ValidationRunStore {
         throw new Error("Validation run is missing or owned by another principal");
       }
       assertReviewJudgeClaim(row, provider);
-      this.db
-        .prepare(`UPDATE validation_runs SET status = 'judge_skipped' WHERE validation_id = ?`)
-        .run(validationId);
-    })();
+      await this.execSql(
+        `UPDATE validation_runs SET status = 'judge_skipped' WHERE validation_id = ?`,
+        [validationId],
+        conn
+      );
+    });
   }
 
   async setValidationRunStatus(
     validationId: string,
-    status: ValidationRunRecord["status"]
+    status: ValidationRunRecord["status"],
+    conn?: StorageConnection
   ): Promise<void> {
-    this.db
-      .prepare(`UPDATE validation_runs SET status = ? WHERE validation_id = ?`)
-      .run(status, validationId);
+    await this.execSql(
+      `UPDATE validation_runs SET status = ? WHERE validation_id = ?`,
+      [status, validationId],
+      conn
+    );
   }
 
-  async recordValidationReceipt(receipt: ValidationReceiptRecord): Promise<void> {
+  async recordValidationReceipt(
+    receipt: ValidationReceiptRecord,
+    conn?: StorageConnection
+  ): Promise<void> {
     // INSERT OR IGNORE: the receipt is immutable and minted exactly once. A
     // concurrent or repeat mint for the same validation_id is a no-op; callers
     // re-read to get the authoritative stored row.
-    this.db
-      .prepare(
-        `INSERT OR IGNORE INTO validation_receipts
+    await this.execSql(
+      `INSERT OR IGNORE INTO validation_receipts
            (validation_id, owner_principal, minted_at, schema_version, report_json,
             canonical_sha256, prev_sha256, seq, signature, models,
             has_material_disagreement, confidence)
          VALUES (@validation_id, @owner_principal, @minted_at, @schema_version, @report_json,
                  @canonical_sha256, @prev_sha256, @seq, @signature, @models,
-                 @has_material_disagreement, @confidence)`
-      )
-      .run({
-        validation_id: receipt.validationId,
-        owner_principal: receipt.ownerPrincipal,
-        minted_at: receipt.mintedAt,
-        schema_version: receipt.schemaVersion,
-        report_json: receipt.reportJson,
-        canonical_sha256: receipt.canonicalSha256,
-        prev_sha256: receipt.prevSha256,
-        seq: receipt.seq,
-        signature: receipt.signature,
-        models: JSON.stringify(receipt.models),
-        has_material_disagreement: receipt.hasMaterialDisagreement ? 1 : 0,
-        confidence: receipt.confidence,
-      });
+                 @has_material_disagreement, @confidence)`,
+      [
+        {
+          validation_id: receipt.validationId,
+          owner_principal: receipt.ownerPrincipal,
+          minted_at: receipt.mintedAt,
+          schema_version: receipt.schemaVersion,
+          report_json: receipt.reportJson,
+          canonical_sha256: receipt.canonicalSha256,
+          prev_sha256: receipt.prevSha256,
+          seq: receipt.seq,
+          signature: receipt.signature,
+          models: JSON.stringify(receipt.models),
+          has_material_disagreement: receipt.hasMaterialDisagreement ? 1 : 0,
+          confidence: receipt.confidence,
+        },
+      ],
+      conn
+    );
   }
 
-  async getValidationReceipt(validationId: string): Promise<ValidationReceiptRecord | null> {
-    const row = this.db
-      .prepare(`SELECT * FROM validation_receipts WHERE validation_id = ?`)
-      .get(validationId);
+  async getValidationReceipt(
+    validationId: string,
+    conn?: StorageConnection
+  ): Promise<ValidationReceiptRecord | null> {
+    const row = await this.getSql(
+      `SELECT * FROM validation_receipts WHERE validation_id = ?`,
+      [validationId],
+      conn
+    );
     return row ? rowToValidationReceiptRecord(row) : null;
   }
 
   async close(): Promise<void> {
+    if (this.closed) return;
+    // Set BEFORE the await so a racing call is refused rather than reaching a
+    // driver that is shutting down, and JOIN an in-flight bootstrap first: the
+    // Postgres store had exactly this hole, where close() could return while
+    // initialisation was still going and leave a live handle behind.
+    this.closed = true;
+    if (this.bootstrapPromise) await this.bootstrapPromise.catch(() => undefined);
     try {
-      this.db.close();
+      // The driver's close() drains its queue within a bound and REJECTS any
+      // transaction it could not land, rather than dropping it silently.
+      await this.driver.close();
     } catch (err) {
       this.logger.error("SqliteJobStore close failed", err);
     }

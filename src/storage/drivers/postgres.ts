@@ -130,6 +130,13 @@ function connectionOver(
     ): Promise<{ rowsAffected: number }> {
       return { rowsAffected: (await run(statement, params)).rowCount ?? 0 };
     },
+    async executeScript(script: string): Promise<void> {
+      // A parameterless query uses the simple query protocol, which already
+      // accepts several statements, so this needs no separate mechanism here.
+      // It exists on the port because SQLite genuinely cannot do it through
+      // `execute`.
+      await run(script, []);
+    },
   };
 }
 
