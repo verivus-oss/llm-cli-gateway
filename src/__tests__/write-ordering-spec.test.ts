@@ -103,6 +103,15 @@ describe("write-ordering specification (s6)", () => {
     // return before the response body is durable.
     expect(unawaited).toEqual([]);
     expect(source.match(/flight\.start\(/g)?.length).toBeGreaterThan(0);
+
+    // The other half of the same invariant, and the reason the await matters at
+    // all: the envelope must finish the stage that holds `flight.start()` before
+    // it dispatches `execute`. Reordering these two lines would let the sync
+    // deadline arm the async manager while the start row was still open.
+    const staged = source.indexOf("await hooks.runInsideTerminalTry()");
+    const dispatched = source.indexOf("await hooks.execute(");
+    expect(staged).toBeGreaterThan(-1);
+    expect(dispatched).toBeGreaterThan(staged);
   });
 
   it("takes the port's sink types rather than a void slot", () => {
