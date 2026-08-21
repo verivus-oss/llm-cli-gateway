@@ -3,7 +3,7 @@
 
 [meta]
 surface = "FlightRecorder, JobStore and ISessionManager: 3 interfaces, 42 methods, 2 engines"
-status = "2026-08-21. s1, s2, s4 done, s3 part 1 done. b1 measured, awaiting its results review. s5 is 39 commits in: port moved, three gates added, awaiting the failure tail, test:pg and review. s3sig, s6, s8 and s12 unblock when s5 lands."
+status = "2026-08-21. s1, s2, s4 done, s3 part 1 done. b1 measured, awaiting its results review. s5 is 42 commits in: port moved, worker deleted, test:pg 133/133, and 18 REGRESSIONS measured against main. s3sig, s6, s8 and s12 unblock when s5 lands."
 
 # WHY: `[persistence].backend` selects the job store and nothing else, so one
 # request's two halves live in two engines 15 ms apart, beside an abandoned
@@ -78,9 +78,17 @@ critical = true
 depends_on = ["s4.two-drivers"]
 role = "It already has both engines, so the *-pg suites prove the port against real dual-engine behaviour before anything irreversible."
 action = "Move JobStore onto the port; delete the worker-thread sync-over-async shim."
-constraint = "AMENDED 2026-08-21. `unchanged` cannot hold with this action: an async interface delivers failure as a rejection, and drivers/sqlite.ts:24 already forbids the alternative. The replacement is stronger and machine-checked: same tests, same matchers, same errors, no assertion weakened, across EVERY reached test file rather than the five *-pg ones. Sync-throw to rejects is the only permitted rewrite, by allowlist, with an ADD-form negative control. INSUFFICIENT AS WRITTEN, found 2026-08-21: hoisting an await off an assertion subject onto its declaration keeps matcher and value byte-identical while serialising work that was concurrent, so a test named `serialises transactions` stopped exercising the queue and still passed. Assertion identity must include await COUNT and POSITION, not just matcher and value."
+constraint = "AMENDED 2026-08-21. `unchanged` cannot hold with this action: an async interface delivers failure as a rejection, and drivers/sqlite.ts:24 already forbids the alternative. The replacement is stronger and machine-checked: same tests, same matchers, same errors, no assertion weakened, across EVERY reached test file rather than the five *-pg ones. Sync-throw to rejects is the only permitted rewrite, by allowlist, with an ADD-form negative control. INSUFFICIENT AS WRITTEN, found 2026-08-21: hoisting an await off an assertion subject onto its declaration keeps matcher and value byte-identical while serialising work that was concurrent, so a test named `serialises transactions` stopped exercising the queue and still passed. Assertion identity must include await COUNT and POSITION, not just matcher and value. AND IT IS STILL NOT SUFFICIENT: parity held while 18 regressions landed, because parity compares assertions, not outcomes. Two full suites, main against the branch, is the control parity cannot be. Evidence: storage-s5-regressions-2026-08-21.md."
 bootstrap_ddl = "Stays under `app` for now. Design 3.1 process-separates the migrate credential, but moving it is a grant change on a live host, which operator decision 0a held. Recorded as gated, not deferred, and it is NOT routed through an operation class."
 affects = ["s3sig.operation-signatures", "s6.write-ordering", "s8.sessions"]
+
+[[node]]
+id = "s13.whole-operation-deadline"
+depends_on = ["s5.job-store-first"]
+role = "Deleting the worker thread deleted its 35s bridge watchdog. Most of what that covered went with the thread: a wedged worker, a lost message, an Atomics.wait never released. One residual survives and is real. PG_STATEMENT_TIMEOUT_MS is per STATEMENT, so a multi-statement transaction has no aggregate bound; job-store.ts:2174 loops over providerLinks, about 175s worst case under pathological blocking."
+action = "Give a whole operation a bound, once, on the port rather than per call site."
+constraint = "A Promise.race deadline is WORSE than no deadline and must not be used. Rejecting the wrapper does not roll the transaction back: the client keeps going, the connection stays busy, and the caller now believes its mutation failed while it may still commit. That is precisely the ambiguity drivers/postgres.ts:300 says these timeouts exist to remove. The deadline path must CANCEL the query and destroy the connection, not merely stop waiting."
+affects = []
 
 [[node]]
 id = "s3sig.operation-signatures"
