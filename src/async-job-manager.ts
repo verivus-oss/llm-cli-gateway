@@ -853,6 +853,17 @@ interface AsyncJobRecord {
    * stored disappears, with no error anywhere.
    */
   outputWriteChain?: Promise<void>;
+  /**
+   * The in-flight spawn, when one has been started.
+   *
+   * `launch` became async, so `startJob` began returning a snapshot BEFORE the
+   * child was spawned and before a spawn failure had been classified. Callers
+   * that used to see `failed` with a real exit code saw `running` instead, and
+   * cancelJob's `!job.process` branch could not tell "not spawned yet" from
+   * "orphaned from a prior gateway run". Holding the promise lets the caller
+   * wait for the outcome the synchronous version always had.
+   */
+  launchPromise?: Promise<void>;
   lastOutputFlushAt: number;
   /**
    * True once no further output can arrive for this job: `close` fired, or the
@@ -2784,7 +2795,7 @@ export class AsyncJobManager {
       }
       // `void`: JobLimiter.onGrant is a synchronous slot by contract, and the
       // launch owns its own failure path (it terminalises and releases).
-      void launch(permit);
+      job.launchPromise = launch(permit);
     };
 
     const acq = this.limiter.acquire(
@@ -2843,7 +2854,7 @@ export class AsyncJobManager {
         this.logger.info(`Job ${id} prepared for ${provider.name} (http)`, { correlationId });
       } else {
         this.logger.info(`Job ${id} started for ${provider.name} (http)`, { correlationId });
-        void launch(acq.permit);
+        job.launchPromise = launch(acq.permit);
       }
     } else {
       job.queueCancel = acq.cancel;
@@ -2860,7 +2871,7 @@ export class AsyncJobManager {
             if (job.status !== "queued") return;
             const permit = heldPermit;
             heldPermit = null;
-            if (permit) void launch(permit);
+            if (permit) job.launchPromise = launch(permit);
           },
           cancel: async () => {
             if (launchReleased) return false;
@@ -2870,6 +2881,18 @@ export class AsyncJobManager {
           },
         }
       : undefined;
+    // Wait for the spawn before describing the job.
+    //
+    // While `launch` was synchronous a snapshot returned here already carried
+    // the spawn outcome, including a classified spawn FAILURE. Once it became
+    // async the snapshot said "running" for a job that was about to fail, and
+    // the durable row agreed with it. Awaiting restores the original contract,
+    // and is bounded by the SPAWN rather than the child's lifetime: the launch
+    // wires handlers and returns, it does not wait for exit.
+    //
+    // A deferred launch is deliberately not awaited here: it has not been
+    // released yet, so there is nothing to wait for.
+    if (job.launchPromise) await job.launchPromise;
     return { snapshot: this.snapshot(job), deduped: false, deferredLaunch: deferredControl };
   }
 
@@ -4036,7 +4059,7 @@ export class AsyncJobManager {
       }
       // `void`: JobLimiter.onGrant is a synchronous slot by contract, and the
       // launch owns its own failure path (it terminalises and releases).
-      void launch(permit);
+      job.launchPromise = launch(permit);
     };
 
     const acq = this.limiter.acquire(
@@ -4111,7 +4134,7 @@ export class AsyncJobManager {
         this.logger.info(`Job ${id} prepared for ${cli}`, { correlationId });
       } else {
         this.logger.info(`Job ${id} started for ${cli}`, { correlationId });
-        void launch(acq.permit);
+        job.launchPromise = launch(acq.permit);
       }
     } else {
       job.queueCancel = acq.cancel;
@@ -4126,7 +4149,7 @@ export class AsyncJobManager {
             if (job.status !== "queued") return;
             const permit = heldPermit;
             heldPermit = null;
-            if (permit) void launch(permit);
+            if (permit) job.launchPromise = launch(permit);
           },
           cancel: async () => {
             if (launchReleased) return false;
@@ -4136,6 +4159,18 @@ export class AsyncJobManager {
           },
         }
       : undefined;
+    // Wait for the spawn before describing the job.
+    //
+    // While `launch` was synchronous a snapshot returned here already carried
+    // the spawn outcome, including a classified spawn FAILURE. Once it became
+    // async the snapshot said "running" for a job that was about to fail, and
+    // the durable row agreed with it. Awaiting restores the original contract,
+    // and is bounded by the SPAWN rather than the child's lifetime: the launch
+    // wires handlers and returns, it does not wait for exit.
+    //
+    // A deferred launch is deliberately not awaited here: it has not been
+    // released yet, so there is nothing to wait for.
+    if (job.launchPromise) await job.launchPromise;
     return { snapshot: this.snapshot(job), deduped: false, deferredLaunch: deferredControl };
   }
 
