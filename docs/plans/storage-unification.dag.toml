@@ -3,7 +3,7 @@
 
 [meta]
 surface = "FlightRecorder, JobStore and ISessionManager: 3 interfaces, 42 methods, 2 engines"
-status = "s1, s2, s4 done and s3 part 1 done, 2026-08-21; b1 and s5 next"
+status = "2026-08-21. s1, s2, s4 done, s3 part 1 done. b1 measured, awaiting its results review. s5 is 39 commits in: port moved, three gates added, awaiting the failure tail, test:pg and review. s3sig, s6, s8 and s12 unblock when s5 lands."
 
 # WHY: `[persistence].backend` selects the job store and nothing else, so one
 # request's two halves live in two engines 15 ms apart, beside an abandoned
@@ -20,7 +20,7 @@ write_visibility = "TWENTY instances of one class, censused at c518e3f: a call t
 schema_gap = "`requests` and `gateway_metadata` exist ONLY in SQLite. The Postgres transcript schema is new authorship, not a migration."
 
 [non_goals]
-gate_output_is_not_a_control = "A gate reporting `0 production, 8 tests` was read as a clean production number with a tail, by BOTH the track and the controller, for hours. All eight were live defects of the exact class the gate was built to find, including a receipt helper that returned a promise typed as a record and caused 15 downstream failures. Work every gate's output to zero or say why a finding is not one. Output nobody acts on is not a control."
+gate_output_is_not_a_control = "A gate reporting `0 production, 8 tests` was read as a clean production number with a tail, by BOTH the track and the controller, for hours. All eight were live defects of the exact class the gate was built to find, including a receipt helper that returned a promise typed as a record and caused 15 downstream failures. Work every gate's output to zero or say why a finding is not one. Output nobody acts on is not a control. Its twin, hit INDEPENDENTLY by the controller and by a track on the same day: `check | tail` returns tail's exit code, so both of us reported a gate green while it was red. Never read an exit code through a pipe."
 no_postgres_mandate = "Decided 2026-08-13. SQLite stays as a driver. 'Postgres only' is a deployment property via config, never a package property via removal; the 2.0.0 node:sqlite move exists to keep zero-config npm installs working."
 no_transcript_move_yet = "Bodies do NOT enter Postgres until postgres-security-hardening.md section 6 is complete through step 8. It is at step 2 of 10. Moving 1.2 GB of plaintext prompts into a store one superuser role reads in cleartext is a regression over a 0600 file."
 
