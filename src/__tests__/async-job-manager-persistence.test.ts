@@ -201,7 +201,7 @@ describe("AsyncJobManager + JobStore (durability + dedup)", () => {
         pid: 123,
       });
       await store.recordOutput("captured-output", "usable provider response\n", "", false);
-      rec.logStart({
+      await rec.logStart({
         correlationId: "corr-captured-output",
         cli: "grok",
         model: "default",
@@ -218,7 +218,7 @@ describe("AsyncJobManager + JobStore (durability + dedup)", () => {
         startedAt,
         pid: 124,
       });
-      rec.logStart({
+      await rec.logStart({
         correlationId: "corr-no-output",
         cli: "mistral",
         model: "default",
@@ -237,20 +237,20 @@ describe("AsyncJobManager + JobStore (durability + dedup)", () => {
       expect((await fresh.getJobResult("captured-output"))?.stdout).toBe(
         "usable provider response\n"
       );
-      const captured = readPersistedRequest(rec, "corr-captured-output");
+      const captured = await readPersistedRequest(rec, "corr-captured-output");
       expect(captured?.status).toBe("completed");
       expect(captured?.exitCode).toBe(0);
       expect(captured?.errorMessage).toBeNull();
       expect(captured?.response).toBe("usable provider response\n");
 
       expect((await fresh.getJobSnapshot("no-output"))?.status).toBe("orphaned");
-      const missing = readPersistedRequest(rec, "corr-no-output");
+      const missing = await readPersistedRequest(rec, "corr-no-output");
       expect(missing?.status).toBe("failed");
       expect(missing?.exitCode).toBe(1);
       expect(missing?.errorMessage).toBe("orphaned after gateway restart");
       expect(missing?.response).toBe("");
     } finally {
-      rec.close();
+      await rec.close();
     }
   });
 

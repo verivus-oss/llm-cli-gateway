@@ -110,9 +110,17 @@ export const FLIGHT_RECORDER_OPERATION_CLASSES = {
 export const FLIGHT_RECORDER_NON_OPERATIONS = {
   queryRequests:
     "Takes caller-supplied SQL, which is the anti-seam s2 removed. It survives as an internal of the SQLite implementation and the gate stops any other module calling it.",
-  flush:
-    "A no-op with zero callers in the tree. Unported rather than signed asynchronous: an operation with no caller is a guess about s7's needs, and s7 can ask.",
 } as const;
+
+/**
+ * `flush` was the second exclusion here until s7. s3sig left it unported and
+ * said "an operation with no caller is a guess about s7's needs, and s7 can
+ * ask". s7's answer is that it is not needed and would now be a lie: it was a
+ * no-op because node:sqlite writes synchronously, and on the port a caller
+ * reading the name would reasonably expect it to mean "my writes are durable",
+ * which nothing here implements. `close()` is the operation that drains.
+ * Deleted from the class as well, not merely from this list.
+ */
 
 /**
  * The two closures `FlightOwnership` (index.ts) holds, returning promises,

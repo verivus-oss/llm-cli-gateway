@@ -52,7 +52,7 @@ describe("recordComplete reports whether the completion guard admitted the write
   let tempDir: string;
   let store: JobStore;
 
-  beforeEach(() => {
+  beforeEach(async () => {
     tempDir = mkdtempSync(join(tmpdir(), "ajm-record-complete-"));
     store = new SqliteJobStore(join(tempDir, "jobs.db"));
   });
@@ -111,7 +111,7 @@ describe("late child output survives a terminal-status-before-close transition",
   let store: JobStore;
   let manager: AsyncJobManager;
 
-  beforeEach(() => {
+  beforeEach(async () => {
     tempDir = mkdtempSync(join(tmpdir(), "ajm-late-output-"));
     store = new SqliteJobStore(join(tempDir, "jobs.db"));
     manager = new AsyncJobManager(undefined, undefined, store);
@@ -188,14 +188,15 @@ describe("late child output survives a terminal-status-before-close transition",
       // llm_request_result reads this row; it is the documented way to read a
       // full response back, so it must not stop at the pre-cancel snapshot.
       await waitFor(
-        () => (readPersistedRequest(rec, "corr-fr-flush")?.response ?? "").includes("LATE"),
+        async () =>
+          ((await readPersistedRequest(rec, "corr-fr-flush"))?.response ?? "").includes("LATE"),
         25_000
       );
-      const persisted = readPersistedRequest(rec, "corr-fr-flush");
+      const persisted = await readPersistedRequest(rec, "corr-fr-flush");
       expect(persisted?.response).toContain("EARLY_BYTES");
       expect(persisted?.response).toContain("LATE_FLUSH_MARKER");
     } finally {
-      rec.close();
+      await rec.close();
     }
   }, 60_000);
 
@@ -243,18 +244,21 @@ describe("late child output survives a terminal-status-before-close transition",
       await internals.evictCompletedJobs();
 
       // The sweep wrote the row from the bytes known at that instant.
-      expect(readPersistedRequest(rec, "corr-esrch")?.response).toContain("EARLY_BYTES");
-      expect(readPersistedRequest(rec, "corr-esrch")?.response ?? "").not.toContain("LATE");
+      expect((await readPersistedRequest(rec, "corr-esrch"))?.response).toContain("EARLY_BYTES");
+      expect((await readPersistedRequest(rec, "corr-esrch"))?.response ?? "").not.toContain("LATE");
 
       // Now let the real child flush and close.
       process.kill(realPid, "SIGTERM");
       await waitFor(
-        () => (readPersistedRequest(rec, "corr-esrch")?.response ?? "").includes("LATE"),
+        async () =>
+          ((await readPersistedRequest(rec, "corr-esrch"))?.response ?? "").includes("LATE"),
         25_000
       );
-      expect(readPersistedRequest(rec, "corr-esrch")?.response).toContain("LATE_FLUSH_MARKER");
+      expect((await readPersistedRequest(rec, "corr-esrch"))?.response).toContain(
+        "LATE_FLUSH_MARKER"
+      );
     } finally {
-      rec.close();
+      await rec.close();
     }
   }, 60_000);
 

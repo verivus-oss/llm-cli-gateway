@@ -19,7 +19,6 @@ import {
   type ApiProviderLoginGuidance,
 } from "./provider-login-guidance.js";
 import { CLAUDE_MCP_SERVER_NAMES } from "./claude-mcp-config.js";
-import type { FlightRecorderQuery } from "./flight-recorder.js";
 import {
   defaultLeastCostConfig,
   diagnoseRemoteOAuthConfig,
@@ -37,6 +36,7 @@ import {
 import { telemetryTierFor, type TelemetryTier } from "./lcr-telemetry.js";
 import { API_CATALOG_AS_OF, PRICING_AS_OF, getModelCost, modelIdToFamily } from "./pricing.js";
 import { computeLcrPriorsFromDb } from "./lcr-priors.js";
+import type { LcrPriors } from "./lcr-priors.js";
 import { getCliInfo } from "./model-registry.js";
 import type { Confidence, PriceSource, QualityTier } from "./least-cost-types.js";
 import type { AuthConfig } from "./auth.js";
@@ -47,6 +47,7 @@ import {
 } from "./workspace-registry.js";
 import { buildRemoteConnectorUrls, resolveConfiguredRemoteOrigin } from "./remote-url.js";
 import { computeGlobalCacheStats } from "./cache-stats.js";
+import type { GlobalCacheStats } from "./cache-stats.js";
 import { FlightRecorder, resolveFlightRecorderDbPath } from "./flight-recorder.js";
 import {
   buildUpstreamContractReport,
@@ -941,11 +942,24 @@ function chatGPTConnectorUrl(env: NodeJS.ProcessEnv, rawPublicUrl: string | null
 export interface CreateDoctorReportOptions {
   env?: NodeJS.ProcessEnv;
   /**
-   * Optional read access to the flight recorder. Drives the
-   * cache_awareness.last_24h and per_cli aggregates. When absent, those
-   * blocks report zeroed aggregates (still PRESENT in the report).
+   * Cache aggregates over the last 24h, ALREADY READ from the flight recorder.
+   * Drives cache_awareness.last_24h and per_cli. When absent, those blocks
+   * report zeroed aggregates (still PRESENT in the report).
+   *
+   * s7: this used to be the recorder handle itself. The recorder is
+   * asynchronous now, and `createDoctorReport` is a pure synchronous
+   * projection whose only I/O was this one scan; `printDoctorJson` does the
+   * read, with its own failure degrading to the zeroed block exactly as the
+   * try/catch here used to.
    */
-  flightRecorder?: FlightRecorderQuery;
+  cacheStats?: GlobalCacheStats;
+  /**
+   * Least-cost calibration priors, ALREADY READ. Same reason as `cacheStats`.
+   * Absent means "not read": either routing is off, `priors_scope` is off, the
+   * recorder is unavailable, or the scan failed. All four leave
+   * `calibrationQuality` empty, which is what the previous code did too.
+   */
+  lcrPriors?: LcrPriors;
   /**
    * Optional CacheAwarenessConfig. Drives `enabled_features`. When
    * absent, `enabled_features` is empty (all behaviour considered off).
@@ -1223,23 +1237,8 @@ function buildCacheAwarenessReport(opts: CreateDoctorReportOptions): CacheAwaren
     enabled.push("ttl_warnings");
   }
 
-  if (!opts.flightRecorder) {
-    return {
-      enabled_features: enabled,
-      last_24h: {
-        hit_rate: 0,
-        total_hits: 0,
-        total_requests: 0,
-        estimated_savings_usd: 0,
-      },
-      per_cli: {},
-    };
-  }
-
-  let stats;
-  try {
-    stats = computeGlobalCacheStats(opts.flightRecorder, { lastNHours: 24 });
-  } catch {
+  const stats = opts.cacheStats;
+  if (!stats) {
     return {
       enabled_features: enabled,
       last_24h: {
@@ -1300,7 +1299,7 @@ function computePricingStaleDays(runIso: string): number {
 function buildLeastCostReport(
   cfg: LeastCostConfig,
   generatedAt: string,
-  flightRecorder?: FlightRecorderQuery
+  priors?: LcrPriors
 ): LeastCostReport {
   const pricing = {
     tableAsOf: PRICING_AS_OF,
@@ -1351,19 +1350,14 @@ function buildLeastCostReport(
   // priors shape is anonymized model-level (content-type:family), never per
   // principal, so no caller identity can leak here.
   const calibrationQuality: LeastCostCalibrationBucketReport[] = [];
-  if (flightRecorder && cfg.priorsScope !== "off") {
-    try {
-      const priors = computeLcrPriorsFromDb(flightRecorder, { priorsScope: cfg.priorsScope });
-      for (const [bucket, entry] of priors.calibration) {
-        calibrationQuality.push({
-          bucket,
-          k: entry.k,
-          samples: entry.samples,
-          confidence: entry.confidence,
-        });
-      }
-    } catch {
-      // Best-effort: leave calibrationQuality empty on any read failure.
+  if (priors && cfg.priorsScope !== "off") {
+    for (const [bucket, entry] of priors.calibration) {
+      calibrationQuality.push({
+        bucket,
+        k: entry.k,
+        samples: entry.samples,
+        confidence: entry.confidence,
+      });
     }
   }
 
@@ -1548,7 +1542,7 @@ export function createDoctorReport(
     client_config: clientConfigStatus(),
     cache_awareness: buildCacheAwarenessReport(opts),
     provider_capabilities: buildProviderCapabilitySummary(providerStatuses),
-    least_cost: buildLeastCostReport(leastCostConfig, generatedAt, opts.flightRecorder),
+    least_cost: buildLeastCostReport(leastCostConfig, generatedAt, opts.lcrPriors),
     personal_config: personalConfigReadiness,
     upstream,
     next_actions: [],
@@ -1727,10 +1721,37 @@ export async function printDoctorJson(
       apiReachability[runtime.name] = await probeApiProviderReachability(runtime.baseUrl);
     }
   }
+  // The recorder is asynchronous since s7, so the two scans happen HERE and
+  // `createDoctorReport` stays a pure synchronous projection. Each read keeps
+  // the try/catch that used to sit inside the report builders, with the await
+  // INSIDE the try: a call that stopped throwing and started rejecting, inside
+  // a try whose catch can no longer fire, is the dead-catch class this
+  // programme has already shipped once.
+  let cacheStats: GlobalCacheStats | undefined;
+  if (flightRecorder) {
+    try {
+      cacheStats = await computeGlobalCacheStats(flightRecorder, { lastNHours: 24 });
+    } catch {
+      // Degrade to the zeroed cache_awareness block.
+    }
+  }
+  // Gated on priors_scope as well as on the recorder: readLcrPriorRows scans
+  // every request row, so reading it when learning is off would make `doctor`
+  // a full-table scan of a 1.2 GB file for a block it then discards.
+  const priorsScope = leastCost?.priorsScope ?? defaultLeastCostConfig().priorsScope;
+  let lcrPriors: LcrPriors | undefined;
+  if (flightRecorder && priorsScope !== "off") {
+    try {
+      lcrPriors = await computeLcrPriorsFromDb(flightRecorder, { priorsScope });
+    } catch {
+      // Degrade to an empty calibrationQuality array.
+    }
+  }
   const report = createDoctorReport({
     env: process.env,
     cacheAwareness,
-    flightRecorder,
+    cacheStats,
+    lcrPriors,
     probeUpstream: opts.probeUpstream,
     providersConfig,
     apiReachability,
@@ -1739,7 +1760,7 @@ export async function printDoctorJson(
   process.stdout.write(`${JSON.stringify(report, null, 2)}\n`);
   if (flightRecorder) {
     try {
-      flightRecorder.close();
+      await flightRecorder.close();
     } catch {
       // best effort
     }
@@ -1785,13 +1806,17 @@ function isCreateDoctorReportOptions(
   value: NodeJS.ProcessEnv | CreateDoctorReportOptions
 ): value is CreateDoctorReportOptions {
   // CreateDoctorReportOptions carries either `env` (an object) or
-  // `flightRecorder` (an object). A NodeJS.ProcessEnv is a flat
+  // `cacheStats` (an object). A NodeJS.ProcessEnv is a flat
   // Record<string, string|undefined> — even if a shell happens to export
-  // `env=production` or `flightRecorder=...`, the value at that key is a
+  // `env=production` or `cacheStats=...`, the value at that key is a
   // STRING, not an object, so the typeof checks here cannot collide.
+  //
+  // s7 renamed the discriminating key from `flightRecorder` to `cacheStats`
+  // along with the option itself; a key nothing reads is exactly the inert
+  // config key this repository has shipped before.
   if (value === null || typeof value !== "object") return false;
-  if (Object.prototype.hasOwnProperty.call(value, "flightRecorder")) {
-    const candidate = (value as { flightRecorder?: unknown }).flightRecorder;
+  if (Object.prototype.hasOwnProperty.call(value, "cacheStats")) {
+    const candidate = (value as { cacheStats?: unknown }).cacheStats;
     return candidate === undefined || typeof candidate === "object";
   }
   if (Object.prototype.hasOwnProperty.call(value, "leastCost")) {

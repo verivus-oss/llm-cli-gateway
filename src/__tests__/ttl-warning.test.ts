@@ -88,12 +88,12 @@ class SeededFlightRecorder implements FlightRecorderLike {
     });
   }
 
-  logStart(_entry: FlightLogStart): void {
+  async logStart(_entry: FlightLogStart): Promise<void> {
     // Ignored in TTL tests — we only care about pre-seeded rows.
   }
-  logComplete(_correlationId: string, _result: FlightLogResult): void {}
+  async logComplete(_correlationId: string, _result: FlightLogResult): Promise<void> {}
   // s2: was sniffing `sql.includes("session_id = ?")`. Named reads instead.
-  readCacheRowsBySession(sessionId: string): CacheAggregateRow[] {
+  async readCacheRowsBySession(sessionId: string): Promise<CacheAggregateRow[]> {
     return this.rows
       .filter(r => r.session_id === sessionId)
       .map(r => ({
@@ -106,26 +106,26 @@ class SeededFlightRecorder implements FlightRecorderLike {
         cache_control_blocks: r.cache_control_blocks ?? null,
       }));
   }
-  readCacheRowsByPrefix(): CacheAggregateRow[] {
+  async readCacheRowsByPrefix(): Promise<CacheAggregateRow[]> {
     return [];
   }
-  readCacheRowsGlobal(): CacheAggregateRow[] {
+  async readCacheRowsGlobal(): Promise<CacheAggregateRow[]> {
     return [];
   }
-  readRequestById(): null {
+  async readRequestById(): Promise<null> {
     return null;
   }
-  listRequestSummaries(): [] {
+  async listRequestSummaries(): Promise<[]> {
     return [];
   }
-  readLcrPriorRows(): [] {
+  async readLcrPriorRows(): Promise<[]> {
     return [];
   }
-  readRoutingDecisions(): [] {
+  async readRoutingDecisions(): Promise<[]> {
     return [];
   }
-  flush(): void {}
-  close(): void {}
+  async flush(): Promise<void> {}
+  async close(): Promise<void> {}
 }
 
 interface RegisteredTool {

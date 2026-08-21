@@ -144,7 +144,7 @@ import {
   type KitSessionAttempt,
   type KitSessionBinding,
 } from "./personal-config-types.js";
-import { buildRouterEnv, toRouterConfig } from "./lcr-router-env.js";
+import { buildRouterEnv, resolveRouterPriors, toRouterConfig } from "./lcr-router-env.js";
 import { getModelCost, composeCost, modelIdToFamily } from "./pricing.js";
 import { telemetryTierFor } from "./lcr-telemetry.js";
 import type { TokenCounts, CostBasis } from "./least-cost-types.js";
@@ -157,7 +157,7 @@ import {
   type RequiredCapabilities as RouterRequiredCapabilities,
 } from "./least-cost-router.js";
 import { loadGatewaySkills, type SkillEntry } from "./skill-loader.js";
-import { runAcpRequest, type AcpFlightSink } from "./acp/runtime.js";
+import { runAcpRequest } from "./acp/runtime.js";
 import { isAcpError } from "./acp/errors.js";
 import { redactSecrets } from "./secret-redaction.js";
 import {
@@ -281,6 +281,7 @@ import {
 } from "./cli-input-limits.js";
 import {
   createFlightRecorder,
+  flightRecorderEngineDecision,
   NoopFlightRecorder,
   resolveFlightRecorderDbPath,
   FlightRecorderLike,
@@ -666,7 +667,14 @@ let asyncJobManager: AsyncJobManager | null = null;
 let approvalManager: ApprovalManager | null = null;
 
 function getFlightRecorder(runtimeLogger: GatewayLogger = logger): FlightRecorderLike {
-  flightRecorder ??= createFlightRecorder(runtimeLogger);
+  // The recorder is told what `[persistence].backend` asked for. It cannot
+  // honour "postgres" and says so once, out loud, instead of ignoring it: see
+  // flightRecorderEngineDecision. Resolved through getPersistenceConfig so the
+  // config is loaded once for both subsystems.
+  flightRecorder ??= createFlightRecorder(
+    runtimeLogger,
+    getPersistenceConfig(runtimeLogger).backend
+  );
   return flightRecorder;
 }
 
@@ -1568,7 +1576,10 @@ export async function runAcpTransport(
         config: runtime.acpConfig,
         sessionManager: runtime.sessionManager,
         approvalManager: runtime.approvalManager,
-        flightRecorder: runtime.flightRecorder as AcpFlightSink,
+        // No `as AcpFlightSink` cast. The cast was what let the sink's `void`
+        // return types absorb the recorder's promises; a structural match is
+        // now a compile error the moment the two diverge again.
+        flightRecorder: runtime.flightRecorder,
         logger: runtime.logger,
       },
       {
@@ -4279,15 +4290,18 @@ export function resolveEffectiveCompression(
  * compression_* columns only, write-once, never through logComplete. No-op
  * when compression did not change the response.
  */
-function safeRecordCompression(
+async function safeRecordCompression(
   correlationId: string,
   compression: CompressResult | undefined,
   runtime: GatewayServerRuntime,
   suppressForPersonalKit = false
-): void {
+): Promise<void> {
   if (!compression || suppressForPersonalKit) return;
   try {
-    runtime.flightRecorder.recordCompressionTelemetry(correlationId, {
+    // AWAIT INSIDE THE TRY. s6 left this operation off FlightOwnership's chain
+    // deliberately, as one s7 moves; moving it without the await would leave a
+    // catch that can no longer fire.
+    await runtime.flightRecorder.recordCompressionTelemetry(correlationId, {
       route: compression.route,
       transforms: compression.transforms,
       originalChars: compression.originalChars,
@@ -4306,13 +4320,13 @@ function safeRecordCompression(
  * routed request whose row has been written (an inline completion); a deferred
  * route still returns the block in its response.
  */
-function safeRecordRouting(
+async function safeRecordRouting(
   correlationId: string,
   routing: Parameters<FlightRecorderLike["recordRouting"]>[1],
   runtime: GatewayServerRuntime
-): void {
+): Promise<void> {
   try {
-    runtime.flightRecorder.recordRouting(correlationId, routing);
+    await runtime.flightRecorder.recordRouting(correlationId, routing);
   } catch (error) {
     runtime.logger.error("Flight recorder recordRouting failed", error);
   }
@@ -10282,16 +10296,16 @@ export function registerApiProviderTools(
  * writes, and ttlRemainingMs is below the threshold (30s by default).
  * Returns null when no warning applies.
  */
-function maybeBuildCacheTtlWarning(args: {
+async function maybeBuildCacheTtlWarning(args: {
   runtime: GatewayServerRuntime;
   sessionId: string | undefined;
   cli: "claude" | "codex" | "gemini" | "grok" | "mistral";
   thresholdMs?: number;
-}): WarningEntry | null {
+}): Promise<WarningEntry | null> {
   if (args.cli !== "claude") return null;
   if (!args.sessionId) return null;
   if (!args.runtime.cacheAwareness?.warnOnTtlExpiry) return null;
-  const stats = computeSessionCacheStats(args.runtime.flightRecorder, args.sessionId);
+  const stats = await computeSessionCacheStats(args.runtime.flightRecorder, args.sessionId);
   if (stats.requestCount === 0 || !stats.lastRequestAt) return null;
   const ttl = computeTtlRemaining(stats, args.cli, {
     anthropicTtlSeconds: args.runtime.cacheAwareness.anthropicTtlSeconds,
@@ -10808,7 +10822,7 @@ export async function handleClaudeRequest(
   // cache breakpoint, attach a structured warning (NOT a hard error)
   // to the response. Computed BEFORE safeFlightStart so the current
   // row does not skew lastRequestAt.
-  const ttlWarning = maybeBuildCacheTtlWarning({
+  const ttlWarning = await maybeBuildCacheTtlWarning({
     runtime,
     sessionId: effectiveSessionId,
     cli: "claude",
@@ -11132,7 +11146,7 @@ export async function handleClaudeRequest(
           warnings,
           effectiveCompress
         );
-        safeRecordCompression(corrId, streamResponse.compression, runtime, kit !== null);
+        await safeRecordCompression(corrId, streamResponse.compression, runtime, kit !== null);
         if (worktreeResolution.worktreePath) {
           const first = streamResponse.content[0];
           if (first && first.type === "text") {
@@ -11168,7 +11182,7 @@ export async function handleClaudeRequest(
         warnings,
         effectiveCompress
       );
-      safeRecordCompression(corrId, nonStreamResponse.compression, runtime, kit !== null);
+      await safeRecordCompression(corrId, nonStreamResponse.compression, runtime, kit !== null);
       if (worktreeResolution.worktreePath) {
         const first = nonStreamResponse.content[0];
         if (first && first.type === "text") {
@@ -11775,7 +11789,7 @@ export async function handleCodexRequest(
         undefined,
         effectiveCompress
       );
-      safeRecordCompression(corrId, codexResponse.compression, runtime, kit !== null);
+      await safeRecordCompression(corrId, codexResponse.compression, runtime, kit !== null);
       if (worktreeResolution.worktreePath) {
         const first = codexResponse.content[0];
         if (first && first.type === "text") {
@@ -12072,7 +12086,7 @@ export async function handleGeminiRequest(
         undefined,
         effectiveCompress
       );
-      safeRecordCompression(corrId, response.compression, runtime);
+      await safeRecordCompression(corrId, response.compression, runtime);
       if (worktreeResolution.worktreePath) {
         const first = response.content[0];
         if (first && first.type === "text") {
@@ -12808,7 +12822,7 @@ export async function handleGrokRequest(
         undefined,
         effectiveCompress
       );
-      safeRecordCompression(corrId, response.compression, runtime);
+      await safeRecordCompression(corrId, response.compression, runtime);
       if (worktreeResolution.worktreePath) {
         const first = response.content[0];
         if (first && first.type === "text") {
@@ -13580,7 +13594,7 @@ export async function handleDevinRequest(
         undefined,
         effectiveCompress
       );
-      safeRecordCompression(corrId, response.compression, runtime);
+      await safeRecordCompression(corrId, response.compression, runtime);
       await flight.completeInline({
         response: stdout,
         durationMs,
@@ -14370,7 +14384,7 @@ export async function handleCursorRequest(
         undefined,
         effectiveCompress
       );
-      safeRecordCompression(corrId, response.compression, runtime);
+      await safeRecordCompression(corrId, response.compression, runtime);
       await flight.completeInline({
         response: stdout,
         durationMs,
@@ -15254,7 +15268,7 @@ export async function handleMistralRequest(
         undefined,
         effectiveCompress
       );
-      safeRecordCompression(corrId, response.compression, runtime, kit !== null);
+      await safeRecordCompression(corrId, response.compression, runtime, kit !== null);
       if (worktreeResolution.worktreePath) {
         const first = response.content[0];
         if (first && first.type === "text") {
@@ -16230,7 +16244,7 @@ async function dispatchRoutedCli(
       undefined,
       effectiveCompress
     );
-    safeRecordCompression(corrId, response.compression, runtime);
+    await safeRecordCompression(corrId, response.compression, runtime);
     return response;
   } catch (error) {
     if (!cleanupHandedOff) prepCleanup?.();
@@ -16405,16 +16419,16 @@ export function deriveCostBasis(
 }
 
 /** Persist the routing decision columns for a routed request that dispatched. */
-function recordRoutingDecision(
+async function recordRoutingDecision(
   runtime: GatewayServerRuntime,
   correlationId: string,
   decision: RouteDecision,
   reroutes: number
-): void {
+): Promise<void> {
   const reason = decision.chosen
     ? `cheapest${decision.nearTie ? ":near-tie" : ""}`
     : (decision.error ?? "no-eligible");
-  safeRecordRouting(
+  await safeRecordRouting(
     correlationId,
     {
       estCostUsd: decision.estCostUsd ?? null,
@@ -16572,7 +16586,7 @@ async function runRouteRequest(
     );
   }
   const cfg = runtime.leastCost;
-  const { env, routerConfig, req } = buildRouteContext(runtime, params);
+  const { env, routerConfig, req } = await buildRouteContext(runtime, params);
 
   const excluded = new Set<string>();
   // Candidates that failed AT DISPATCH (not at selection), with why. Merged into
@@ -16624,7 +16638,7 @@ async function runRouteRequest(
     const result = await dispatchRoutedRequest(runtime, chosen, dispatchParams);
 
     if (!result.isError) {
-      recordRoutingDecision(runtime, attemptCorrId, decision, reroutes);
+      await recordRoutingDecision(runtime, attemptCorrId, decision, reroutes);
       return attachRouting(result, buildRoutingBlock(decision, reroutes));
     }
 
@@ -16662,25 +16676,30 @@ async function runRouteRequest(
 }
 
 /** Shared selection context for the sync and async route tools. */
-function buildRouteContext(
+async function buildRouteContext(
   runtime: GatewayServerRuntime,
   params: RouteToolParams
-): {
+): Promise<{
   env: ReturnType<typeof buildRouterEnv>;
   routerConfig: ReturnType<typeof toRouterConfig>;
   req: RouteRequestInput;
-} {
+}> {
+  // Calibration priors (token-estimator layer 3): read from the flight
+  // recorder, scoped per config; principal scope uses the caller's principal.
+  // Resolved BEFORE buildRouterEnv, which is synchronous and does no I/O since
+  // the recorder became asynchronous (s7).
+  const priors = await resolveRouterPriors({
+    flightRecorder: runtime.flightRecorder,
+    priorsScope: runtime.leastCost.priorsScope,
+    ownerPrincipal: resolveOwnerPrincipal(getRequestContext()),
+  });
   return {
     env: buildRouterEnv({
       performanceMetrics: runtime.performanceMetrics,
       limiterSnapshot: runtime.asyncJobManager.getLimiterSnapshot(),
       apiProviders: enabledApiProviders(runtime.providers),
       preferCatalogPrice: runtime.leastCost.preferCatalogPrice,
-      // Calibration priors (token-estimator layer 3): read from the flight
-      // recorder, scoped per config; principal scope uses the caller's principal.
-      flightRecorder: runtime.flightRecorder,
-      priorsScope: runtime.leastCost.priorsScope,
-      ownerPrincipal: resolveOwnerPrincipal(getRequestContext()),
+      priors,
     }),
     routerConfig: toRouterConfig(runtime.leastCost),
     req: {
@@ -16793,7 +16812,7 @@ async function runRouteRequestAsync(
       )
     );
   }
-  const { env, routerConfig, req } = buildRouteContext(runtime, params);
+  const { env, routerConfig, req } = await buildRouteContext(runtime, params);
   const decision = selectCandidate(req, env, routerConfig);
   if (!decision.chosen) {
     return routeErrorResponse(decision, 0, corrId);
@@ -16832,7 +16851,7 @@ async function runRouteRequestAsync(
       optimizeResponse: params.optimizeResponse ?? false,
     });
   }
-  recordRoutingDecision(runtime, corrId, decision, 0);
+  await recordRoutingDecision(runtime, corrId, decision, 0);
   return attachRouting(result, buildRoutingBlock(decision, 0));
 }
 
@@ -20138,7 +20157,7 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
               });
 
           // Slice 3: TTL warning on resume (async path too).
-          const ttlWarning = maybeBuildCacheTtlWarning({
+          const ttlWarning = await maybeBuildCacheTtlWarning({
             runtime,
             sessionId: effectiveSessionId,
             cli: "claude",
@@ -22069,7 +22088,7 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
           });
           if (compressed.text !== result.stdout) {
             result.stdout = compressed.text;
-            safeRecordCompression(result.correlationId, compressed, runtime, personalKitJob);
+            await safeRecordCompression(result.correlationId, compressed, runtime, personalKitJob);
           }
         }
 
@@ -22255,7 +22274,7 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
     },
     async ({ correlationId, maxChars, includePrompt }) => {
       const remoteCaller = callerIsRemote();
-      const record = readPersistedRequest(flightRecorder, correlationId, {
+      const record = await readPersistedRequest(flightRecorder, correlationId, {
         maxChars,
         includePrompt,
         redactProviderSessionId: remoteCaller,
@@ -22337,7 +22356,7 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
     },
     async ({ limit, since, cli, sessionId }) => {
       const caller = resolveOwnerPrincipal(getRequestContext());
-      const requests = listPersistedRequests(flightRecorder, {
+      const requests = await listPersistedRequests(flightRecorder, {
         limit,
         since,
         cli,
@@ -22422,13 +22441,20 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
       // docs/plans/storage-unification.md is the fix; until it lands, the split
       // is at least stated rather than hidden.
       const recorderEnabled = !(flightRecorder instanceof NoopFlightRecorder);
+      // s7: the recorder now runs through the storage port's SQLite driver and
+      // is TOLD what [persistence].backend asked for. `engineDeferredBecause`
+      // is the difference between a setting that is ignored and one that is
+      // refused with a reason.
+      const recorderEngine = flightRecorderEngineDecision(persistence.backend);
       const flightRecorderBlock = {
-        engine: recorderEnabled ? ("sqlite" as const) : null,
+        engine: recorderEnabled ? recorderEngine.engine : null,
         path: recorderEnabled ? resolveFlightRecorderDbPath() : null,
         enabled: recorderEnabled,
         // Stated as a fact rather than implied, because the whole failure mode
         // is a caller assuming one backend setting covers both subsystems.
         followsPersistenceBackend: false,
+        engineRequested: recorderEngine.requested ?? null,
+        engineDeferredBecause: recorderEngine.deferredBecause ?? null,
         holds: "requests (llm_request_list, llm_request_result)",
         warning: !recorderEnabled
           ? "Flight recording is disabled (LLM_GATEWAY_LOGS_DB=none). llm_request_list returns an empty list and llm_request_result finds nothing; this is not evidence that no request ran."
@@ -23518,7 +23544,7 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
             }
           | undefined;
         try {
-          const stats = computeSessionCacheStats(flightRecorder, session.id);
+          const stats = await computeSessionCacheStats(flightRecorder, session.id);
           if (stats.requestCount > 0) {
             const ttlRemainingMs = computeTtlRemaining(stats, stats.cli, {
               anthropicTtlSeconds: cacheAwareness?.anthropicTtlSeconds ?? 300,
@@ -23802,7 +23828,12 @@ async function performShutdown(signal: string, exitCode: number): Promise<void> 
     }
 
     if (flightRecorder) {
-      flightRecorder.close();
+      // AWAITED. This line was the one close() in performShutdown that was not,
+      // which was harmless only while the recorder was synchronous. It is now
+      // exactly jobStore's old defect: process.exit() below would fire while
+      // the driver's bounded drain was still running, and the log line on the
+      // next line would assert a close that had not finished.
+      await flightRecorder.close();
       logger.info("Flight recorder closed");
     }
 

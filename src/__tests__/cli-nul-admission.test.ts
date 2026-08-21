@@ -48,12 +48,12 @@ function expectNoSensitiveNativeError(value: unknown): void {
 }
 
 describe("embedded NUL CLI admission", () => {
-  afterEach(() => {
+  afterEach(async () => {
     cleanupNeutralExecutionWorkspaces();
     resetCliBreakersForTest();
   });
 
-  it("rejects an embedded NUL in command and argv at the shared pre-spawn chokepoint", () => {
+  it("rejects an embedded NUL in command and argv at the shared pre-spawn chokepoint", async () => {
     const before = activeNeutralExecutionWorkspaceCountForTest();
 
     for (const [command, args] of [
@@ -285,7 +285,7 @@ describe("embedded NUL CLI admission", () => {
         retryable: false,
       });
 
-      const rows = flight.queryRequests<{
+      const rows = await flight.queryRequests<{
         model: string;
         prompt: string;
         response: string | null;
@@ -313,7 +313,7 @@ describe("embedded NUL CLI admission", () => {
       });
     } finally {
       await manager.dispose();
-      flight.close();
+      await flight.close();
       await store.close();
       rmSync(root, { recursive: true, force: true });
     }

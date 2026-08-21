@@ -17,15 +17,15 @@ function enabledLeastCost(): LeastCostConfig {
 }
 
 /** Seed one routed claude row whose prompt carries a marker we must never emit. */
-function seedRoutedRow(rec: FlightRecorder): void {
-  rec.logStart({
+async function seedRoutedRow(rec: FlightRecorder): Promise<void> {
+  await rec.logStart({
     correlationId: "routed-1",
     cli: "claude",
     model: "claude-sonnet-4-5",
     prompt: "SECRETPROMPT do the thing",
     sessionId: "sess-A",
   });
-  rec.logComplete("routed-1", {
+  await rec.logComplete("routed-1", {
     response: "SECRETRESPONSE done",
     durationMs: 1,
     retryCount: 0,
@@ -38,7 +38,7 @@ function seedRoutedRow(rec: FlightRecorder): void {
     costUsd: 0.0021,
     costBasis: "provider-reported",
   });
-  rec.recordRouting("routed-1", {
+  await rec.recordRouting("routed-1", {
     estCostUsd: 0.0025,
     estConfidence: "high",
     reason: "cheapest-eligible",
@@ -48,7 +48,7 @@ function seedRoutedRow(rec: FlightRecorder): void {
 }
 
 describe("telemetryTierFor", () => {
-  it("assigns the DAG cost-model tier for each of the 7 CLI providers", () => {
+  it("assigns the DAG cost-model tier for each of the 7 CLI providers", async () => {
     expect(telemetryTierFor("claude")).toBe("T1");
     expect(telemetryTierFor("codex")).toBe("T2");
     // See doctor.test.ts: gemini emits no usage at all, so T4.
@@ -59,7 +59,7 @@ describe("telemetryTierFor", () => {
     expect(telemetryTierFor("cursor")).toBe("T4");
   });
 
-  it("falls back to T2 for API-backed / unknown providers", () => {
+  it("falls back to T2 for API-backed / unknown providers", async () => {
     expect(telemetryTierFor("grok-api")).toBe("T2");
     expect(telemetryTierFor("some-openrouter-provider")).toBe("T2");
   });
@@ -69,13 +69,13 @@ describe("routing:// resources (LCR phase_2)", () => {
   let tmpDir: string;
   let rec: FlightRecorder;
 
-  beforeEach(() => {
+  beforeEach(async () => {
     tmpDir = mkdtempSync(path.join(os.tmpdir(), "lcr-res-"));
     rec = new FlightRecorder(path.join(tmpDir, "logs.db"));
   });
 
-  afterEach(() => {
-    rec.close();
+  afterEach(async () => {
+    await rec.close();
     rmSync(tmpDir, { recursive: true, force: true });
   });
 
@@ -106,7 +106,7 @@ describe("routing:// resources (LCR phase_2)", () => {
     expect(await provider.readResource("routing://priors")).toBeNull();
   });
 
-  it("lists both resources when enabled", () => {
+  it("lists both resources when enabled", async () => {
     const provider = new ResourceProvider(
       sessionManagerStub,
       new PerformanceMetrics(),
@@ -123,7 +123,7 @@ describe("routing:// resources (LCR phase_2)", () => {
   });
 
   it("routing://decisions returns the routed row, redacted (no raw prompt/response)", async () => {
-    seedRoutedRow(rec);
+    await seedRoutedRow(rec);
     const provider = new ResourceProvider(
       sessionManagerStub,
       new PerformanceMetrics(),
@@ -180,7 +180,7 @@ describe("routing:// resources (LCR phase_2)", () => {
   });
 
   it("routing://priors carries priceAsOf and leaks no principal", async () => {
-    seedRoutedRow(rec);
+    await seedRoutedRow(rec);
     const provider = new ResourceProvider(
       sessionManagerStub,
       new PerformanceMetrics(),
@@ -217,7 +217,7 @@ describe("routing:// resources (LCR phase_2)", () => {
     // mirror image, the defect this work fixed (a declaration disagreeing with what
     // the server exposes). Raised by a cross-LLM reviewer against resources.ts.
     const rec = new FlightRecorder(path.join(tmpDir, "kit.db"));
-    seedRoutedRow(rec);
+    await seedRoutedRow(rec);
     const provider = new ResourceProvider(
       sessionManagerStub,
       new PerformanceMetrics(),
@@ -234,6 +234,6 @@ describe("routing:// resources (LCR phase_2)", () => {
     expect(uris).not.toContain("routing://priors");
     expect(await provider.readResource("routing://decisions")).toBeNull();
     expect(await provider.readResource("routing://priors")).toBeNull();
-    rec.close();
+    await rec.close();
   });
 });

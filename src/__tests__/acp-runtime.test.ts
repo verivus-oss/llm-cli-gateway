@@ -40,6 +40,8 @@ class FakeAgent extends EventEmitter implements AcpChildProcess {
   private buffer = "";
   private readonly handlers = new Map<string, (f: Frame) => void>();
   failPrompt = false;
+  /** How many `session/prompt` frames the agent has actually been given. */
+  promptsReceived = 0;
   /** Optional `_meta` block echoed on the session/prompt response (B4 usage). */
   promptMeta: Record<string, unknown> | undefined = undefined;
 
@@ -64,6 +66,7 @@ class FakeAgent extends EventEmitter implements AcpChildProcess {
     this.handlers.set("session/new", f => this.reply(f.id, { sessionId: "prov-sess-1" }));
     this.handlers.set("session/load", f => this.reply(f.id, {}));
     this.handlers.set("session/prompt", f => {
+      this.promptsReceived += 1;
       if (this.failPrompt) {
         this.replyError(f.id, -32000, "prompt failed");
         return;
@@ -244,13 +247,45 @@ describe("ACP runtime — happy path", () => {
     });
   });
 
+  it("does not dispatch the prompt until the flight start row is down", async () => {
+    // s7. `AcpFlightSink` used to declare `void`, so the recorder's promises
+    // were absorbed by the TYPE and every ACP flight write was dropped: no lint
+    // rule can see a promise the type system already discarded. With the sink
+    // honest, the await is the same fence FlightOwnership.start() provides on
+    // the CLI path, driven here with a gate rather than a sleep.
+    const agent = new FakeAgent();
+    let releaseStart: () => void = () => {};
+    const started = new Promise<void>(resolve => {
+      releaseStart = resolve;
+    });
+    const flightRecorder: AcpFlightSink = {
+      logStart: () => started,
+      logComplete: async () => {},
+    };
+    const run = runAcpRequest(deps(agent, { flightRecorder }), {
+      provider: "mistral",
+      prompt: "gated",
+      correlationId: "c-fence",
+    });
+    // 25 event-loop turns with the start write still open.
+    for (let i = 0; i < 25; i++) await new Promise(resolve => setImmediate(resolve));
+    expect(agent.promptsReceived).toBe(0);
+    releaseStart();
+    await run;
+    expect(agent.promptsReceived).toBe(1);
+  });
+
   it("writes only summarized prompt/response to the flight recorder", async () => {
     const agent = new FakeAgent();
     const starts: unknown[] = [];
     const completes: unknown[] = [];
     const flightRecorder: AcpFlightSink = {
-      logStart: e => starts.push(e),
-      logComplete: (_id, r) => completes.push(r),
+      logStart: async e => {
+        starts.push(e);
+      },
+      logComplete: async (_id, r) => {
+        completes.push(r);
+      },
     };
     await runAcpRequest(deps(agent, { flightRecorder }), {
       provider: "mistral",
@@ -289,8 +324,10 @@ describe("ACP runtime — happy path", () => {
     };
     const completes: unknown[] = [];
     const flightRecorder: AcpFlightSink = {
-      logStart: () => {},
-      logComplete: (_id, r) => completes.push(r),
+      logStart: async () => {},
+      logComplete: async (_id, r) => {
+        completes.push(r);
+      },
     };
     await runAcpRequest(deps(agent, { flightRecorder }), {
       provider: "mistral",
@@ -317,8 +354,10 @@ describe("ACP runtime — happy path", () => {
     const agent = new FakeAgent(); // no promptMeta, reply has no _meta
     const completes: unknown[] = [];
     const flightRecorder: AcpFlightSink = {
-      logStart: () => {},
-      logComplete: (_id, r) => completes.push(r),
+      logStart: async () => {},
+      logComplete: async (_id, r) => {
+        completes.push(r);
+      },
     };
     await runAcpRequest(deps(agent, { flightRecorder }), {
       provider: "mistral",
@@ -406,8 +445,10 @@ describe("ACP runtime: LCR phase_2b derived cost", () => {
     };
     const completes: unknown[] = [];
     const flightRecorder: AcpFlightSink = {
-      logStart: () => {},
-      logComplete: (_id, r) => completes.push(r),
+      logStart: async () => {},
+      logComplete: async (_id, r) => {
+        completes.push(r);
+      },
     };
     await runAcpRequest(deps(agent, { flightRecorder, config: grokConfig() }), {
       provider: "grok",

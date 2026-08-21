@@ -15,24 +15,24 @@ describe("loadLcrPriorRows against a real flight-recorder DB", () => {
   let tmpDir: string;
   let dbPath: string;
 
-  beforeEach(() => {
+  beforeEach(async () => {
     tmpDir = mkdtempSync(path.join(os.tmpdir(), "lcr-loader-test-"));
     dbPath = path.join(tmpDir, "logs.db");
   });
 
-  afterEach(() => {
+  afterEach(async () => {
     rmSync(tmpDir, { recursive: true, force: true });
   });
 
-  it("reads the projected columns for a completed T2 row (SQL matches the schema)", () => {
+  it("reads the projected columns for a completed T2 row (SQL matches the schema)", async () => {
     const rec = new FlightRecorder(dbPath);
-    rec.logStart({
+    await rec.logStart({
       correlationId: "c1",
       cli: "gemini",
       model: "gemini-2.5-flash",
       prompt: "hello world",
     });
-    rec.logComplete("c1", {
+    await rec.logComplete("c1", {
       response: "hi",
       durationMs: 5,
       retryCount: 0,
@@ -47,7 +47,7 @@ describe("loadLcrPriorRows against a real flight-recorder DB", () => {
       exitCode: 0,
       status: "completed",
     });
-    rec.recordRouting("c1", {
+    await rec.recordRouting("c1", {
       estCostUsd: 0.0012,
       estConfidence: "low",
       reason: "cheapest",
@@ -55,8 +55,8 @@ describe("loadLcrPriorRows against a real flight-recorder DB", () => {
       reroutes: 0,
     });
 
-    const rows = loadLcrPriorRows(rec);
-    rec.close();
+    const rows = await loadLcrPriorRows(rec);
+    await rec.close();
 
     expect(rows.length).toBe(1);
     const row = rows[0];
@@ -78,17 +78,17 @@ describe("loadLcrPriorRows against a real flight-recorder DB", () => {
     expect(row.sessionContinued).toBe(false);
   });
 
-  it("computes non-empty priors from real rows end to end", () => {
+  it("computes non-empty priors from real rows end to end", async () => {
     const rec = new FlightRecorder(dbPath);
     for (let i = 0; i < 3; i++) {
       const id = `g${i}`;
-      rec.logStart({
+      await rec.logStart({
         correlationId: id,
         cli: "gemini",
         model: "gemini-2.5-flash",
         prompt: "some prose prompt here",
       });
-      rec.logComplete(id, {
+      await rec.logComplete(id, {
         response: "ok",
         durationMs: 5,
         retryCount: 0,
@@ -102,8 +102,8 @@ describe("loadLcrPriorRows against a real flight-recorder DB", () => {
         status: "completed",
       });
     }
-    const rows = loadLcrPriorRows(rec);
-    rec.close();
+    const rows = await loadLcrPriorRows(rec);
+    await rec.close();
     const priors = computeLcrPriors(rows, { priorsScope: "global" });
     expect(priors.outputPriors.get("gemini:gemini-2.5-flash")?.samples).toBe(3);
     expect(priors.outputPriors.get("gemini:gemini-2.5-flash")?.median).toBeGreaterThan(0);

@@ -150,7 +150,7 @@ describe("handleGrokRequest terminal net: inline (Mode A) + state-4..8 boundary"
   let recordRequest: ReturnType<typeof vi.fn>;
   const assertUpstreamCliArgsMock = vi.mocked(assertUpstreamCliArgs);
 
-  beforeEach(() => {
+  beforeEach(async () => {
     tmp = mkdtempSync(join(tmpdir(), "grok-terminal-net-"));
     flight = new FlightRecorder(join(tmp, "logs.db"));
     manager = new AsyncJobManager(noopLogger);
@@ -162,7 +162,7 @@ describe("handleGrokRequest terminal net: inline (Mode A) + state-4..8 boundary"
 
   afterEach(async () => {
     await manager.dispose();
-    flight.close();
+    await flight.close();
     rmSync(tmp, { recursive: true, force: true });
     vi.restoreAllMocks();
   });
@@ -286,7 +286,7 @@ describe("handleGrokRequest terminal net: deferred (Mode B) + D4 split + H-Doubl
   let sessions: FileSessionManager;
   const removeSpy = vi.mocked(removeWorktree);
 
-  beforeEach(() => {
+  beforeEach(async () => {
     originalDeadline = process.env.SYNC_DEADLINE_MS;
     process.env.SYNC_DEADLINE_MS = "25";
     tmp = mkdtempSync(join(tmpdir(), "grok-terminal-net-defer-"));
@@ -298,10 +298,10 @@ describe("handleGrokRequest terminal net: deferred (Mode B) + D4 split + H-Doubl
     vi.resetModules();
   });
 
-  afterEach(() => {
+  afterEach(async () => {
     if (originalDeadline === undefined) delete process.env.SYNC_DEADLINE_MS;
     else process.env.SYNC_DEADLINE_MS = originalDeadline;
-    flight.close();
+    await flight.close();
     rmSync(tmp, { recursive: true, force: true });
     vi.resetModules();
     vi.restoreAllMocks();

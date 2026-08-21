@@ -58,38 +58,38 @@ class CapturingFlightRecorder implements FlightRecorderLike {
   readonly starts: FlightLogStart[] = [];
   readonly completes: Array<{ correlationId: string; result: FlightLogResult }> = [];
 
-  logStart(entry: FlightLogStart): void {
+  async logStart(entry: FlightLogStart): Promise<void> {
     this.starts.push(entry);
   }
 
-  logComplete(correlationId: string, result: FlightLogResult): void {
+  async logComplete(correlationId: string, result: FlightLogResult): Promise<void> {
     this.completes.push({ correlationId, result });
   }
 
-  readCacheRowsBySession(): [] {
+  async readCacheRowsBySession(): Promise<[]> {
     return [];
   }
-  readCacheRowsByPrefix(): [] {
+  async readCacheRowsByPrefix(): Promise<[]> {
     return [];
   }
-  readCacheRowsGlobal(): [] {
+  async readCacheRowsGlobal(): Promise<[]> {
     return [];
   }
-  readRequestById(): null {
+  async readRequestById(): Promise<null> {
     return null;
   }
-  listRequestSummaries(): [] {
+  async listRequestSummaries(): Promise<[]> {
     return [];
   }
-  readLcrPriorRows(): [] {
+  async readLcrPriorRows(): Promise<[]> {
     return [];
   }
-  readRoutingDecisions(): [] {
+  async readRoutingDecisions(): Promise<[]> {
     return [];
   }
 
-  flush(): void {}
-  close(): void {}
+  async flush(): Promise<void> {}
+  async close(): Promise<void> {}
 }
 
 class CapturingLogger implements Logger {

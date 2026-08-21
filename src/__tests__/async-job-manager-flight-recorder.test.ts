@@ -27,75 +27,84 @@ interface CapturedComplete {
 class CapturingFlightRecorder implements FlightRecorderLike {
   starts: FlightLogStart[] = [];
   completes: CapturedComplete[] = [];
-  logStart(entry: FlightLogStart): void {
+  async logStart(entry: FlightLogStart): Promise<void> {
     this.starts.push(entry);
   }
-  logComplete(correlationId: string, result: FlightLogResult): void {
+  async logComplete(correlationId: string, result: FlightLogResult): Promise<void> {
     this.completes.push({ correlationId, result });
   }
-  readCacheRowsBySession(): [] {
+  async readCacheRowsBySession(): Promise<[]> {
     return [];
   }
-  readCacheRowsByPrefix(): [] {
+  async readCacheRowsByPrefix(): Promise<[]> {
     return [];
   }
-  readCacheRowsGlobal(): [] {
+  async readCacheRowsGlobal(): Promise<[]> {
     return [];
   }
-  readRequestById(): null {
+  async readRequestById(): Promise<null> {
     return null;
   }
-  listRequestSummaries(): [] {
+  async listRequestSummaries(): Promise<[]> {
     return [];
   }
-  readLcrPriorRows(): [] {
+  async readLcrPriorRows(): Promise<[]> {
     return [];
   }
-  readRoutingDecisions(): [] {
+  async readRoutingDecisions(): Promise<[]> {
     return [];
   }
-  flush(): void {}
-  close(): void {}
+  async flush(): Promise<void> {}
+  async close(): Promise<void> {}
 }
 
-/** Variant that throws on the first logComplete then succeeds (Codex-F4). */
+/**
+ * Variant that REJECTS on the first logComplete then succeeds (Codex-F4).
+ *
+ * s7: it used to THROW synchronously, and a synchronous throw is caught by the
+ * manager's try whether or not the call is awaited. The real recorder rejects
+ * now, so the fake has to as well, or this test cannot see the dead-catch
+ * class it exists to guard: an await placed outside the try leaves the catch
+ * unreachable and `flightRecorderComplete` set on a write that failed, which
+ * disarms the very retry asserted below.
+ */
 class FlakyOnceFlightRecorder implements FlightRecorderLike {
   starts: FlightLogStart[] = [];
   completes: CapturedComplete[] = [];
   private threwOnce = false;
-  logStart(entry: FlightLogStart): void {
+  async logStart(entry: FlightLogStart): Promise<void> {
     this.starts.push(entry);
   }
-  logComplete(correlationId: string, result: FlightLogResult): void {
+  async logComplete(correlationId: string, result: FlightLogResult): Promise<void> {
     if (!this.threwOnce) {
       this.threwOnce = true;
       throw new Error("flaky FR write");
     }
     this.completes.push({ correlationId, result });
   }
-  readCacheRowsBySession(): [] {
+  async readCacheRowsBySession(): Promise<[]> {
     return [];
   }
-  readCacheRowsByPrefix(): [] {
+  async readCacheRowsByPrefix(): Promise<[]> {
     return [];
   }
-  readCacheRowsGlobal(): [] {
+  async readCacheRowsGlobal(): Promise<[]> {
     return [];
   }
-  readRequestById(): null {
+  async readRequestById(): Promise<null> {
     return null;
   }
-  listRequestSummaries(): [] {
+  async listRequestSummaries(): Promise<[]> {
     return [];
   }
-  readLcrPriorRows(): [] {
+  async readLcrPriorRows(): Promise<[]> {
     return [];
   }
-  readRoutingDecisions(): [] {
+  async readRoutingDecisions(): Promise<[]> {
     return [];
   }
-  flush(): void {}
-  close(): void {}
+  async flush(): Promise<void> {}
+  async close(): Promise<void> {}
 }
 
 function waitForJobDone(manager: AsyncJobManager, jobId: string, timeoutMs = 5000): Promise<void> {
@@ -190,6 +199,7 @@ describe("AsyncJobManager + flight-recorder (slice 1.5)", () => {
       manager.armFlightCompleteForDeferral(outcome.snapshot.id);
       await waitForJobDone(manager, outcome.snapshot.id);
       await tick();
+      await manager.whenPendingWritesSettled();
       expect(fr.starts).toHaveLength(0);
       // ...and logComplete fires (manager covers the sync handler's row).
       expect(fr.completes).toHaveLength(1);
@@ -215,6 +225,7 @@ describe("AsyncJobManager + flight-recorder (slice 1.5)", () => {
       );
       await waitForJobDone(manager, outcome.snapshot.id);
       await tick();
+      await manager.whenPendingWritesSettled();
       expect(fr.starts).toHaveLength(0);
       expect(fr.completes).toHaveLength(0);
     });
@@ -231,6 +242,7 @@ describe("AsyncJobManager + flight-recorder (slice 1.5)", () => {
       await tick();
       // Arm AFTER terminal — race mitigation should write logComplete now.
       manager.armFlightCompleteForDeferral(outcome.snapshot.id);
+      await manager.whenPendingWritesSettled();
       expect(fr.completes).toHaveLength(1);
       expect(fr.completes[0].correlationId).toBe("corr-a4");
     });
@@ -258,6 +270,7 @@ describe("AsyncJobManager + flight-recorder (slice 1.5)", () => {
       await manager.cancelJob(running.snapshot.id);
       await waitForJobDone(manager, queued.snapshot.id);
       await tick();
+      await manager.whenPendingWritesSettled();
       expect(fr.completes).toHaveLength(1);
       expect(fr.completes[0].correlationId).toBe("corr-queued");
       expect(fr.completes[0].result.status).toBe("completed");
@@ -491,7 +504,7 @@ describe("AsyncJobManager + flight-recorder (slice 1.5)", () => {
         getById: () => null,
         findByRequestKey: () => null,
         evictExpired: () => 0,
-        close: () => {},
+        close: async () => {},
       };
       await new AsyncJobManager(
         noopLogger,
@@ -558,7 +571,7 @@ describe("AsyncJobManager + flight-recorder (slice 1.5)", () => {
         getById: () => null,
         findByRequestKey: () => null,
         evictExpired: () => 0,
-        close: () => {},
+        close: async () => {},
       };
 
       await new AsyncJobManager(
@@ -778,13 +791,42 @@ describe("AsyncJobManager — provider sessionId + stopReason (phase 7)", () => 
     expect(result?.stopReason).toBe("stop");
   });
 
-  it("writeFlightComplete persists providerSessionId + stopReason to logComplete", () => {
+  it("a REJECTED logComplete leaves the flag false so the next callback retries", async () => {
+    // s7's dead-catch control. `flightRecorderComplete` means "the row was
+    // written". The write is now a promise, so with the await outside the try
+    // the catch is unreachable AND the flag is set on a write that failed,
+    // which silently disarms this retry. Driven with closeObserved = true so
+    // the flag would really be reached on the first attempt.
+    const fr = new FlakyOnceFlightRecorder();
+    const manager = new AsyncJobManager(noopLogger, undefined, new MemoryJobStore(), fr);
+    const job = seedCompletedGrokJob(manager, "job-reject-retry");
+    job.closeObserved = true;
+    const write = manager as unknown as {
+      writeFlightComplete(j: unknown, s: string): void;
+    };
+
+    write.writeFlightComplete(job, "completed");
+    await manager.whenPendingWritesSettled();
+    expect(fr.completes).toHaveLength(0);
+    expect(job.flightRecorderComplete).toBe(false);
+    expect(job.flightRecorderEntry).toBeDefined();
+
+    write.writeFlightComplete(job, "completed");
+    await manager.whenPendingWritesSettled();
+    expect(fr.completes).toHaveLength(1);
+    expect(job.flightRecorderComplete).toBe(true);
+  });
+
+  it("writeFlightComplete persists providerSessionId + stopReason to logComplete", async () => {
     const fr = new CapturingFlightRecorder();
     const manager = new AsyncJobManager(noopLogger, undefined, new MemoryJobStore(), fr);
     const job = seedCompletedGrokJob(manager, "job-grok-2");
     (
       manager as unknown as { writeFlightComplete(j: unknown, s: string): void }
     ).writeFlightComplete(job, "completed");
+    // s7: the write is enqueued on the job's terminal chain, so it is no longer
+    // observable in the same tick.
+    await manager.whenPendingWritesSettled();
     const c = fr.completes.find(x => x.correlationId === "corr-grok-p7");
     // Mutation that flips this red: dropping providerSessionId/stopReason from
     // the logComplete payload in writeFlightComplete.
@@ -792,7 +834,7 @@ describe("AsyncJobManager — provider sessionId + stopReason (phase 7)", () => 
     expect(c?.result.stopReason).toBe("stop");
   });
 
-  it("persists failed process metadata for remote persisted-result redaction", () => {
+  it("persists failed process metadata for remote persisted-result redaction", async () => {
     const fr = new CapturingFlightRecorder();
     const manager = new AsyncJobManager(noopLogger, undefined, new MemoryJobStore(), fr);
     const job = seedCompletedGrokJob(manager, "job-grok-failed");
@@ -801,6 +843,7 @@ describe("AsyncJobManager — provider sessionId + stopReason (phase 7)", () => 
     (
       manager as unknown as { writeFlightComplete(j: unknown, s: string): void }
     ).writeFlightComplete(job, "failed");
+    await manager.whenPendingWritesSettled();
     const c = fr.completes.find(x => x.correlationId === "corr-grok-p7");
     expect(c?.result.status).toBe("failed");
     // Native continuation remains non-resumable to callers, but the private

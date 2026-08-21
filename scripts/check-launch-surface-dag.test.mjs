@@ -135,7 +135,7 @@ describe("launch-surface DAG checker", () => {
   it("rejects a node with its coordinate declaration removed", () => {
     mutate(DAG_PATH, source =>
       source.replace(
-        'file = "src/validation-tools.ts"\nline = 417',
+        'file = "src/validation-tools.ts"\nline = 420',
         'file = "src/validation-tools.ts"'
       )
     );

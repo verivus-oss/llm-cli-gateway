@@ -133,11 +133,11 @@ function safeCount(
 describe("cross-engine WAL crash-recovery (plan B3/B8)", () => {
   let tmpDir: string;
 
-  beforeEach(() => {
+  beforeEach(async () => {
     tmpDir = mkdtempSync(path.join(os.tmpdir(), "cross-engine-wal-"));
   });
 
-  afterEach(() => {
+  afterEach(async () => {
     rmSync(tmpDir, { recursive: true, force: true });
   });
 
@@ -281,7 +281,7 @@ describe("cross-engine WAL crash-recovery (plan B3/B8)", () => {
       try {
         // (a) All seeded rows visible — WAL recovery happened through the
         //     production read-only connection (queryRequests → openReadOnly).
-        const recoveredReqs = recorder.queryRequests<{ c: number }>(
+        const recoveredReqs = await recorder.queryRequests<{ c: number }>(
           "SELECT COUNT(*) AS c FROM requests"
         );
         expect(Number(recoveredReqs[0].c)).toBe(LOG_ROWS);
@@ -298,13 +298,13 @@ describe("cross-engine WAL crash-recovery (plan B3/B8)", () => {
 
         // (b) Normal operations work on the recovered file: log a new
         //     request start/complete and read it back via queryRequests.
-        recorder.logStart({
+        await recorder.logStart({
           correlationId: "post-recovery-1",
           cli: "gemini",
           model: "flash",
           prompt: "after recovery",
         });
-        recorder.logComplete("post-recovery-1", {
+        await recorder.logComplete("post-recovery-1", {
           response: "ok",
           durationMs: 12,
           retryCount: 0,
@@ -313,7 +313,7 @@ describe("cross-engine WAL crash-recovery (plan B3/B8)", () => {
           exitCode: 0,
           status: "completed",
         });
-        const readBack = recorder.queryRequests<{ id: string; response: string }>(
+        const readBack = await recorder.queryRequests<{ id: string; response: string }>(
           "SELECT id, response FROM requests WHERE id = ?",
           "post-recovery-1"
         );
@@ -345,18 +345,18 @@ describe("cross-engine WAL crash-recovery (plan B3/B8)", () => {
         expect(prJob?.stdout).toBe("done");
 
         // Total rows now = seeded + the one we just added.
-        const finalReqs = recorder.queryRequests<{ c: number }>(
+        const finalReqs = await recorder.queryRequests<{ c: number }>(
           "SELECT COUNT(*) AS c FROM requests"
         );
         expect(Number(finalReqs[0].c)).toBe(LOG_ROWS + 1);
 
         // (c) integrity_check returns ok through the production read path.
-        const logsIntegrity = recorder.queryRequests<{ integrity_check: string }>(
+        const logsIntegrity = await recorder.queryRequests<{ integrity_check: string }>(
           "PRAGMA integrity_check"
         );
         expect(logsIntegrity[0].integrity_check).toBe("ok");
       } finally {
-        recorder.close();
+        await recorder.close();
         await store.close();
       }
 
@@ -403,13 +403,13 @@ describe("cross-engine WAL crash-recovery (plan B3/B8)", () => {
       // main-db-only delta guard below proves rows are genuinely WAL-resident.
       const LOG_ROWS = 50;
       for (let i = 0; i < LOG_ROWS; i++) {
-        recorder.logStart({
+        await recorder.logStart({
           correlationId: `prod-req-${i}`,
           cli: "claude",
           model: "sonnet",
           prompt: `p ${i}`,
         });
-        recorder.logComplete(`prod-req-${i}`, {
+        await recorder.logComplete(`prod-req-${i}`, {
           response: `r ${i}`,
           durationMs: i,
           retryCount: 0,
@@ -466,7 +466,7 @@ describe("cross-engine WAL crash-recovery (plan B3/B8)", () => {
       const jobsMainOnly = mainDbOnlyCopy(jobsPath, mainOnlyDir);
 
       // Close production connections (snapshot already captured = crash).
-      recorder.close();
+      await recorder.close();
       await store.close();
 
       // Snapshots carry a non-empty WAL.

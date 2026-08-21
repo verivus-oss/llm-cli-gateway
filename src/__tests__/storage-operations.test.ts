@@ -15,7 +15,7 @@ const RESPONSE = "s3sig-body-marker-response-4a71";
 const OWNER = "principal-s3sig";
 
 describe("the flight recorder's declared operation set", () => {
-  it("names every method the recorder actually has, or says why not", () => {
+  it("names every method the recorder actually has, or says why not", async () => {
     // The drift control. s7 implements FlightRecorderOperations; if the
     // recorder grows a method and the port surface does not, s7 ships a
     // subsystem with a write path the port cannot see, which is the exact
@@ -31,14 +31,17 @@ describe("the flight recorder's declared operation set", () => {
     expect(new Set(declared)).toEqual(new Set(real));
   });
 
-  it("keeps the two exclusions explicit rather than merely absent", () => {
-    expect(Object.keys(FLIGHT_RECORDER_NON_OPERATIONS).sort()).toEqual(["flush", "queryRequests"]);
+  it("keeps the one exclusion explicit rather than merely absent", async () => {
+    // ONE exclusion since s7, not two: `flush` was deleted from the recorder
+    // rather than ported, because a no-op named "flush" on an asynchronous
+    // surface reads as a durability guarantee nothing provides.
+    expect(Object.keys(FLIGHT_RECORDER_NON_OPERATIONS).sort()).toEqual(["queryRequests"]);
     for (const reason of Object.values(FLIGHT_RECORDER_NON_OPERATIONS)) {
       expect(reason.length).toBeGreaterThan(20);
     }
   });
 
-  it("reaches no PRAGMA and no VACUUM, by name or by argument", () => {
+  it("reaches no PRAGMA and no VACUUM, by name or by argument", async () => {
     // The s3sig constraint, at the surface. Neither maintenance verb is an
     // operation, and no operation takes a statement: every parameter is a
     // domain value, so there is nothing for one to be smuggled through.
@@ -52,10 +55,10 @@ describe("transcript_read is declared exactly where a body can come back", () =>
   let tmpDir: string;
   let recorder: FlightRecorder;
 
-  beforeEach(() => {
+  beforeEach(async () => {
     tmpDir = mkdtempSync(path.join(os.tmpdir(), "s3sig-ops-"));
     recorder = new FlightRecorder(path.join(tmpDir, "logs.db"));
-    recorder.logStart({
+    await recorder.logStart({
       correlationId: "c-1",
       cli: "claude",
       model: "sonnet",
@@ -64,7 +67,7 @@ describe("transcript_read is declared exactly where a body can come back", () =>
       stablePrefixHash: "prefix-1",
       ownerPrincipal: OWNER,
     });
-    recorder.logComplete("c-1", {
+    await recorder.logComplete("c-1", {
       response: RESPONSE,
       inputTokens: 11,
       outputTokens: 22,
@@ -79,25 +82,25 @@ describe("transcript_read is declared exactly where a body can come back", () =>
       exitCode: 0,
       status: "completed",
     });
-    recorder.recordRouting("c-1", { estCostUsd: 0.01, reason: "cheapest", considered: 2 });
+    await recorder.recordRouting("c-1", { estCostUsd: 0.01, reason: "cheapest", considered: 2 });
   });
 
-  afterEach(() => {
-    recorder.close();
+  afterEach(async () => {
+    await recorder.close();
     rmSync(tmpDir, { recursive: true, force: true });
   });
 
-  it("the one transcript_read operation really does return the body", () => {
+  it("the one transcript_read operation really does return the body", async () => {
     // Without this the next test passes vacuously: six reads returning nothing
     // also contain no prompt.
-    const row = recorder.readRequestById("c-1");
+    const row = await recorder.readRequestById("c-1");
     expect(row?.prompt).toBe(PROMPT);
     expect(row?.response).toBe(RESPONSE);
     expect(FLIGHT_RECORDER_OPERATION_CLASSES.readRequestById).toBe("transcript_read");
   });
 
-  it("no analytics_read operation returns prompt or response text", () => {
-    const analytics: Record<string, () => unknown> = {
+  it("no analytics_read operation returns prompt or response text", async () => {
+    const analytics: Record<string, () => Promise<unknown>> = {
       readCacheRowsBySession: () => recorder.readCacheRowsBySession("sess-1"),
       readCacheRowsByPrefix: () => recorder.readCacheRowsByPrefix("prefix-1"),
       readCacheRowsGlobal: () => recorder.readCacheRowsGlobal(),
@@ -108,7 +111,7 @@ describe("transcript_read is declared exactly where a body can come back", () =>
     };
     for (const [name, read] of Object.entries(analytics)) {
       expect(FLIGHT_RECORDER_OPERATION_CLASSES, name).toHaveProperty(name, "analytics_read");
-      const serialized = JSON.stringify(read());
+      const serialized = JSON.stringify(await read());
       expect(serialized, `${name} returned no rows, so it proves nothing`).not.toBe("[]");
       expect(serialized, `${name} leaked prompt text`).not.toContain(PROMPT);
       expect(serialized, `${name} leaked response text`).not.toContain(RESPONSE);
@@ -117,13 +120,13 @@ describe("transcript_read is declared exactly where a body can come back", () =>
 });
 
 describe("the state inventory after s5", () => {
-  it("gives every group a determination about who authors its operations", () => {
+  it("gives every group a determination about who authors its operations", async () => {
     expect(Object.keys(STATE_GROUP_AUTHORSHIP).sort()).toEqual(
       STATE_INVENTORY.map(group => group.id).sort()
     );
   });
 
-  it("names the three in-port groups no DAG node carries", () => {
+  it("names the three in-port groups no DAG node carries", async () => {
     // s3 part 1 wrote inPort: true for eleven groups, which reads as a plan.
     // These three have no node and never had one. Pinned so a fourth cannot
     // join them silently and so these three cannot be quietly dropped.
@@ -131,7 +134,7 @@ describe("the state inventory after s5", () => {
     expect(unowned).toEqual(["approvals", "admin_audit", "workspace_registry"]);
   });
 
-  it("marks as carried exactly the groups s5 actually moved", () => {
+  it("marks as carried exactly the groups s5 actually moved", async () => {
     const carried = STATE_INVENTORY.filter(g => g.carried).map(g => g.id);
     expect(carried).toEqual(["jobs", "validation_runs", "validation_receipts", "kit_persistence"]);
     for (const group of STATE_INVENTORY.filter(g => g.carried)) {
@@ -139,7 +142,7 @@ describe("the state inventory after s5", () => {
     }
   });
 
-  it("records the SQLite-only transcript groups as a decision, not an oversight", () => {
+  it("records the SQLite-only transcript groups as a decision, not an oversight", async () => {
     for (const id of ["requests", "gateway_metadata"] as const) {
       const group = STATE_INVENTORY.find(g => g.id === id);
       expect(group?.owningNode).toBe("s7.flight-recorder-onto-the-port");

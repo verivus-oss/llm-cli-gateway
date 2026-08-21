@@ -11,7 +11,7 @@ import {
 } from "../lcr-priors.js";
 import { estimateInputTokens, classifyContent } from "../token-estimator.js";
 import { modelIdToFamily } from "../pricing.js";
-import type { FlightRecorderQuery } from "../flight-recorder.js";
+import type { FlightRecorderQuery, LcrPriorSourceRow } from "../flight-recorder.js";
 
 // Deterministic prose prompt (classifies as "prose"; no clock, no randomness).
 const PROSE = "Please summarize the meeting notes and list the action items for the team today.";
@@ -37,7 +37,7 @@ function row(overrides: Partial<LcrPriorRow>): LcrPriorRow {
 const GLOBAL = { priorsScope: "global" as const };
 
 describe("output-token priors", () => {
-  it("computes median and p90 per (provider, model)", () => {
+  it("computes median and p90 per (provider, model)", async () => {
     const rows = [10, 20, 30, 40, 50].map(n =>
       row({ provider: "codex", model: "gpt-5.5", outputTokens: n })
     );
@@ -50,7 +50,7 @@ describe("output-token priors", () => {
     expect(prior!.p90).toBeCloseTo(46, 10);
   });
 
-  it("keys output priors by provider+model, not by family", () => {
+  it("keys output priors by provider+model, not by family", async () => {
     const rows = [
       row({ provider: "cursor", model: "claude-sonnet-4.5", outputTokens: 100 }),
       row({ provider: "claude", model: "claude-sonnet-4.5", outputTokens: 200 }),
@@ -63,7 +63,7 @@ describe("output-token priors", () => {
 });
 
 describe("input-token calibration k", () => {
-  it("computes k = median(actual/base) for an inclusive family using input_tokens as-is", () => {
+  it("computes k = median(actual/base) for an inclusive family using input_tokens as-is", async () => {
     const family = modelIdToFamily("gpt-5.5"); // openai-gpt5 (inclusive)
     const base = estimateInputTokens(PROSE, { family });
     // Inclusive: actual = input_tokens; cache_* MUST be ignored. Set a huge cache
@@ -83,7 +83,7 @@ describe("input-token calibration k", () => {
     expect(bucket!.k).toBeCloseTo(2, 10);
   });
 
-  it("reconstructs disjoint (claude) actual_input as fresh + cache_read + cache_creation", () => {
+  it("reconstructs disjoint (claude) actual_input as fresh + cache_read + cache_creation", async () => {
     const family = modelIdToFamily("claude-sonnet-4.5"); // claude-sonnet (disjoint)
     expect(family.startsWith("claude-")).toBe(true);
     const base = estimateInputTokens(PROSE, { family });
@@ -102,7 +102,7 @@ describe("input-token calibration k", () => {
     expect(bucket!.k).toBeCloseTo(2, 10);
   });
 
-  it("excludes mistral session-continued rows from k", () => {
+  it("excludes mistral session-continued rows from k", async () => {
     const family = modelIdToFamily("mistral-medium-3.5"); // mistral-medium (inclusive)
     const base = estimateInputTokens(PROSE, { family });
     const fresh = row({
@@ -125,7 +125,7 @@ describe("input-token calibration k", () => {
     expect(bucket!.k).toBeCloseTo(1, 10);
   });
 
-  it("buckets by resolved family via modelIdToFamily, not the CLI brand", () => {
+  it("buckets by resolved family via modelIdToFamily, not the CLI brand", async () => {
     const family = modelIdToFamily("claude-sonnet-4.5"); // claude-sonnet
     const base = estimateInputTokens(PROSE, { family });
     // cursor and devin brands both running a claude-family model: they MUST merge
@@ -144,7 +144,7 @@ describe("input-token calibration k", () => {
     expect(priors.calibration.has(`${classifyContent(PROSE)}:cursor`)).toBe(false);
   });
 
-  it("computes residual p10/p50/p90 for the bucket", () => {
+  it("computes residual p10/p50/p90 for the bucket", async () => {
     const family = modelIdToFamily("gpt-5.5");
     const base = estimateInputTokens(PROSE, { family });
     const rows = [1, 2, 3].map(mult =>
@@ -161,17 +161,17 @@ describe("input-token calibration k", () => {
 });
 
 describe("confidenceFromQuality mapping", () => {
-  it("labels high when samples >= 30 and spread <= 1.5", () => {
+  it("labels high when samples >= 30 and spread <= 1.5", async () => {
     expect(confidenceFromQuality(30, 1.0, 1.4)).toBe("high");
     expect(confidenceFromQuality(50, 1.0, 1.5)).toBe("high");
   });
 
-  it("labels medium at the middle band", () => {
+  it("labels medium at the middle band", async () => {
     expect(confidenceFromQuality(30, 1.0, 2.0)).toBe("medium"); // wide-ish but <=3
     expect(confidenceFromQuality(15, 1.0, 1.2)).toBe("medium"); // <30 samples
   });
 
-  it("labels low when too few samples or too wide a spread", () => {
+  it("labels low when too few samples or too wide a spread", async () => {
     expect(confidenceFromQuality(5, 1.0, 1.0)).toBe("low"); // <10 samples
     expect(confidenceFromQuality(30, 1.0, 4.0)).toBe("low"); // spread > 3
     expect(confidenceFromQuality(30, 0, 1.0)).toBe("low"); // undefined spread
@@ -179,12 +179,12 @@ describe("confidenceFromQuality mapping", () => {
 });
 
 describe("lookupCalibrationK", () => {
-  it("returns 1 for a missing bucket", () => {
+  it("returns 1 for a missing bucket", async () => {
     const priors = computeLcrPriors([], GLOBAL);
     expect(lookupCalibrationK(priors, "prose", "openai-gpt5")).toBe(1);
   });
 
-  it("returns 1 below the min-sample floor, and the learned k at/above it", () => {
+  it("returns 1 below the min-sample floor, and the learned k at/above it", async () => {
     const family = modelIdToFamily("gpt-5.5");
     const base = estimateInputTokens(PROSE, { family });
     const contentType = classifyContent(PROSE);
@@ -209,7 +209,7 @@ describe("lookupCalibrationK", () => {
 });
 
 describe("accuracy split by cost_basis", () => {
-  it("keeps derived and provider-reported accuracy in separate buckets", () => {
+  it("keeps derived and provider-reported accuracy in separate buckets", async () => {
     const rows = [
       row({
         provider: "codex",
@@ -247,7 +247,7 @@ describe("accuracy split by cost_basis", () => {
 });
 
 describe("priors_scope", () => {
-  it("principal restricts to the caller's owner_principal rows (no cross-principal leakage)", () => {
+  it("principal restricts to the caller's owner_principal rows (no cross-principal leakage)", async () => {
     const rows = [
       row({ provider: "codex", model: "gpt-5.5", outputTokens: 10, ownerPrincipal: "alice" }),
       row({ provider: "codex", model: "gpt-5.5", outputTokens: 20, ownerPrincipal: "alice" }),
@@ -263,7 +263,7 @@ describe("priors_scope", () => {
     expect(priors.outputPriors.has("grok:grok-4")).toBe(false);
   });
 
-  it("principal with no matching principal yields empty priors", () => {
+  it("principal with no matching principal yields empty priors", async () => {
     const rows = [
       row({ provider: "codex", model: "gpt-5.5", outputTokens: 10, ownerPrincipal: "alice" }),
     ];
@@ -273,7 +273,7 @@ describe("priors_scope", () => {
     expect(priors.accuracyByBasis.size).toBe(0);
   });
 
-  it("off disables learning: empty priors and neutral k = 1", () => {
+  it("off disables learning: empty priors and neutral k = 1", async () => {
     const family = modelIdToFamily("gpt-5.5");
     const base = estimateInputTokens(PROSE, { family });
     const rows = Array.from({ length: 50 }, () =>
@@ -286,7 +286,7 @@ describe("priors_scope", () => {
     expect(lookupCalibrationK(priors, classifyContent(PROSE), family)).toBe(1);
   });
 
-  it("the priors shape carries no principal field (anonymized model-level only)", () => {
+  it("the priors shape carries no principal field (anonymized model-level only)", async () => {
     const rows = [
       row({ provider: "codex", model: "gpt-5.5", outputTokens: 10, ownerPrincipal: "alice" }),
     ];
@@ -304,17 +304,17 @@ describe("loadLcrPriorRows (flight-recorder read path)", () => {
   // Minimal FlightRecorderQuery stub returning fixed raw rows in datetime order.
   function stubDb(rawRows: Record<string, unknown>[]): FlightRecorderQuery {
     return {
-      readLcrPriorRows: () => rawRows as unknown as LcrPriorRow[],
-      readCacheRowsBySession: () => [],
-      readCacheRowsByPrefix: () => [],
-      readCacheRowsGlobal: () => [],
-      readRequestById: () => null,
-      listRequestSummaries: () => [],
-      readRoutingDecisions: () => [],
+      readLcrPriorRows: async () => rawRows as unknown as LcrPriorSourceRow[],
+      readCacheRowsBySession: async () => [],
+      readCacheRowsByPrefix: async () => [],
+      readCacheRowsGlobal: async () => [],
+      readRequestById: async () => null,
+      listRequestSummaries: async () => [],
+      readRoutingDecisions: async () => [],
     };
   }
 
-  it("marks the second mistral row that reuses a session_id as sessionContinued", () => {
+  it("marks the second mistral row that reuses a session_id as sessionContinued", async () => {
     const db = stubDb([
       {
         cli: "mistral",
@@ -349,7 +349,7 @@ describe("loadLcrPriorRows (flight-recorder read path)", () => {
         route_est_cost_usd: null,
       },
     ]);
-    const rows = loadLcrPriorRows(db);
+    const rows = await loadLcrPriorRows(db);
     expect(rows).toHaveLength(2);
     expect(rows[0].sessionContinued).toBe(false); // first occurrence = fresh
     expect(rows[1].sessionContinued).toBe(true); // reused session id = continued
@@ -357,7 +357,7 @@ describe("loadLcrPriorRows (flight-recorder read path)", () => {
     expect(rows[0].costUsd).toBeNull();
   });
 
-  it("computeLcrPriorsFromDb reads via readLcrPriorRows and aggregates", () => {
+  it("computeLcrPriorsFromDb reads via readLcrPriorRows and aggregates", async () => {
     const db = stubDb([
       {
         cli: "codex",
@@ -376,7 +376,7 @@ describe("loadLcrPriorRows (flight-recorder read path)", () => {
         route_est_cost_usd: null,
       },
     ]);
-    const priors = computeLcrPriorsFromDb(db, GLOBAL);
+    const priors = await computeLcrPriorsFromDb(db, GLOBAL);
     expect(priors.outputPriors.get("codex:gpt-5.5")!.median).toBe(30);
   });
 });

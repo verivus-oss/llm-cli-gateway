@@ -15,12 +15,12 @@ describe("FlightRecorder compression telemetry (native compressor PR-1)", () => 
   let tmpDir: string;
   let dbPath: string;
 
-  beforeEach(() => {
+  beforeEach(async () => {
     tmpDir = mkdtempSync(path.join(os.tmpdir(), "flight-compress-test-"));
     dbPath = path.join(tmpDir, "logs.db");
   });
 
-  afterEach(() => {
+  afterEach(async () => {
     rmSync(tmpDir, { recursive: true, force: true });
   });
 
@@ -45,13 +45,13 @@ describe("FlightRecorder compression telemetry (native compressor PR-1)", () => 
     }
   }
 
-  function seedStarted(rec: FlightRecorder, id: string): void {
-    rec.logStart({ correlationId: id, cli: "claude", model: "sonnet", prompt: "hi" });
+  async function seedStarted(rec: FlightRecorder, id: string): Promise<void> {
+    await rec.logStart({ correlationId: id, cli: "claude", model: "sonnet", prompt: "hi" });
   }
 
-  it("creates the additive compression_* columns", () => {
+  it("creates the additive compression_* columns", async () => {
     const rec = new FlightRecorder(dbPath);
-    rec.close();
+    await rec.close();
     const cols = metaColumns(dbPath);
     for (const c of [
       "compression_route",
@@ -64,10 +64,10 @@ describe("FlightRecorder compression telemetry (native compressor PR-1)", () => 
     }
   });
 
-  it("records exact chars and the transform list, leaving optimization_applied alone", () => {
+  it("records exact chars and the transform list, leaving optimization_applied alone", async () => {
     const rec = new FlightRecorder(dbPath);
-    seedStarted(rec, "c1");
-    rec.logComplete("c1", {
+    await seedStarted(rec, "c1");
+    await rec.logComplete("c1", {
       response: "compressed body",
       durationMs: 10,
       retryCount: 0,
@@ -76,14 +76,14 @@ describe("FlightRecorder compression telemetry (native compressor PR-1)", () => 
       exitCode: 0,
       status: "completed",
     });
-    rec.recordCompressionTelemetry("c1", {
+    await rec.recordCompressionTelemetry("c1", {
       route: "log",
       transforms: ["lit-escape", "dedup", "leading-note"],
       originalChars: 1500,
       compressedChars: 900,
       estimatedTokensSaved: 176,
     });
-    rec.close();
+    await rec.close();
 
     const meta = readMeta(dbPath, "c1");
     expect(meta.compression_route).toBe("log");
@@ -95,10 +95,10 @@ describe("FlightRecorder compression telemetry (native compressor PR-1)", () => 
     expect(meta.optimization_applied).toBe(0);
   });
 
-  it("is write-once: a second telemetry write does not overwrite the first", () => {
+  it("is write-once: a second telemetry write does not overwrite the first", async () => {
     const rec = new FlightRecorder(dbPath);
-    seedStarted(rec, "c2");
-    rec.logComplete("c2", {
+    await seedStarted(rec, "c2");
+    await rec.logComplete("c2", {
       response: "x",
       durationMs: 1,
       retryCount: 0,
@@ -107,7 +107,7 @@ describe("FlightRecorder compression telemetry (native compressor PR-1)", () => 
       exitCode: 0,
       status: "completed",
     });
-    rec.recordCompressionTelemetry("c2", {
+    await rec.recordCompressionTelemetry("c2", {
       route: "json",
       transforms: ["json-minify"],
       originalChars: 100,
@@ -116,24 +116,24 @@ describe("FlightRecorder compression telemetry (native compressor PR-1)", () => 
     });
     // A repeated llm_job_result read recomputes identical values; simulate a
     // divergent second write and confirm first-write-wins.
-    rec.recordCompressionTelemetry("c2", {
+    await rec.recordCompressionTelemetry("c2", {
       route: "plain",
       transforms: ["whitespace"],
       originalChars: 999,
       compressedChars: 1,
       estimatedTokensSaved: 999,
     });
-    rec.close();
+    await rec.close();
 
     const meta = readMeta(dbPath, "c2");
     expect(meta.compression_route).toBe("json");
     expect(meta.compression_original_chars).toBe(100);
   });
 
-  it("leaves columns NULL when compression never ran", () => {
+  it("leaves columns NULL when compression never ran", async () => {
     const rec = new FlightRecorder(dbPath);
-    seedStarted(rec, "c3");
-    rec.logComplete("c3", {
+    await seedStarted(rec, "c3");
+    await rec.logComplete("c3", {
       response: "plain",
       durationMs: 1,
       retryCount: 0,
@@ -142,7 +142,7 @@ describe("FlightRecorder compression telemetry (native compressor PR-1)", () => 
       exitCode: 0,
       status: "completed",
     });
-    rec.close();
+    await rec.close();
 
     const meta = readMeta(dbPath, "c3");
     expect(meta.compression_route).toBeNull();
@@ -151,7 +151,7 @@ describe("FlightRecorder compression telemetry (native compressor PR-1)", () => 
     expect(meta.optimization_applied).toBe(1);
   });
 
-  it("auto-migrates a pre-compressor gateway_metadata table", () => {
+  it("auto-migrates a pre-compressor gateway_metadata table", async () => {
     const seed = new BetterSqlite3(dbPath);
     seed.exec(`
       CREATE TABLE _migrations (version INTEGER PRIMARY KEY, applied_at TEXT NOT NULL);
@@ -174,13 +174,13 @@ describe("FlightRecorder compression telemetry (native compressor PR-1)", () => 
 
     expect(metaColumns(dbPath).has("compression_route")).toBe(false);
     const rec = new FlightRecorder(dbPath);
-    rec.close();
+    await rec.close();
     expect(metaColumns(dbPath).has("compression_route")).toBe(true);
   });
 
-  it("NoopFlightRecorder tolerates the telemetry call", () => {
+  it("NoopFlightRecorder tolerates the telemetry call", async () => {
     const noop = new NoopFlightRecorder();
-    expect(() =>
+    await expect(
       noop.recordCompressionTelemetry("x", {
         route: "log",
         transforms: [],
@@ -188,6 +188,6 @@ describe("FlightRecorder compression telemetry (native compressor PR-1)", () => 
         compressedChars: 0,
         estimatedTokensSaved: 0,
       })
-    ).not.toThrow();
+    ).resolves.toBeUndefined();
   });
 });

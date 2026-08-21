@@ -60,7 +60,7 @@ function minimalPrep(overrides: Record<string, unknown> = {}): any {
 }
 
 describe("C1/C7 byte-identity through buildCliResponse (spec 9.1)", () => {
-  it("extractUsageAndCost sees identical raw stdout with compression on and off", () => {
+  it("extractUsageAndCost sees identical raw stdout with compression on and off", async () => {
     const stdout = codexStdout(REPLY);
     const off = buildCliResponse(
       "codex",
@@ -108,7 +108,7 @@ describe("C1/C7 byte-identity through buildCliResponse (spec 9.1)", () => {
     expect(on.content[0].text.length).toBeLessThan(off.content[0].text.length);
   });
 
-  it("content[0].text and structuredContent.response mirror the same compressed string", () => {
+  it("content[0].text and structuredContent.response mirror the same compressed string", async () => {
     const on = buildCliResponse(
       "codex",
       codexStdout(REPLY),
@@ -128,7 +128,7 @@ describe("C1/C7 byte-identity through buildCliResponse (spec 9.1)", () => {
 });
 
 describe("review-integrity ordering (spec 5.1 / 9.8)", () => {
-  it("appends warnings uncompressed AFTER the compressed body", () => {
+  it("appends warnings uncompressed AFTER the compressed body", async () => {
     const prep = minimalPrep({
       reviewIntegrity: {
         violations: [
@@ -168,17 +168,17 @@ describe("review-integrity ordering (spec 5.1 / 9.8)", () => {
 describe("byte-recovery escape hatch (spec 5.3 / 9.10)", () => {
   let tmpDir: string;
   let dbPath: string;
-  beforeEach(() => {
+  beforeEach(async () => {
     tmpDir = mkdtempSync(path.join(os.tmpdir(), "compress-escape-"));
     dbPath = path.join(tmpDir, "logs.db");
   });
   afterEach(() => rmSync(tmpDir, { recursive: true, force: true }));
 
-  it("llm_request_result returns the pre-compression stored response", () => {
+  it("llm_request_result returns the pre-compression stored response", async () => {
     const fr = new FlightRecorder(dbPath);
     const raw = REPLY; // what a codex/gemini FR site would store (pre-compression)
-    fr.logStart({ correlationId: "corr-esc", cli: "codex", model: "gpt-5.5", prompt: "p" });
-    fr.logComplete("corr-esc", {
+    await fr.logStart({ correlationId: "corr-esc", cli: "codex", model: "gpt-5.5", prompt: "p" });
+    await fr.logComplete("corr-esc", {
       response: raw,
       durationMs: 5,
       retryCount: 0,
@@ -188,17 +188,17 @@ describe("byte-recovery escape hatch (spec 5.3 / 9.10)", () => {
       status: "completed",
     });
     // Even after compression telemetry is recorded, the stored response is raw.
-    fr.recordCompressionTelemetry("corr-esc", {
+    await fr.recordCompressionTelemetry("corr-esc", {
       route: "log",
       transforms: ["dedup", "leading-note"],
       originalChars: raw.length,
       compressedChars: 100,
       estimatedTokensSaved: 40,
     });
-    const record = readPersistedRequest(fr, "corr-esc", { maxChars: 100000 });
+    const record = await readPersistedRequest(fr, "corr-esc", { maxChars: 100000 });
     expect(record?.response).toBe(raw);
     expect(record?.response).not.toContain("[[gateway-");
-    fr.close();
+    await fr.close();
   });
 });
 
@@ -216,10 +216,10 @@ describe("async llm_job_result wiring (spec 5.2 / 5.4 / 9.9)", () => {
   class CompressionCapturingFlightRecorder extends NoopFlightRecorder {
     readonly compression: Array<{ correlationId: string; telemetry: CompressionTelemetry }> = [];
 
-    override recordCompressionTelemetry(
+    override async recordCompressionTelemetry(
       correlationId: string,
       telemetry: CompressionTelemetry
-    ): void {
+    ): Promise<void> {
       this.compression.push({ correlationId, telemetry });
     }
   }
@@ -427,7 +427,7 @@ describe("async llm_job_result wiring (spec 5.2 / 5.4 / 9.9)", () => {
     expect(response.error).toMatch(/rawOutput:true/);
   });
 
-  it("dedup key folds the effective decision in both directions (spec 9.9)", () => {
+  it("dedup key folds the effective decision in both directions (spec 9.9)", async () => {
     const mgr = new AsyncJobManager(
       undefined,
       undefined,
@@ -452,7 +452,7 @@ describe("async llm_job_result wiring (spec 5.2 / 5.4 / 9.9)", () => {
 });
 
 describe("resolveEffectiveCompression codex outputSchema bypass (spec 5.2)", () => {
-  it("bypasses when an output schema is declared even with the flag on", () => {
+  it("bypasses when an output schema is declared even with the flag on", async () => {
     const on = { enabled: true, sources: { configFile: null } };
     expect(resolveEffectiveCompression(on, { outputSchemaDeclared: true })).toBe(false);
     expect(

@@ -123,4 +123,37 @@ describe("write-ordering specification (s6)", () => {
     expect(source).toContain("completeFn: FlightCompleteSink");
     expect(source).not.toMatch(/=>\s*void\b/);
   });
+
+  it("awaits flightRecorder.close() in performShutdown", () => {
+    const source = readFileSync(join(ROOT, "src", "index.ts"), "utf8");
+    // `pre_positioned` on the s7 node: this was the one close() in
+    // performShutdown that was not awaited, harmless only while the recorder
+    // was synchronous. Unawaited, process.exit() fires while the driver's
+    // bounded drain is still running, and the log line on the next line
+    // asserts a close that did not finish. The DYNAMIC half of this pair is
+    // "close() settles only after an already-submitted write has settled",
+    // which is what makes the await load-bearing rather than decorative.
+    expect(source).toMatch(/await flightRecorder\.close\(\);\s*\n\s*logger\.info/);
+  });
+
+  it("declares no recorder sink that returns void", () => {
+    // s7 found the SECOND instance of the same hazard, and it was live: ACP's
+    // own `AcpFlightSink` declared `logStart(entry): void`, so the async
+    // recorder's promises were absorbed by the type and every ACP flight write
+    // was silently dropped. No lint rule can see a promise the type system has
+    // already discarded, so the control has to be the declaration. Checking one
+    // file fixed one site; this checks the class.
+    for (const file of [
+      join(ROOT, "src", "acp", "runtime.ts"),
+      join(ROOT, "src", "storage", "operations.ts"),
+    ]) {
+      const source = readFileSync(file, "utf8");
+      for (const method of ["logStart", "logComplete"]) {
+        const declaration = new RegExp(`\\b${method}\\([^)]*\\):\\s*(\\w+)`, "g");
+        for (const match of source.matchAll(declaration)) {
+          expect(match[1], `${file}: ${method} returns ${match[1]}`).toBe("Promise");
+        }
+      }
+    }
+  });
 });

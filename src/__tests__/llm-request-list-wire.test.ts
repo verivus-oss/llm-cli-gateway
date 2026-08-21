@@ -62,14 +62,14 @@ describe("llm_request_list (wire)", () => {
     });
   }
 
-  beforeEach(() => {
+  beforeEach(async () => {
     tmp = mkdtempSync(join(tmpdir(), "reqlist-"));
     flight = new FlightRecorder(join(tmp, "logs.db"));
     server = build(mkPersistence());
   });
 
-  afterEach(() => {
-    flight.close();
+  afterEach(async () => {
+    await flight.close();
     rmSync(tmp, { recursive: true, force: true });
   });
 
@@ -88,8 +88,8 @@ describe("llm_request_list (wire)", () => {
     return JSON.parse(result.content[0].text);
   }
 
-  function seed(id: string, owner: string, jobId?: string): void {
-    flight.logStart({
+  async function seed(id: string, owner: string, jobId?: string): Promise<void> {
+    await flight.logStart({
       correlationId: id,
       cli: "grok",
       model: "grok-4",
@@ -97,7 +97,7 @@ describe("llm_request_list (wire)", () => {
       asyncJobId: jobId,
       ownerPrincipal: owner,
     });
-    flight.logComplete(id, {
+    await flight.logComplete(id, {
       response: "RESPONSE-BODY",
       durationMs: 10,
       retryCount: 0,
@@ -109,7 +109,7 @@ describe("llm_request_list (wire)", () => {
   }
 
   it("finds a request from a caller holding no id at all", async () => {
-    seed("corr-1", "local");
+    await seed("corr-1", "local");
 
     const res = await call({});
 
@@ -122,7 +122,7 @@ describe("llm_request_list (wire)", () => {
   });
 
   it("hands back an asyncJobId usable with llm_job_*", async () => {
-    seed("corr-async", "local", "job-42");
+    await seed("corr-async", "local", "job-42");
 
     const res = await call({});
 
@@ -130,7 +130,7 @@ describe("llm_request_list (wire)", () => {
   });
 
   it("never returns prompt or response bodies", async () => {
-    seed("corr-body", "local");
+    await seed("corr-body", "local");
 
     const res = await call({});
 
@@ -150,15 +150,15 @@ describe("llm_request_list (wire)", () => {
     // pass against a build where nothing is conditional at all.
     expect(tools(noAsync)["llm_job_status"]).toBeUndefined();
 
-    seed("corr-noasync", "local");
+    await seed("corr-noasync", "local");
     const res = await call({}, undefined, noAsync);
     expect(res.requests[0].correlationId).toBe("corr-noasync");
   });
 
   it("shows a remote principal only its own rows", async () => {
-    seed("alice-row", "alice");
-    seed("bob-row", "bob");
-    seed("legacy-row", null as unknown as string);
+    await seed("alice-row", "alice");
+    await seed("bob-row", "bob");
+    await seed("legacy-row", null as unknown as string);
 
     const alice = await call({}, "alice");
     expect(alice.requests.map((r: { correlationId: string }) => r.correlationId)).toEqual([
@@ -172,7 +172,7 @@ describe("llm_request_list (wire)", () => {
     ]);
   });
 
-  it("is annotated read-only", () => {
+  it("is annotated read-only", async () => {
     expect(tools()["llm_request_list"].annotations).toMatchObject({ readOnlyHint: true });
   });
 });

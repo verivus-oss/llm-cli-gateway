@@ -168,7 +168,7 @@ export class ResourceProvider {
    * structural: the response shape (GlobalCacheStats) has no `prompt`,
    * `response`, `system`, or `task` field by construction.
    */
-  readCacheStateGlobal(opts: { lastNHours?: number } = {}): GlobalCacheStats {
+  async readCacheStateGlobal(opts: { lastNHours?: number } = {}): Promise<GlobalCacheStats> {
     return computeGlobalCacheStats(this.flightRecorder, opts);
   }
 
@@ -180,8 +180,8 @@ export class ResourceProvider {
    * policy. Null for non-claude sessions or when the gateway has no
    * cache-awareness config loaded (defaults to 5-min policy).
    */
-  readCacheStateSession(sessionId: string): SessionCacheStats {
-    const stats = computeSessionCacheStats(this.flightRecorder, sessionId);
+  async readCacheStateSession(sessionId: string): Promise<SessionCacheStats> {
+    const stats = await computeSessionCacheStats(this.flightRecorder, sessionId);
     const ttlSeconds = this.cacheAwareness?.anthropicTtlSeconds ?? 300;
     stats.ttlRemainingMs = computeTtlRemaining(stats, stats.cli, {
       anthropicTtlSeconds: ttlSeconds,
@@ -193,7 +193,7 @@ export class ResourceProvider {
    * cache-state://prefix/{hash} — per-stable-prefix-hash aggregates.
    * Returns empty defaults for unknown hashes. Token/hash fields only.
    */
-  readCacheStateForPrefix(stablePrefixHash: string): PrefixCacheStats {
+  async readCacheStateForPrefix(stablePrefixHash: string): Promise<PrefixCacheStats> {
     return computePrefixCacheStats(this.flightRecorder, stablePrefixHash);
   }
 
@@ -373,8 +373,8 @@ export class ResourceProvider {
    * principal). Reads through the flight recorder read-only path over routed
    * rows.
    */
-  private readRoutingDecisions(): RoutingDecision[] {
-    const rows = this.flightRecorder.readRoutingDecisions(ROUTING_DECISIONS_LIMIT);
+  private async readRoutingDecisions(): Promise<RoutingDecision[]> {
+    const rows = await this.flightRecorder.readRoutingDecisions(ROUTING_DECISIONS_LIMIT);
     return rows.map(row => ({
       provider: row.cli,
       model: row.model,
@@ -395,11 +395,11 @@ export class ResourceProvider {
    * principal field). Adds a `priceAsOf` marker so a consumer knows the vintage
    * of the pricing table / API catalog the router prices against.
    */
-  private readRoutingPriors(): RoutingPriorsPayload {
+  private async readRoutingPriors(): Promise<RoutingPriorsPayload> {
     const scope = this.leastCost?.priorsScope ?? "off";
     // For priors_scope = "principal" the aggregator needs the caller's principal,
     // otherwise it scopes to nothing and returns empty. Global/off ignore it.
-    const priors = computeLcrPriorsFromDb(this.flightRecorder, {
+    const priors = await computeLcrPriorsFromDb(this.flightRecorder, {
       priorsScope: scope,
       ownerPrincipal: resolveOwnerPrincipal(getRequestContext()),
     });
@@ -570,14 +570,14 @@ export class ResourceProvider {
         return {
           uri,
           mimeType: "application/json",
-          text: JSON.stringify({ decisions: this.readRoutingDecisions() }, null, 2),
+          text: JSON.stringify({ decisions: await this.readRoutingDecisions() }, null, 2),
         };
       }
       if (uri === "routing://priors") {
         return {
           uri,
           mimeType: "application/json",
-          text: JSON.stringify(this.readRoutingPriors(), null, 2),
+          text: JSON.stringify(await this.readRoutingPriors(), null, 2),
         };
       }
     }

@@ -8,7 +8,7 @@ import { apiProviderCatalogEntry } from "./api-request.js";
 import { getRequestContext, principalCanAccess, resolveOwnerPrincipal } from "./request-context.js";
 import { PerformanceMetrics } from "./metrics.js";
 import { loadLeastCostConfig, type ApiProviderRuntime, type LeastCostConfig } from "./config.js";
-import { buildRouterEnv, toRouterConfig } from "./lcr-router-env.js";
+import { buildRouterEnv, resolveRouterPriors, toRouterConfig } from "./lcr-router-env.js";
 import {
   selectCandidate,
   selectCheapestPerTier,
@@ -122,12 +122,12 @@ type SelectionResult = { ok: true; providers: ValidationProvider[] } | { ok: fal
  * disabled or nothing is eligible. `singleProvider` tools always take the single
  * cheapest overall; only the multi-provider tools fan out per tier.
  */
-function resolveSelectedProviders(
+async function resolveSelectedProviders(
   ctx: LcrSelectionContext,
   prompt: string,
   mode: ProviderSelectMode,
   singleProvider: boolean
-): SelectionResult {
+): Promise<SelectionResult> {
   if (!ctx.leastCost.enabled) {
     return {
       ok: false,
@@ -140,9 +140,11 @@ function resolveSelectedProviders(
     limiterSnapshot: ctx.asyncJobManager.getLimiterSnapshot(),
     apiProviders: ctx.apiProviders,
     preferCatalogPrice: ctx.leastCost.preferCatalogPrice,
-    flightRecorder: ctx.flightRecorder,
-    priorsScope: ctx.leastCost.priorsScope,
-    ownerPrincipal: resolveOwnerPrincipal(getRequestContext()),
+    priors: await resolveRouterPriors({
+      flightRecorder: ctx.flightRecorder,
+      priorsScope: ctx.leastCost.priorsScope,
+      ownerPrincipal: resolveOwnerPrincipal(getRequestContext()),
+    }),
   });
   const config = toRouterConfig(ctx.leastCost);
   const req: RouteRequestInput = { prompt };
@@ -658,7 +660,7 @@ export function registerValidationTools(server: McpServer, deps: ValidationToolD
     async ({ question, models, focus, judgeModel, select }) => {
       let providers = models;
       if (select) {
-        const resolved = resolveSelectedProviders(selectionContext, question, select, false);
+        const resolved = await resolveSelectedProviders(selectionContext, question, select, false);
         if (!resolved.ok) {
           return textResponse({
             success: false,
@@ -702,7 +704,7 @@ export function registerValidationTools(server: McpServer, deps: ValidationToolD
     async ({ answer, question, model, select }) => {
       let providers: ValidationProvider[] = [model];
       if (select) {
-        const resolved = resolveSelectedProviders(selectionContext, answer, select, true);
+        const resolved = await resolveSelectedProviders(selectionContext, answer, select, true);
         if (!resolved.ok) {
           return textResponse({ success: false, tool: "second_opinion", error: resolved.error });
         }
@@ -773,7 +775,7 @@ export function registerValidationTools(server: McpServer, deps: ValidationToolD
     async ({ content, riskLevel, models, select }) => {
       let providers = models;
       if (select) {
-        const resolved = resolveSelectedProviders(selectionContext, content, select, false);
+        const resolved = await resolveSelectedProviders(selectionContext, content, select, false);
         if (!resolved.ok) {
           return textResponse({ success: false, tool: "red_team_review", error: resolved.error });
         }
@@ -811,7 +813,7 @@ export function registerValidationTools(server: McpServer, deps: ValidationToolD
     async ({ claim, models, select }) => {
       let providers = models;
       if (select) {
-        const resolved = resolveSelectedProviders(selectionContext, claim, select, false);
+        const resolved = await resolveSelectedProviders(selectionContext, claim, select, false);
         if (!resolved.ok) {
           return textResponse({ success: false, tool: "consensus_check", error: resolved.error });
         }
@@ -848,7 +850,7 @@ export function registerValidationTools(server: McpServer, deps: ValidationToolD
     async ({ question, model, select }) => {
       let providers: ValidationProvider[] = [model];
       if (select) {
-        const resolved = resolveSelectedProviders(selectionContext, question, select, true);
+        const resolved = await resolveSelectedProviders(selectionContext, question, select, true);
         if (!resolved.ok) {
           return textResponse({ success: false, tool: "ask_model", error: resolved.error });
         }

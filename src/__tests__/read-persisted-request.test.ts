@@ -9,31 +9,31 @@ describe("readPersistedRequest", () => {
   let tmpDir: string;
   let rec: FlightRecorder;
 
-  beforeEach(() => {
+  beforeEach(async () => {
     tmpDir = mkdtempSync(path.join(os.tmpdir(), "read-persisted-test-"));
     rec = new FlightRecorder(path.join(tmpDir, "logs.db"));
   });
 
-  afterEach(() => {
-    rec.close();
+  afterEach(async () => {
+    await rec.close();
     rmSync(tmpDir, { recursive: true, force: true });
   });
 
-  function seedSync(opts: {
+  async function seedSync(opts: {
     id: string;
     prompt?: string;
     response?: string;
     sessionId?: string;
     providerSessionId?: string;
-  }): void {
-    rec.logStart({
+  }): Promise<void> {
+    await rec.logStart({
       correlationId: opts.id,
       cli: "gemini",
       model: "gemini-2.5-pro",
       prompt: opts.prompt ?? "the prompt",
       sessionId: opts.sessionId,
     });
-    rec.logComplete(opts.id, {
+    await rec.logComplete(opts.id, {
       response: opts.response ?? "the verdict",
       durationMs: 1234,
       inputTokens: 100,
@@ -48,10 +48,10 @@ describe("readPersistedRequest", () => {
     });
   }
 
-  it("recovers a persisted SYNC response by correlation id (the core gap)", () => {
-    seedSync({ id: "corr-sync-1", response: "GEMINI SAYS APPROVED" });
+  it("recovers a persisted SYNC response by correlation id (the core gap)", async () => {
+    await seedSync({ id: "corr-sync-1", response: "GEMINI SAYS APPROVED" });
 
-    const rec1 = readPersistedRequest(rec, "corr-sync-1");
+    const rec1 = await readPersistedRequest(rec, "corr-sync-1");
     expect(rec1).not.toBeNull();
     expect(rec1!.correlationId).toBe("corr-sync-1");
     expect(rec1!.cli).toBe("gemini");
@@ -65,46 +65,46 @@ describe("readPersistedRequest", () => {
     expect(rec1!.costUsd).toBeCloseTo(0.01);
   });
 
-  it("returns null for an unknown correlation id", () => {
-    expect(readPersistedRequest(rec, "does-not-exist")).toBeNull();
+  it("returns null for an unknown correlation id", async () => {
+    expect(await readPersistedRequest(rec, "does-not-exist")).toBeNull();
   });
 
-  it("omits the prompt unless includePrompt is set, but always reports promptChars", () => {
-    seedSync({ id: "corr-prompt", prompt: "abcdef", response: "r" });
+  it("omits the prompt unless includePrompt is set, but always reports promptChars", async () => {
+    await seedSync({ id: "corr-prompt", prompt: "abcdef", response: "r" });
 
-    const without = readPersistedRequest(rec, "corr-prompt");
+    const without = await readPersistedRequest(rec, "corr-prompt");
     expect(without!.prompt).toBeUndefined();
     expect(without!.promptChars).toBe(6);
 
-    const withPrompt = readPersistedRequest(rec, "corr-prompt", { includePrompt: true });
+    const withPrompt = await readPersistedRequest(rec, "corr-prompt", { includePrompt: true });
     expect(withPrompt!.prompt).toBe("abcdef");
     expect(withPrompt!.promptChars).toBe(6);
   });
 
-  it("truncates the response to maxChars and reports the full length", () => {
+  it("truncates the response to maxChars and reports the full length", async () => {
     const big = "x".repeat(5000);
-    seedSync({ id: "corr-big", response: big });
+    await seedSync({ id: "corr-big", response: big });
 
-    const clipped = readPersistedRequest(rec, "corr-big", { maxChars: 1000 });
+    const clipped = await readPersistedRequest(rec, "corr-big", { maxChars: 1000 });
     expect(clipped!.response).toHaveLength(1000);
     expect(clipped!.responseChars).toBe(5000);
     expect(clipped!.responseTruncated).toBe(true);
 
-    const full = readPersistedRequest(rec, "corr-big", { maxChars: 10000 });
+    const full = await readPersistedRequest(rec, "corr-big", { maxChars: 10000 });
     expect(full!.response).toHaveLength(5000);
     expect(full!.responseTruncated).toBe(false);
   });
 
-  it("redacts a known native provider id before persisted-response slicing", () => {
+  it("redacts a known native provider id before persisted-response slicing", async () => {
     const nativeId = "019ec070-26ab-7fa3-b66b-72fc6964f250";
-    seedSync({
+    await seedSync({
       id: "corr-native-id",
       prompt: `prompt ${nativeId}`,
       response: `${"x".repeat(995)}${nativeId} trailing response`,
       providerSessionId: nativeId,
     });
 
-    const sliced = readPersistedRequest(rec, "corr-native-id", {
+    const sliced = await readPersistedRequest(rec, "corr-native-id", {
       maxChars: 1000,
       includePrompt: true,
       redactProviderSessionId: true,
@@ -113,7 +113,7 @@ describe("readPersistedRequest", () => {
     expect(sliced!.response).toContain("[reda");
     expect(sliced!.prompt).toBe("prompt [redacted-session-id]");
 
-    const local = readPersistedRequest(rec, "corr-native-id", {
+    const local = await readPersistedRequest(rec, "corr-native-id", {
       maxChars: 200000,
       includePrompt: true,
     });
@@ -121,16 +121,16 @@ describe("readPersistedRequest", () => {
     expect(local!.prompt).toContain(nativeId);
   });
 
-  it("redacts every caller-visible persisted text field for remote readback", () => {
+  it("redacts every caller-visible persisted text field for remote readback", async () => {
     const nativeId = "019ec070-26ab-7fa3-b66b-72fc6964f250";
-    rec.logStart({
+    await rec.logStart({
       correlationId: "corr-native-fields",
       cli: "grok",
       model: "grok-build",
       prompt: `prompt ${nativeId}`,
       sessionId: nativeId,
     });
-    rec.logComplete("corr-native-fields", {
+    await rec.logComplete("corr-native-fields", {
       response: `response ${nativeId}`,
       durationMs: 1,
       retryCount: 0,
@@ -143,7 +143,7 @@ describe("readPersistedRequest", () => {
       providerSessionId: nativeId,
     });
 
-    const remote = readPersistedRequest(rec, "corr-native-fields", {
+    const remote = await readPersistedRequest(rec, "corr-native-fields", {
       includePrompt: true,
       redactProviderSessionId: true,
     });
@@ -152,24 +152,29 @@ describe("readPersistedRequest", () => {
     expect(remote!.errorMessage).toBe("error [redacted-session-id]");
     expect(remote!.thinkingBlocks).toEqual(["thinking [redacted-session-id]"]);
 
-    const local = readPersistedRequest(rec, "corr-native-fields", { includePrompt: true });
+    const local = await readPersistedRequest(rec, "corr-native-fields", { includePrompt: true });
     expect(JSON.stringify(local)).toContain(nativeId);
     expect(local!.sessionId).toBe(nativeId);
     expect(local!.errorMessage).toBe(`error ${nativeId}`);
     expect(local!.thinkingBlocks).toEqual([`thinking ${nativeId}`]);
   });
 
-  it("defaults maxChars to the documented constant", () => {
-    seedSync({ id: "corr-default", response: "short" });
-    const r = readPersistedRequest(rec, "corr-default");
+  it("defaults maxChars to the documented constant", async () => {
+    await seedSync({ id: "corr-default", response: "short" });
+    const r = await readPersistedRequest(rec, "corr-default");
     // Sanity: a short response is never truncated under the default budget.
     expect(PERSISTED_REQUEST_DEFAULT_MAX_CHARS).toBeGreaterThan("short".length);
     expect(r!.responseTruncated).toBe(false);
   });
 
-  it("surfaces a failed request's error message and exit code", () => {
-    rec.logStart({ correlationId: "corr-fail", cli: "gemini", model: "default", prompt: "p" });
-    rec.logComplete("corr-fail", {
+  it("surfaces a failed request's error message and exit code", async () => {
+    await rec.logStart({
+      correlationId: "corr-fail",
+      cli: "gemini",
+      model: "default",
+      prompt: "p",
+    });
+    await rec.logComplete("corr-fail", {
       response: "partial output",
       durationMs: 50,
       retryCount: 2,
@@ -180,7 +185,7 @@ describe("readPersistedRequest", () => {
       status: "failed",
     });
 
-    const r = readPersistedRequest(rec, "corr-fail");
+    const r = await readPersistedRequest(rec, "corr-fail");
     expect(r!.status).toBe("failed");
     expect(r!.exitCode).toBe(1);
     expect(r!.errorMessage).toBe("boom");
@@ -188,9 +193,14 @@ describe("readPersistedRequest", () => {
     expect(r!.circuitBreakerState).toBe("open");
   });
 
-  it("reports a started-but-never-completed row with a null response", () => {
-    rec.logStart({ correlationId: "corr-pending", cli: "gemini", model: "default", prompt: "p" });
-    const r = readPersistedRequest(rec, "corr-pending");
+  it("reports a started-but-never-completed row with a null response", async () => {
+    await rec.logStart({
+      correlationId: "corr-pending",
+      cli: "gemini",
+      model: "default",
+      prompt: "p",
+    });
+    const r = await readPersistedRequest(rec, "corr-pending");
     expect(r).not.toBeNull();
     expect(r!.status).toBe("started");
     expect(r!.response).toBeNull();
@@ -198,9 +208,9 @@ describe("readPersistedRequest", () => {
     expect(r!.responseTruncated).toBe(false);
   });
 
-  it("parses persisted thinking blocks back into an array", () => {
-    rec.logStart({ correlationId: "corr-think", cli: "claude", model: "opus", prompt: "p" });
-    rec.logComplete("corr-think", {
+  it("parses persisted thinking blocks back into an array", async () => {
+    await rec.logStart({ correlationId: "corr-think", cli: "claude", model: "opus", prompt: "p" });
+    await rec.logComplete("corr-think", {
       response: "answer",
       durationMs: 10,
       retryCount: 0,
@@ -210,12 +220,12 @@ describe("readPersistedRequest", () => {
       exitCode: 0,
       status: "completed",
     });
-    const r = readPersistedRequest(rec, "corr-think");
+    const r = await readPersistedRequest(rec, "corr-think");
     expect(r!.thinkingBlocks).toEqual(["step one", "step two"]);
   });
 
-  it("returns null against a NoopFlightRecorder (flight recording disabled)", () => {
+  it("returns null against a NoopFlightRecorder (flight recording disabled)", async () => {
     const noop = new NoopFlightRecorder();
-    expect(readPersistedRequest(noop, "anything")).toBeNull();
+    expect(await readPersistedRequest(noop, "anything")).toBeNull();
   });
 });

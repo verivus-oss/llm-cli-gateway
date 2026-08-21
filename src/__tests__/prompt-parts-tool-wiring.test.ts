@@ -106,33 +106,33 @@ describe("slice 1: prompt / promptParts mutex (runtime check, NOT Zod refine)", 
  */
 class CapturingFlightRecorder implements FlightRecorderLike {
   starts: FlightLogStart[] = [];
-  logStart(entry: FlightLogStart): void {
+  async logStart(entry: FlightLogStart): Promise<void> {
     this.starts.push(entry);
   }
-  logComplete(_correlationId: string, _result: FlightLogResult): void {}
-  readCacheRowsBySession(): [] {
+  async logComplete(_correlationId: string, _result: FlightLogResult): Promise<void> {}
+  async readCacheRowsBySession(): Promise<[]> {
     return [];
   }
-  readCacheRowsByPrefix(): [] {
+  async readCacheRowsByPrefix(): Promise<[]> {
     return [];
   }
-  readCacheRowsGlobal(): [] {
+  async readCacheRowsGlobal(): Promise<[]> {
     return [];
   }
-  readRequestById(): null {
+  async readRequestById(): Promise<null> {
     return null;
   }
-  listRequestSummaries(): [] {
+  async listRequestSummaries(): Promise<[]> {
     return [];
   }
-  readLcrPriorRows(): [] {
+  async readLcrPriorRows(): Promise<[]> {
     return [];
   }
-  readRoutingDecisions(): [] {
+  async readRoutingDecisions(): Promise<[]> {
     return [];
   }
-  flush(): void {}
-  close(): void {}
+  async flush(): Promise<void> {}
+  async close(): Promise<void> {}
 }
 
 describe("slice 1: sync claude_request writes stable_prefix_hash via flight-recorder", () => {

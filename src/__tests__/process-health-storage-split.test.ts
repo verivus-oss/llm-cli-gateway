@@ -47,14 +47,14 @@ describe("llm_process_health discloses the storage split", () => {
   let flight: FlightRecorder;
   const savedEnv = process.env.LLM_GATEWAY_LOGS_DB;
 
-  beforeEach(() => {
+  beforeEach(async () => {
     tmp = mkdtempSync(join(tmpdir(), "health-split-"));
     process.env.LLM_GATEWAY_LOGS_DB = join(tmp, "logs.db");
     flight = new FlightRecorder(join(tmp, "logs.db"));
   });
 
-  afterEach(() => {
-    flight.close();
+  afterEach(async () => {
+    await flight.close();
     if (savedEnv === undefined) delete process.env.LLM_GATEWAY_LOGS_DB;
     else process.env.LLM_GATEWAY_LOGS_DB = savedEnv;
     rmSync(tmp, { recursive: true, force: true });

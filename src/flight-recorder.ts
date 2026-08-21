@@ -1,28 +1,35 @@
 /**
- * Flight recorder: SQLite-backed request log.
+ * Flight recorder: the request transcript, on the storage port (s7).
  *
- * Read access for cache-stats / MCP resources / doctor goes through the
- * `queryRequests<T>(sql, ...params)` method exposed on both `FlightRecorder`
- * and `NoopFlightRecorder` (the `FlightRecorderQuery` interface, see bottom
- * of file). This is Option A from
- * docs/plans/cache-awareness.dag.toml#expose-flight-recorder-read-access —
- * a single read-only query surface on the existing class, threaded through
- * GatewayServerRuntime as one field.
+ * WHAT CHANGED. The recorder used to hold its own `GatewayDatabase` and issue
+ * synchronous `node:sqlite` calls. It now holds a `SqliteStorageDriver` and
+ * implements `FlightRecorderOperations` (src/storage/operations.ts), so it
+ * shares the port's serialised write queue, bounded shutdown drain and
+ * whole-operation deadline with the job store and the session store. Every
+ * operation is asynchronous, including the reads.
  *
- * Since the node:sqlite migration (plan B4) that surface runs on a dedicated
- * read-only connection (`openReadOnly`), opened lazily on first use. node:sqlite
- * in WAL mode handles concurrent readers alongside the read/write logging
- * connection inside a single process safely; write attempts on the read-only
- * connection fail at the engine level (SQLITE_READONLY).
+ * WHAT DID NOT CHANGE, and this is the hard stop rather than an omission:
+ * `[persistence].backend = "postgres"` does NOT move the transcript. See
+ * `flightRecorderEngineDecision` for the reason and for what a postgres host
+ * is told instead.
  *
- * Callers MUST pass parameterised SQL — string-interpolation of untrusted
- * values is unsafe even on a "read-only" query.
+ * Read access for cache-stats / MCP resources / doctor goes through the seven
+ * named typed reads on `FlightRecorderQuery` (s2). `queryRequests`, which takes
+ * caller-supplied SQL, survives as an internal of this module and of tests;
+ * `scripts/check-storage-port.mjs` fails the build if any other production
+ * module calls it.
+ *
+ * The read classes route to a dedicated read-only connection, so a write
+ * disguised as a read fails at the SQLite engine level (SQLITE_READONLY) rather
+ * than on trust.
  */
 import { chmodSync } from "fs";
 import os from "os";
 import path from "path";
-import { openDatabase, openReadOnly } from "./sqlite-driver.js";
-import type { GatewayDatabase } from "./sqlite-driver.js";
+import { SqliteStorageDriver } from "./storage/drivers/sqlite.js";
+import type { StorageConnection } from "./storage/store.js";
+import { FLIGHT_RECORDER_OPERATION_CLASSES } from "./storage/operations.js";
+import type { FlightRecorderOperations } from "./storage/operations.js";
 import { redactSecrets, isRedactionEnabled } from "./secret-redaction.js";
 import { getRequestContext, principalScopeSql, resolveOwnerPrincipal } from "./request-context.js";
 import { derivePromptSignals } from "./token-estimator.js";
@@ -116,20 +123,32 @@ interface LoggerLike {
 const MAX_THINKING_BYTES = 1_000_000;
 
 /**
+ * Column names of one table, read through the port's connection.
+ *
+ * Eleven idempotent migrations below all begin the same way, and they are
+ * SQLite-specific twice over: `PRAGMA table_info` is the engine's own
+ * introspection, and `ALTER TABLE ADD COLUMN` has no `IF NOT EXISTS` form here.
+ * That is exactly why this file is a sanctioned SQL owner and why none of it
+ * reaches the port's surface: `scripts/check-storage-port.mjs` rule 3 keeps
+ * PRAGMA inside the modules that own an engine.
+ */
+async function columnNames(conn: StorageConnection, table: string): Promise<Set<string>> {
+  const rows = await conn.query<{ name?: unknown }>(`PRAGMA table_info(${table})`);
+  return new Set<string>(rows.map(row => (row && typeof row.name === "string" ? row.name : "")));
+}
+
+/**
  * Idempotent migration: add `cache_read_tokens` / `cache_creation_tokens`
  * columns to the `requests` table if a pre-U23 logs.db is opened. Existing
  * rows keep NULL for the new columns; that is intentional.
  */
-function ensureRequestsCacheColumns(db: GatewayDatabase): void {
-  const rows = db.prepare("PRAGMA table_info(requests)").all();
-  const names = new Set<string>(
-    rows.map((row: any) => (row && typeof row.name === "string" ? row.name : ""))
-  );
+async function ensureRequestsCacheColumns(conn: StorageConnection): Promise<void> {
+  const names = await columnNames(conn, "requests");
   if (!names.has("cache_read_tokens")) {
-    db.exec("ALTER TABLE requests ADD COLUMN cache_read_tokens INTEGER");
+    await conn.execute("ALTER TABLE requests ADD COLUMN cache_read_tokens INTEGER");
   }
   if (!names.has("cache_creation_tokens")) {
-    db.exec("ALTER TABLE requests ADD COLUMN cache_creation_tokens INTEGER");
+    await conn.execute("ALTER TABLE requests ADD COLUMN cache_creation_tokens INTEGER");
   }
 }
 
@@ -138,13 +157,10 @@ function ensureRequestsCacheColumns(db: GatewayDatabase): void {
  * table. Fresh tables already include it via CREATE TABLE. Legacy rows keep
  * NULL (treated as legacy-unowned by enforcement).
  */
-function ensureRequestsOwnerColumn(db: GatewayDatabase): void {
-  const rows = db.prepare("PRAGMA table_info(requests)").all();
-  const names = new Set<string>(
-    rows.map((row: any) => (row && typeof row.name === "string" ? row.name : ""))
-  );
+async function ensureRequestsOwnerColumn(conn: StorageConnection): Promise<void> {
+  const names = await columnNames(conn, "requests");
   if (!names.has("owner_principal")) {
-    db.exec("ALTER TABLE requests ADD COLUMN owner_principal TEXT");
+    await conn.execute("ALTER TABLE requests ADD COLUMN owner_principal TEXT");
   }
 }
 
@@ -162,19 +178,16 @@ function ensureRequestsOwnerColumn(db: GatewayDatabase): void {
  * Legacy rows keep NULL and are backfilled separately; a NULL derivation must
  * be skipped by readers rather than treated as zero.
  */
-function ensureRequestsDerivationColumns(db: GatewayDatabase): void {
-  const rows = db.prepare("PRAGMA table_info(requests)").all();
-  const names = new Set<string>(
-    rows.map((row: any) => (row && typeof row.name === "string" ? row.name : ""))
-  );
+async function ensureRequestsDerivationColumns(conn: StorageConnection): Promise<void> {
+  const names = await columnNames(conn, "requests");
   if (!names.has("derived_prompt_chars")) {
-    db.exec("ALTER TABLE requests ADD COLUMN derived_prompt_chars INTEGER");
+    await conn.execute("ALTER TABLE requests ADD COLUMN derived_prompt_chars INTEGER");
   }
   if (!names.has("derived_content_class")) {
-    db.exec("ALTER TABLE requests ADD COLUMN derived_content_class TEXT");
+    await conn.execute("ALTER TABLE requests ADD COLUMN derived_content_class TEXT");
   }
   if (!names.has("derivation_version")) {
-    db.exec("ALTER TABLE requests ADD COLUMN derivation_version INTEGER");
+    await conn.execute("ALTER TABLE requests ADD COLUMN derivation_version INTEGER");
   }
 }
 
@@ -182,23 +195,18 @@ function ensureRequestsDerivationColumns(db: GatewayDatabase): void {
  * Idempotent v3 migration: add `stable_prefix_hash` / `stable_prefix_tokens`
  * columns plus their index. Populated only for new rows that carry a
  * promptParts structure (slice 1); legacy rows keep NULL forever.
- *
- * Read access for cache-stats / MCP resources / doctor goes through the
- * read-only `queryRequests()` method on FlightRecorder (a dedicated
- * read-only connection — node:sqlite in WAL mode handles concurrent readers).
  */
-function ensureStablePrefixColumns(db: GatewayDatabase): void {
-  const rows = db.prepare("PRAGMA table_info(requests)").all();
-  const names = new Set<string>(
-    rows.map((row: any) => (row && typeof row.name === "string" ? row.name : ""))
-  );
+async function ensureStablePrefixColumns(conn: StorageConnection): Promise<void> {
+  const names = await columnNames(conn, "requests");
   if (!names.has("stable_prefix_hash")) {
-    db.exec("ALTER TABLE requests ADD COLUMN stable_prefix_hash TEXT");
+    await conn.execute("ALTER TABLE requests ADD COLUMN stable_prefix_hash TEXT");
   }
   if (!names.has("stable_prefix_tokens")) {
-    db.exec("ALTER TABLE requests ADD COLUMN stable_prefix_tokens INTEGER");
+    await conn.execute("ALTER TABLE requests ADD COLUMN stable_prefix_tokens INTEGER");
   }
-  db.exec("CREATE INDEX IF NOT EXISTS idx_requests_stable_hash ON requests(stable_prefix_hash)");
+  await conn.execute(
+    "CREATE INDEX IF NOT EXISTS idx_requests_stable_hash ON requests(stable_prefix_hash)"
+  );
 }
 
 /**
@@ -208,13 +216,10 @@ function ensureStablePrefixColumns(db: GatewayDatabase): void {
  * marker. Pre-κ rows keep NULL; only κ-opt-in callers ever set the
  * column to a non-NULL integer.
  */
-function ensureCacheControlBlocksColumn(db: GatewayDatabase): void {
-  const rows = db.prepare("PRAGMA table_info(requests)").all();
-  const names = new Set<string>(
-    rows.map((row: any) => (row && typeof row.name === "string" ? row.name : ""))
-  );
+async function ensureCacheControlBlocksColumn(conn: StorageConnection): Promise<void> {
+  const names = await columnNames(conn, "requests");
   if (!names.has("cache_control_blocks")) {
-    db.exec("ALTER TABLE requests ADD COLUMN cache_control_blocks INTEGER");
+    await conn.execute("ALTER TABLE requests ADD COLUMN cache_control_blocks INTEGER");
   }
 }
 
@@ -224,13 +229,10 @@ function ensureCacheControlBlocksColumn(db: GatewayDatabase): void {
  * `transport='http'` jobs, distinct from the 0/1 `exit_code`. Process-job rows
  * keep NULL.
  */
-function ensureMetadataHttpStatusColumn(db: GatewayDatabase): void {
-  const rows = db.prepare("PRAGMA table_info(gateway_metadata)").all();
-  const names = new Set<string>(
-    rows.map((row: any) => (row && typeof row.name === "string" ? row.name : ""))
-  );
+async function ensureMetadataHttpStatusColumn(conn: StorageConnection): Promise<void> {
+  const names = await columnNames(conn, "gateway_metadata");
   if (!names.has("http_status")) {
-    db.exec("ALTER TABLE gateway_metadata ADD COLUMN http_status INTEGER");
+    await conn.execute("ALTER TABLE gateway_metadata ADD COLUMN http_status INTEGER");
   }
 }
 
@@ -240,13 +242,10 @@ function ensureMetadataHttpStatusColumn(db: GatewayDatabase): void {
  * alone is enough to identify κ rows, but not enough to report TTL state
  * without inferring policy from current config.
  */
-function ensureCacheControlTtlSecondsColumn(db: GatewayDatabase): void {
-  const rows = db.prepare("PRAGMA table_info(requests)").all();
-  const names = new Set<string>(
-    rows.map((row: any) => (row && typeof row.name === "string" ? row.name : ""))
-  );
+async function ensureCacheControlTtlSecondsColumn(conn: StorageConnection): Promise<void> {
+  const names = await columnNames(conn, "requests");
   if (!names.has("cache_control_ttl_seconds")) {
-    db.exec("ALTER TABLE requests ADD COLUMN cache_control_ttl_seconds INTEGER");
+    await conn.execute("ALTER TABLE requests ADD COLUMN cache_control_ttl_seconds INTEGER");
   }
 }
 
@@ -258,16 +257,13 @@ function ensureCacheControlTtlSecondsColumn(db: GatewayDatabase): void {
  * id intact. Legacy rows keep NULL; only providers that actually emit the
  * fields populate them (typed capability fact otherwise).
  */
-function ensureMetadataProviderSessionColumns(db: GatewayDatabase): void {
-  const rows = db.prepare("PRAGMA table_info(gateway_metadata)").all();
-  const names = new Set<string>(
-    rows.map((row: any) => (row && typeof row.name === "string" ? row.name : ""))
-  );
+async function ensureMetadataProviderSessionColumns(conn: StorageConnection): Promise<void> {
+  const names = await columnNames(conn, "gateway_metadata");
   if (!names.has("provider_session_id")) {
-    db.exec("ALTER TABLE gateway_metadata ADD COLUMN provider_session_id TEXT");
+    await conn.execute("ALTER TABLE gateway_metadata ADD COLUMN provider_session_id TEXT");
   }
   if (!names.has("stop_reason")) {
-    db.exec("ALTER TABLE gateway_metadata ADD COLUMN stop_reason TEXT");
+    await conn.execute("ALTER TABLE gateway_metadata ADD COLUMN stop_reason TEXT");
   }
 }
 
@@ -280,25 +276,28 @@ function ensureMetadataProviderSessionColumns(db: GatewayDatabase): void {
  * after completion is finalized: async read-time, and the Claude
  * stream-json sync path logs completion before buildCliResponse).
  */
-function ensureCompressionColumns(db: GatewayDatabase): void {
-  const rows = db.prepare("PRAGMA table_info(gateway_metadata)").all();
-  const names = new Set<string>(
-    rows.map((row: any) => (row && typeof row.name === "string" ? row.name : ""))
-  );
+async function ensureCompressionColumns(conn: StorageConnection): Promise<void> {
+  const names = await columnNames(conn, "gateway_metadata");
   if (!names.has("compression_route")) {
-    db.exec("ALTER TABLE gateway_metadata ADD COLUMN compression_route TEXT");
+    await conn.execute("ALTER TABLE gateway_metadata ADD COLUMN compression_route TEXT");
   }
   if (!names.has("compression_transforms")) {
-    db.exec("ALTER TABLE gateway_metadata ADD COLUMN compression_transforms TEXT");
+    await conn.execute("ALTER TABLE gateway_metadata ADD COLUMN compression_transforms TEXT");
   }
   if (!names.has("compression_original_chars")) {
-    db.exec("ALTER TABLE gateway_metadata ADD COLUMN compression_original_chars INTEGER");
+    await conn.execute(
+      "ALTER TABLE gateway_metadata ADD COLUMN compression_original_chars INTEGER"
+    );
   }
   if (!names.has("compression_compressed_chars")) {
-    db.exec("ALTER TABLE gateway_metadata ADD COLUMN compression_compressed_chars INTEGER");
+    await conn.execute(
+      "ALTER TABLE gateway_metadata ADD COLUMN compression_compressed_chars INTEGER"
+    );
   }
   if (!names.has("compression_tokens_saved_est")) {
-    db.exec("ALTER TABLE gateway_metadata ADD COLUMN compression_tokens_saved_est INTEGER");
+    await conn.execute(
+      "ALTER TABLE gateway_metadata ADD COLUMN compression_tokens_saved_est INTEGER"
+    );
   }
 }
 
@@ -308,13 +307,10 @@ function ensureCompressionColumns(db: GatewayDatabase): void {
  * 'provider-reported' vs 'derived-from-tokens'); the derivation logic lives in
  * index.ts, not here. Legacy rows keep NULL.
  */
-function ensureRequestsCostBasisColumn(db: GatewayDatabase): void {
-  const rows = db.prepare("PRAGMA table_info(requests)").all();
-  const names = new Set<string>(
-    rows.map((row: any) => (row && typeof row.name === "string" ? row.name : ""))
-  );
+async function ensureRequestsCostBasisColumn(conn: StorageConnection): Promise<void> {
+  const names = await columnNames(conn, "requests");
   if (!names.has("cost_basis")) {
-    db.exec("ALTER TABLE requests ADD COLUMN cost_basis TEXT");
+    await conn.execute("ALTER TABLE requests ADD COLUMN cost_basis TEXT");
   }
 }
 
@@ -323,28 +319,25 @@ function ensureRequestsCostBasisColumn(db: GatewayDatabase): void {
  * columns on `gateway_metadata`. All NULL when the request was not routed by the
  * least-cost router; written post-hoc via recordRouting (never logComplete).
  */
-function ensureMetadataRoutingColumns(db: GatewayDatabase): void {
-  const rows = db.prepare("PRAGMA table_info(gateway_metadata)").all();
-  const names = new Set<string>(
-    rows.map((row: any) => (row && typeof row.name === "string" ? row.name : ""))
-  );
+async function ensureMetadataRoutingColumns(conn: StorageConnection): Promise<void> {
+  const names = await columnNames(conn, "gateway_metadata");
   if (!names.has("routed")) {
-    db.exec("ALTER TABLE gateway_metadata ADD COLUMN routed INTEGER");
+    await conn.execute("ALTER TABLE gateway_metadata ADD COLUMN routed INTEGER");
   }
   if (!names.has("route_est_cost_usd")) {
-    db.exec("ALTER TABLE gateway_metadata ADD COLUMN route_est_cost_usd REAL");
+    await conn.execute("ALTER TABLE gateway_metadata ADD COLUMN route_est_cost_usd REAL");
   }
   if (!names.has("route_est_confidence")) {
-    db.exec("ALTER TABLE gateway_metadata ADD COLUMN route_est_confidence TEXT");
+    await conn.execute("ALTER TABLE gateway_metadata ADD COLUMN route_est_confidence TEXT");
   }
   if (!names.has("route_reason")) {
-    db.exec("ALTER TABLE gateway_metadata ADD COLUMN route_reason TEXT");
+    await conn.execute("ALTER TABLE gateway_metadata ADD COLUMN route_reason TEXT");
   }
   if (!names.has("route_considered")) {
-    db.exec("ALTER TABLE gateway_metadata ADD COLUMN route_considered INTEGER");
+    await conn.execute("ALTER TABLE gateway_metadata ADD COLUMN route_considered INTEGER");
   }
   if (!names.has("route_reroutes")) {
-    db.exec("ALTER TABLE gateway_metadata ADD COLUMN route_reroutes INTEGER");
+    await conn.execute("ALTER TABLE gateway_metadata ADD COLUMN route_reroutes INTEGER");
   }
 }
 
@@ -422,37 +415,77 @@ function truncateThinkingBlocks(blocks: string[]): string[] {
   return result;
 }
 
-export class FlightRecorder {
-  private db: GatewayDatabase;
-  /**
-   * Dedicated read-only connection for `queryRequests`. Opened lazily on the
-   * first read-back (a cache/MCP-resource/doctor path, not the hot logging
-   * path) and cached for the recorder's lifetime; closed in `close()`. Write
-   * attempts on this connection fail at the SQLite engine level
-   * (SQLITE_READONLY) — the engine-level replacement for the old
-   * `stmt.readonly` JS guard (plan B4).
-   */
-  private readOnlyDb: GatewayDatabase | null = null;
+/**
+ * Every statement the recorder issues, once, at module scope.
+ *
+ * The driver caches prepared statements keyed by statement TEXT, so a literal
+ * rebuilt per call would miss that cache on every request. It also puts the
+ * whole SQLite dialect of this subsystem in one place, which is what a second
+ * driver would have to answer if the transcript schema ever moves.
+ */
+const SQL_INSERT_REQUEST = `
+      INSERT INTO requests (id, cli, model, prompt, system, session_id, datetime_utc,
+                            stable_prefix_hash, stable_prefix_tokens,
+                            cache_control_blocks, cache_control_ttl_seconds, owner_principal,
+                            derived_prompt_chars, derived_content_class, derivation_version)
+      VALUES (@id, @cli, @model, @prompt, @system, @session_id, @datetime_utc,
+              @stable_prefix_hash, @stable_prefix_tokens,
+              @cache_control_blocks, @cache_control_ttl_seconds, @owner_principal,
+              @derived_prompt_chars, @derived_content_class, @derivation_version)
+    `;
 
-  /** Set by close(); guards queryRequests from lazily reopening the RO connection. */
-  private closed = false;
-  private readonly dbPath: string;
-  /** F4: redact recognisable secrets from prompt/system/response before write. */
-  private readonly redactEnabled: boolean;
-  private insertStartTxn: (entry: FlightLogStart) => void;
-  private updateCompleteTxn: (correlationId: string, result: FlightLogResult) => void;
+const SQL_INSERT_METADATA = `
+      INSERT INTO gateway_metadata (request_id, async_job_id, status)
+      VALUES (@request_id, @async_job_id, 'started')
+    `;
 
-  constructor(dbPath: string, options: { redactSecrets?: boolean } = {}) {
-    this.dbPath = dbPath;
-    this.redactEnabled = options.redactSecrets ?? isRedactionEnabled();
-    // openDatabase owns parent-directory creation (mkdirSync recursive), so the
-    // recorder no longer does its own mkdir. Any open/DDL failure throws and is
-    // caught by createFlightRecorder → NoopFlightRecorder (graceful degradation).
-    this.db = openDatabase(dbPath);
-    this.db.exec("PRAGMA journal_mode = WAL");
-    this.db.exec("PRAGMA foreign_keys = ON");
+const SQL_UPDATE_REQUEST_COMPLETE = `
+      UPDATE requests
+      SET response = @response,
+          duration_ms = @duration_ms,
+          input_tokens = @input_tokens,
+          output_tokens = @output_tokens,
+          cache_read_tokens = @cache_read_tokens,
+          cache_creation_tokens = @cache_creation_tokens,
+          cost_basis = @cost_basis
+      WHERE id = @id
+    `;
 
-    this.db.exec(`
+const SQL_UPDATE_METADATA_COMPLETE = `
+      UPDATE gateway_metadata
+      SET retry_count = @retry_count,
+          circuit_breaker_state = @circuit_breaker_state,
+          cost_usd = @cost_usd,
+          approval_decision = @approval_decision,
+          optimization_applied = @optimization_applied,
+          thinking_blocks = @thinking_blocks,
+          exit_code = @exit_code,
+          http_status = @http_status,
+          error_message = @error_message,
+          provider_session_id = @provider_session_id,
+          stop_reason = @stop_reason,
+          status = @status
+      WHERE request_id = @id AND status = 'started'
+    `;
+
+const SQL_UPDATE_COMPRESSION = `UPDATE gateway_metadata
+         SET compression_route = @route,
+             compression_transforms = @transforms,
+             compression_original_chars = @original_chars,
+             compression_compressed_chars = @compressed_chars,
+             compression_tokens_saved_est = @tokens_saved_est
+         WHERE request_id = @id AND compression_route IS NULL`;
+
+const SQL_UPDATE_ROUTING = `UPDATE gateway_metadata
+         SET routed = 1,
+             route_est_cost_usd = @est_cost_usd,
+             route_est_confidence = @est_confidence,
+             route_reason = @reason,
+             route_considered = @considered,
+             route_reroutes = @reroutes
+         WHERE request_id = @id`;
+
+const SQL_SCHEMA = `
       CREATE TABLE IF NOT EXISTS _migrations (
         version INTEGER PRIMARY KEY,
         applied_at TEXT NOT NULL
@@ -507,96 +540,63 @@ export class FlightRecorder {
       CREATE INDEX IF NOT EXISTS idx_requests_cli ON requests(cli);
       CREATE INDEX IF NOT EXISTS idx_requests_session ON requests(session_id);
       CREATE INDEX IF NOT EXISTS idx_metadata_status ON gateway_metadata(status);
-    `);
+    `;
 
-    this.db
-      .prepare("INSERT OR IGNORE INTO _migrations(version, applied_at) VALUES(1, ?)")
-      .run(new Date().toISOString());
+const SQL_RECORD_MIGRATION = "INSERT OR IGNORE INTO _migrations(version, applied_at) VALUES(?, ?)";
 
-    // Migration v2: cache_read_tokens / cache_creation_tokens columns on
-    // pre-U23 logs.db files. ALTER TABLE ADD COLUMN is idempotent only via
-    // a prior PRAGMA table_info() check; SQLite has no native
-    // "IF NOT EXISTS" for ADD COLUMN.
-    ensureRequestsCacheColumns(this.db);
-    this.db
-      .prepare("INSERT OR IGNORE INTO _migrations(version, applied_at) VALUES(2, ?)")
-      .run(new Date().toISOString());
+/**
+ * Every recorder operation except `close`, which is `lifecycle` rather than one
+ * of the four routed classes. Indexing `FLIGHT_RECORDER_OPERATION_CLASSES` with
+ * this union yields only routable classes, so the class travels as DATA from
+ * s3sig's declaration to the driver and never as a literal at a call site. That
+ * is the defect s3sig recorded against the job store, which passes `"write"`
+ * everywhere including its reads.
+ */
+type RoutedFlightOperation = Exclude<keyof FlightRecorderOperations, "close">;
 
-    // Migration v3: stable_prefix_hash / stable_prefix_tokens columns plus
-    // their index. Populated only for new rows whose request carried a
-    // promptParts structure (slice 1 of cache-awareness); legacy rows keep
-    // NULL intentionally.
-    ensureStablePrefixColumns(this.db);
-    this.db
-      .prepare("INSERT OR IGNORE INTO _migrations(version, applied_at) VALUES(3, ?)")
-      .run(new Date().toISOString());
+/**
+ * SQLite implementation of `FlightRecorderOperations`, over the storage port.
+ *
+ * s7 of docs/plans/storage-unification.dag.toml. The recorder no longer holds a
+ * `GatewayDatabase`: it holds a `SqliteStorageDriver`, so its writes share one
+ * serialised queue, one bounded drain and one whole-operation deadline with
+ * every other subsystem on the port.
+ *
+ * ASYNC, and three consequences the port's header spells out. Construction no
+ * longer implies the schema exists, so every operation awaits `ensureSchema()`.
+ * Every write returns `Promise<void>`, so a dropped one is a floating promise a
+ * lint rule can see. Every read returns a promise, so it is truthy before it
+ * resolves and `npm run promise:conditions:check` is the control for that.
+ *
+ * What it does NOT do, by operator decision 0a: choose Postgres. See
+ * `flightRecorderEngineDecision`.
+ */
+export class FlightRecorder implements FlightRecorderOperations {
+  private readonly driver: SqliteStorageDriver;
+  private readonly dbPath: string;
+  /** F4: redact recognisable secrets from prompt/system/response before write. */
+  private readonly redactEnabled: boolean;
+  private readonly logger: LoggerLike | null;
+  /** Memoised schema bootstrap. Cleared on failure so a later call retries. */
+  private bootstrapPromise: Promise<void> | null = null;
+  /** Set by close(); every operation refuses from that point on. */
+  private closed = false;
 
-    // Migration v4: cache_control_blocks (slice κ). Pre-κ rows keep NULL;
-    // only κ-opt-in writes populate this. Aggregates in cache-stats /
-    // MCP resources can use this to separate explicit κ hits from
-    // implicit prefix-cache hits.
-    ensureCacheControlBlocksColumn(this.db);
-    this.db
-      .prepare("INSERT OR IGNORE INTO _migrations(version, applied_at) VALUES(4, ?)")
-      .run(new Date().toISOString());
+  constructor(dbPath: string, options: { redactSecrets?: boolean; logger?: LoggerLike } = {}) {
+    this.dbPath = dbPath;
+    this.redactEnabled = options.redactSecrets ?? isRedactionEnabled();
+    this.logger = options.logger ?? null;
+    // The DRIVER owns the handle. Holding a GatewayDatabase alongside it would
+    // put two independent writers on one file, which is the second write path
+    // the port exists to remove. `openDatabase` runs inside this constructor
+    // and throws synchronously on an unwritable path, so `createFlightRecorder`
+    // still degrades to NoopFlightRecorder for that failure exactly as before.
+    this.driver = new SqliteStorageDriver(dbPath);
 
-    // Migration v5: cache_control_ttl_seconds. New rows with emitted
-    // cache_control markers record the actual TTL seconds; legacy rows
-    // remain NULL and cache-state uses a compatibility fallback.
-    ensureCacheControlTtlSecondsColumn(this.db);
-    this.db
-      .prepare("INSERT OR IGNORE INTO _migrations(version, applied_at) VALUES(5, ?)")
-      .run(new Date().toISOString());
-
-    // Migration v6 (F3): owner_principal on the requests table. New rows are
-    // stamped with the request's ownership principal; legacy rows keep NULL.
-    ensureRequestsOwnerColumn(this.db);
-    // Slice 1: http_status on gateway_metadata for transport='http' jobs.
-    ensureMetadataHttpStatusColumn(this.db);
-    this.db
-      .prepare("INSERT OR IGNORE INTO _migrations(version, applied_at) VALUES(6, ?)")
-      .run(new Date().toISOString());
-
-    // Migration v7 (phase 7): provider_session_id + stop_reason on
-    // gateway_metadata so a deferred/async job preserves the real provider
-    // session id (needed to resume) and the terminal stop reason. Legacy rows
-    // keep NULL; only providers that emit the fields populate them.
-    ensureMetadataProviderSessionColumns(this.db);
-    this.db
-      .prepare("INSERT OR IGNORE INTO _migrations(version, applied_at) VALUES(7, ?)")
-      .run(new Date().toISOString());
-
-    // Migration v8 (native compressor PR-1): compression_* telemetry columns
-    // on gateway_metadata. NULL when compression never ran for a row.
-    ensureCompressionColumns(this.db);
-    this.db
-      .prepare("INSERT OR IGNORE INTO _migrations(version, applied_at) VALUES(8, ?)")
-      .run(new Date().toISOString());
-
-    // Migration v9 (LCR phase_1): cost_basis on the requests table. New rows
-    // record how cost_usd was derived (provider-reported vs derived-from-tokens);
-    // legacy rows keep NULL.
-    ensureRequestsCostBasisColumn(this.db);
-    this.db
-      .prepare("INSERT OR IGNORE INTO _migrations(version, applied_at) VALUES(9, ?)")
-      .run(new Date().toISOString());
-
-    // Migration v10 (LCR phase_1): route_* least-cost-routing telemetry columns
-    // on gateway_metadata. NULL when the request was not routed; written post-hoc
-    // via recordRouting.
-    ensureMetadataRoutingColumns(this.db);
-    this.db
-      .prepare("INSERT OR IGNORE INTO _migrations(version, applied_at) VALUES(10, ?)")
-      .run(new Date().toISOString());
-
-    // Migration v11 (LCR body-read removal): persisted prompt signals so the
-    // routing path stops bulk-reading prompt bodies. Prerequisite for body
-    // encryption. Legacy rows keep NULL until backfilled.
-    ensureRequestsDerivationColumns(this.db);
-    this.db
-      .prepare("INSERT OR IGNORE INTO _migrations(version, applied_at) VALUES(11, ?)")
-      .run(new Date().toISOString());
-
+    // Tightened HERE rather than after the schema, and that is a change: the
+    // file exists the moment the driver opens it, so an async bootstrap would
+    // otherwise leave a world-readable transcript database for the length of
+    // the DDL.
     if (process.platform !== "win32") {
       try {
         chmodSync(dbPath, 0o600);
@@ -605,126 +605,238 @@ export class FlightRecorder {
       }
     }
 
-    const insertRequest = this.db.prepare(`
-      INSERT INTO requests (id, cli, model, prompt, system, session_id, datetime_utc,
-                            stable_prefix_hash, stable_prefix_tokens,
-                            cache_control_blocks, cache_control_ttl_seconds, owner_principal,
-                            derived_prompt_chars, derived_content_class, derivation_version)
-      VALUES (@id, @cli, @model, @prompt, @system, @session_id, @datetime_utc,
-              @stable_prefix_hash, @stable_prefix_tokens,
-              @cache_control_blocks, @cache_control_ttl_seconds, @owner_principal,
-              @derived_prompt_chars, @derived_content_class, @derivation_version)
-    `);
-
-    const insertMetadata = this.db.prepare(`
-      INSERT INTO gateway_metadata (request_id, async_job_id, status)
-      VALUES (@request_id, @async_job_id, 'started')
-    `);
-
-    this.insertStartTxn = this.db.withTransaction((entry: FlightLogStart) => {
-      // Derive from the entry as it is about to be PERSISTED. logStart applies
-      // redaction before calling this, so the signals describe the stored text
-      // rather than the original; deriving from the pre-redaction prompt would
-      // make routing statistics disagree with the stored row.
-      const derived = derivePromptSignals(entry.prompt ?? "");
-
-      insertRequest.run({
-        id: entry.correlationId,
-        cli: entry.cli,
-        model: entry.model,
-        prompt: entry.prompt,
-        derived_prompt_chars: derived.promptChars,
-        derived_content_class: derived.contentClass,
-        derivation_version: derived.derivationVersion,
-        system: entry.system || null,
-        session_id: entry.sessionId || null,
-        datetime_utc: new Date().toISOString(),
-        stable_prefix_hash: entry.stablePrefixHash ?? null,
-        stable_prefix_tokens: entry.stablePrefixTokens ?? null,
-        cache_control_blocks: entry.cacheControlBlocks ?? null,
-        cache_control_ttl_seconds: entry.cacheControlTtlSeconds ?? null,
-        // F3: stamp the owner from the entry, else the ambient request context.
-        owner_principal: entry.ownerPrincipal ?? resolveOwnerPrincipal(getRequestContext()),
-      });
-
-      insertMetadata.run({
-        request_id: entry.correlationId,
-        async_job_id: entry.asyncJobId || null,
-      });
+    // STARTED here, not awaited here: a constructor cannot await. Every
+    // operation still awaits ensureSchema(), so nothing observes a half-built
+    // schema; starting early only shortens the window before the first write.
+    void this.ensureSchema().catch((error: unknown) => {
+      // Swallowed HERE so a constructor's async tail cannot raise an unhandled
+      // rejection with nobody to receive it. The memo is cleared by
+      // ensureSchema's own catch, so the next operation retries and, if it
+      // fails again, rejects where a caller can be told.
+      this.logger?.error("Flight recorder schema bootstrap failed", error);
     });
+  }
 
-    const updateRequests = this.db.prepare(`
-      UPDATE requests
-      SET response = @response,
-          duration_ms = @duration_ms,
-          input_tokens = @input_tokens,
-          output_tokens = @output_tokens,
-          cache_read_tokens = @cache_read_tokens,
-          cache_creation_tokens = @cache_creation_tokens,
-          cost_basis = @cost_basis
-      WHERE id = @id
-    `);
+  /**
+   * Schema, PRAGMAs and the eleven idempotent column migrations, run ONCE.
+   *
+   * The memo is installed BEFORE any await, so two callers racing the first
+   * operation share one bootstrap instead of both running the DDL.
+   */
+  private ensureSchema(): Promise<void> {
+    // No closed-check here. `close()` refuses NEW operations and then waits for
+    // the ones already in flight, and those still have to reach a built schema.
+    // Refusing here would abandon exactly the writes the drain exists to save.
+    this.bootstrapPromise ??= this.bootstrapSchema().catch((error: unknown) => {
+      this.bootstrapPromise = null;
+      throw error;
+    });
+    return this.bootstrapPromise;
+  }
 
-    const updateMetadata = this.db.prepare(`
-      UPDATE gateway_metadata
-      SET retry_count = @retry_count,
-          circuit_breaker_state = @circuit_breaker_state,
-          cost_usd = @cost_usd,
-          approval_decision = @approval_decision,
-          optimization_applied = @optimization_applied,
-          thinking_blocks = @thinking_blocks,
-          exit_code = @exit_code,
-          http_status = @http_status,
-          error_message = @error_message,
-          provider_session_id = @provider_session_id,
-          stop_reason = @stop_reason,
-          status = @status
-      WHERE request_id = @id AND status = 'started'
-    `);
+  private async bootstrapSchema(): Promise<void> {
+    // driver.bootstrap runs on the driver's own connection with transaction
+    // control and OUTSIDE operation-class routing, because DDL is none of the
+    // four classes. It shares the driver's queue, so no write can interleave
+    // with a half-applied migration.
+    await this.driver.bootstrap(async conn => {
+      await conn.execute("PRAGMA journal_mode = WAL");
+      await conn.execute("PRAGMA foreign_keys = ON");
+      await conn.executeScript(SQL_SCHEMA);
+      const applied = async (version: number): Promise<void> => {
+        await conn.execute(SQL_RECORD_MIGRATION, [version, new Date().toISOString()]);
+      };
+      await applied(1);
 
-    this.updateCompleteTxn = this.db.withTransaction(
-      (correlationId: string, result: FlightLogResult) => {
-        const thinkingBlocks =
-          result.thinkingBlocks && result.thinkingBlocks.length > 0
-            ? JSON.stringify(truncateThinkingBlocks(result.thinkingBlocks))
-            : null;
+      // v2: cache_read_tokens / cache_creation_tokens on pre-U23 files.
+      // ALTER TABLE ADD COLUMN is idempotent only via a prior table_info check;
+      // SQLite has no native "IF NOT EXISTS" for ADD COLUMN.
+      await ensureRequestsCacheColumns(conn);
+      await applied(2);
 
-        updateRequests.run({
-          id: correlationId,
-          response: result.response,
-          duration_ms: result.durationMs,
-          input_tokens: result.inputTokens ?? null,
-          output_tokens: result.outputTokens ?? null,
-          cache_read_tokens: result.cacheReadTokens ?? null,
-          cache_creation_tokens: result.cacheCreationTokens ?? null,
-          cost_basis: result.costBasis ?? null,
-        });
+      // v3: stable_prefix_hash / stable_prefix_tokens plus their index.
+      await ensureStablePrefixColumns(conn);
+      await applied(3);
 
-        updateMetadata.run({
-          id: correlationId,
-          retry_count: result.retryCount,
-          circuit_breaker_state: result.circuitBreakerState,
-          cost_usd: result.costUsd ?? null,
-          approval_decision: result.approvalDecision ?? null,
-          optimization_applied: result.optimizationApplied ? 1 : 0,
-          thinking_blocks: thinkingBlocks,
-          exit_code: result.exitCode,
-          http_status: result.httpStatus ?? null,
-          error_message: result.errorMessage ?? null,
-          provider_session_id: result.providerSessionId ?? null,
-          stop_reason: result.stopReason ?? null,
-          status: result.status,
-        });
-      }
+      // v4: cache_control_blocks (slice κ). Pre-κ rows keep NULL.
+      await ensureCacheControlBlocksColumn(conn);
+      await applied(4);
+
+      // v5: cache_control_ttl_seconds. Legacy rows use a compatibility fallback.
+      await ensureCacheControlTtlSecondsColumn(conn);
+      await applied(5);
+
+      // v6 (F3): owner_principal on requests, plus http_status on metadata.
+      await ensureRequestsOwnerColumn(conn);
+      await ensureMetadataHttpStatusColumn(conn);
+      await applied(6);
+
+      // v7 (phase 7): provider_session_id + stop_reason on metadata.
+      await ensureMetadataProviderSessionColumns(conn);
+      await applied(7);
+
+      // v8 (native compressor PR-1): compression_* telemetry on metadata.
+      await ensureCompressionColumns(conn);
+      await applied(8);
+
+      // v9 (LCR phase_1): cost_basis on requests.
+      await ensureRequestsCostBasisColumn(conn);
+      await applied(9);
+
+      // v10 (LCR phase_1): route_* telemetry on metadata.
+      await ensureMetadataRoutingColumns(conn);
+      await applied(10);
+
+      // v11 (LCR body-read removal): persisted prompt signals.
+      await ensureRequestsDerivationColumns(conn);
+      await applied(11);
+    });
+  }
+
+  /**
+   * Operations that have STARTED but not settled.
+   *
+   * The driver's bounded drain covers work already submitted to its queue. It
+   * cannot cover the gap between an operation being CALLED and reaching that
+   * queue, which is at minimum the `await ensureSchema()` in front of every one
+   * of them. Found by driving it: `logStart(x); close()` in one tick made the
+   * driver refuse the write with "closed while this transaction was still
+   * queued", so the row was lost by the very call that was supposed to save it.
+   *
+   * Registered SYNCHRONOUSLY: `read` and `write` are called before the first
+   * await in every public method, so a promise is in this set by the time the
+   * caller gets it, and `close()` in the next statement can see it.
+   */
+  private readonly inFlight = new Set<Promise<unknown>>();
+
+  private track<T>(operation: Promise<T>): Promise<T> {
+    this.inFlight.add(operation);
+    const forget = (): void => {
+      this.inFlight.delete(operation);
+    };
+    void operation.then(forget, forget);
+    return operation;
+  }
+
+  /** One routed read. The class comes from s3sig's declaration, never a literal. */
+  private read<T>(
+    operation: RoutedFlightOperation,
+    sql: string,
+    params: readonly unknown[] = []
+  ): Promise<T[]> {
+    if (this.closed) return Promise.reject(new Error("flight recorder is closed"));
+    return this.track(
+      (async () => {
+        await this.ensureSchema();
+        return this.driver.withConnection(FLIGHT_RECORDER_OPERATION_CLASSES[operation], conn =>
+          conn.query<T>(sql, params)
+        );
+      })()
     );
   }
 
-  logStart(entry: FlightLogStart): void {
-    this.insertStartTxn(this.redactEnabled ? this.redactStart(entry) : entry);
+  /**
+   * One routed write, as a transaction.
+   *
+   * `transaction`, not `withConnection`, even for the single-statement
+   * telemetry updates: `withConnection` bypasses the driver's queue, so a
+   * statement issued while a transaction is mid-body would join that
+   * transaction on the same handle and be rolled back with it. Serialising all
+   * four writers is also what makes their ORDER a property of submission
+   * (src/storage/write-ordering.ts).
+   */
+  private write(
+    operation: RoutedFlightOperation,
+    fn: (connection: StorageConnection) => Promise<void>
+  ): Promise<void> {
+    if (this.closed) return Promise.reject(new Error("flight recorder is closed"));
+    return this.track(
+      (async () => {
+        await this.ensureSchema();
+        await this.driver.transaction(FLIGHT_RECORDER_OPERATION_CLASSES[operation], fn);
+      })()
+    );
   }
 
-  logComplete(correlationId: string, result: FlightLogResult): void {
-    this.updateCompleteTxn(correlationId, this.redactEnabled ? this.redactResult(result) : result);
+  async logStart(entry: FlightLogStart): Promise<void> {
+    // SYNCHRONOUS PROLOGUE. `resolveOwnerPrincipal(getRequestContext())` reads
+    // an AsyncLocalStorage context and `derivePromptSignals` must describe the
+    // text as it will be STORED, so both are resolved before the first await
+    // rather than inside a transaction body the driver schedules later. The
+    // timestamp moves with them, so `datetime_utc` is now when the request
+    // started rather than when its row reached the disk.
+    const stored = this.redactEnabled ? this.redactStart(entry) : entry;
+    const ownerPrincipal = stored.ownerPrincipal ?? resolveOwnerPrincipal(getRequestContext());
+    const datetimeUtc = new Date().toISOString();
+    const derived = derivePromptSignals(stored.prompt ?? "");
+
+    await this.write("logStart", async conn => {
+      await conn.execute(SQL_INSERT_REQUEST, [
+        {
+          id: stored.correlationId,
+          cli: stored.cli,
+          model: stored.model,
+          prompt: stored.prompt,
+          derived_prompt_chars: derived.promptChars,
+          derived_content_class: derived.contentClass,
+          derivation_version: derived.derivationVersion,
+          system: stored.system || null,
+          session_id: stored.sessionId || null,
+          datetime_utc: datetimeUtc,
+          stable_prefix_hash: stored.stablePrefixHash ?? null,
+          stable_prefix_tokens: stored.stablePrefixTokens ?? null,
+          cache_control_blocks: stored.cacheControlBlocks ?? null,
+          cache_control_ttl_seconds: stored.cacheControlTtlSeconds ?? null,
+          owner_principal: ownerPrincipal,
+        },
+      ]);
+      await conn.execute(SQL_INSERT_METADATA, [
+        {
+          request_id: stored.correlationId,
+          async_job_id: stored.asyncJobId || null,
+        },
+      ]);
+    });
+  }
+
+  async logComplete(correlationId: string, result: FlightLogResult): Promise<void> {
+    const stored = this.redactEnabled ? this.redactResult(result) : result;
+    const thinkingBlocks =
+      stored.thinkingBlocks && stored.thinkingBlocks.length > 0
+        ? JSON.stringify(truncateThinkingBlocks(stored.thinkingBlocks))
+        : null;
+
+    await this.write("logComplete", async conn => {
+      await conn.execute(SQL_UPDATE_REQUEST_COMPLETE, [
+        {
+          id: correlationId,
+          response: stored.response,
+          duration_ms: stored.durationMs,
+          input_tokens: stored.inputTokens ?? null,
+          output_tokens: stored.outputTokens ?? null,
+          cache_read_tokens: stored.cacheReadTokens ?? null,
+          cache_creation_tokens: stored.cacheCreationTokens ?? null,
+          cost_basis: stored.costBasis ?? null,
+        },
+      ]);
+      await conn.execute(SQL_UPDATE_METADATA_COMPLETE, [
+        {
+          id: correlationId,
+          retry_count: stored.retryCount,
+          circuit_breaker_state: stored.circuitBreakerState,
+          cost_usd: stored.costUsd ?? null,
+          approval_decision: stored.approvalDecision ?? null,
+          optimization_applied: stored.optimizationApplied ? 1 : 0,
+          thinking_blocks: thinkingBlocks,
+          exit_code: stored.exitCode,
+          http_status: stored.httpStatus ?? null,
+          error_message: stored.errorMessage ?? null,
+          provider_session_id: stored.providerSessionId ?? null,
+          stop_reason: stored.stopReason ?? null,
+          status: stored.status,
+        },
+      ]);
+    });
   }
 
   /**
@@ -735,25 +847,22 @@ export class FlightRecorder {
    * still NULL, so repeated llm_job_result reads (which recompute
    * deterministically identical values) keep the first write.
    */
-  recordCompressionTelemetry(correlationId: string, telemetry: CompressionTelemetry): void {
-    this.db
-      .prepare(
-        `UPDATE gateway_metadata
-         SET compression_route = @route,
-             compression_transforms = @transforms,
-             compression_original_chars = @original_chars,
-             compression_compressed_chars = @compressed_chars,
-             compression_tokens_saved_est = @tokens_saved_est
-         WHERE request_id = @id AND compression_route IS NULL`
-      )
-      .run({
-        id: correlationId,
-        route: telemetry.route,
-        transforms: telemetry.transforms.join(","),
-        original_chars: telemetry.originalChars,
-        compressed_chars: telemetry.compressedChars,
-        tokens_saved_est: telemetry.estimatedTokensSaved,
-      });
+  async recordCompressionTelemetry(
+    correlationId: string,
+    telemetry: CompressionTelemetry
+  ): Promise<void> {
+    await this.write("recordCompressionTelemetry", async conn => {
+      await conn.execute(SQL_UPDATE_COMPRESSION, [
+        {
+          id: correlationId,
+          route: telemetry.route,
+          transforms: telemetry.transforms.join(","),
+          original_chars: telemetry.originalChars,
+          compressed_chars: telemetry.compressedChars,
+          tokens_saved_est: telemetry.estimatedTokensSaved,
+        },
+      ]);
+    });
   }
 
   /**
@@ -762,26 +871,19 @@ export class FlightRecorder {
    * point than completion; mirrors recordCompressionTelemetry's post-hoc UPSERT.
    * Sets `routed = 1` plus the five route_* columns from the RoutingRecord.
    */
-  recordRouting(correlationId: string, routing: RoutingRecord): void {
-    this.db
-      .prepare(
-        `UPDATE gateway_metadata
-         SET routed = 1,
-             route_est_cost_usd = @est_cost_usd,
-             route_est_confidence = @est_confidence,
-             route_reason = @reason,
-             route_considered = @considered,
-             route_reroutes = @reroutes
-         WHERE request_id = @id`
-      )
-      .run({
-        id: correlationId,
-        est_cost_usd: routing.estCostUsd ?? null,
-        est_confidence: routing.estConfidence ?? null,
-        reason: routing.reason ?? null,
-        considered: routing.considered ?? null,
-        reroutes: routing.reroutes ?? null,
-      });
+  async recordRouting(correlationId: string, routing: RoutingRecord): Promise<void> {
+    await this.write("recordRouting", async conn => {
+      await conn.execute(SQL_UPDATE_ROUTING, [
+        {
+          id: correlationId,
+          est_cost_usd: routing.estCostUsd ?? null,
+          est_confidence: routing.estConfidence ?? null,
+          reason: routing.reason ?? null,
+          considered: routing.considered ?? null,
+          reroutes: routing.reroutes ?? null,
+        },
+      ]);
+    });
   }
 
   /** Redact secrets from the persisted prompt/system copy (audit log only). */
@@ -799,46 +901,44 @@ export class FlightRecorder {
   }
 
   /**
-   * Read-only query over the requests + gateway_metadata tables. Used by
-   * cache-stats / MCP resources / doctor.
+   * Read-only query over the requests + gateway_metadata tables.
    *
-   * Safety:
-   * - Caller MUST pass parameterised SQL — direct string interpolation of
-   *   untrusted values is unsafe.
-   * - The query runs on a dedicated read-only connection
-   *   (`openReadOnly` → `new DatabaseSync(path, { readOnly: true })`), so any
-   *   statement that mutates rows (INSERT/UPDATE/DELETE, including the
-   *   `RETURNING` forms surfaced via `.all()`) fails at the SQLite engine
-   *   level with SQLITE_READONLY ("attempt to write a readonly database").
-   *   This is the engine-level replacement for the old `stmt.readonly` JS
-   *   guard and blocks the writer-disguised-as-reader vector codex-r1/F3
-   *   flagged, even for internal gateway callers. node:sqlite WAL mode permits
-   *   this reader connection to run alongside the read/write logging
-   *   connection in-process; reads see only committed rows (every
-   *   queryRequests callsite is a post-commit readback/cache path).
+   * INTERNAL to this module and to tests inspecting a fixture database.
+   * `scripts/check-storage-port.mjs` rule 2 fails the build if any other
+   * production module calls it, because a method whose argument is one engine's
+   * dialect is an anti-seam rather than a seam (s2).
+   *
+   * Safety is unchanged by the port: the `transcript_read` class routes to the
+   * driver's dedicated read-only connection (`openReadOnly`), so a statement
+   * that mutates rows fails at the SQLite engine level with SQLITE_READONLY,
+   * and `VACUUM INTO` (which writes a new file despite readOnly) is refused by
+   * the adapter. Callers MUST still pass parameterised SQL.
    */
-  queryRequests<T = Record<string, unknown>>(sql: string, ...params: unknown[]): T[] {
-    // Closed-state guard: without it, a post-close() query would lazily
-    // REOPEN the read-only connection (fd leak, no later close — found in
-    // B-review). Matches the pre-migration semantics where any operation on
-    // a closed better-sqlite3 handle threw.
-    if (this.closed) {
-      throw new Error("flight recorder is closed");
-    }
-    if (!this.readOnlyDb) {
-      this.readOnlyDb = openReadOnly(this.dbPath);
-    }
-    return this.readOnlyDb.prepare(sql).all(...params) as T[];
+  queryRequests<T = Record<string, unknown>>(sql: string, ...params: unknown[]): Promise<T[]> {
+    // Closed-state guard: without it a post-close query would lazily REOPEN the
+    // read-only connection (fd leak, no later close). ensureSchema refuses too;
+    // this one gives the recorder's own message rather than the driver's.
+    if (this.closed) return Promise.reject(new Error("flight recorder is closed"));
+    // `transcript_read` as a literal, deliberately: queryRequests is not one of
+    // the twelve declared operations (see FLIGHT_RECORDER_NON_OPERATIONS), and
+    // arbitrary caller SQL may project body columns, so it takes the widest
+    // read class rather than borrowing a named operation's.
+    return this.track(
+      (async () => {
+        await this.ensureSchema();
+        return this.driver.withConnection("transcript_read", conn => conn.query<T>(sql, params));
+      })()
+    );
   }
 
   // ---- Typed read surface (FlightRecorderQuery) -------------------------
   // s2 of storage-unification: each of these replaced a caller-supplied SQL
   // string. The SQL now lives beside the schema it reads, which is what makes
-  // a second driver implementable. All route through queryRequests, so they
-  // inherit its dedicated read-only connection.
+  // a second driver implementable.
 
-  readCacheRowsBySession(sessionId: string): CacheAggregateRow[] {
-    return this.queryRequests<CacheAggregateRow>(
+  async readCacheRowsBySession(sessionId: string): Promise<CacheAggregateRow[]> {
+    return this.read<CacheAggregateRow>(
+      "readCacheRowsBySession",
       `SELECT cli, model,
               COALESCE(cache_read_tokens, 0) AS cache_read_tokens,
               COALESCE(cache_creation_tokens, 0) AS cache_creation_tokens,
@@ -849,14 +949,15 @@ export class FlightRecorder {
        FROM requests
        WHERE session_id = ?
        ORDER BY datetime_utc DESC`,
-      sessionId
+      [sessionId]
     );
   }
 
-  readCacheRowsByPrefix(stablePrefixHash: string): CacheAggregateRow[] {
+  async readCacheRowsByPrefix(stablePrefixHash: string): Promise<CacheAggregateRow[]> {
     // No cache_control_* columns: the pre-s2 query did not select them, and
     // adding them here would silently change prefix aggregates.
-    return this.queryRequests<CacheAggregateRow>(
+    return this.read<CacheAggregateRow>(
+      "readCacheRowsByPrefix",
       `SELECT cli, model,
               COALESCE(cache_read_tokens, 0) AS cache_read_tokens,
               COALESCE(cache_creation_tokens, 0) AS cache_creation_tokens,
@@ -865,11 +966,11 @@ export class FlightRecorder {
        FROM requests
        WHERE stable_prefix_hash = ?
        ORDER BY datetime_utc ASC`,
-      stablePrefixHash
+      [stablePrefixHash]
     );
   }
 
-  readCacheRowsGlobal(sinceIso?: string): CacheAggregateRow[] {
+  async readCacheRowsGlobal(sinceIso?: string): Promise<CacheAggregateRow[]> {
     const select = `SELECT cli, model,
               COALESCE(cache_read_tokens, 0) AS cache_read_tokens,
               COALESCE(cache_creation_tokens, 0) AS cache_creation_tokens,
@@ -879,12 +980,15 @@ export class FlightRecorder {
               cache_control_ttl_seconds
        FROM requests`;
     return sinceIso
-      ? this.queryRequests<CacheAggregateRow>(`${select} WHERE datetime_utc >= ?`, sinceIso)
-      : this.queryRequests<CacheAggregateRow>(select);
+      ? this.read<CacheAggregateRow>("readCacheRowsGlobal", `${select} WHERE datetime_utc >= ?`, [
+          sinceIso,
+        ])
+      : this.read<CacheAggregateRow>("readCacheRowsGlobal", select);
   }
 
-  readRequestById(correlationId: string): PersistedRequestRow | null {
-    const [row] = this.queryRequests<PersistedRequestRow>(
+  async readRequestById(correlationId: string): Promise<PersistedRequestRow | null> {
+    const [row] = await this.read<PersistedRequestRow>(
+      "readRequestById",
       `SELECT r.id, r.cli, r.model, r.prompt, r.response, r.session_id,
               r.datetime_utc, r.duration_ms, r.input_tokens, r.output_tokens,
               r.cache_read_tokens, r.cache_creation_tokens, r.owner_principal,
@@ -895,12 +999,12 @@ export class FlightRecorder {
        LEFT JOIN gateway_metadata m ON m.request_id = r.id
        WHERE r.id = ?
        LIMIT 1`,
-      correlationId
+      [correlationId]
     );
     return row ?? null;
   }
 
-  listRequestSummaries(filter: RequestSummaryFilter): PersistedRequestSummaryRow[] {
+  async listRequestSummaries(filter: RequestSummaryFilter): Promise<PersistedRequestSummaryRow[]> {
     // The ownership fragment bounds LIMIT to rows the caller may see; the
     // caller still re-checks every row with principalCanAccess, which is the
     // control. See src/request-context.ts.
@@ -921,7 +1025,8 @@ export class FlightRecorder {
       params.push(filter.sessionId);
     }
 
-    return this.queryRequests<PersistedRequestSummaryRow>(
+    return this.read<PersistedRequestSummaryRow>(
+      "listRequestSummaries",
       `SELECT r.id, r.cli, r.model, r.session_id, r.datetime_utc, r.duration_ms,
               r.owner_principal,
               LENGTH(r.prompt) AS prompt_chars,
@@ -932,15 +1037,15 @@ export class FlightRecorder {
        WHERE ${where.join(" AND ")}
        ORDER BY r.datetime_utc DESC
        LIMIT ?`,
-      ...params,
-      filter.limit
+      [...params, filter.limit]
     );
   }
 
-  readLcrPriorRows(): LcrPriorSourceRow[] {
+  async readLcrPriorRows(): Promise<LcrPriorSourceRow[]> {
     // Deliberately does not select r.prompt: the derived_* columns exist so
     // this reader need not bulk-read prompt bodies.
-    return this.queryRequests<LcrPriorSourceRow>(
+    return this.read<LcrPriorSourceRow>(
+      "readLcrPriorRows",
       `SELECT r.cli, r.model, r.derived_prompt_chars, r.derived_content_class,
               r.input_tokens, r.output_tokens,
               r.cache_read_tokens, r.cache_creation_tokens,
@@ -952,8 +1057,9 @@ export class FlightRecorder {
     );
   }
 
-  readRoutingDecisions(limit: number): RoutingDecisionRow[] {
-    return this.queryRequests<RoutingDecisionRow>(
+  async readRoutingDecisions(limit: number): Promise<RoutingDecisionRow[]> {
+    return this.read<RoutingDecisionRow>(
+      "readRoutingDecisions",
       `SELECT r.cli, r.model, r.datetime_utc, r.cost_basis,
               m.route_est_cost_usd, m.route_est_confidence, m.route_reason,
               m.route_considered, m.route_reroutes
@@ -962,55 +1068,74 @@ export class FlightRecorder {
        WHERE m.routed = 1
        ORDER BY r.datetime_utc DESC
        LIMIT ?`,
-      limit
+      [limit]
     );
   }
 
-  flush(): void {
-    // No-op: node:sqlite (DatabaseSync) writes synchronously.
-  }
-
-  close(): void {
+  /**
+   * Drain, then shut the handles.
+   *
+   * MUST BE AWAITED. `performShutdown` did not await it, which was harmless
+   * only while this class was synchronous: the driver's bounded drain runs
+   * inside `driver.close()`, and an unawaited call discards the drain entirely
+   * and then logs a completed close that has not happened.
+   */
+  async close(): Promise<void> {
+    // Refuse NEW work first, so the set below cannot be refilled while it drains.
     this.closed = true;
-    if (this.readOnlyDb) {
-      this.readOnlyDb.close();
-      this.readOnlyDb = null;
+    // Then let what is already running reach the driver's queue. The loop is
+    // for an operation that starts another; none do today, and each is bounded
+    // by the driver's own whole-operation deadline, so this cannot wait forever
+    // on anything the driver would not have waited on anyway.
+    while (this.inFlight.size > 0) {
+      await Promise.allSettled([...this.inFlight]);
     }
-    this.db.close();
+    // Only now: the driver's bounded drain, then the handles.
+    await this.driver.close();
   }
 }
 
-export class NoopFlightRecorder {
-  logStart(_entry: FlightLogStart): void {}
-  logComplete(_correlationId: string, _result: FlightLogResult): void {}
-  recordCompressionTelemetry(_correlationId: string, _telemetry: CompressionTelemetry): void {}
-  recordRouting(_correlationId: string, _routing: RoutingRecord): void {}
-  queryRequests<T = Record<string, unknown>>(_sql: string, ..._params: unknown[]): T[] {
+/**
+ * The recorder-disabled implementation. Async for the same reason the real one
+ * is: a caller must not be able to tell the two apart by whether it has to
+ * await, or the disabled path would take a different code path at every site.
+ */
+export class NoopFlightRecorder implements FlightRecorderOperations {
+  async logStart(_entry: FlightLogStart): Promise<void> {}
+  async logComplete(_correlationId: string, _result: FlightLogResult): Promise<void> {}
+  async recordCompressionTelemetry(
+    _correlationId: string,
+    _telemetry: CompressionTelemetry
+  ): Promise<void> {}
+  async recordRouting(_correlationId: string, _routing: RoutingRecord): Promise<void> {}
+  async queryRequests<T = Record<string, unknown>>(
+    _sql: string,
+    ..._params: unknown[]
+  ): Promise<T[]> {
     return [];
   }
-  readCacheRowsBySession(_sessionId: string): CacheAggregateRow[] {
+  async readCacheRowsBySession(_sessionId: string): Promise<CacheAggregateRow[]> {
     return [];
   }
-  readCacheRowsByPrefix(_stablePrefixHash: string): CacheAggregateRow[] {
+  async readCacheRowsByPrefix(_stablePrefixHash: string): Promise<CacheAggregateRow[]> {
     return [];
   }
-  readCacheRowsGlobal(_sinceIso?: string): CacheAggregateRow[] {
+  async readCacheRowsGlobal(_sinceIso?: string): Promise<CacheAggregateRow[]> {
     return [];
   }
-  readRequestById(_correlationId: string): PersistedRequestRow | null {
+  async readRequestById(_correlationId: string): Promise<PersistedRequestRow | null> {
     return null;
   }
-  listRequestSummaries(_filter: RequestSummaryFilter): PersistedRequestSummaryRow[] {
+  async listRequestSummaries(_filter: RequestSummaryFilter): Promise<PersistedRequestSummaryRow[]> {
     return [];
   }
-  readLcrPriorRows(): LcrPriorSourceRow[] {
+  async readLcrPriorRows(): Promise<LcrPriorSourceRow[]> {
     return [];
   }
-  readRoutingDecisions(_limit: number): RoutingDecisionRow[] {
+  async readRoutingDecisions(_limit: number): Promise<RoutingDecisionRow[]> {
     return [];
   }
-  flush(): void {}
-  close(): void {}
+  async close(): Promise<void> {}
 }
 
 export type FlightRecorderLike = FlightRecorder | NoopFlightRecorder;
@@ -1132,19 +1257,19 @@ export interface RoutingDecisionRow {
  */
 export interface FlightRecorderQuery {
   /** Cache aggregate rows for one gateway session, newest first. */
-  readCacheRowsBySession(sessionId: string): CacheAggregateRow[];
+  readCacheRowsBySession(sessionId: string): Promise<CacheAggregateRow[]>;
   /** Cache aggregate rows sharing one stable prefix hash, oldest first. */
-  readCacheRowsByPrefix(stablePrefixHash: string): CacheAggregateRow[];
+  readCacheRowsByPrefix(stablePrefixHash: string): Promise<CacheAggregateRow[]>;
   /** Cache aggregate rows across all CLIs, optionally bounded below by an ISO timestamp. */
-  readCacheRowsGlobal(sinceIso?: string): CacheAggregateRow[];
+  readCacheRowsGlobal(sinceIso?: string): Promise<CacheAggregateRow[]>;
   /** One persisted request joined to its gateway metadata, or null. */
-  readRequestById(correlationId: string): PersistedRequestRow | null;
+  readRequestById(correlationId: string): Promise<PersistedRequestRow | null>;
   /** Persisted request summaries, newest first, scoped to one principal. */
-  listRequestSummaries(filter: RequestSummaryFilter): PersistedRequestSummaryRow[];
+  listRequestSummaries(filter: RequestSummaryFilter): Promise<PersistedRequestSummaryRow[]>;
   /** Least-cost-routing prior rows, oldest first. Never selects prompt text. */
-  readLcrPriorRows(): LcrPriorSourceRow[];
+  readLcrPriorRows(): Promise<LcrPriorSourceRow[]>;
   /** The most recent routed decisions, newest first. */
-  readRoutingDecisions(limit: number): RoutingDecisionRow[];
+  readRoutingDecisions(limit: number): Promise<RoutingDecisionRow[]>;
 }
 
 /** Filter for `listRequestSummaries`. `ownerPrincipal` is required by design. */
@@ -1157,16 +1282,74 @@ export interface RequestSummaryFilter {
   sessionId?: string;
 }
 
-export function createFlightRecorder(logger: LoggerLike): FlightRecorderLike {
+/**
+ * Which engine the recorder runs on, and why it is not the one `[persistence]`
+ * asked for.
+ *
+ * This is the whole of what s7 can honestly deliver against "the recorder obeys
+ * `[persistence].backend`", and the boundary is operator decision 0a plus
+ * `[non_goals].no_transcript_move_yet` in docs/plans/storage-unification.dag.toml:
+ * transcript BODIES do not enter Postgres until postgres-security-hardening.md
+ * section 6 is complete through step 8, and it is at step 2 of 10. The Postgres
+ * transcript schema does not exist and is NEW AUTHORSHIP rather than a
+ * migration, so a `postgres` backend cannot be honoured by writing one here.
+ *
+ * What changes is that the split is now DECLARED instead of implicit. A
+ * `postgres` host gets `deferredBecause` populated, which
+ * `llm_process_health` reports, rather than a recorder that quietly ignores the
+ * setting.
+ *
+ * `none` is deliberately NOT treated as "disable the recorder". That switch is
+ * `LLM_GATEWAY_LOGS_DB=none` today, and reconciling the two inputs (which one
+ * wins, which one deprecates) is s9's node, not this one. Silently dropping
+ * request history on every `backend = "none"` host would be a data-visible
+ * change smuggled in under a refactor.
+ */
+export interface FlightRecorderEngineDecision {
+  /** The engine the recorder will actually use. Always "sqlite" today. */
+  engine: "sqlite";
+  /** What `[persistence].backend` asked for, when it asked for something else. */
+  requested?: string;
+  /** Populated only when `requested` could not be honoured. */
+  deferredBecause?: string;
+}
+
+export function flightRecorderEngineDecision(
+  backend: string | undefined
+): FlightRecorderEngineDecision {
+  if (backend !== "postgres") return { engine: "sqlite" };
+  return {
+    engine: "sqlite",
+    requested: backend,
+    deferredBecause:
+      "transcript bodies stay on SQLite until postgres-security-hardening.md section 6 is " +
+      "complete through step 8 (currently step 2 of 10). There is no Postgres transcript " +
+      "schema: `requests` and `gateway_metadata` exist only in SQLite, and authoring them " +
+      "would move 1.2 GB of plaintext prompts into a store one superuser role reads in " +
+      "cleartext, which is a regression over a 0600 file.",
+  };
+}
+
+export function createFlightRecorder(
+  logger: LoggerLike,
+  persistenceBackend?: string
+): FlightRecorderLike {
   const dbPath = resolveFlightRecorderDbPath();
   if (!dbPath) {
     logger.info("Flight recorder disabled (LLM_GATEWAY_LOGS_DB=none)");
     return new NoopFlightRecorder();
   }
 
+  const decision = flightRecorderEngineDecision(persistenceBackend);
   try {
-    const recorder = new FlightRecorder(dbPath);
-    logger.info(`Flight recorder enabled at ${dbPath}`);
+    const recorder = new FlightRecorder(dbPath, { logger });
+    logger.info(`Flight recorder enabled at ${dbPath} (engine: ${decision.engine})`);
+    if (decision.deferredBecause) {
+      logger.info(
+        `Flight recorder is NOT following [persistence].backend = "${decision.requested}": ` +
+          decision.deferredBecause
+      );
+    }
     return recorder;
   } catch (error) {
     logger.error("Flight recorder unavailable; continuing without SQLite logging", error);

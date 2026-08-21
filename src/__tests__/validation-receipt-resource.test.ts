@@ -111,7 +111,7 @@ describe("validation-receipt:// MCP resource (Phase 3)", () => {
     } catch {
       /* ignore */
     }
-    flight.close();
+    await flight.close();
     rmSync(tmp, { recursive: true, force: true });
   });
 
@@ -232,7 +232,7 @@ describe("validation_receipt tool (Phase 1-2)", () => {
     } catch {
       /* ignore */
     }
-    flight.close();
+    await flight.close();
     rmSync(tmp, { recursive: true, force: true });
   });
 
