@@ -1301,7 +1301,6 @@ async function op(method: string, args: any[]): Promise<unknown> {
   }
 }
 
-// eslint-disable-next-line @typescript-eslint/no-misused-promises -- worker message handler; an EventEmitter cannot await it. Deleted with this file at C4
 parentPort?.on(
   "message",
   // eslint-disable-next-line @typescript-eslint/no-misused-promises -- worker message handler; an EventEmitter cannot await it. Deleted with this file at C4

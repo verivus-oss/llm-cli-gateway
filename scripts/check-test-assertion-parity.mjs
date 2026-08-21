@@ -147,6 +147,27 @@ function key(a) {
   return `${a.subject}|${a.modifiers.join(".")}|${a.matcher}|${(a.args ?? []).join(",")}`;
 }
 
+/**
+ * Assertions that ALREADY had a bare matcher at the base ref.
+ *
+ * `toThrow()` with no argument reads like a weakened `toThrow(E)` to anyone
+ * comparing against the parity rule, and this checker cannot tell the two apart
+ * from the head alone. It does not need to, because it compares against the
+ * base, but a reader will. So the tool REPORTS them: the exception is carried by
+ * the checker's own output against a named ref, not by a comment asking for
+ * restraint. Anyone tempted to "narrow" one of these can see it was always bare.
+ */
+export function preExistingBareMatchers(baseSource, filename) {
+  return extractAssertions(baseSource, filename)
+    .filter(a => Array.isArray(a.args) && a.args.length === 0)
+    .map(a => ({
+      filename,
+      line: a.line,
+      subject: a.subject,
+      matcher: [...a.modifiers, a.matcher].join("."),
+    }));
+}
+
 export function compareTestFile(baseSource, headSource, filename) {
   const violations = [];
 
@@ -233,12 +254,20 @@ function main() {
     .filter(s => s.endsWith(".test.ts"));
 
   const violations = [];
+  const bare = [];
   for (const path of changed) {
     const baseSource = gitShow(baseRef, path);
     // A NEW test file has no base to weaken, so it is out of scope.
     if (baseSource === null) continue;
     const headSource = gitShow("HEAD", path) ?? "";
     violations.push(...compareTestFile(baseSource, headSource, path));
+    bare.push(...preExistingBareMatchers(baseSource, path));
+  }
+
+  if (bare.length > 0) {
+    console.log(`pre-existing bare matchers at ${baseRef}, NOT weakened by this change:`);
+    for (const b of bare) console.log(`  ${b.filename}:${b.line}  ${b.matcher}() on ${b.subject}`);
+    console.log("");
   }
 
   if (violations.length > 0) {

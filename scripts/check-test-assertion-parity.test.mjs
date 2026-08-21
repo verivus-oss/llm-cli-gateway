@@ -11,6 +11,7 @@ import {
   compareTestFile,
   extractAssertions,
   normaliseSubject,
+  preExistingBareMatchers,
 } from "./check-test-assertion-parity.mjs";
 
 const BASE = `
@@ -109,6 +110,44 @@ describe("ADD-form negative controls", () => {
   it("fires when an assertion is negated with .not", () => {
     const head = PORTED.replace("rejects.toThrow", "rejects.not.toThrow");
     expect(compareTestFile(BASE, head, "t.test.ts")).toHaveLength(1);
+  });
+});
+
+describe("pre-existing bare matchers", () => {
+  const BARE = `
+import { describe, expect, it } from "vitest";
+it("refuses", () => {
+  expect(() => store.recordStart({ id: "a" })).toThrow();
+  expect(() => store.markRunning("a")).toThrow(/nope/);
+});
+`;
+
+  it("reports a matcher that was ALREADY bare at the base ref", () => {
+    // Three real sites exist: job-store-pg.test.ts:1146, job-store.test.ts:156
+    // and validation-run-store.test.ts:298, all bare at 039c006. A reader
+    // comparing head against the parity rule would see an un-narrowed matcher
+    // and "fix" it; this is how the tool says it was always that way.
+    const bare = preExistingBareMatchers(BARE, "t.test.ts");
+    expect(bare).toHaveLength(1);
+    expect(bare[0].subject).toBe('store.recordStart({ id: "a" })');
+    expect(bare[0].matcher).toBe("toThrow");
+  });
+
+  it("does NOT report a matcher that carries an argument", () => {
+    // The control that stops this becoming a blanket amnesty for bare matchers.
+    const bare = preExistingBareMatchers(BARE, "t.test.ts");
+    expect(bare.map(b => b.subject)).not.toContain('store.markRunning("a")');
+  });
+
+  it("still fails a NEWLY narrowed matcher even though bare ones are reported", () => {
+    // ADD-form: narrowing toThrow(/nope/) to toThrow() must remain a violation.
+    // Reporting pre-existing bare matchers must not excuse a new one.
+    const ported = BARE.replace(
+      'expect(() => store.markRunning("a")).toThrow(/nope/);',
+      'await expect(store.markRunning("a")).rejects.toThrow();'
+    );
+    const v = compareTestFile(BARE, ported, "t.test.ts");
+    expect(v.some(x => /outside the allowlist/.test(x))).toBe(true);
   });
 });
 
