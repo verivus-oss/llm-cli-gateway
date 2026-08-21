@@ -73,19 +73,74 @@ export interface StateGroup {
   /** Where it lives today. */
   current: string;
   inPort: boolean;
+  /**
+   * The DAG node that puts this group on the port, or that already did.
+   *
+   * ABSENT ON AN `inPort` GROUP MEANS NOBODY IS CARRYING IT. s3 part 1 wrote
+   * `inPort: true` for all eleven, which reads as a plan; three of them have no
+   * node in `storage-unification.dag.toml` and never had one. That is an open
+   * gap rather than scheduled work, and the suite pins the set so it cannot
+   * grow quietly.
+   */
+  owningNode?: string;
+  /** True once the owning node has landed and the port really does carry it. */
+  carried?: boolean;
   /** Why, when it is not in the port. */
   note?: string;
 }
 
-export const STATE_INVENTORY: readonly StateGroup[] = [
-  { id: "sessions", current: "sessions.json or Postgres", inPort: true },
-  { id: "active_session_pointers", current: "sessions.json or Postgres", inPort: true },
-  { id: "jobs", current: "logs.db or Postgres", inPort: true },
-  { id: "validation_runs", current: "logs.db or Postgres", inPort: true },
-  { id: "validation_receipts", current: "logs.db or Postgres", inPort: true },
-  { id: "kit_persistence", current: "logs.db or Postgres", inPort: true },
-  { id: "requests", current: "logs.db (SQLite only)", inPort: true },
-  { id: "gateway_metadata", current: "logs.db (SQLite only)", inPort: true },
+export const STATE_INVENTORY = [
+  { id: "sessions", current: "sessions.json or Postgres", inPort: true, owningNode: "s8.sessions" },
+  {
+    id: "active_session_pointers",
+    current: "sessions.json or Postgres",
+    inPort: true,
+    owningNode: "s8.sessions",
+  },
+  {
+    id: "jobs",
+    current: "logs.db or Postgres",
+    inPort: true,
+    owningNode: "s5.job-store-first",
+    carried: true,
+  },
+  {
+    id: "validation_runs",
+    current: "logs.db or Postgres",
+    inPort: true,
+    owningNode: "s5.job-store-first",
+    carried: true,
+    note: "Reached the port as part of JobStore, not as a subsystem of its own: `ValidationRunStore` is a capability the durable job stores add, and MemoryJobStore withholding it IS the durability gate.",
+  },
+  {
+    id: "validation_receipts",
+    current: "logs.db or Postgres",
+    inPort: true,
+    owningNode: "s5.job-store-first",
+    carried: true,
+    note: "Same surface as validation_runs; see that entry.",
+  },
+  {
+    id: "kit_persistence",
+    current: "logs.db or Postgres",
+    inPort: true,
+    owningNode: "s5.job-store-first",
+    carried: true,
+  },
+  {
+    id: "requests",
+    current: "logs.db (SQLite only)",
+    inPort: true,
+    owningNode: "s7.flight-recorder-onto-the-port",
+    note: "SQLITE ONLY, by operator decision 0a. There is no Postgres transcript schema and s7 does not author one, so `inPort` here means the recorder starts running through the port's SQLite driver, NOT that this state becomes engine-selectable.",
+  },
+  {
+    id: "gateway_metadata",
+    current: "logs.db (SQLite only)",
+    inPort: true,
+    owningNode: "s7.flight-recorder-onto-the-port",
+    note: "Same decision as `requests`; it is read only through the joins behind readRequestById and readRoutingDecisions.",
+  },
   { id: "approvals", current: "approvals.jsonl, 3.0 MB", inPort: true },
   { id: "admin_audit", current: "admin-audit.jsonl", inPort: true },
   { id: "workspace_registry", current: "file-backed", inPort: true },
@@ -101,4 +156,6 @@ export const STATE_INVENTORY: readonly StateGroup[] = [
     inPort: false,
     note: "Configuration and generated output, not state the gateway accumulates.",
   },
-];
+] as const satisfies readonly StateGroup[];
+
+export type StateGroupId = (typeof STATE_INVENTORY)[number]["id"];
