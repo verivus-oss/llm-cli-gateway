@@ -2,7 +2,7 @@
 # Evidence: docs/evidence/storage-unification-audit-2026-08-21.md (host-local).
 
 [meta]
-surface = "FlightRecorder, JobStore and ISessionManager: 3 interfaces, 42 methods, 2 engines"
+surface = "FlightRecorder, JobStore and ISessionManager: 3 interfaces, 2 engines. RECOUNTED 2026-08-21: 53 members, not the 42 this line carried since before s2 split queryRequests into seven named reads. JobStore 26, ISessionManager 13, FlightRecorder 14. s3sig signs 12 recorder operations and excludes 2 by name, which is where its own figure of 48 comes from; both are above 42 and that is the point."
 status = "2026-08-21. s1, s2, s4 done, s3 part 1 done. b1 measured, awaiting its results review. b1 and s5 DONE and merged. s3sig, s6, s7, s8, s12, s13 are unblocked; s10 held. s3sig, s6, s8 and s12 unblock when s5 lands."
 
 # WHY: `[persistence].backend` selects the job store and nothing else, so one
@@ -59,7 +59,7 @@ critical = true
 status = "part 1 done: classes, roles, seam, inventory. Signatures follow s5."
 depends_on = ["s2.kill-the-raw-sql-read-path"]
 role = "Sync-over-async needs a worker thread; async-over-sync does not. CORRECTION: the design withdrew 'async-over-sync is free', so this is a structural claim and b1 measures the cost."
-action = "Define the storage port over all three subsystems' 42 operations. No PRAGMA, no VACUUM, no SQL string anywhere in the surface."
+action = "Define the storage port over all three subsystems' operations, recounted in [meta].surface. No PRAGMA, no VACUUM, no SQL string anywhere in the surface."
 constraint = "The port is types only until s4 and s5 give it two implementations. Do not land it with one."
 affects = ["s4.two-drivers", "s6.write-ordering"]
 
