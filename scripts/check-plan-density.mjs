@@ -12,7 +12,8 @@
  * past a file's recorded ceiling is the defect, and a deleted file must update
  * the baseline or its ceiling silently returns if the file is ever re-added.
  */
-import { readdirSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync, readFileSync, writeFileSync } from "node:fs";
+import { execFileSync } from "node:child_process";
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -23,12 +24,24 @@ const NEW_FILE_CAP = 150;
 const UPDATE = process.argv.includes("--update");
 
 const lines = f => readFileSync(join(PLANS, f), "utf8").split("\n").length;
-const current = Object.fromEntries(
-  readdirSync(PLANS)
-    .filter(f => f.endsWith(".dag.toml"))
-    .sort()
-    .map(f => [f, lines(f)])
-);
+
+// Tracked files, not a directory listing. A gitignored plan file is visible to
+// readdirSync on the checkout that authored it and to nobody else, so it earned
+// a baseline entry here that failed as GONE in every other worktree and in CI.
+// src/__tests__/skill-packaging.test.ts already learned this; the gate did not.
+const tracked = execFileSync("git", ["ls-files", "docs/plans/*.dag.toml"], {
+  cwd: ROOT,
+  encoding: "utf8",
+})
+  .split("\n")
+  .filter(Boolean)
+  .map(p => p.slice("docs/plans/".length))
+  // Tracked but deleted from the working tree: let it fall through to the GONE
+  // branch below, which says what to do. Reading it here would exit non-zero via
+  // an ENOENT stack trace, which is a gate that fails without diagnosing.
+  .filter(f => existsSync(join(PLANS, f)))
+  .sort();
+const current = Object.fromEntries(tracked.map(f => [f, lines(f)]));
 
 if (UPDATE) {
   writeFileSync(BASELINE, `${JSON.stringify(current, null, 2)}\n`);

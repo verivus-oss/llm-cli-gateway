@@ -11,7 +11,6 @@
   "gateway-passthrough-policy.dag.toml": 172,
   "grok-0.2.33-contract-sync.dag.toml": 247,
   "http-session-async-backpressure-hardening.dag.toml": 484,
-  "hybrid-multi-agent-playbook-evolution.dag.toml": 140,
   "issue-130-backpressure-followup-fixes.dag.toml": 393,
   "issue-139-orphan-recovery.dag.toml": 459,
   "least-cost-routing.dag.toml": 730,
