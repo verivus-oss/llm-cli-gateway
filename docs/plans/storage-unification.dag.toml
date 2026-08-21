@@ -144,3 +144,12 @@ role = "Only `jobs` is bounded today. validation_runs has wedged rows and logs.d
 action = "Express retention once, over every subsystem the port carries."
 constraint = "Retention economics differ per engine: Postgres drops partitions, SQLite needs DELETE plus a VACUUM that takes a long exclusive lock on a 1.2 GB file. One policy, two terminations."
 affects = []
+
+[[node]]
+id = "s12.lint-the-tests"
+critical = true
+depends_on = ["s5.job-store-first"]
+role = "eslint.config.js:8 ignores **/*.test.ts globally, so 290 test files have NEVER been linted. That is pre-existing debt, and this programme fixes debt rather than recording it."
+action = "Lift the ignore, measure honestly, fix what it finds, and keep the suite in npm run check from then on."
+constraint = "The count is UNKNOWN, not zero: a vacuous 0/0 was reported once already and caught only by checking whether one file produced any message at all. Measure before scoping. An un-awaited promise in a test usually fails the test rather than losing data, so severity differs from production and the triage must say which is which."
+affects = []
