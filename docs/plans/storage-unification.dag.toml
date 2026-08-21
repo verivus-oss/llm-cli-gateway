@@ -151,5 +151,5 @@ critical = true
 depends_on = ["s5.job-store-first"]
 role = "eslint.config.js:8 ignores **/*.test.ts globally, so 290 test files have NEVER been linted. That is pre-existing debt, and this programme fixes debt rather than recording it."
 action = "Lift the ignore, measure honestly, fix what it finds, and keep the suite in npm run check from then on."
-constraint = "The count is UNKNOWN, not zero: a vacuous 0/0 was reported once already and caught only by checking whether one file produced any message at all. Measure before scoping. An un-awaited promise in a test usually fails the test rather than losing data, so severity differs from production and the triage must say which is which."
+constraint = "MEASURED at 15c7eee across 281 files: 27 errors, 1 parse error, 1259 warnings, plus 6 no-misused-promises and 11 no-floating-promises PRE-EXISTING. Warnings do not fail the build (production carries 848 and exits 0), so the blocking set is ~44 and an afternoon. The current tree reports 354 floating promises; 343 are s5 test-migration residue, not s12 debt, and scoping from that number would have been wrong by 30x. Triage warnings BY RULE, not by site: a rule inapplicable to tests gets scoped off deliberately and recorded, never suppressed site by site."
 affects = []
