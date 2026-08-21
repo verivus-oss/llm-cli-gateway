@@ -285,6 +285,7 @@ import {
   resolveFlightRecorderDbPath,
   FlightRecorderLike,
 } from "./flight-recorder.js";
+import { FlightOwnership } from "./flight-ownership.js";
 import {
   resolvePromptInput,
   PromptPartsSchema,
@@ -2585,71 +2586,12 @@ class RequestTerminalLedger {
 }
 
 /**
- * Tier-B T3: FlightOwnership.
- *
- * Names the flight-recorder completion-ownership contract for a sync request so
- * the terminal branches stop open-coding "did we hand completion to the manager?".
- * The three modes (spec section 3):
- *  - Mode A (handler-owned inline): the handler writes BOTH flight ends - `start()`
- *    for `logStart`, `completeInline(...)` for `logComplete`.
- *  - Mode B (handler-start / manager-complete): the handler wrote `logStart`, then
- *    at the sync deadline `awaitJobOrDefer` arms the async manager
- *    (`armFlightCompleteForDeferral`, index.ts:1719) and returns a deferral. From
- *    that instant the manager owns `logComplete`, so the handler must NOT inline-
- *    complete. Enforcing that on the exceptional catch path is what fences the
- *    pre-existing H-DoubleComplete hazard (spec section 4): a rejecting
- *    post-handoff `finishHandler()` used to still reach the unconditional inline
- *    `safePersonalKitFlightComplete`, writing a SECOND completion after the manager
- *    was armed to own it.
- *  - Mode C (manager-owned): the pure `*_request_async` path; these sync handlers
- *    never construct a Mode C FlightOwnership.
- *
- * The two sync Kit-sibling handlers (claude, codex-sync) begin in Mode A and
- * transition to Mode B the instant they observe a deferral (`isDeferredResponse`),
- * signalled by `transferCompletionToManager()`. `completeInline()` is the single
- * gate: a no-op once completion belongs to the manager, so the handler can never
- * double-complete a flight the manager was armed to finish.
- *
- * Generic machinery (spec section 5): the actual `logStart` / `logComplete` writes
- * carry Kit redaction and per-provider metadata, so they are injected as closures;
- * this unit owns only WHO completes the flight, never WHAT is written.
+ * Tier-B T3 FlightOwnership now lives in src/flight-ownership.ts, with its two
+ * `() => void` slots converted to the port's FlightStartSink/FlightCompleteSink
+ * (s6). The three modes and the H-DoubleComplete fence are documented there;
+ * what changed here is that `start()` and `completeInline()` return promises,
+ * and every terminal branch awaits them.
  */
-class FlightOwnership {
-  private started = false;
-  private managerOwnsCompletion = false;
-  private readonly startFn: () => void;
-  private readonly completeFn: (result: Parameters<FlightRecorderLike["logComplete"]>[1]) => void;
-
-  constructor(
-    startFn: () => void,
-    completeFn: (result: Parameters<FlightRecorderLike["logComplete"]>[1]) => void
-  ) {
-    this.startFn = startFn;
-    this.completeFn = completeFn;
-  }
-
-  /** Write the flight `logStart` (Mode A/B, handler-start). Idempotent. */
-  start(): void {
-    if (this.started) return;
-    this.startFn();
-    this.started = true;
-  }
-
-  /** Mode A -> B transition: the sync deadline handed `logComplete` to the async
-   *  manager (armed in `awaitJobOrDefer`), so every subsequent inline completion -
-   *  including on the exceptional catch path - becomes a no-op. This is the
-   *  H-DoubleComplete fence (spec section 4). */
-  transferCompletionToManager(): void {
-    this.managerOwnsCompletion = true;
-  }
-
-  /** Write an inline `logComplete` (Mode A). A no-op once the manager owns
-   *  completion (Mode B/C). */
-  completeInline(result: Parameters<FlightRecorderLike["logComplete"]>[1]): void {
-    if (this.managerOwnsCompletion) return;
-    this.completeFn(result);
-  }
-}
 
 /**
  * Tier-B T4: the terminal-envelope driver.
@@ -2811,7 +2753,7 @@ interface KitTerminalHooks<TFacts = undefined> {
     stdout: string;
     durationMs: number;
     facts: TFacts;
-  }): ExtendedToolResponse;
+  }): Promise<ExtendedToolResponse> | ExtendedToolResponse;
 }
 
 async function runKitTerminalEnvelope<TFacts>(
@@ -2868,7 +2810,7 @@ async function runKitTerminalEnvelope<TFacts>(
         await hooks.finalizeKit({ completed: false, stdout, result });
       }
       logger.info(`[${corrId}] ${provider}_request failed in ${durationMs}ms`);
-      flight.completeInline({
+      await flight.completeInline({
         ...terminalFailure,
         durationMs,
         retryCount: 0,
@@ -2899,7 +2841,7 @@ async function runKitTerminalEnvelope<TFacts>(
     if (kit && kitSession && !result.jobId) {
       await hooks.finalizeKit({ completed: true, stdout, result });
     }
-    return hooks.buildSuccessResponse({ worktreeResolution, stdout, durationMs, facts });
+    return await hooks.buildSuccessResponse({ worktreeResolution, stdout, durationMs, facts });
   } catch (error) {
     await ledger.rollbackOnException(kitSession, env.exceptionRollbackManager);
     await ledger.cleanupOnException(
@@ -2913,7 +2855,7 @@ async function runKitTerminalEnvelope<TFacts>(
     // A no-op once the request deferred (Mode B): the manager owns completion,
     // so a rejecting post-handoff finishHandler() reaching here no longer writes
     // a second flight completion (H-DoubleComplete fence, T3).
-    flight.completeInline({
+    await flight.completeInline({
       response: "",
       durationMs: elapsedMs,
       retryCount: 0,
@@ -4218,24 +4160,30 @@ function personalKitFlightRecorderEntry(
   };
 }
 
-function safeFlightStart(
+/**
+ * s6: the two flight sinks are `FlightStartSink` / `FlightCompleteSink`, so
+ * they return promises and the `await` is INSIDE the try. Without that await
+ * the catch stops firing the moment s7 makes the recorder reject rather than
+ * throw, which is the dead-catch class this programme has already shipped once.
+ */
+async function safeFlightStart(
   entry: Parameters<FlightRecorderLike["logStart"]>[0],
   runtime: GatewayServerRuntime = resolveGatewayServerRuntime()
-): void {
+): Promise<void> {
   try {
-    runtime.flightRecorder.logStart(entry);
+    await runtime.flightRecorder.logStart(entry);
   } catch (error) {
     runtime.logger.error("Flight recorder logStart failed", error);
   }
 }
 
-function safeFlightComplete(
+async function safeFlightComplete(
   correlationId: string,
   result: Parameters<FlightRecorderLike["logComplete"]>[1],
   runtime: GatewayServerRuntime = resolveGatewayServerRuntime()
-): void {
+): Promise<void> {
   try {
-    runtime.flightRecorder.logComplete(correlationId, result);
+    await runtime.flightRecorder.logComplete(correlationId, result);
   } catch (error) {
     runtime.logger.error("Flight recorder logComplete failed", error);
   }
@@ -4276,17 +4224,17 @@ const PERSONAL_KIT_FLIGHT_OUTPUT_WITHHELD =
 const PERSONAL_KIT_FLIGHT_FAILURE_WITHHELD =
   "Personal Agent Config Kit provider execution failed; detailed output is withheld";
 
-function safePersonalKitFlightComplete(
+async function safePersonalKitFlightComplete(
   correlationId: string,
   result: Parameters<FlightRecorderLike["logComplete"]>[1],
   kit: PersonalKitRequestContext | null,
   runtime: GatewayServerRuntime
-): void {
+): Promise<void> {
   if (!kit) {
-    safeFlightComplete(correlationId, result, runtime);
+    await safeFlightComplete(correlationId, result, runtime);
     return;
   }
-  safeFlightComplete(
+  await safeFlightComplete(
     correlationId,
     {
       response: PERSONAL_KIT_FLIGHT_OUTPUT_WITHHELD,
@@ -9628,7 +9576,7 @@ export async function handleGrokApiRequest(
     );
   }
 
-  safeFlightStart(
+  await safeFlightStart(
     {
       correlationId: corrId,
       cli: "grok-api",
@@ -9703,7 +9651,7 @@ export async function handleGrokApiRequest(
     });
     await runtime.sessionManager.updateSessionUsage(sessionId);
 
-    safeFlightComplete(
+    await safeFlightComplete(
       corrId,
       {
         response: result.text,
@@ -9732,7 +9680,7 @@ export async function handleGrokApiRequest(
     durationMs = Math.max(0, Date.now() - startTime);
     const err = error as Error;
     runtime.logger.error(`[${corrId}] grok_api_request failed`, err.message);
-    safeFlightComplete(
+    await safeFlightComplete(
       corrId,
       {
         response: extractApiErrorBody(error) ?? "",
@@ -10020,7 +9968,7 @@ export async function handleApiProviderRequest(
       stablePrefixHash: resolved.stablePrefixHash ?? undefined,
       stablePrefixTokens: resolved.stablePrefixTokens ?? undefined,
     };
-    safeFlightStart(
+    await safeFlightStart(
       {
         correlationId: corrId,
         cli: providerRuntime.name,
@@ -10084,7 +10032,7 @@ export async function handleApiProviderRequest(
 
     const durationMs = Math.max(0, Date.now() - startTime);
     if (result.code !== 0) {
-      safeFlightComplete(
+      await safeFlightComplete(
         corrId,
         {
           response: result.errorBody ?? "",
@@ -10119,7 +10067,7 @@ export async function handleApiProviderRequest(
       logOptimizationTokens("response", corrId, text, optimized);
       text = optimized;
     }
-    safeFlightComplete(
+    await safeFlightComplete(
       corrId,
       {
         response: text,
@@ -11013,7 +10961,7 @@ export async function handleClaudeRequest(
       // State 8 (flight start): after session resolution so the flight row reads
       // the prior session's lastWriteAt, not the row about to be written (spec
       // section 8).
-      flight.start();
+      await flight.start();
       logger.info(
         `[${corrId}] claude_request invoked with model=${prep.resolvedModel || "default"}, outputFormat=${outputFormat}, prompt length=${prep.effectivePrompt.length}, sessionId=${effectiveSessionId}, cacheControlBlocks=${prep.cacheControlBlocks ?? 0}`
       );
@@ -11130,7 +11078,7 @@ export async function handleClaudeRequest(
       }
       return errResp;
     },
-    buildSuccessResponse: ({ worktreeResolution, stdout, durationMs }) => {
+    buildSuccessResponse: async ({ worktreeResolution, stdout, durationMs }) => {
       // Parse stream-json NDJSON output to extract result text
       if (outputFormat === "stream-json") {
         const parsed = parseStreamJson(stdout);
@@ -11152,7 +11100,7 @@ export async function handleClaudeRequest(
             costUsd: parsed.costUsd ?? undefined,
           }
         );
-        flight.completeInline({
+        await flight.completeInline({
           response: parsed.text,
           inputTokens: parsed.usage?.inputTokens,
           outputTokens: parsed.usage?.outputTokens,
@@ -11196,7 +11144,7 @@ export async function handleClaudeRequest(
       // Phase 7: non-stream claude (json/text). parseStreamJson also scans a
       // single json result object; plain text yields no fields (capability fact).
       const claudeMeta = extractProviderOutputMetadata("claude", stdout, outputFormat);
-      flight.completeInline({
+      await flight.completeInline({
         response: stdout,
         durationMs,
         retryCount: 0,
@@ -11629,7 +11577,7 @@ export async function handleCodexRequest(
       ),
     metadata => safePersonalKitFlightComplete(corrId, metadata, kit, runtime)
   );
-  flight.start();
+  await flight.start();
   logger.info(
     `[${corrId}] codex_request invoked with model=${prep.resolvedModel || "default"}, fullAuto=${fullAuto}, prompt length=${prep.effectivePrompt.length}`
   );
@@ -11789,7 +11737,7 @@ export async function handleCodexRequest(
         result
       );
     },
-    buildSuccessResponse: ({ worktreeResolution, stdout, durationMs, facts }) => {
+    buildSuccessResponse: async ({ worktreeResolution, stdout, durationMs, facts }) => {
       // #44: usage is parsed from the raw JSONL `stdout`, but the FR response
       // column stores the reconstructed reply (== text-mode stdout) so
       // read-back surfaces (llm_request_result, cache-stats) get plain text,
@@ -11797,7 +11745,7 @@ export async function handleCodexRequest(
       // This is the sync-in-time / deferral-disabled writer; the deferred and
       // pure-async writer is AsyncJobManager.logComplete; both use the same
       // codexFrResponse() helper so the persisted value agrees byte-for-byte.
-      flight.completeInline({
+      await flight.completeInline({
         response: codexFrResponse(effectiveOutputFormat, stdout),
         durationMs,
         retryCount: 0,
@@ -12040,7 +11988,7 @@ export async function handleGeminiRequest(
       ledger.installWorktree(
         createRequestOwnedWorktreeLifecycle(worktreeResolution, runtime, true)
       );
-      flight.start();
+      await flight.start();
       deps.logger.info(
         `[${corrId}] gemini_request invoked with model=${prep.resolvedModel || "default"}, approvalMode=${params.approvalMode}, prompt length=${prep.effectivePrompt.length}`
       );
@@ -12110,7 +12058,7 @@ export async function handleGeminiRequest(
         },
         result
       ),
-    buildSuccessResponse: ({ worktreeResolution, stdout, durationMs, facts }) => {
+    buildSuccessResponse: async ({ worktreeResolution, stdout, durationMs, facts }) => {
       const response = buildCliResponse(
         "gemini",
         stdout,
@@ -12131,7 +12079,7 @@ export async function handleGeminiRequest(
           first.text = formatWorktreePrefix(worktreeResolution.worktreePath) + first.text;
         }
       }
-      flight.completeInline({
+      await flight.completeInline({
         response: stdout,
         durationMs,
         retryCount: 0,
@@ -12779,7 +12727,7 @@ export async function handleGrokRequest(
       ledger.installWorktree(
         createRequestOwnedWorktreeLifecycle(worktreeResolution, runtime, true)
       );
-      flight.start();
+      await flight.start();
       deps.logger.info(
         `[${corrId}] grok_request invoked with model=${prep.resolvedModel || "default"}, permissionMode=${params.permissionMode}, prompt length=${prep.effectivePrompt.length}`
       );
@@ -12846,7 +12794,7 @@ export async function handleGrokRequest(
         },
         result
       ),
-    buildSuccessResponse: ({ worktreeResolution, stdout, durationMs, facts }) => {
+    buildSuccessResponse: async ({ worktreeResolution, stdout, durationMs, facts }) => {
       const response = buildCliResponse(
         "grok",
         stdout,
@@ -12867,7 +12815,7 @@ export async function handleGrokRequest(
           first.text = formatWorktreePrefix(worktreeResolution.worktreePath) + first.text;
         }
       }
-      flight.completeInline({
+      await flight.completeInline({
         response: stdout,
         durationMs,
         retryCount: 0,
@@ -13553,7 +13501,7 @@ export async function handleDevinRequest(
       ledger.installWorktree(
         createRequestOwnedWorktreeLifecycle(worktreeResolution, runtime, true)
       );
-      flight.start();
+      await flight.start();
       return { ok: true, value: { worktreeResolution } };
     },
     execute: async worktreeResolution => {
@@ -13618,7 +13566,7 @@ export async function handleDevinRequest(
         },
         result
       ),
-    buildSuccessResponse: ({ stdout, durationMs }) => {
+    buildSuccessResponse: async ({ stdout, durationMs }) => {
       const response = buildCliResponse(
         "devin",
         stdout,
@@ -13633,7 +13581,7 @@ export async function handleDevinRequest(
         effectiveCompress
       );
       safeRecordCompression(corrId, response.compression, runtime);
-      flight.completeInline({
+      await flight.completeInline({
         response: stdout,
         durationMs,
         retryCount: 0,
@@ -14350,7 +14298,7 @@ export async function handleCursorRequest(
           };
         }
       }
-      flight.start();
+      await flight.start();
       return { ok: true, value: { worktreeResolution } };
     },
     execute: async worktreeResolution => {
@@ -14408,7 +14356,7 @@ export async function handleCursorRequest(
         },
         result
       ),
-    buildSuccessResponse: ({ stdout, durationMs }) => {
+    buildSuccessResponse: async ({ stdout, durationMs }) => {
       const response = buildCliResponse(
         "cursor",
         stdout,
@@ -14423,7 +14371,7 @@ export async function handleCursorRequest(
         effectiveCompress
       );
       safeRecordCompression(corrId, response.compression, runtime);
-      flight.completeInline({
+      await flight.completeInline({
         response: stdout,
         durationMs,
         retryCount: 0,
@@ -15039,7 +14987,7 @@ export async function handleMistralRequest(
         assertFinalCliProcessAdmission("vibe", args, "mistral", kitEnvFragment!);
         // Fail closed if the compiled context drifted from what the plan admitted.
         assertMistralKitContextPrefix(isolation, kitPrefix!);
-        flight.start();
+        await flight.start();
         deps.logger.info(
           `[${corrId}] mistral_request (Kit) invoked with model=${prep.resolvedModel || "default"}, agent=${resolveMistralKitAgentMode()}, prompt length=${prep.effectivePrompt.length}`
         );
@@ -15126,7 +15074,7 @@ export async function handleMistralRequest(
       ledger.installWorktree(
         createRequestOwnedWorktreeLifecycle(worktreeResolution, runtime, true)
       );
-      flight.start();
+      await flight.start();
       deps.logger.info(
         `[${corrId}] mistral_request invoked with model=${prep.resolvedModel || "default"}, permissionMode=${resolveMistralAgentMode(params.approvalStrategy, params.permissionMode)}, prompt length=${prep.effectivePrompt.length}`
       );
@@ -15292,7 +15240,7 @@ export async function handleMistralRequest(
         },
         result
       ),
-    buildSuccessResponse: ({ worktreeResolution, stdout, durationMs }) => {
+    buildSuccessResponse: async ({ worktreeResolution, stdout, durationMs }) => {
       const response = buildCliResponse(
         "mistral",
         stdout,
@@ -15313,7 +15261,7 @@ export async function handleMistralRequest(
           first.text = formatWorktreePrefix(worktreeResolution.worktreePath) + first.text;
         }
       }
-      flight.completeInline({
+      await flight.completeInline({
         response: stdout,
         durationMs,
         retryCount: 0,
@@ -16127,7 +16075,7 @@ async function dispatchRoutedCli(
   const cliEnv = routedCliEnv(cli, prep);
   let cleanupHandedOff = false;
 
-  safeFlightStart(
+  await safeFlightStart(
     {
       correlationId: corrId,
       cli,
@@ -16198,7 +16146,7 @@ async function dispatchRoutedCli(
 
     if (code !== 0) {
       const terminalFailure = buildTerminalCliFailure(cli, stdout, stderr, code, outputFormat);
-      safeFlightComplete(
+      await safeFlightComplete(
         corrId,
         {
           ...terminalFailure,
@@ -16248,7 +16196,7 @@ async function dispatchRoutedCli(
       prep.resolvedModel || "default",
       usage
     );
-    safeFlightComplete(
+    await safeFlightComplete(
       corrId,
       {
         response: cli === "codex" ? codexFrResponse(outputFormat, stdout) : responseText,
@@ -16287,7 +16235,7 @@ async function dispatchRoutedCli(
   } catch (error) {
     if (!cleanupHandedOff) prepCleanup?.();
     const elapsedMs = Math.max(0, Date.now() - startTime);
-    safeFlightComplete(
+    await safeFlightComplete(
       corrId,
       {
         response: "",
