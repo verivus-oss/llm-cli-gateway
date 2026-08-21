@@ -1408,6 +1408,11 @@ export class FileSessionManager
         return false;
       }
       if (session.cli !== cli) return false;
+      // Same rule as deleteSession: the caller's ownership is re-decided in the
+      // lock hold that writes the pointer, not in the handler an await earlier.
+      if (!principalCanAccess(session.ownerPrincipal, resolveOwnerPrincipal(getRequestContext()))) {
+        return false;
+      }
     }
 
     this.storage.activeSession[cli] = sessionId;

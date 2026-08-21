@@ -1118,22 +1118,36 @@ export class PostgreSQLSessionManager
    * PostgreSQL and the session FK keeps stale IDs from being recorded.
    */
   async setActiveSession(cli: ProviderType, sessionId: string | null): Promise<boolean> {
-    if (sessionId !== null) {
-      const session = await this.getSession(sessionId);
-      if (!session || session.cli !== cli) {
-        return false;
-      }
+    await this.ensureSessionSchema();
+    const now = new Date().toISOString();
+    if (sessionId === null) {
+      await this.execute(
+        `INSERT INTO active_sessions (cli, session_id, updated_at)
+         VALUES ($1, NULL, $2)
+         ON CONFLICT (cli) DO UPDATE SET session_id = NULL, updated_at = $2`,
+        [cli, now]
+      );
+      return true;
     }
 
-    const now = new Date().toISOString();
-    await this.execute(
+    // The target's provider and OWNER are selected by the same statement that
+    // writes the pointer. Read-then-write let a row deleted and re-created
+    // under another principal in the gap inherit this caller's decision.
+    const scope = principalScopeSql(
+      "s.owner_principal",
+      resolveOwnerPrincipal(getRequestContext())
+    );
+    const rowsAffected = await this.execute(
       `INSERT INTO active_sessions (cli, session_id, updated_at)
-       VALUES ($1, $2, $3)
-       ON CONFLICT (cli) DO UPDATE SET session_id = $2, updated_at = $3`,
-      [cli, sessionId, now]
+       SELECT ?, s.id, ?
+         FROM sessions s
+        WHERE s.id = ? AND s.cli = ? AND ${scope.sql}
+       ON CONFLICT (cli) DO UPDATE
+          SET session_id = EXCLUDED.session_id, updated_at = EXCLUDED.updated_at`,
+      [cli, now, sessionId, cli, ...scope.params]
     );
 
-    return true;
+    return rowsAffected !== 0;
   }
 
   /**

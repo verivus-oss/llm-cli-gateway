@@ -139,6 +139,60 @@ describe("session_delete owner fence", () => {
     expect(storedRow(alice.id)?.ownerPrincipal).toBe("alice");
   });
 
+  it("does not point the active pointer at a row taken over during the request", async () => {
+    const alice = await runWithRequestContext(ctx("alice"), () =>
+      sessions.createSession("claude", "alice one")
+    );
+    const keep = await runWithRequestContext(ctx("alice"), () =>
+      sessions.createSession("claude", "alice two")
+    );
+    // Park the pointer somewhere alice owns, so a create in the window cannot
+    // claim an empty pointer and hide what the handler did.
+    await runWithRequestContext(ctx("alice"), () => sessions.setActiveSession("claude", keep.id));
+
+    let release!: () => void;
+    let arrived!: () => void;
+    const gate = new Promise<void>(resolve => (release = resolve));
+    const reached = new Promise<void>(resolve => (arrived = resolve));
+    const realGetSession = sessions.getSession.bind(sessions);
+    let held = false;
+    (sessions as unknown as Record<string, unknown>).getSession = async (id: string) => {
+      const found = realGetSession(id);
+      if (!held && id === alice.id) {
+        held = true;
+        arrived();
+        await gate;
+      }
+      return found;
+    };
+
+    const activating = call("session_set_active", { cli: "claude", sessionId: alice.id }, "alice");
+    await reached;
+
+    await runWithRequestContext(ctx("alice"), () => sessions.deleteSession(alice.id));
+    await runWithRequestContext(ctx("bob"), () =>
+      sessions.createSession("claude", "bob session", alice.id)
+    );
+
+    release();
+    await activating;
+
+    (sessions as unknown as Record<string, unknown>).getSession = realGetSession;
+    const active = JSON.parse(readFileSync(storePath, "utf8")).activeSession.claude;
+    // THE ASSERTION: the pointer was not aimed at bob's row by alice's request.
+    expect(active).toBe(keep.id);
+  });
+
+  it("refuses to point the active pointer at a foreign-owned session", async () => {
+    const alice = await runWithRequestContext(ctx("alice"), () =>
+      sessions.createSession("claude", "alice session")
+    );
+
+    expect(
+      await runWithRequestContext(ctx("bob"), () => sessions.setActiveSession("claude", alice.id))
+    ).toBe(false);
+  });
+
   it("still evicts an expired row for whichever principal touches the store", async () => {
     const short = new FileSessionManager(join(tmp, "short.json"), 1);
     const alice = await runWithRequestContext(ctx("alice"), () =>

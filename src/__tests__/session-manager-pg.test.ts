@@ -251,6 +251,28 @@ describe("PostgreSQLSessionManager", () => {
       expect(merged).toEqual([true, true]);
     });
 
+    it("selects the active pointer's target by owner in the same statement", async () => {
+      const alice = await runWithRequestContext(
+        { transport: "http", authScopes: [], authPrincipal: "alice" },
+        () => manager.createSession("claude", "alice session")
+      );
+      const bobOwn = await runWithRequestContext(
+        { transport: "http", authScopes: [], authPrincipal: "bob" },
+        () => manager.createSession("claude", "bob session")
+      );
+      await runWithRequestContext({ transport: "http", authScopes: [], authPrincipal: "bob" }, () =>
+        manager.setActiveSession("claude", bobOwn.id)
+      );
+
+      const pointed = await runWithRequestContext(
+        { transport: "http", authScopes: [], authPrincipal: "bob" },
+        () => manager.setActiveSession("claude", alice.id)
+      );
+
+      expect(pointed).toBe(false);
+      expect((await manager.getActiveSession("claude"))?.id).toBe(bobOwn.id);
+    });
+
     it("carries the owner into the DELETE, not only into the caller's decision", async () => {
       const alice = await runWithRequestContext(
         { transport: "http", authScopes: [], authPrincipal: "alice" },
