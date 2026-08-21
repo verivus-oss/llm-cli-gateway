@@ -16,7 +16,7 @@ scope_0a = "Option A. b1, s3sig, s5, s6, s8, s9, s11 in full; s7 stops with the 
 retirement_0b = "Superseded state is proposed per file and may be moved to a quarantine directory so it stops looking live. Nothing is deleted by this run."
 
 [facts]
-driver_internal = "PRAGMA x12 and VACUUM x2 must be UNREACHABLE from the port, not translated"
+write_visibility = "THREE defects, one class, found by three different methods: the recordOutput swallow, close() without a drain, and output-flush overlap. Each is a write that returns successfully and does not land, and none was caught by a green suite. EVERY node that moves a write path must answer: after this returns, what row exists, and what test fails if it does not?"
 schema_gap = "`requests` and `gateway_metadata` exist ONLY in SQLite. The Postgres transcript schema is new authorship, not a migration."
 the_choke_point = "every inline flight write funnels through ONE sync class, FlightOwnership at index.ts:2587, whose started/managerOwnsCompletion flags are idempotence fences"
 
