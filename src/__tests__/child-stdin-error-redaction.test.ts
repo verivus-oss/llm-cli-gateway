@@ -271,8 +271,18 @@ describe("child stdin native-error redaction", () => {
       const result = manager.getJobResult(started.snapshot.id);
       const durable = store.getById(started.snapshot.id);
       expect(await snapshot).toMatchObject({ status: "failed", exitCode: 42, error: null });
-      expect(await result).toMatchObject({ status: "failed", exitCode: 42, error: null, stderr: "" });
-      expect(await durable).toMatchObject({ status: "failed", exitCode: 42, error: null, stderr: "" });
+      expect(await result).toMatchObject({
+        status: "failed",
+        exitCode: 42,
+        error: null,
+        stderr: "",
+      });
+      expect(await durable).toMatchObject({
+        status: "failed",
+        exitCode: 42,
+        error: null,
+        stderr: "",
+      });
 
       const allSurfaces = inspect(
         { snapshot, result, durable, logs: logger.entries },
@@ -362,7 +372,10 @@ describe("child stdin native-error redaction", () => {
         exitCode: 125,
         error: "Process killed after 100ms of inactivity",
       });
-      expect(await store.getById(idle.snapshot.id)).toMatchObject({ status: "failed", exitCode: 125 });
+      expect(await store.getById(idle.snapshot.id)).toMatchObject({
+        status: "failed",
+        exitCode: 125,
+      });
 
       const canceled = await manager.startJobWithDedup(
         process.execPath as LlmCli,

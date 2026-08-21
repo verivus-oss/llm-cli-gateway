@@ -405,7 +405,9 @@ describe("review judge API-upload policy", () => {
         },
       });
       expect(storedRun.providerLinks).toHaveLength(1);
-      expect(await store.getValidationRunIdByJobId(storedRun.providerLinks[0].jobId)).toBe(validationId);
+      expect(await store.getValidationRunIdByJobId(storedRun.providerLinks[0].jobId)).toBe(
+        validationId
+      );
 
       const judgeInput = {
         question: "Judge the completed review",

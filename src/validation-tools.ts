@@ -315,62 +315,53 @@ async function bindReviewSynthesisInput(
       return { ok: false, error: "A durable review provider result is missing" };
     }
     if (
-      (result).id !== link.jobId ||
-      (result).cli !== link.provider ||
-      (result).correlationId !== link.correlationId
+      result.id !== link.jobId ||
+      result.cli !== link.provider ||
+      result.correlationId !== link.correlationId
     ) {
       return { ok: false, error: "A durable review provider result is mismatched" };
     }
-    if ((result).status === "queued" || (result).status === "running") {
+    if (result.status === "queued" || result.status === "running") {
       return { ok: false, error: "Every durable review provider result must be terminal" };
     }
     if (
-      (result).outputTruncated ||
-      (result).stdoutTruncated ||
-      (result).stderrTruncated ||
-      (result).stdoutOffsetChars !== 0 ||
-      (result).stderrOffsetChars !== 0 ||
-      (result).stdoutNextOffsetChars !== null ||
-      (result).stderrNextOffsetChars !== null ||
-      (result).stdoutTotalChars !== (result).stdout.length ||
-      (result).stderrTotalChars !== (result).stderr.length
+      result.outputTruncated ||
+      result.stdoutTruncated ||
+      result.stderrTruncated ||
+      result.stdoutOffsetChars !== 0 ||
+      result.stderrOffsetChars !== 0 ||
+      result.stdoutNextOffsetChars !== null ||
+      result.stderrNextOffsetChars !== null ||
+      result.stdoutTotalChars !== result.stdout.length ||
+      result.stderrTotalChars !== result.stderr.length
     ) {
       return {
         ok: false,
         error: "A durable review provider output is truncated or paging is incomplete",
       };
     }
-    const stdoutByteLength = Buffer.byteLength((result).stdout, "utf8");
-    const stderrByteLength = Buffer.byteLength((result).stderr, "utf8");
-    if (
-      (result).stdoutBytes !== stdoutByteLength ||
-      (result).stderrBytes !== stderrByteLength
-    ) {
+    const stdoutByteLength = Buffer.byteLength(result.stdout, "utf8");
+    const stderrByteLength = Buffer.byteLength(result.stderr, "utf8");
+    if (result.stdoutBytes !== stdoutByteLength || result.stderrBytes !== stderrByteLength) {
       return {
         ok: false,
         error: "A durable review provider output byte identity is inconsistent",
       };
     }
-    const stdoutSha256 = createHash("sha256")
-      .update((result).stdout)
-      .digest("hex");
-    const stderrSha256 = createHash("sha256")
-      .update((result).stderr)
-      .digest("hex");
+    const stdoutSha256 = createHash("sha256").update(result.stdout).digest("hex");
+    const stderrSha256 = createHash("sha256").update(result.stderr).digest("hex");
     reviewEvidence.push({
       schemaVersion: "review-judge-evidence.v1",
       provider: link.provider,
       jobId: link.jobId,
       correlationId: link.correlationId,
-      status: (result).status,
-      exitCode: (result).exitCode,
-      error: (result).error,
-      stdout: { text: (result).stdout, byteLength: stdoutByteLength, sha256: stdoutSha256 },
-      stderr: { text: (result).stderr, byteLength: stderrByteLength, sha256: stderrSha256 },
+      status: result.status,
+      exitCode: result.exitCode,
+      error: result.error,
+      stdout: { text: result.stdout, byteLength: stdoutByteLength, sha256: stdoutSha256 },
+      stderr: { text: result.stderr, byteLength: stderrByteLength, sha256: stderrSha256 },
     });
-    providerResults.push(
-      normalizeJobResult(link.provider, (result).model ?? null, result)
-    );
+    providerResults.push(normalizeJobResult(link.provider, result.model ?? null, result));
   }
 
   return {

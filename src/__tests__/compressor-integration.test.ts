@@ -200,7 +200,12 @@ describe("byte-recovery escape hatch (spec 5.3 / 9.10)", () => {
 });
 
 describe("async llm_job_result wiring (spec 5.2 / 5.4 / 9.9)", () => {
-  async function seed(store: MemoryJobStore, id: string, compress: boolean, ndjson: string): Promise<void> {
+  async function seed(
+    store: MemoryJobStore,
+    id: string,
+    compress: boolean,
+    ndjson: string
+  ): Promise<void> {
     const now = new Date().toISOString();
     await store.recordStart({
       id,

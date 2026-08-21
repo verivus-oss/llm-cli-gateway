@@ -21854,8 +21854,8 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
 
         const deadline = Date.now() + waitMs;
         while (
-          (job).progress.events.length === 0 &&
-          ((job).status === "queued" || (job).status === "running") &&
+          job.progress.events.length === 0 &&
+          (job.status === "queued" || job.status === "running") &&
           Date.now() < deadline &&
           !extra.signal.aborted
         ) {
@@ -21892,7 +21892,7 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
 
         const progressToken = extra._meta?.progressToken;
         if (progressToken !== undefined) {
-          for (const event of (job).progress.events) {
+          for (const event of job.progress.events) {
             if (extra.signal.aborted) break;
             await extra.sendNotification({
               method: "notifications/progress",

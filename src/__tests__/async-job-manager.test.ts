@@ -236,7 +236,7 @@ describe("AsyncJobManager", () => {
       // Signal-killed processes have code=null, so exitCode stays null for
       // canceled jobs. Use the exited flag instead.
       await waitFor(async () => {
-        const s = await manager.getJobSnapshot((job).id);
+        const s = await manager.getJobSnapshot(job.id);
         return s !== null && s.exited === true;
       }, 10000);
 
@@ -344,7 +344,7 @@ describe("AsyncJobManager", () => {
 
       // Wait for process exit
       await waitFor(async () => {
-        const s = await manager.getJobSnapshot((job).id);
+        const s = await manager.getJobSnapshot(job.id);
         return s !== null && s.exited === true;
       }, 10000);
 

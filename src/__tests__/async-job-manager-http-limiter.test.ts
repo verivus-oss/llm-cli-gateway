@@ -85,7 +85,7 @@ describe("AsyncJobManager HTTP limiter (issue #130)", () => {
     releaseFirst(result("first-done"));
     await vi.waitFor(async () => {
       expect(runApiRequestMock).toHaveBeenCalledTimes(2);
-      expect((await manager.getJobSnapshot((b).snapshot.id)!).status).toBe("completed");
+      expect((await manager.getJobSnapshot(b.snapshot.id)!).status).toBe("completed");
     });
   });
 

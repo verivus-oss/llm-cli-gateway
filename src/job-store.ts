@@ -1989,7 +1989,7 @@ export class SqliteJobStore implements JobStore, ValidationRunStore {
     orphaned: Array<OrphanedJobSnapshot>;
   }> {
     const orphaned = await this.recoverStaleJobs(this.leaseTtlMs, DEFAULT_HTTP_JOB_GRACE_MS);
-    return { count: (orphaned).length, orphaned };
+    return { count: orphaned.length, orphaned };
   }
 
   /**
@@ -3163,7 +3163,7 @@ export class PostgresJobStore implements JobStore, ValidationRunStore {
       DEFAULT_INSTANCE_LEASE_TTL_MS,
       DEFAULT_HTTP_JOB_GRACE_MS
     );
-    return { count: (orphaned).length, orphaned };
+    return { count: orphaned.length, orphaned };
   }
 
   async evictExpired(): Promise<number> {

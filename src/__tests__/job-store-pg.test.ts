@@ -271,9 +271,9 @@ describe("PostgresJobStore", () => {
 
     expect(await store.fenceUnadmittedKitAttempt(fence)).toBe("reserved");
     expect(await store.fenceUnadmittedKitAttempt(fence)).toBe("already_recovered");
-    expect(await store.fenceUnadmittedKitAttempt({ ...fence, kitSessionId: "pg-other-session" })).toBe(
-      "conflict"
-    );
+    expect(
+      await store.fenceUnadmittedKitAttempt({ ...fence, kitSessionId: "pg-other-session" })
+    ).toBe("conflict");
     await expect(
       store.recordStart({
         id: fence.attemptId,
@@ -326,9 +326,9 @@ describe("PostgresJobStore", () => {
     expect(await store.fenceUnadmittedKitAttempt({ ...fence, ownerPrincipal: "local" })).toBe(
       "already_recovered"
     );
-    expect(await store.fenceUnadmittedKitAttempt({ ...fence, ownerPrincipal: "remote-reviewer" })).toBe(
-      "conflict"
-    );
+    expect(
+      await store.fenceUnadmittedKitAttempt({ ...fence, ownerPrincipal: "remote-reviewer" })
+    ).toBe("conflict");
     expect(await store.fenceUnadmittedKitAttempt(fence)).toBe("conflict");
     expect(await store.fenceUnadmittedKitAttempt({ ...fence, ownerPrincipal: undefined })).toBe(
       "conflict"
@@ -626,13 +626,15 @@ describe("PostgresJobStore", () => {
       error: null,
     });
     expect(JSON.stringify(store.getById("pg-kit-finalization"))).not.toContain(privateContext);
-    expect(await store.markKitTerminalFinalized("pg-kit-finalization", "wrong-session")).toBe(false);
-    expect(await store.markKitTerminalFinalized("pg-kit-finalization", "gateway-pg-kit-session")).toBe(
-      true
+    expect(await store.markKitTerminalFinalized("pg-kit-finalization", "wrong-session")).toBe(
+      false
     );
-    expect(await store.markKitTerminalFinalized("pg-kit-finalization", "gateway-pg-kit-session")).toBe(
-      true
-    );
+    expect(
+      await store.markKitTerminalFinalized("pg-kit-finalization", "gateway-pg-kit-session")
+    ).toBe(true);
+    expect(
+      await store.markKitTerminalFinalized("pg-kit-finalization", "gateway-pg-kit-session")
+    ).toBe(true);
     expect(await store.getPendingKitFinalizations()).toEqual([]);
     expect(await store.getPinnedKitReleaseIds?.()).toEqual([]);
     expect(await store.getById("pg-kit-finalization")).toMatchObject({
@@ -1003,9 +1005,9 @@ describe("PostgresJobStore", () => {
       })
     ).rejects.toThrow(/missing or owned by another principal/);
     expect(await store.getById("job-rejected")).toBeNull();
-    expect(await store.transitionValidationRunStatus("val-pg-1", "alice", "admitting", "running")).toBe(
-      true
-    );
+    expect(
+      await store.transitionValidationRunStatus("val-pg-1", "alice", "admitting", "running")
+    ).toBe(true);
     await store.setValidationJudgeLink("val-pg-1", {
       provider: "anthropic",
       jobId: "job-judge",
@@ -1165,10 +1167,20 @@ describe("PostgresJobStore", () => {
       status: "admitting",
     });
     expect(
-      await store.transitionValidationRunStatus("val-pg-transition", "mallory", "admitting", "running")
+      await store.transitionValidationRunStatus(
+        "val-pg-transition",
+        "mallory",
+        "admitting",
+        "running"
+      )
     ).toBe(false);
     expect(
-      await store.transitionValidationRunStatus("val-pg-transition", "alice", "admitting", "running")
+      await store.transitionValidationRunStatus(
+        "val-pg-transition",
+        "alice",
+        "admitting",
+        "running"
+      )
     ).toBe(true);
     await store.skipValidationJudge("val-pg-transition", "judge-api", "alice");
     expect((await store.getValidationRun("val-pg-transition"))?.status).toBe("judge_skipped");

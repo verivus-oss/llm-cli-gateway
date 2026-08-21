@@ -189,7 +189,10 @@ describe("MCP artifact cleanup pin recovery", () => {
     expect(
       await recoverMcpArtifactCleanupPin({ store, jobId: id, acknowledgement: "not-acknowledged" })
     ).toMatchObject({ ok: false, reason: "acknowledgement_required" });
-    expect(await recover(id)).toMatchObject({ ok: false, reason: "not_terminal_claude_process_job" });
+    expect(await recover(id)).toMatchObject({
+      ok: false,
+      reason: "not_terminal_claude_process_job",
+    });
     expect(existsSync(config.path)).toBe(true);
     expect((await store.getById(id))?.mcpArtifactCleanupPending).toBe(true);
   });

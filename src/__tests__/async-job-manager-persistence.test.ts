@@ -269,6 +269,8 @@ describe("AsyncJobManager + JobStore (durability + dedup)", () => {
     expect(await store.findByRequestKey(computeRequestKey("codex", args1))).toBeNull();
 
     // Different args: should NOT dedup either.
-    expect(await store.findByRequestKey(computeRequestKey("claude", ["-p", "different"]))).toBeNull();
+    expect(
+      await store.findByRequestKey(computeRequestKey("claude", ["-p", "different"]))
+    ).toBeNull();
   });
 });

@@ -131,7 +131,7 @@ describe("late child output survives a terminal-status-before-close transition",
 
     // Wait until the child is up and the gateway has seen its first bytes.
     await waitFor(
-      async () => ((await manager.getJobSnapshot((job).id))?.stdoutBytes ?? 0) >= 11,
+      async () => ((await manager.getJobSnapshot(job.id))?.stdoutBytes ?? 0) >= 11,
       25_000
     );
 
@@ -139,12 +139,9 @@ describe("late child output survives a terminal-status-before-close transition",
 
     // `canceled` is set the instant the signal is requested; the child only
     // closes once it has run its SIGTERM handler. Wait for the real death.
-    await waitFor(
-      async () => (await manager.getJobSnapshot((job).id))?.exited === true,
-      25_000
-    );
+    await waitFor(async () => (await manager.getJobSnapshot(job.id))?.exited === true, 25_000);
     // Let the close handler's terminal persistence run.
-    await waitFor(async () => (await store.getById((job).id))?.status === "canceled", 25_000);
+    await waitFor(async () => (await store.getById(job.id))?.status === "canceled", 25_000);
 
     const inMemory = await manager.getJobResult(job.id);
     expect(inMemory?.stdout).toContain("EARLY_BYTES");
@@ -283,11 +280,8 @@ describe("late child output survives a terminal-status-before-close transition",
       flushOnSigtermArgs("AAAAAAAAAAA", "X"),
       "corr-overflow-flush"
     );
-    await waitFor(
-      async () => (await capped.getJobSnapshot((job).id))?.exited === true,
-      15_000
-    );
-    await waitFor(async () => (await store.getById((job).id))?.status === "failed", 25_000);
+    await waitFor(async () => (await capped.getJobSnapshot(job.id))?.exited === true, 15_000);
+    await waitFor(async () => (await store.getById(job.id))?.status === "failed", 25_000);
 
     const row = await store.getById(job.id);
     expect(row?.outputTruncated).toBe(true);
@@ -307,7 +301,7 @@ describe("late child output survives a terminal-status-before-close transition",
     // would catch it.
     const job = await manager.startJob("node" as LlmCli, FLUSH_ON_SIGTERM, "corr-foreign-row");
     await waitFor(
-      async () => ((await manager.getJobSnapshot((job).id))?.stdoutBytes ?? 0) >= 11,
+      async () => ((await manager.getJobSnapshot(job.id))?.stdoutBytes ?? 0) >= 11,
       25_000
     );
 
@@ -328,10 +322,7 @@ describe("late child output survives a terminal-status-before-close transition",
 
     // Steps 2 and 3.
     await manager.cancelJob(job.id);
-    await waitFor(
-      async () => (await manager.getJobSnapshot((job).id))?.exited === true,
-      25_000
-    );
+    await waitFor(async () => (await manager.getJobSnapshot(job.id))?.exited === true, 25_000);
     await new Promise(r => setTimeout(r, 500));
 
     const row = await store.getById(job.id);
@@ -352,7 +343,7 @@ describe("late child output survives a terminal-status-before-close transition",
     // post-terminal-only guard does not cover.
     const job = await manager.startJob("node" as LlmCli, FLUSH_ON_SIGTERM, "corr-foreign-flush");
     await waitFor(
-      async () => ((await manager.getJobSnapshot((job).id))?.stdoutBytes ?? 0) >= 11,
+      async () => ((await manager.getJobSnapshot(job.id))?.stdoutBytes ?? 0) >= 11,
       25_000
     );
     // Let the flush throttle lapse so the next chunk can flush immediately.
@@ -372,10 +363,7 @@ describe("late child output survives a terminal-status-before-close transition",
     ).toBe(true);
 
     await manager.cancelJob(job.id);
-    await waitFor(
-      async () => (await manager.getJobSnapshot((job).id))?.exited === true,
-      25_000
-    );
+    await waitFor(async () => (await manager.getJobSnapshot(job.id))?.exited === true, 25_000);
     await new Promise(r => setTimeout(r, 800));
 
     const row = await store.getById(job.id);
@@ -397,11 +385,8 @@ describe("late child output survives a terminal-status-before-close transition",
       400
     );
 
-    await waitFor(
-      async () => (await manager.getJobSnapshot((job).id))?.exited === true,
-      15_000
-    );
-    await waitFor(async () => (await store.getById((job).id))?.status === "failed", 25_000);
+    await waitFor(async () => (await manager.getJobSnapshot(job.id))?.exited === true, 15_000);
+    await waitFor(async () => (await store.getById(job.id))?.status === "failed", 25_000);
 
     const row = await store.getById(job.id);
     expect(row?.exitCode).toBe(125);

@@ -65,8 +65,7 @@ describe("AsyncJobManager shutdown fencing", () => {
 
       await manager.dispose({ timeoutMs: 3_000 });
       await waitFor(
-        async () =>
-          !isAsyncJobInProgress((await manager.getJobSnapshot((running).id)!).status)
+        async () => !isAsyncJobInProgress((await manager.getJobSnapshot(running.id)!).status)
       );
 
       expect(await manager.getJobSnapshot(queued.id)).toMatchObject({
@@ -152,8 +151,7 @@ describe("AsyncJobManager shutdown fencing", () => {
         }
       );
       await waitFor(
-        async () =>
-          !isAsyncJobInProgress((await manager.getJobSnapshot((job).snapshot.id)!).status)
+        async () => !isAsyncJobInProgress((await manager.getJobSnapshot(job.snapshot.id)!).status)
       );
       const inMemoryJob = (
         manager as unknown as { jobs: Map<string, { terminalPersistenceAcknowledged?: boolean }> }

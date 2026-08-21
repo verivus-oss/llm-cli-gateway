@@ -207,7 +207,10 @@ class CapturingJobManager extends AsyncJobManager {
       } else {
         const run = await store.getValidationRun(admission.validationId);
         if (!run) throw new Error("test fixture could not find the review run");
-        await store.setValidationProviderLinks(admission.validationId, [...run.providerLinks, link]);
+        await store.setValidationProviderLinks(admission.validationId, [
+          ...run.providerLinks,
+          link,
+        ]);
       }
     }
 

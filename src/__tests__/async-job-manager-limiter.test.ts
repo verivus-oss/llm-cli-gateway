@@ -110,20 +110,20 @@ describe("AsyncJobManager limiter (issue #130)", () => {
     const b = await startSleeper(manager, 0.3, "corr-b");
     const c = await startSleeper(manager, 0.3, "corr-c");
 
-    expect(((await manager.getJobSnapshot(a))!).status).toBe("running");
+    expect((await manager.getJobSnapshot(a))!.status).toBe("running");
     // both b and c queued behind a
-    expect(((await manager.getJobSnapshot(b))!).status).toBe("queued");
-    expect(((await manager.getJobSnapshot(c))!).status).toBe("queued");
+    expect((await manager.getJobSnapshot(b))!.status).toBe("queued");
+    expect((await manager.getJobSnapshot(c))!.status).toBe("queued");
 
     // b (enqueued first) must run before c.
-    await waitFor(async () => ((await manager.getJobSnapshot(b))!).status === "running");
-    expect(((await manager.getJobSnapshot(c))!).status).toBe("queued");
+    await waitFor(async () => (await manager.getJobSnapshot(b))!.status === "running");
+    expect((await manager.getJobSnapshot(c))!.status).toBe("queued");
 
-    await waitFor(async () => ((await manager.getJobSnapshot(c))!).status !== "queued", 8000);
+    await waitFor(async () => (await manager.getJobSnapshot(c))!.status !== "queued", 8000);
     await waitFor(
       async () =>
-        ((await manager.getJobSnapshot(b))!).status === "completed" &&
-        ((await manager.getJobSnapshot(c))!).status === "completed",
+        (await manager.getJobSnapshot(b))!.status === "completed" &&
+        (await manager.getJobSnapshot(c))!.status === "completed",
       8000
     );
   });
@@ -191,10 +191,7 @@ describe("AsyncJobManager limiter (issue #130)", () => {
     const a = await manager.startJob("sleep" as LlmCli, ["3"], "corr-a"); // long-running
     const b = await manager.startJob("sleep" as LlmCli, ["3"], "corr-b"); // queued
 
-    await waitFor(
-      async () => (await manager.getJobSnapshot((b).id)!).status === "failed",
-      4000
-    );
+    await waitFor(async () => (await manager.getJobSnapshot(b.id)!).status === "failed", 4000);
     const snap = (await manager.getJobSnapshot(b.id))!;
     expect(snap.exitCode).toBe(75);
     expect(snap.error).toMatch(/at capacity/i);
@@ -248,10 +245,7 @@ describe("AsyncJobManager limiter (issue #130)", () => {
     await manager.cancelJob(a.id);
     // A signal is not proof that the process has stopped. The slot becomes
     // available only after the close path finalizes the cancellation.
-    await waitFor(
-      async () => (await manager.getJobSnapshot((a).id)!).status === "canceled",
-      5000
-    );
+    await waitFor(async () => (await manager.getJobSnapshot(a.id)!).status === "canceled", 5000);
     // Slot now free: acquire resolves with a releasable permit.
     const slot = await manager.acquireProcessSlot("claude");
     expect(typeof slot.release).toBe("function");
@@ -273,10 +267,7 @@ describe("AsyncJobManager configurable output cap + retention (issue #130)", () 
       ["-c", "for i in $(seq 1 200); do echo 0123456789012345678901234567890123456789; done"],
       "corr-overflow"
     );
-    await waitFor(
-      async () => (await manager.getJobSnapshot((job).id)!).status === "failed",
-      6000
-    );
+    await waitFor(async () => (await manager.getJobSnapshot(job.id)!).status === "failed", 6000);
     const snap = (await manager.getJobSnapshot(job.id))!;
     expect(snap.exitCode).toBe(126);
     expect(snap.error).toContain("Output exceeded maximum size");

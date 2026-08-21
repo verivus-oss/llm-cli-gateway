@@ -184,7 +184,9 @@ describe("Mistral Kit M3 admission + wiring", () => {
     rmSync(root, { recursive: true, force: true });
   });
 
-  async function invoke(args: Record<string, unknown>): Promise<ReturnType<RegisteredTool["handler"]>> {
+  async function invoke(
+    args: Record<string, unknown>
+  ): Promise<ReturnType<RegisteredTool["handler"]>> {
     const tool = tools.mistral_request;
     if (!tool) throw new Error("mistral_request was not registered");
     return (await runWithRequestContext(

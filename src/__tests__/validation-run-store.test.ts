@@ -312,12 +312,12 @@ describe("ValidationRunStore (SqliteJobStore)", () => {
         status: "admitting",
       })
     );
-    expect(await store.transitionValidationRunStatus("val-1", "other", "admitting", "running")).toBe(
-      false
-    );
-    expect(await store.transitionValidationRunStatus("val-1", "local", "admitting", "running")).toBe(
-      true
-    );
+    expect(
+      await store.transitionValidationRunStatus("val-1", "other", "admitting", "running")
+    ).toBe(false);
+    expect(
+      await store.transitionValidationRunStatus("val-1", "local", "admitting", "running")
+    ).toBe(true);
     await store.skipValidationJudge("val-1", "judge-api", "local");
     expect((await store.getValidationRun("val-1"))?.status).toBe("judge_skipped");
   });

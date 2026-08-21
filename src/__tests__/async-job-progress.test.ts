@@ -52,9 +52,7 @@ describe("AsyncJobManager normalized progress", () => {
     }))!;
     expect(afterFirst.progress.events.length).toBeLessThanOrEqual(2);
     expect(
-      afterFirst.progress.events.every(
-        event => event.seq > (restored).progress.events[0]!.seq
-      )
+      afterFirst.progress.events.every(event => event.seq > restored.progress.events[0]!.seq)
     ).toBe(true);
   });
 

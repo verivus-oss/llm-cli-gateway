@@ -78,7 +78,7 @@ export async function recoverMcpArtifactCleanupPin(
 
   const row = await store.getById(jobId);
   if (!row) return refused(jobId, "not_found");
-  if (!(isTerminalClaudeProcessArtifactPin(row))) {
+  if (!isTerminalClaudeProcessArtifactPin(row)) {
     return refused(jobId, "not_terminal_claude_process_job");
   }
   if (!row.ownerHostname || row.ownerHostname !== hostname) {

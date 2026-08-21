@@ -1048,9 +1048,9 @@ describe("Personal Agent Config Kit persistence", () => {
       // A retry after a crash between fencing and lease release is safe only
       // for the exact same durable identity.
       expect(await store.fenceUnadmittedKitAttempt(fence)).toBe("already_recovered");
-      expect(await store.fenceUnadmittedKitAttempt({ ...fence, kitSessionId: "other-kit-session" })).toBe(
-        "conflict"
-      );
+      expect(
+        await store.fenceUnadmittedKitAttempt({ ...fence, kitSessionId: "other-kit-session" })
+      ).toBe("conflict");
       await expect(
         store.recordStart({
           id: fence.attemptId,
@@ -1178,9 +1178,9 @@ describe("Personal Agent Config Kit persistence", () => {
         },
       ]);
       expect(await manager.getPinnedKitReleaseIds()).toEqual(["release-restart"]);
-      expect(await manager.markKitTerminalFinalized("restart-kit-job", "gateway-restart-session")).toBe(
-        true
-      );
+      expect(
+        await manager.markKitTerminalFinalized("restart-kit-job", "gateway-restart-session")
+      ).toBe(true);
       expect(await manager.getPendingKitFinalizations()).toEqual([]);
       expect(await manager.getPinnedKitReleaseIds()).toEqual([]);
       expect((await reopened.getById("restart-kit-job"))?.kitTerminalFinalizedAt).toEqual(

@@ -180,9 +180,7 @@ describe("F3b sessions://* resource ownership isolation", () => {
 
   it("sessions://all hides another principal's active-session pointer", async () => {
     const bob = await create("codex", "bob");
-    await runWithRequestContext(ctx("bob"), async () =>
-      sessions.setActiveSession("codex", (bob).id)
-    );
+    await runWithRequestContext(ctx("bob"), async () => sessions.setActiveSession("codex", bob.id));
 
     const aliceView = await read("sessions://all", "alice");
     expect(aliceView.activeSessions.codex).toBeNull();
@@ -210,7 +208,7 @@ describe("F3b sessions://* resource ownership isolation", () => {
     });
 
     const view = await read("sessions://all", "alice");
-    const projected = view.sessions.find((session: any) => session.id === (alice).id);
+    const projected = view.sessions.find((session: any) => session.id === alice.id);
     expect(projected.metadata?.worktreeOwnerHostname).toBeUndefined();
     expect(projected.metadata?.worktreeOwnerInstanceId).toBeUndefined();
     expect(projected.metadata?.worktreeCleanupPending).toBeUndefined();

@@ -55,12 +55,50 @@ export function normaliseSubject(text) {
   // lines when an inserted await makes it longer, and a line break is not a
   // change of assertion. Comparing with spaces left in reported six violations
   // that were purely reformatting.
-  const matchKey = subject.replace(/[()]/g, "").replace(/\s+/g, "");
+  const matchKey = argKey(subject.replace(/[()]/g, ""));
   return { subject, matchKey, thunk, awaitCount };
 }
 
+/**
+ * Whitespace, then a DANGLING COMMA before a closer.
+ *
+ * Prettier adds a trailing comma when an inserted `await` pushes an object or
+ * array literal onto multiple lines, so `{ ok: false, reason: "x" }` becomes
+ * `{ ok: false, reason: "x", }`. That reported four violations that were purely
+ * reformatting, the same shape as the six the whitespace collapse already
+ * exists to absorb.
+ *
+ * Safe to normalise, and worth saying why rather than assuming it: a trailing
+ * comma cannot express any of the things this checker exists to catch. It
+ * cannot weaken a matcher, change an expected value, remove an assertion or
+ * negate one. Nothing that is a violation is spelled with a comma before a
+ * closing brace. The control for that claim is a test asserting a NEWLY
+ * narrowed matcher still fails with this normalisation in place, so absorbing
+ * the reflow cannot become a blanket amnesty.
+ */
 function collapse(text) {
   return String(text).replace(/\s+/g, " ").trim();
+}
+
+/**
+ * The COMPARISON form of a matcher argument: no whitespace, no dangling comma.
+ *
+ * `collapse` is what the violation message prints, so it stays readable. This
+ * is what decides equality, and it absorbs exactly the two things Prettier does
+ * when an inserted `await` makes an argument too long for one line: it reflows
+ * it, and it adds a trailing comma before the closer.
+ *
+ * Safe, and worth stating rather than assuming: neither a line break nor a
+ * trailing comma can express anything this checker exists to catch. Neither can
+ * weaken a matcher, change an expected value, remove an assertion or negate
+ * one. The control is `rejects a NEWLY narrowed matcher`, which still fails
+ * with this normalisation in place, so absorbing a reflow cannot slide into a
+ * blanket amnesty.
+ */
+function argKey(text) {
+  return String(text)
+    .replace(/,(?=\s*[}\])])/g, "")
+    .replace(/\s+/g, "");
 }
 
 /** Every expect(...) chain in a source file, as comparable fingerprints. */
@@ -139,7 +177,7 @@ export function extractTests(source, filename = "f.ts") {
 
 function sameArgs(a, b) {
   if (a === null || b === null) return a === b;
-  return a.length === b.length && a.every((v, i) => v === b[i]);
+  return a.length === b.length && a.every((v, i) => argKey(v) === argKey(b[i]));
 }
 
 /**

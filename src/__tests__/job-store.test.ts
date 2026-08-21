@@ -235,9 +235,9 @@ describe("JobStore", () => {
       expect(await store.fenceUnadmittedKitAttempt({ ...fence, ownerPrincipal: "local" })).toBe(
         "already_recovered"
       );
-      expect(await store.fenceUnadmittedKitAttempt({ ...fence, ownerPrincipal: "remote-reviewer" })).toBe(
-        "conflict"
-      );
+      expect(
+        await store.fenceUnadmittedKitAttempt({ ...fence, ownerPrincipal: "remote-reviewer" })
+      ).toBe("conflict");
       expect(await store.fenceUnadmittedKitAttempt(fence)).toBe("conflict");
       expect(await store.fenceUnadmittedKitAttempt({ ...fence, ownerPrincipal: undefined })).toBe(
         "conflict"

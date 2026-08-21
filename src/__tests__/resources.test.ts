@@ -197,9 +197,7 @@ describe("phase-2 generated model + session resources", () => {
     expect(ids).toContain(alice.id);
     expect(ids).not.toContain(bob.id);
     // active-session pointer for bob's provider must not leak either.
-    await runWithRequestContext(ctx("bob"), async () =>
-      sessions.setActiveSession("devin", (bob).id)
-    );
+    await runWithRequestContext(ctx("bob"), async () => sessions.setActiveSession("devin", bob.id));
     const aliceAgain = JSON.parse((await read("sessions://all", "alice"))!.text);
     expect(aliceAgain.activeSessions.devin).toBeNull();
   });

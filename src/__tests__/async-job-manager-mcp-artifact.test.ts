@@ -21,7 +21,10 @@ import { SqliteJobStore } from "../job-store.js";
 import { noopLogger } from "../logger.js";
 import { openDatabase } from "../sqlite-driver.js";
 
-function waitFor(predicate: () => boolean | Promise<boolean> | Promise<boolean>, timeoutMs = 5000): Promise<void> {
+function waitFor(
+  predicate: () => boolean | Promise<boolean> | Promise<boolean>,
+  timeoutMs = 5000
+): Promise<void> {
   return new Promise((resolve, reject) => {
     const deadline = Date.now() + timeoutMs;
     const check = async (): Promise<void> => {
@@ -195,7 +198,11 @@ describe("AsyncJobManager Claude MCP artifacts", () => {
       os.hostname(),
       queued.path
     );
-    await seedExpiredProcessRow("outside", ["-p", "review", "--mcp-config", sentinel], os.hostname());
+    await seedExpiredProcessRow(
+      "outside",
+      ["-p", "review", "--mcp-config", sentinel],
+      os.hostname()
+    );
     await seedExpiredProcessRow(
       "symlink",
       ["-p", "review", "--mcp-config", symlinkArtifact],
@@ -428,7 +435,7 @@ describe("AsyncJobManager Claude MCP artifacts", () => {
         }
       );
       await waitFor(
-        async () => (await manager.getJobSnapshot((started).snapshot.id))?.exited === true
+        async () => (await manager.getJobSnapshot(started.snapshot.id))?.exited === true
       );
 
       expect(existsSync(config.path)).toBe(false);
@@ -483,7 +490,7 @@ describe("AsyncJobManager Claude MCP artifacts", () => {
           }
         );
         await waitFor(
-          async () => (await manager.getJobSnapshot((started).snapshot.id))?.exited === true
+          async () => (await manager.getJobSnapshot(started.snapshot.id))?.exited === true
         );
 
         expect(replacementInjected).toBe(true);
@@ -525,7 +532,7 @@ describe("AsyncJobManager Claude MCP artifacts", () => {
         }
       );
       await waitFor(
-        async () => (await manager.getJobSnapshot((started).snapshot.id))?.exited === true
+        async () => (await manager.getJobSnapshot(started.snapshot.id))?.exited === true
       );
 
       expect(existsSync(config.path)).toBe(true);
@@ -573,14 +580,13 @@ describe("AsyncJobManager Claude MCP artifacts", () => {
         }
       );
       await waitFor(
-        async () =>
-          (await manager.getJobSnapshot((started).snapshot.id))?.status === "running"
+        async () => (await manager.getJobSnapshot(started.snapshot.id))?.status === "running"
       );
       renameSync(artifactDirectory, movedArtifactDirectory);
       symlinkSync(movedArtifactDirectory, artifactDirectory, "dir");
 
       await waitFor(
-        async () => (await manager.getJobSnapshot((started).snapshot.id))?.exited === true
+        async () => (await manager.getJobSnapshot(started.snapshot.id))?.exited === true
       );
 
       expect(lstatSync(artifactDirectory).isSymbolicLink()).toBe(true);
@@ -755,9 +761,7 @@ describe("AsyncJobManager Claude MCP artifacts", () => {
       await new Promise(resolve => setTimeout(resolve, 100));
       expect(cleanup).not.toHaveBeenCalled();
 
-      await waitFor(
-        async () => (await manager.getJobSnapshot((job).snapshot.id))?.exited === true
-      );
+      await waitFor(async () => (await manager.getJobSnapshot(job.snapshot.id))?.exited === true);
       expect(cleanup).toHaveBeenCalledTimes(1);
     } finally {
       await manager.cancelJob(job.snapshot.id);

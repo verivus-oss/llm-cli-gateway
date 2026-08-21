@@ -7,7 +7,10 @@ import { JobProgressTracker, parseStoredJobProgress } from "../job-progress.js";
 import { MemoryJobStore, SqliteJobStore, type JobStoreStatus } from "../job-store.js";
 import { noopLogger } from "../logger.js";
 
-async function waitFor(condition: () => boolean | Promise<boolean> | Promise<boolean>, label: string): Promise<void> {
+async function waitFor(
+  condition: () => boolean | Promise<boolean> | Promise<boolean>,
+  label: string
+): Promise<void> {
   const deadline = Date.now() + 5_000;
   while (Date.now() < deadline) {
     if (await condition()) return;
@@ -67,8 +70,8 @@ describe("job progress durability", () => {
     try {
       await waitFor(
         async () =>
-          (await manager.getJobSnapshot((started).id))?.status === "running" &&
-          (await store.getById((started).id))?.status === "running",
+          (await manager.getJobSnapshot(started.id))?.status === "running" &&
+          (await store.getById(started.id))?.status === "running",
         "running job admission"
       );
       const internals = manager as unknown as ProgressManagerHarness;
@@ -105,9 +108,7 @@ describe("job progress durability", () => {
       await manager.cancelJob(started.id);
       await waitFor(
         async () =>
-          !["queued", "running"].includes(
-            (await manager.getJobSnapshot((started).id))?.status ?? ""
-          ),
+          !["queued", "running"].includes((await manager.getJobSnapshot(started.id))?.status ?? ""),
         "canceled job termination"
       );
       await manager.dispose({ timeoutMs: 1_000 });

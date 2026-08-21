@@ -2795,7 +2795,7 @@ export class AsyncJobManager {
       });
     }
 
-    const deferredControl: DeferredJobLaunch | undefined = (deferLaunch)
+    const deferredControl: DeferredJobLaunch | undefined = deferLaunch
       ? {
           release: () => {
             if (launchReleased) return;
@@ -4043,7 +4043,7 @@ export class AsyncJobManager {
       this.logger.info(`Job ${id} queued for ${cli} (limiter saturated)`, { correlationId });
     }
 
-    const deferredControl: DeferredJobLaunch | undefined = (deferLaunch)
+    const deferredControl: DeferredJobLaunch | undefined = deferLaunch
       ? {
           release: () => {
             if (launchReleased) return;
