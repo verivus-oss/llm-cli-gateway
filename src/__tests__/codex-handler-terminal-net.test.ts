@@ -180,7 +180,7 @@ describe("handleCodexRequest terminal net: deferred (Mode B) FlightOwnership", (
       // transferCompletionToManager() flips ownership. The manager is the sole
       // completer for the deferral (T3 FlightOwnership).
       expect(logComplete).not.toHaveBeenCalled();
-      manager.cancelJob(body.jobId);
+      await manager.cancelJob(body.jobId);
     } finally {
       slot.release();
       await manager.dispose();

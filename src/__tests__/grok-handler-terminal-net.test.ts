@@ -347,7 +347,7 @@ describe("handleGrokRequest terminal net: deferred (Mode B) + D4 split + H-Doubl
       expect(logStart).toHaveBeenCalledTimes(1);
       expect(arm).toHaveBeenCalledTimes(1);
       expect(logComplete).not.toHaveBeenCalled();
-      manager.cancelJob(body.jobId);
+      await manager.cancelJob(body.jobId);
     } finally {
       slot.release();
       await manager.dispose();
@@ -397,7 +397,7 @@ describe("handleGrokRequest terminal net: deferred (Mode B) + D4 split + H-Doubl
       // ...but no durable usage update fired for that minted session (the D4
       // usageUpdateSessionId split: userProvidedSession is false => undefined).
       expect(updateUsage).not.toHaveBeenCalled();
-      manager.cancelJob(body.jobId);
+      await manager.cancelJob(body.jobId);
     } finally {
       slot.release();
       await manager.dispose();

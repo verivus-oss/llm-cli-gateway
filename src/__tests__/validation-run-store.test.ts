@@ -43,19 +43,19 @@ describe("ValidationRunStore (SqliteJobStore)", () => {
     store = new SqliteJobStore(dbPath);
   });
 
-  afterEach(() => {
+  afterEach(async () => {
     try {
-      store.close();
+      await store.close();
     } catch {
       /* ignore */
     }
     rmSync(tempDir, { recursive: true, force: true });
   });
 
-  it("round-trips a validation run record", () => {
+  it("round-trips a validation run record", async () => {
     const record = runRecord();
-    store.recordValidationRun(record);
-    expect(store.getValidationRun("val-1")).toEqual(record);
+    await store.recordValidationRun(record);
+    expect(await store.getValidationRun("val-1")).toEqual(record);
   });
 
   it.each([
@@ -63,8 +63,8 @@ describe("ValidationRunStore (SqliteJobStore)", () => {
     ["judge_link", "job-judge", /judge link is malformed/],
   ] as const)(
     "fails closed when durable SQLite %s is malformed despite a surviving reverse link",
-    (column, reverseJobId, expectedError) => {
-      store.recordValidationRun(
+    async (column, reverseJobId, expectedError) => {
+      await store.recordValidationRun(
         runRecord({
           requestJson: JSON.stringify({ question: "?", modelList: ["claude"] }),
           providerLinks:
@@ -75,7 +75,7 @@ describe("ValidationRunStore (SqliteJobStore)", () => {
         })
       );
       if (column === "judge_link") {
-        store.setValidationJudgeLink("val-1", {
+        await store.setValidationJudgeLink("val-1", {
           provider: "codex",
           jobId: reverseJobId,
           correlationId: "corr-judge",
@@ -91,73 +91,73 @@ describe("ValidationRunStore (SqliteJobStore)", () => {
         corruptionDb.close();
       }
 
-      expect(store.getValidationRunIdByJobId(reverseJobId)).toBe("val-1");
-      expect(() => store.getValidationRun("val-1")).toThrow(expectedError);
-      eagerMintFromJobId(
+      expect(await store.getValidationRunIdByJobId(reverseJobId)).toBe("val-1");
+      await expect(store.getValidationRun("val-1")).rejects.toThrow(expectedError);
+      await eagerMintFromJobId(
         { validationRunStore: store, asyncJobManager: {} as AsyncJobManager },
         reverseJobId
       );
-      expect(store.getValidationReceipt("val-1")).toBeNull();
+      expect(await store.getValidationReceipt("val-1")).toBeNull();
     }
   );
 
-  it("returns null for an unknown validation id", () => {
-    expect(store.getValidationRun("missing")).toBeNull();
+  it("returns null for an unknown validation id", async () => {
+    expect(await store.getValidationRun("missing")).toBeNull();
   });
 
-  it("is idempotent on the validation_id PK (INSERT OR IGNORE, no overwrite)", () => {
-    store.recordValidationRun(runRecord({ status: "running" }));
+  it("is idempotent on the validation_id PK (INSERT OR IGNORE, no overwrite)", async () => {
+    await store.recordValidationRun(runRecord({ status: "running" }));
     // A second write with the same id must NOT overwrite the existing row.
-    store.recordValidationRun(runRecord({ status: "finalized", ownerPrincipal: "attacker" }));
-    const stored = store.getValidationRun("val-1");
+    await store.recordValidationRun(runRecord({ status: "finalized", ownerPrincipal: "attacker" }));
+    const stored = await store.getValidationRun("val-1");
     expect(stored?.status).toBe("running");
     expect(stored?.ownerPrincipal).toBe("local");
   });
 
-  it("sets the judge link on an existing run", () => {
-    store.recordValidationRun(runRecord());
-    store.setValidationJudgeLink("val-1", {
+  it("sets the judge link on an existing run", async () => {
+    await store.recordValidationRun(runRecord());
+    await store.setValidationJudgeLink("val-1", {
       provider: "codex",
       jobId: "job-judge",
       correlationId: "corr-judge",
     });
-    expect(store.getValidationRun("val-1")?.judgeLink).toEqual({
+    expect((await store.getValidationRun("val-1"))?.judgeLink).toEqual({
       provider: "codex",
       jobId: "job-judge",
       correlationId: "corr-judge",
     });
 
-    expect(() =>
+    await expect(
       store.setValidationJudgeLink("val-1", {
         provider: "claude",
         jobId: "job-second-judge",
         correlationId: "corr-second-judge",
       })
-    ).toThrow(/one-shot claim/);
-    expect(store.getValidationRun("val-1")?.judgeLink).toEqual({
+    ).rejects.toThrow(/one-shot claim/);
+    expect((await store.getValidationRun("val-1"))?.judgeLink).toEqual({
       provider: "codex",
       jobId: "job-judge",
       correlationId: "corr-judge",
     });
   });
 
-  it("attaches provider links after a pre-dispatch run record", () => {
-    store.recordValidationRun(runRecord({ providerLinks: [] }));
+  it("attaches provider links after a pre-dispatch run record", async () => {
+    await store.recordValidationRun(runRecord({ providerLinks: [] }));
     const links = [
       { provider: "claude", jobId: "job-claude", correlationId: "corr-claude" },
       { provider: "codex", jobId: "job-codex", correlationId: "corr-codex" },
     ];
-    store.setValidationProviderLinks("val-1", links);
-    expect(store.getValidationRun("val-1")?.providerLinks).toEqual(links);
-    expect(store.getValidationRunIdByJobId("job-claude")).toBe("val-1");
-    expect(store.getValidationRunIdByJobId("job-codex")).toBe("val-1");
+    await store.setValidationProviderLinks("val-1", links);
+    expect((await store.getValidationRun("val-1"))?.providerLinks).toEqual(links);
+    expect(await store.getValidationRunIdByJobId("job-claude")).toBe("val-1");
+    expect(await store.getValidationRunIdByJobId("job-codex")).toBe("val-1");
   });
 
-  it("atomically rolls back a queued job when validation-link admission fails", () => {
-    store.recordValidationRun(
+  it("atomically rolls back a queued job when validation-link admission fails", async () => {
+    await store.recordValidationRun(
       runRecord({ intent: "review", providerLinks: [], status: "admitting" })
     );
-    expect(() =>
+    await expect(
       store.recordStart({
         id: "job-wrong-owner",
         correlationId: "corr-wrong-owner",
@@ -169,17 +169,17 @@ describe("ValidationRunStore (SqliteJobStore)", () => {
         ownerPrincipal: "other-owner",
         validationAdmission: { validationId: "val-1", provider: "codex" },
       })
-    ).toThrow(/missing or owned by another principal/);
-    expect(store.getById("job-wrong-owner")).toBeNull();
-    expect(store.getValidationRun("val-1")?.providerLinks).toEqual([]);
-    expect(store.getValidationRunIdByJobId("job-wrong-owner")).toBeNull();
+    ).rejects.toThrow(/missing or owned by another principal/);
+    expect(await store.getById("job-wrong-owner")).toBeNull();
+    expect((await store.getValidationRun("val-1"))?.providerLinks).toEqual([]);
+    expect(await store.getValidationRunIdByJobId("job-wrong-owner")).toBeNull();
   });
 
-  it("atomically admits a queued job and its provider/reverse links", () => {
-    store.recordValidationRun(
+  it("atomically admits a queued job and its provider/reverse links", async () => {
+    await store.recordValidationRun(
       runRecord({ intent: "review", providerLinks: [], status: "admitting" })
     );
-    store.recordStart({
+    await store.recordStart({
       id: "job-admitted",
       correlationId: "corr-admitted",
       requestKey: "request-admitted",
@@ -190,15 +190,15 @@ describe("ValidationRunStore (SqliteJobStore)", () => {
       ownerPrincipal: "local",
       validationAdmission: { validationId: "val-1", provider: "codex" },
     });
-    expect(store.getById("job-admitted")?.status).toBe("queued");
-    expect(store.getValidationRun("val-1")?.providerLinks).toEqual([
+    expect((await store.getById("job-admitted"))?.status).toBe("queued");
+    expect((await store.getValidationRun("val-1"))?.providerLinks).toEqual([
       { provider: "codex", jobId: "job-admitted", correlationId: "corr-admitted" },
     ]);
-    expect(store.getValidationRunIdByJobId("job-admitted")).toBe("val-1");
+    expect(await store.getValidationRunIdByJobId("job-admitted")).toBe("val-1");
   });
 
-  it("atomically claims the exact planned review judge only once", () => {
-    store.recordValidationRun(
+  it("atomically claims the exact planned review judge only once", async () => {
+    await store.recordValidationRun(
       runRecord({
         intent: "review",
         providerLinks: [],
@@ -209,7 +209,7 @@ describe("ValidationRunStore (SqliteJobStore)", () => {
         status: "running",
       })
     );
-    store.recordStart({
+    await store.recordStart({
       id: "job-judge",
       correlationId: "corr-judge",
       requestKey: "request-judge",
@@ -224,14 +224,14 @@ describe("ValidationRunStore (SqliteJobStore)", () => {
         role: "judge",
       },
     });
-    expect(store.getValidationRun("val-1")?.judgeLink).toEqual({
+    expect((await store.getValidationRun("val-1"))?.judgeLink).toEqual({
       provider: "judge-api",
       jobId: "job-judge",
       correlationId: "corr-judge",
     });
-    expect(store.getValidationRunIdByJobId("job-judge")).toBe("val-1");
+    expect(await store.getValidationRunIdByJobId("job-judge")).toBe("val-1");
 
-    expect(() =>
+    await expect(
       store.recordStart({
         id: "job-judge-duplicate",
         correlationId: "corr-judge-duplicate",
@@ -247,11 +247,11 @@ describe("ValidationRunStore (SqliteJobStore)", () => {
           role: "judge",
         },
       })
-    ).toThrow(/already claimed/);
-    expect(store.getById("job-judge-duplicate")).toBeNull();
+    ).rejects.toThrow(/already claimed/);
+    expect(await store.getById("job-judge-duplicate")).toBeNull();
   });
 
-  it("rejects a judge claim for the wrong plan, owner, or run state", () => {
+  it("rejects a judge claim for the wrong plan, owner, or run state", async () => {
     const requestJson = JSON.stringify({
       judgeProvider: "judge-api",
       reviewAuthorization: { judgeProvider: "judge-api" },
@@ -261,7 +261,7 @@ describe("ValidationRunStore (SqliteJobStore)", () => {
       ["wrong-owner", "alice", "running"],
       ["closed", "local", "finalized"],
     ] as const) {
-      store.recordValidationRun(
+      await store.recordValidationRun(
         runRecord({
           validationId,
           ownerPrincipal,
@@ -279,7 +279,7 @@ describe("ValidationRunStore (SqliteJobStore)", () => {
     ];
     for (const [index, attempt] of attempts.entries()) {
       const jobId = `rejected-judge-${index}`;
-      expect(() =>
+      await expect(
         store.recordStart({
           id: jobId,
           correlationId: `corr-${jobId}`,
@@ -295,13 +295,13 @@ describe("ValidationRunStore (SqliteJobStore)", () => {
             role: "judge",
           },
         })
-      ).toThrow();
-      expect(store.getById(jobId)).toBeNull();
+      ).rejects.toThrow();
+      expect(await store.getById(jobId)).toBeNull();
     }
   });
 
-  it("transitions roster state by owner and records a skipped judge atomically", () => {
-    store.recordValidationRun(
+  it("transitions roster state by owner and records a skipped judge atomically", async () => {
+    await store.recordValidationRun(
       runRecord({
         intent: "review",
         providerLinks: [],
@@ -312,32 +312,32 @@ describe("ValidationRunStore (SqliteJobStore)", () => {
         status: "admitting",
       })
     );
-    expect(store.transitionValidationRunStatus("val-1", "other", "admitting", "running")).toBe(
+    expect(await store.transitionValidationRunStatus("val-1", "other", "admitting", "running")).toBe(
       false
     );
-    expect(store.transitionValidationRunStatus("val-1", "local", "admitting", "running")).toBe(
+    expect(await store.transitionValidationRunStatus("val-1", "local", "admitting", "running")).toBe(
       true
     );
-    store.skipValidationJudge("val-1", "judge-api", "local");
-    expect(store.getValidationRun("val-1")?.status).toBe("judge_skipped");
+    await store.skipValidationJudge("val-1", "judge-api", "local");
+    expect((await store.getValidationRun("val-1"))?.status).toBe("judge_skipped");
   });
 
-  it("updates the run status to finalized", () => {
-    store.recordValidationRun(runRecord());
-    store.setValidationRunStatus("val-1", "finalized");
-    expect(store.getValidationRun("val-1")?.status).toBe("finalized");
+  it("updates the run status to finalized", async () => {
+    await store.recordValidationRun(runRecord());
+    await store.setValidationRunStatus("val-1", "finalized");
+    expect((await store.getValidationRun("val-1"))?.status).toBe("finalized");
   });
 
-  it("persists across a re-open (CREATE TABLE IF NOT EXISTS is durable)", () => {
+  it("persists across a re-open (CREATE TABLE IF NOT EXISTS is durable)", async () => {
     const dbPath = join(tempDir, "reopen.db");
     const first = new SqliteJobStore(dbPath);
-    first.recordValidationRun(runRecord({ validationId: "val-reopen" }));
-    first.close();
+    await first.recordValidationRun(runRecord({ validationId: "val-reopen" }));
+    await first.close();
     const second = new SqliteJobStore(dbPath);
     try {
-      expect(second.getValidationRun("val-reopen")?.validationId).toBe("val-reopen");
+      expect((await second.getValidationRun("val-reopen"))?.validationId).toBe("val-reopen");
     } finally {
-      second.close();
+      await second.close();
     }
   });
 
@@ -391,18 +391,18 @@ describe("startValidationRun durable run persistence (Phase 0)", () => {
     store = new SqliteJobStore(join(tempDir, "jobs.db"));
   });
 
-  afterEach(() => {
+  afterEach(async () => {
     try {
-      store.close();
+      await store.close();
     } catch {
       /* ignore */
     }
     rmSync(tempDir, { recursive: true, force: true });
   });
 
-  it("writes exactly one validation_runs row at kickoff with owner + provider links", () => {
+  it("writes exactly one validation_runs row at kickoff with owner + provider links", async () => {
     const manager = scriptedManager();
-    const run = startValidationRun(
+    const run = await startValidationRun(
       {
         asyncJobManager: manager as any,
         getProviderRuntimeStatus: () => ({
@@ -416,7 +416,7 @@ describe("startValidationRun durable run persistence (Phase 0)", () => {
       { intent: "validate", question: "Is this safe?", providers: ["claude", "codex"] }
     );
 
-    const stored = store.getValidationRun(run.validationId);
+    const stored = await store.getValidationRun(run.validationId);
     expect(stored).not.toBeNull();
     expect(stored?.ownerPrincipal).toBe("local"); // no request context => local principal
     expect(stored?.intent).toBe("validate");
@@ -427,9 +427,9 @@ describe("startValidationRun durable run persistence (Phase 0)", () => {
     );
   });
 
-  it("does not write a run row when no durable store is wired, but still returns a validationId", () => {
+  it("does not write a run row when no durable store is wired, but still returns a validationId", async () => {
     const manager = scriptedManager();
-    const run = startValidationRun(
+    const run = await startValidationRun(
       {
         asyncJobManager: manager as any,
         getProviderRuntimeStatus: () => ({
@@ -445,7 +445,7 @@ describe("startValidationRun durable run persistence (Phase 0)", () => {
 
     expect(run.validationId).toMatch(/[0-9a-f-]{36}/);
     // Nothing was persisted anywhere; the run id is purely transient.
-    expect(store.getValidationRun(run.validationId)).toBeNull();
+    expect(await store.getValidationRun(run.validationId)).toBeNull();
   });
 });
 
@@ -489,34 +489,34 @@ describe("startJudgeSynthesis judge-link persistence (Phase 0)", () => {
     store = new SqliteJobStore(join(tempDir, "jobs.db"));
   });
 
-  afterEach(() => {
+  afterEach(async () => {
     try {
-      store.close();
+      await store.close();
     } catch {
       /* ignore */
     }
     rmSync(tempDir, { recursive: true, force: true });
   });
 
-  it("links the judge job into an owned run", () => {
-    store.recordValidationRun(runRecord({ validationId: "v-own", ownerPrincipal: "local" }));
-    const synthesis = startJudgeSynthesis(deps(), {
+  it("links the judge job into an owned run", async () => {
+    await store.recordValidationRun(runRecord({ validationId: "v-own", ownerPrincipal: "local" }));
+    const synthesis = await startJudgeSynthesis(deps(), {
       question: "?",
       providerResults: [completedResult("claude")],
       judgeProvider: "codex",
       validationId: "v-own",
     });
     expect(synthesis.status).toBe("running");
-    expect(store.getValidationRun("v-own")?.judgeLink?.jobId).toBe(
+    expect((await store.getValidationRun("v-own"))?.judgeLink?.jobId).toBe(
       synthesis.rawJobReference!.jobId
     );
   });
 
-  it("does not mutate a run owned by a different principal (own-or-not-found)", () => {
-    store.recordValidationRun(
+  it("does not mutate a run owned by a different principal (own-or-not-found)", async () => {
+    await store.recordValidationRun(
       runRecord({ validationId: "v-other", ownerPrincipal: "someone-else" })
     );
-    const synthesis = startJudgeSynthesis(deps(), {
+    const synthesis = await startJudgeSynthesis(deps(), {
       question: "?",
       providerResults: [completedResult("claude")],
       judgeProvider: "codex",
@@ -524,11 +524,11 @@ describe("startJudgeSynthesis judge-link persistence (Phase 0)", () => {
     });
     // The judge still starts (status running), but the cross-principal run is untouched.
     expect(synthesis.status).toBe("running");
-    expect(store.getValidationRun("v-other")?.judgeLink).toBeNull();
+    expect((await store.getValidationRun("v-other"))?.judgeLink).toBeNull();
   });
 
-  it("behaves as before when no validationId is supplied", () => {
-    const synthesis = startJudgeSynthesis(deps(), {
+  it("behaves as before when no validationId is supplied", async () => {
+    const synthesis = await startJudgeSynthesis(deps(), {
       question: "?",
       providerResults: [completedResult("claude")],
       judgeProvider: "codex",
@@ -552,13 +552,13 @@ describe("AsyncJobManager.getValidationRunStore durability gate (Phase 0)", () =
     rmSync(tempDir, { recursive: true, force: true });
   });
 
-  it("returns the store for a durable sqlite backend", () => {
+  it("returns the store for a durable sqlite backend", async () => {
     const sqlite = new SqliteJobStore(join(tempDir, "jobs.db"));
     try {
       const manager = new AsyncJobManager(noopLogger, undefined, sqlite);
       expect(manager.getValidationRunStore()).toBe(sqlite);
     } finally {
-      sqlite.close();
+      await sqlite.close();
     }
   });
 
@@ -592,8 +592,8 @@ describe("validation run persistence degrades gracefully on store errors (Phase 
     },
   };
 
-  it("startValidationRun still returns a validationId when recordValidationRun throws", () => {
-    const run = startValidationRun(
+  it("startValidationRun still returns a validationId when recordValidationRun throws", async () => {
+    const run = await startValidationRun(
       {
         asyncJobManager: scriptedManager() as any,
         getProviderRuntimeStatus: () => ({
@@ -609,8 +609,8 @@ describe("validation run persistence degrades gracefully on store errors (Phase 
     expect(run.validationId).toMatch(/[0-9a-f-]{36}/);
   });
 
-  it("startJudgeSynthesis still starts the judge when the run store throws", () => {
-    const synthesis = startJudgeSynthesis(
+  it("startJudgeSynthesis still starts the judge when the run store throws", async () => {
+    const synthesis = await startJudgeSynthesis(
       {
         asyncJobManager: scriptedManager() as any,
         getProviderRuntimeStatus: () => ({

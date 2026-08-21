@@ -122,7 +122,7 @@ describe("ACP session map — recordAcpSessionInfo", () => {
 
   it("returns false for a non-ACP (CLI) session (cannot coerce a CLI session into ACP)", async () => {
     const sm = fakeSM();
-    sm.createSession("mistral", "cli session", "gw-cli-1"); // no acp metadata
+    await sm.createSession("mistral", "cli session", "gw-cli-1"); // no acp metadata
     expect(await recordAcpSessionInfo(sm, "gw-cli-1", { providerSessionId: "x" })).toBe(false);
   });
 
@@ -172,7 +172,7 @@ describe("ACP session map — resolveAcpResume ownership scope", () => {
 
   it("rejects resuming a CLI (non-ACP) session through ACP (wrong_transport)", async () => {
     const sm = fakeSM();
-    sm.createSession("mistral", "cli", "gw-cli-2"); // no acp metadata
+    await sm.createSession("mistral", "cli", "gw-cli-2"); // no acp metadata
     expect(await resolveAcpResume(sm, "gw-cli-2", "mistral")).toEqual({
       ok: false,
       reason: "wrong_transport",

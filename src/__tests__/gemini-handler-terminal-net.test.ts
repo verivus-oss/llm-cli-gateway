@@ -347,7 +347,7 @@ describe("handleGeminiRequest terminal net: deferred (Mode B) + H-DoubleComplete
       // The FlightOwnership fence: completeInline no-ops once the manager owns
       // completion, so the handler does NOT inline-complete on a deferral.
       expect(logComplete).not.toHaveBeenCalled();
-      manager.cancelJob(body.jobId);
+      await manager.cancelJob(body.jobId);
     } finally {
       slot.release();
       await manager.dispose();
@@ -385,8 +385,8 @@ describe("handleGeminiRequest terminal net: deferred (Mode B) + H-DoubleComplete
     const realStart = manager.startJobWithDedup.bind(manager);
     let jobId: string | undefined;
     vi.spyOn(manager, "startJobWithDedup").mockImplementation(
-      (...args: Parameters<typeof realStart>) => {
-        const out = realStart(...args);
+      async (...args: Parameters<typeof realStart>) => {
+        const out = await realStart(...args);
         jobId = out.snapshot.id;
         return out;
       }
@@ -403,7 +403,7 @@ describe("handleGeminiRequest terminal net: deferred (Mode B) + H-DoubleComplete
         )
       );
       await vi.waitFor(() => expect(jobId).toBeDefined());
-      manager.cancelJob(jobId!);
+      await manager.cancelJob(jobId!);
 
       await expect(pending).rejects.toThrow(/worktree removal failed/);
       expect(arm).toHaveBeenCalledTimes(1);

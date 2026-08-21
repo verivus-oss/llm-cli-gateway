@@ -31,9 +31,9 @@ describe("U22 fix: dedup key respects env vars", () => {
     return {
       manager,
       store,
-      cleanup: () => {
+      cleanup: async () => {
         try {
-          store.close();
+          await store.close();
         } catch {
           /* noop */
         }
@@ -42,47 +42,47 @@ describe("U22 fix: dedup key respects env vars", () => {
     };
   }
 
-  it("two Mistral requests with same args but different VIBE_ACTIVE_MODEL do NOT dedup", () => {
+  it("two Mistral requests with same args but different VIBE_ACTIVE_MODEL do NOT dedup", async () => {
     const { manager, cleanup } = makeManager();
     try {
       // Same prompt+flags, different model → must produce DIFFERENT job ids.
       const args = ["-p", "hello", "--agent", "auto-approve"];
-      const j1 = manager.startJobWithDedup("mistral", args, "corr-A", {
+      const j1 = await manager.startJobWithDedup("mistral", args, "corr-A", {
         env: { VIBE_ACTIVE_MODEL: "mistral-medium-3.5" },
       });
-      const j2 = manager.startJobWithDedup("mistral", args, "corr-B", {
+      const j2 = await manager.startJobWithDedup("mistral", args, "corr-B", {
         env: { VIBE_ACTIVE_MODEL: "devstral-small" },
       });
       expect(j2.deduped).toBe(false);
       expect(j2.snapshot.id).not.toBe(j1.snapshot.id);
       // Cancel both to release child processes (they spawn `vibe`, which may
       // not exist on the host — that's fine, we just need argv-shape coverage).
-      manager.cancelJob(j1.snapshot.id);
-      manager.cancelJob(j2.snapshot.id);
+      await manager.cancelJob(j1.snapshot.id);
+      await manager.cancelJob(j2.snapshot.id);
     } finally {
       cleanup();
     }
   });
 
-  it("two Mistral requests with same args AND same VIBE_ACTIVE_MODEL DO dedup", () => {
+  it("two Mistral requests with same args AND same VIBE_ACTIVE_MODEL DO dedup", async () => {
     const { manager, cleanup } = makeManager();
     try {
       const args = ["-p", "hello", "--agent", "auto-approve"];
-      const j1 = manager.startJobWithDedup("mistral", args, "corr-A", {
+      const j1 = await manager.startJobWithDedup("mistral", args, "corr-A", {
         env: { VIBE_ACTIVE_MODEL: "mistral-medium-3.5" },
       });
-      const j2 = manager.startJobWithDedup("mistral", args, "corr-B", {
+      const j2 = await manager.startJobWithDedup("mistral", args, "corr-B", {
         env: { VIBE_ACTIVE_MODEL: "mistral-medium-3.5" },
       });
       expect(j2.deduped).toBe(true);
       expect(j2.snapshot.id).toBe(j1.snapshot.id);
-      manager.cancelJob(j1.snapshot.id);
+      await manager.cancelJob(j1.snapshot.id);
     } finally {
       cleanup();
     }
   });
 
-  it("env-var key canonicalisation is order-independent", () => {
+  it("env-var key canonicalisation is order-independent", async () => {
     // The dedup key payload is a sorted-keys JSON, so the order callers pass
     // env keys in must not change the resulting hash.
     const dir = mkdtempSync(join(tmpdir(), "post-review-jobs-canon-"));
@@ -90,18 +90,18 @@ describe("U22 fix: dedup key respects env vars", () => {
     const manager = new AsyncJobManager(noopLogger, undefined, store);
     try {
       const args = ["-p", "hello"];
-      const j1 = manager.startJobWithDedup("mistral", args, "corr-A", {
+      const j1 = await manager.startJobWithDedup("mistral", args, "corr-A", {
         env: { A: "1", B: "2" },
       });
-      const j2 = manager.startJobWithDedup("mistral", args, "corr-B", {
+      const j2 = await manager.startJobWithDedup("mistral", args, "corr-B", {
         env: { B: "2", A: "1" },
       });
       expect(j2.deduped).toBe(true);
       expect(j2.snapshot.id).toBe(j1.snapshot.id);
-      manager.cancelJob(j1.snapshot.id);
+      await manager.cancelJob(j1.snapshot.id);
     } finally {
       try {
-        store.close();
+        await store.close();
       } catch {
         /* noop */
       }
@@ -109,7 +109,7 @@ describe("U22 fix: dedup key respects env vars", () => {
     }
   });
 
-  it("no-env-vars path keeps the original (cli, args) dedup key shape", () => {
+  it("no-env-vars path keeps the original (cli, args) dedup key shape", async () => {
     // Pre-U22 callers that pass no env must still get hits/misses on the same
     // (cli, args) shape — the env canonicalisation collapses to "" for empty
     // and undefined env maps and `computeRequestKey(cli, args, "")` is the
@@ -119,15 +119,15 @@ describe("U22 fix: dedup key respects env vars", () => {
     const manager = new AsyncJobManager(noopLogger, undefined, store);
     try {
       const args = ["-p", "hello"];
-      const j1 = manager.startJobWithDedup("claude", args, "corr-A", {});
+      const j1 = await manager.startJobWithDedup("claude", args, "corr-A", {});
       // Independently compute what the key should be: legacy form (no extra).
       const expectedKey = computeRequestKey("claude", args, "");
-      const found = store.findByRequestKey(expectedKey);
+      const found = await store.findByRequestKey(expectedKey);
       expect(found?.id).toBe(j1.snapshot.id);
-      manager.cancelJob(j1.snapshot.id);
+      await manager.cancelJob(j1.snapshot.id);
     } finally {
       try {
-        store.close();
+        await store.close();
       } catch {
         /* noop */
       }
@@ -235,9 +235,9 @@ describe("U26 fix: AsyncJobManager.onComplete contract", () => {
     const manager = new AsyncJobManager(noopLogger, undefined, store);
     return {
       manager,
-      cleanup: () => {
+      cleanup: async () => {
         try {
-          store.close();
+          await store.close();
         } catch {
           /* noop */
         }
@@ -250,15 +250,15 @@ describe("U26 fix: AsyncJobManager.onComplete contract", () => {
     const { manager, cleanup } = makeManager();
     try {
       const onComplete = vi.fn();
-      const job = manager.startJobWithDedup("claude", ["-p", "hi"], "corr-1", {
+      const job = await manager.startJobWithDedup("claude", ["-p", "hi"], "corr-1", {
         onComplete,
       });
-      manager.cancelJob(job.snapshot.id);
+      await manager.cancelJob(job.snapshot.id);
       await vi.waitFor(() => {
         expect(onComplete).toHaveBeenCalledTimes(1);
       });
       // Cancel again — should not double-fire.
-      manager.cancelJob(job.snapshot.id);
+      await manager.cancelJob(job.snapshot.id);
       expect(onComplete).toHaveBeenCalledTimes(1);
     } finally {
       cleanup();
@@ -270,10 +270,10 @@ describe("U26 fix: AsyncJobManager.onComplete contract", () => {
     try {
       const onComplete1 = vi.fn();
       const onComplete2 = vi.fn();
-      const j1 = manager.startJobWithDedup("claude", ["-p", "hi"], "corr-1", {
+      const j1 = await manager.startJobWithDedup("claude", ["-p", "hi"], "corr-1", {
         onComplete: onComplete1,
       });
-      const j2 = manager.startJobWithDedup("claude", ["-p", "hi"], "corr-2", {
+      const j2 = await manager.startJobWithDedup("claude", ["-p", "hi"], "corr-2", {
         onComplete: onComplete2,
       });
       expect(j2.deduped).toBe(true);
@@ -282,7 +282,7 @@ describe("U26 fix: AsyncJobManager.onComplete contract", () => {
       expect(onComplete2).toHaveBeenCalledTimes(1);
       expect(onComplete1).not.toHaveBeenCalled();
       // Now cancel the original; its onComplete fires after child close.
-      manager.cancelJob(j1.snapshot.id);
+      await manager.cancelJob(j1.snapshot.id);
       await vi.waitFor(() => {
         expect(onComplete1).toHaveBeenCalledTimes(1);
       });
@@ -309,7 +309,7 @@ describe("U26 fix: AsyncJobManager.onComplete contract", () => {
       const onComplete = (): void => {
         fired = true;
       };
-      const snapshot = manager.startJob(
+      const snapshot = await manager.startJob(
         "claude",
         ["-p", "x"],
         "corr-onc",
@@ -320,7 +320,7 @@ describe("U26 fix: AsyncJobManager.onComplete contract", () => {
         undefined,
         onComplete
       );
-      manager.cancelJob(snapshot.id);
+      await manager.cancelJob(snapshot.id);
       await vi.waitFor(() => {
         expect(fired).toBe(true);
       });

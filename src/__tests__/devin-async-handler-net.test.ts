@@ -127,7 +127,7 @@ describe("handleDevinRequestAsync async-enqueue envelope (A4)", () => {
     // D4: a minted (not user-provided) session gets NO durable usage update.
     expect(sm.updateSessionUsage).not.toHaveBeenCalled();
 
-    ajm.cancelJob(body.job.id);
+    await ajm.cancelJob(body.job.id);
     await ajm.dispose();
   });
 
@@ -148,7 +148,7 @@ describe("handleDevinRequestAsync async-enqueue envelope (A4)", () => {
     expect(startJob).toHaveBeenCalledTimes(1);
     expect(sm.updateSessionUsage).toHaveBeenCalledWith("user-devin-abc");
 
-    ajm.cancelJob(body.job.id);
+    await ajm.cancelJob(body.job.id);
     await ajm.dispose();
   });
 

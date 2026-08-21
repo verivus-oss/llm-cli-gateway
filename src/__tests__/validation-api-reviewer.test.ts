@@ -98,9 +98,9 @@ const cliInstalled = (provider: ValidationProvider) =>
   }) as any;
 
 describe("Slice 3 — API providers as validation reviewers", () => {
-  it("dispatches an API reviewer through startHttpJob, a CLI reviewer through startJob", () => {
+  it("dispatches an API reviewer through startHttpJob, a CLI reviewer through startJob", async () => {
     const fake = makeManager();
-    const report = startValidationRun(
+    const report = await startValidationRun(
       {
         asyncJobManager: fake.manager as any,
         getProviderRuntimeStatus: cliInstalled,
@@ -114,9 +114,9 @@ describe("Slice 3 — API providers as validation reviewers", () => {
     expect(report.results.map(r => r.status).sort()).toEqual(["running", "running"]);
   });
 
-  it("treats an API provider as installed without a CLI runtime probe", () => {
+  it("treats an API provider as installed without a CLI runtime probe", async () => {
     const fake = makeManager();
-    const report = startValidationRun(
+    const report = await startValidationRun(
       // No getProviderRuntimeStatus provided — the CLI path would skip, but the
       // API provider must still start via its own status resolution.
       { asyncJobManager: fake.manager as any, apiProviders: [ollama] },
@@ -126,9 +126,9 @@ describe("Slice 3 — API providers as validation reviewers", () => {
     expect(report.results[0].status).toBe("running");
   });
 
-  it("routes an API judge through startHttpJob", () => {
+  it("routes an API judge through startHttpJob", async () => {
     const fake = makeManager();
-    const synthesis = startJudgeSynthesis(
+    const synthesis = await startJudgeSynthesis(
       { asyncJobManager: fake.manager as any, apiProviders: [ollama] },
       {
         question: "q",
@@ -167,9 +167,9 @@ describe("Slice 3 — API providers as validation reviewers", () => {
     expect(cliOnly.safeParse("grok").success).toBe(true);
   });
 
-  it("leaves CLI-only runs unchanged when no apiProviders are configured", () => {
+  it("leaves CLI-only runs unchanged when no apiProviders are configured", async () => {
     const fake = makeManager();
-    startValidationRun(
+    await startValidationRun(
       { asyncJobManager: fake.manager as any, getProviderRuntimeStatus: cliInstalled },
       { intent: "validate", question: "q", providers: ["claude", "codex"] }
     );
@@ -177,9 +177,9 @@ describe("Slice 3 — API providers as validation reviewers", () => {
     expect(fake.startHttpCalls).toEqual([]);
   });
 
-  it("dispatches Cursor as a CLI validation reviewer with cursor-agent print args", () => {
+  it("dispatches Cursor as a CLI validation reviewer with cursor-agent print args", async () => {
     const fake = makeManager();
-    const report = startValidationRun(
+    const report = await startValidationRun(
       { asyncJobManager: fake.manager as any, getProviderRuntimeStatus: cliInstalled },
       { intent: "validate", question: "q", providers: ["cursor"] }
     );

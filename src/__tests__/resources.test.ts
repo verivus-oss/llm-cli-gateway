@@ -178,8 +178,8 @@ describe("phase-2 generated model + session resources", () => {
 
   // Acceptance 3: per-provider sessions:// stays owner-scoped.
   it("sessions://<provider> is owner-scoped (a caller sees only its own rows)", async () => {
-    const alice = create("cursor", "alice");
-    const bob = create("cursor", "bob");
+    const alice = await create("cursor", "alice");
+    const bob = await create("cursor", "bob");
 
     const aliceView = JSON.parse((await read("sessions://cursor", "alice"))!.text);
     const ids = aliceView.sessions.map((s: { id: string }) => s.id);
@@ -189,15 +189,17 @@ describe("phase-2 generated model + session resources", () => {
 
   // Acceptance 3: sessions://all stays owner-scoped for a newly-generated provider.
   it("sessions://all hides another principal's rows for a generated provider", async () => {
-    const alice = create("devin", "alice");
-    const bob = create("devin", "bob");
+    const alice = await create("devin", "alice");
+    const bob = await create("devin", "bob");
 
     const aliceView = JSON.parse((await read("sessions://all", "alice"))!.text);
     const ids = aliceView.sessions.map((s: { id: string }) => s.id);
     expect(ids).toContain(alice.id);
     expect(ids).not.toContain(bob.id);
     // active-session pointer for bob's provider must not leak either.
-    runWithRequestContext(ctx("bob"), () => sessions.setActiveSession("devin", bob.id));
+    await runWithRequestContext(ctx("bob"), async () =>
+      sessions.setActiveSession("devin", (bob).id)
+    );
     const aliceAgain = JSON.parse((await read("sessions://all", "alice"))!.text);
     expect(aliceAgain.activeSessions.devin).toBeNull();
   });

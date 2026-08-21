@@ -200,7 +200,7 @@ function resultFor(
   report: ReturnType<typeof startReviewRun>,
   provider: ValidationProvider
 ): { status: string; error: string | null } {
-  const found = report.results.find(r => r.provider === provider);
+  const found = (await report).results.find(async r => r.provider === provider);
   if (!found) throw new Error(`No ${provider} result`);
   return { status: found.status, error: found.error };
 }
@@ -234,11 +234,11 @@ describe("issue #270: cursor trust", () => {
     ]);
   });
 
-  it("does NOT emit --trust for an ordinary ask", () => {
+  it("does NOT emit --trust for an ordinary ask", async () => {
     // The ask path is where the neutral temp cwd applies. Granting trust there
     // would widen the change well beyond the defect.
     const fake = makeManager();
-    startValidationRun(
+    await startValidationRun(
       { asyncJobManager: fake.manager as never, getProviderRuntimeStatus: runtime },
       { intent: "second_opinion", question: "is this right?", providers: ["cursor"] }
     );
@@ -323,11 +323,11 @@ describe("issue #270: devin sandbox preflight", () => {
   it("skips only the devin seat when bwrap is absent, and still launches the rest", () => {
     // The defect this replaces: throwing here aborted the entire roster,
     // because startReviewRun defers launches and rethrows admission errors.
-    withPlatform("linux", () => {
+    withPlatform("linux", async () => {
       const { report, calls } = review(["claude", "devin", "cursor"], () => false);
       expect(resultFor(report, "devin").status).toBe("skipped");
       expect(calls.map(c => c.cli)).toEqual(["claude", "cursor"]);
-      expect(report.success).toBe(true);
+      expect((await report).success).toBe(true);
     });
   });
 
@@ -375,8 +375,8 @@ describe("issue #270: devin sandbox preflight", () => {
     expect(probe).not.toHaveBeenCalled();
 
     const fake = makeManager();
-    withPlatform("linux", () => {
-      startValidationRun(
+    withPlatform("linux", async () => {
+      await startValidationRun(
         {
           asyncJobManager: fake.manager as never,
           getProviderRuntimeStatus: runtime,
@@ -394,8 +394,8 @@ describe("issue #270: devin sandbox preflight", () => {
     // Kept last: every test above injects the probe, so the real one has not
     // run yet and the counter starts clean.
     const fake = makeManager();
-    const runOnce = (): void => {
-      startReviewRun(
+    const runOnce = async (): Promise<void> => {
+      await startReviewRun(
         {
           asyncJobManager: fake.manager as never,
           getProviderRuntimeStatus: runtime,
@@ -489,10 +489,10 @@ describe("issue #270 round 3: the judge is a second dispatch site", () => {
     expect(calls[0].args).toContain("--trust");
   });
 
-  it("SKIPS a cursor judge on an unregistered repository instead of launching it", () => {
+  it("SKIPS a cursor judge on an unregistered repository instead of launching it", async () => {
     const { synthesis, calls } = judge("cursor", { isProviderWorkspacePath: () => false });
-    expect(synthesis.status).toBe("skipped");
-    expect(synthesis.note).toMatch(/not a workspace registered for cursor/i);
+    expect((await synthesis).status).toBe("skipped");
+    expect((await synthesis).note).toMatch(/not a workspace registered for cursor/i);
     expect(calls).toHaveLength(0);
   });
 
@@ -506,10 +506,10 @@ describe("issue #270 round 3: the judge is a second dispatch site", () => {
   });
 
   it("skips a devin judge when bubblewrap is missing rather than failing at spawn", () => {
-    withPlatform("linux", () => {
+    withPlatform("linux", async () => {
       const { synthesis, calls } = judge("devin", { hasBubblewrap: () => false });
-      expect(synthesis.status).toBe("skipped");
-      expect(synthesis.note).toMatch(/bubblewrap/i);
+      expect((await synthesis).status).toBe("skipped");
+      expect((await synthesis).note).toMatch(/bubblewrap/i);
       expect(calls).toHaveLength(0);
     });
   });

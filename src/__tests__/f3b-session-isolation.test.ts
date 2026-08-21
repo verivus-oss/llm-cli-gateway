@@ -80,8 +80,8 @@ describe("F3b session ownership isolation", () => {
   }
 
   it("session_list shows only the caller's own sessions", async () => {
-    const alice = create("claude", "alice");
-    const bob = create("claude", "bob");
+    const alice = await create("claude", "alice");
+    const bob = await create("claude", "bob");
 
     const aliceList = await call("session_list", {}, "alice");
     const aliceIds = aliceList.sessions.map((s: any) => s.id);
@@ -90,7 +90,7 @@ describe("F3b session ownership isolation", () => {
   });
 
   it("session_get / session_delete are own-or-not-found across principals", async () => {
-    const alice = create("codex", "alice");
+    const alice = await create("codex", "alice");
 
     const bobGet = await call("session_get", { sessionId: alice.id }, "bob");
     expect(bobGet.success).toBe(false);
@@ -105,8 +105,8 @@ describe("F3b session ownership isolation", () => {
   });
 
   it("local principal sees legacy-unowned + local sessions but not a remote principal's", async () => {
-    const localSession = create("grok"); // owner "local"
-    const aliceSession = create("grok", "alice");
+    const localSession = await create("grok"); // owner "local"
+    const aliceSession = await create("grok", "alice");
 
     const localList = await call("session_list", {}, undefined);
     const ids = localList.sessions.map((s: any) => s.id);
@@ -115,8 +115,8 @@ describe("F3b session ownership isolation", () => {
   });
 
   it("session_clear_all only removes the caller's own sessions", async () => {
-    create("mistral", "alice");
-    const bob = create("mistral", "bob");
+    await create("mistral", "alice");
+    const bob = await create("mistral", "bob");
 
     const cleared = await call("session_clear_all", {}, "alice");
     expect(cleared.deletedCount).toBe(1);
@@ -127,7 +127,7 @@ describe("F3b session ownership isolation", () => {
   });
 
   it("session_set_active rejects pointing at a session the caller does not own", async () => {
-    const alice = create("claude", "alice");
+    const alice = await create("claude", "alice");
     const denied = await call("session_set_active", { cli: "claude", sessionId: alice.id }, "bob");
     expect(denied.success).toBe(false);
     expect(denied.error).toMatch(/not found/i);

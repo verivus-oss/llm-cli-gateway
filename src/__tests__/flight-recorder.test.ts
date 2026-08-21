@@ -291,9 +291,9 @@ describe("FlightRecorder migrations (U23 cache columns)", () => {
     expect(tableColumns(dbPath).has("owner_principal")).toBe(true);
   });
 
-  it("F3: stamps owner_principal from the ambient request context on logStart", () => {
+  it("F3: stamps owner_principal from the ambient request context on logStart", async () => {
     const rec = new FlightRecorder(dbPath);
-    runWithRequestContext(
+    await runWithRequestContext(
       { transport: "http", authScopes: [], authPrincipal: "user-bob@example.com" },
       () => rec.logStart({ correlationId: "owned-1", cli: "claude", model: "sonnet", prompt: "hi" })
     );

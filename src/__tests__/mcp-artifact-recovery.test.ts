@@ -22,8 +22,8 @@ describe("MCP artifact cleanup pin recovery", () => {
     store = new SqliteJobStore(join(testHome, "jobs.db"));
   });
 
-  afterEach(() => {
-    store.close();
+  afterEach(async () => {
+    await store.close();
     if (originalHome === undefined) {
       delete process.env.HOME;
     } else {
@@ -32,13 +32,13 @@ describe("MCP artifact cleanup pin recovery", () => {
     rmSync(testHome, { recursive: true, force: true });
   });
 
-  function seedTerminalArtifactPin(
+  async function seedTerminalArtifactPin(
     id: string,
     artifactPath: string,
     artifactScope: string,
     ownerHostname = hostname()
-  ): void {
-    store.recordStart({
+  ): Promise<void> {
+    await store.recordStart({
       id,
       correlationId: `corr-${id}`,
       requestKey: `key-${id}`,
@@ -52,7 +52,7 @@ describe("MCP artifact cleanup pin recovery", () => {
       mcpArtifactScope: artifactScope,
       transport: "process",
     });
-    store.recordComplete({
+    await store.recordComplete({
       id,
       status: "completed",
       exitCode: 0,
@@ -72,19 +72,19 @@ describe("MCP artifact cleanup pin recovery", () => {
     });
   }
 
-  it("safely removes the exact generated artifact then acknowledges its one row", () => {
+  it("safely removes the exact generated artifact then acknowledges its one row", async () => {
     const config = buildClaudeMcpConfig(["sqry"]);
     const id = randomUUID();
     seedTerminalArtifactPin(id, config.path, config.artifactScope!);
 
     const result = recover(id);
 
-    expect(result).toEqual({ ok: true, jobId: id, outcome: "removed_and_acknowledged" });
+    expect(await result).toEqual({ ok: true, jobId: id, outcome: "removed_and_acknowledged" });
     expect(existsSync(config.path)).toBe(false);
-    expect(store.getById(id)?.mcpArtifactCleanupPending).toBe(false);
+    expect((await store.getById(id))?.mcpArtifactCleanupPending).toBe(false);
   });
 
-  it("allows explicit recovery of an already absent config only after scope proof", () => {
+  it("allows explicit recovery of an already absent config only after scope proof", async () => {
     const config = buildClaudeMcpConfig(["sqry"]);
     const id = randomUUID();
     seedTerminalArtifactPin(id, config.path, config.artifactScope!);
@@ -93,15 +93,15 @@ describe("MCP artifact cleanup pin recovery", () => {
 
     const result = recover(id);
 
-    expect(result).toEqual({
+    expect(await result).toEqual({
       ok: true,
       jobId: id,
       outcome: "verified_absent_and_acknowledged",
     });
-    expect(store.getById(id)?.mcpArtifactCleanupPending).toBe(false);
+    expect((await store.getById(id))?.mcpArtifactCleanupPending).toBe(false);
   });
 
-  it("retains a pin when its captured request namespace is gone", () => {
+  it("retains a pin when its captured request namespace is gone", async () => {
     const config = buildClaudeMcpConfig(["sqry"]);
     const id = randomUUID();
     seedTerminalArtifactPin(id, config.path, config.artifactScope!);
@@ -110,16 +110,16 @@ describe("MCP artifact cleanup pin recovery", () => {
 
     const result = recover(id);
 
-    expect(result).toMatchObject({
+    expect(await result).toMatchObject({
       ok: false,
       jobId: id,
       outcome: "refused",
       reason: "artifact_not_safely_recoverable",
     });
-    expect(store.getById(id)?.mcpArtifactCleanupPending).toBe(true);
+    expect((await store.getById(id))?.mcpArtifactCleanupPending).toBe(true);
   });
 
-  it("cannot authorize a foreign host or a same-host foreign scope", () => {
+  it("cannot authorize a foreign host or a same-host foreign scope", async () => {
     const foreignHostConfig = buildClaudeMcpConfig(["sqry"]);
     const foreignHostId = randomUUID();
     seedTerminalArtifactPin(
@@ -137,21 +137,21 @@ describe("MCP artifact cleanup pin recovery", () => {
       "v2:foreign-installation:1:1:request.1.00000000-0000-4000-8000-000000000000:foreign:1:1"
     );
 
-    expect(recover(foreignHostId)).toMatchObject({
+    expect(await recover(foreignHostId)).toMatchObject({
       ok: false,
       reason: "foreign_or_unknown_host",
     });
-    expect(recover(foreignScopeId)).toMatchObject({
+    expect(await recover(foreignScopeId)).toMatchObject({
       ok: false,
       reason: "artifact_not_safely_recoverable",
     });
     expect(existsSync(foreignHostConfig.path)).toBe(true);
     expect(existsSync(foreignScopeConfig.path)).toBe(true);
-    expect(store.getById(foreignHostId)?.mcpArtifactCleanupPending).toBe(true);
-    expect(store.getById(foreignScopeId)?.mcpArtifactCleanupPending).toBe(true);
+    expect((await store.getById(foreignHostId))?.mcpArtifactCleanupPending).toBe(true);
+    expect((await store.getById(foreignScopeId))?.mcpArtifactCleanupPending).toBe(true);
   });
 
-  it("cannot turn an arbitrary durable path into filesystem authority", () => {
+  it("cannot turn an arbitrary durable path into filesystem authority", async () => {
     const id = randomUUID();
     const sentinel = join(testHome, "must-not-delete.txt");
     writeFileSync(sentinel, "sentinel", "utf8");
@@ -159,20 +159,20 @@ describe("MCP artifact cleanup pin recovery", () => {
 
     const result = recover(id);
 
-    expect(result).toMatchObject({
+    expect(await result).toMatchObject({
       ok: false,
       jobId: id,
       outcome: "refused",
       reason: "artifact_not_safely_recoverable",
     });
     expect(existsSync(sentinel)).toBe(true);
-    expect(store.getById(id)?.mcpArtifactCleanupPending).toBe(true);
+    expect((await store.getById(id))?.mcpArtifactCleanupPending).toBe(true);
   });
 
-  it("requires an explicit acknowledgement and rejects nonterminal rows", () => {
+  it("requires an explicit acknowledgement and rejects nonterminal rows", async () => {
     const config = buildClaudeMcpConfig(["sqry"]);
     const id = randomUUID();
-    store.recordStart({
+    await store.recordStart({
       id,
       correlationId: `corr-${id}`,
       requestKey: `key-${id}`,
@@ -187,10 +187,10 @@ describe("MCP artifact cleanup pin recovery", () => {
     });
 
     expect(
-      recoverMcpArtifactCleanupPin({ store, jobId: id, acknowledgement: "not-acknowledged" })
+      await recoverMcpArtifactCleanupPin({ store, jobId: id, acknowledgement: "not-acknowledged" })
     ).toMatchObject({ ok: false, reason: "acknowledgement_required" });
-    expect(recover(id)).toMatchObject({ ok: false, reason: "not_terminal_claude_process_job" });
+    expect(await recover(id)).toMatchObject({ ok: false, reason: "not_terminal_claude_process_job" });
     expect(existsSync(config.path)).toBe(true);
-    expect(store.getById(id)?.mcpArtifactCleanupPending).toBe(true);
+    expect((await store.getById(id))?.mcpArtifactCleanupPending).toBe(true);
   });
 });

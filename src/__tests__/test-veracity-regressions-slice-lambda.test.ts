@@ -616,40 +616,40 @@ describe("REGRESSIONS Lη — no CLI receives -w / --worktree in emitted argv (s
 // onto the first even though it ran in a different worktree.
 
 describe("REGRESSIONS Lθ — AsyncJobManager dedup key includes cwd (slice λ)", () => {
-  it("Lθ-1: two jobs with identical argv but different cwd do NOT dedup", () => {
+  it("Lθ-1: two jobs with identical argv but different cwd do NOT dedup", async () => {
     const mgr = new AsyncJobManager(noopLogger, undefined, new MemoryJobStore());
-    const a = mgr.startJobWithDedup("claude", ["sleep", "30"], "corr-a", {
+    const a = await mgr.startJobWithDedup("claude", ["sleep", "30"], "corr-a", {
       cwd: "/tmp/wt-A",
     });
-    const b = mgr.startJobWithDedup("claude", ["sleep", "30"], "corr-b", {
+    const b = await mgr.startJobWithDedup("claude", ["sleep", "30"], "corr-b", {
       cwd: "/tmp/wt-B",
     });
     expect(b.deduped).toBe(false);
     expect(b.snapshot.id).not.toBe(a.snapshot.id);
-    mgr.cancelJob(a.snapshot.id);
-    mgr.cancelJob(b.snapshot.id);
+    await mgr.cancelJob(a.snapshot.id);
+    await mgr.cancelJob(b.snapshot.id);
   });
 
-  it("Lθ-2: two jobs with identical argv AND identical cwd DO dedup (regression — pre-λ behaviour preserved)", () => {
+  it("Lθ-2: two jobs with identical argv AND identical cwd DO dedup (regression — pre-λ behaviour preserved)", async () => {
     const mgr = new AsyncJobManager(noopLogger, undefined, new MemoryJobStore());
-    const a = mgr.startJobWithDedup("claude", ["sleep", "30"], "corr-a", {
+    const a = await mgr.startJobWithDedup("claude", ["sleep", "30"], "corr-a", {
       cwd: "/tmp/wt-same",
     });
-    const b = mgr.startJobWithDedup("claude", ["sleep", "30"], "corr-b", {
+    const b = await mgr.startJobWithDedup("claude", ["sleep", "30"], "corr-b", {
       cwd: "/tmp/wt-same",
     });
     expect(b.deduped).toBe(true);
     expect(b.snapshot.id).toBe(a.snapshot.id);
-    mgr.cancelJob(a.snapshot.id);
+    await mgr.cancelJob(a.snapshot.id);
   });
 
-  it("Lθ-3: omitting cwd entirely on both calls preserves the pre-λ dedup behaviour (regression)", () => {
+  it("Lθ-3: omitting cwd entirely on both calls preserves the pre-λ dedup behaviour (regression)", async () => {
     const mgr = new AsyncJobManager(noopLogger, undefined, new MemoryJobStore());
-    const a = mgr.startJobWithDedup("claude", ["sleep", "30"], "corr-a", {});
-    const b = mgr.startJobWithDedup("claude", ["sleep", "30"], "corr-b", {});
+    const a = await mgr.startJobWithDedup("claude", ["sleep", "30"], "corr-a", {});
+    const b = await mgr.startJobWithDedup("claude", ["sleep", "30"], "corr-b", {});
     expect(b.deduped).toBe(true);
     expect(b.snapshot.id).toBe(a.snapshot.id);
-    mgr.cancelJob(a.snapshot.id);
+    await mgr.cancelJob(a.snapshot.id);
   });
 });
 

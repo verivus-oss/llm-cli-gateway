@@ -334,7 +334,7 @@ describe("handleDevinRequest terminal net: deferred (Mode B) + D4 split + decora
       expect(logComplete).not.toHaveBeenCalled();
       // decorateDeferred attaches the approval decision (envelope hook).
       expect("approval" in result).toBe(true);
-      manager.cancelJob(body.jobId);
+      await manager.cancelJob(body.jobId);
     } finally {
       slot.release();
       await manager.dispose();
@@ -377,7 +377,7 @@ describe("handleDevinRequest terminal net: deferred (Mode B) + D4 split + decora
       expect(typeof body.sessionId).toBe("string");
       expect(body.sessionId).toMatch(/^gw-/);
       expect(updateUsage).not.toHaveBeenCalled();
-      manager.cancelJob(body.jobId);
+      await manager.cancelJob(body.jobId);
     } finally {
       slot.release();
       await manager.dispose();
@@ -424,7 +424,7 @@ describe("handleDevinRequest terminal net: deferred (Mode B) + D4 split + decora
       expect(body.status).toBe("deferred");
       expect(body.sessionId).toBe(providedId);
       expect(updateUsage).toHaveBeenCalledWith(providedId);
-      manager.cancelJob(body.jobId);
+      await manager.cancelJob(body.jobId);
     } finally {
       slot.release();
       await manager.dispose();

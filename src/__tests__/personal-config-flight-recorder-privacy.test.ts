@@ -180,7 +180,7 @@ describe("Personal Agent Config Kit sync Flight Recorder privacy", () => {
   afterEach(async () => {
     vi.restoreAllMocks();
     await jobs?.dispose();
-    store?.close();
+    await store?.close();
     flightRecorder?.close();
     rmSync(root, { recursive: true, force: true });
     if (originalDeadline === undefined) delete process.env.SYNC_DEADLINE_MS;

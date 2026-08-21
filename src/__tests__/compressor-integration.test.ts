@@ -200,9 +200,9 @@ describe("byte-recovery escape hatch (spec 5.3 / 9.10)", () => {
 });
 
 describe("async llm_job_result wiring (spec 5.2 / 5.4 / 9.9)", () => {
-  function seed(store: MemoryJobStore, id: string, compress: boolean, ndjson: string): void {
+  async function seed(store: MemoryJobStore, id: string, compress: boolean, ndjson: string): Promise<void> {
     const now = new Date().toISOString();
-    store.recordStart({
+    await store.recordStart({
       id,
       correlationId: `corr-${id}`,
       requestKey: `k-${id}`,
@@ -214,7 +214,7 @@ describe("async llm_job_result wiring (spec 5.2 / 5.4 / 9.9)", () => {
       pid: null,
       ownerPrincipal: "local",
     });
-    store.recordComplete({
+    await store.recordComplete({
       id,
       status: "completed",
       exitCode: 0,

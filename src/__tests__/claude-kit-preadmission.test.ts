@@ -166,7 +166,7 @@ describe("Claude Kit argv pre-admission", () => {
   afterEach(async () => {
     vi.restoreAllMocks();
     await jobs.dispose();
-    store.close();
+    await store.close();
     rmSync(root, { recursive: true, force: true });
   });
 

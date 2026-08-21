@@ -913,13 +913,13 @@ describe("Personal Agent Config Kit compiler and release safety", () => {
     const missing = createClaudeContextArtifact(layout, context);
     missing.bindToJob("a".repeat(32));
     utimesSync(missing.path, agedAt, agedAt);
-    expect(reapClaudeContextArtifacts(layout, () => "not_found", now)).toBe(1);
+    expect(await reapClaudeContextArtifacts(layout, async () => "not_found", now)).toBe(1);
     expect(existsSync(missing.path)).toBe(false);
 
     const unavailable = createClaudeContextArtifact(layout, context);
     unavailable.bindToJob("b".repeat(32));
     utimesSync(unavailable.path, agedAt, agedAt);
-    expect(reapClaudeContextArtifacts(layout, () => "unavailable", now)).toBe(0);
+    expect(await reapClaudeContextArtifacts(layout, async () => "unavailable", now)).toBe(0);
     expect(existsSync(unavailable.path)).toBe(true);
   });
 

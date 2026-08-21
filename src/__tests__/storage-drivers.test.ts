@@ -122,6 +122,10 @@ describe("SqliteStorageDriver", () => {
   });
 
   it("serialises transactions, and one failure does not poison the next", async () => {
+    // BOTH submitted before either is awaited. That concurrency IS the test:
+    // awaiting each at its declaration makes them sequential and the queue is
+    // never exercised, which is how this assertion silently stopped testing
+    // serialisation while still passing.
     const failing = driver
       .transaction("write", async () => {
         throw new Error("first fails");
@@ -224,6 +228,9 @@ describe("SqliteStorageDriver", () => {
       await Promise.resolve();
       await c.execute("INSERT INTO t VALUES (?, ?)", ["first", "1"]);
     });
+    // NOT awaited: the refusal below must happen WHILE the drain is in flight.
+    // Awaiting here turns this into "refuses after closed", which is a
+    // different and much weaker claim that also passes.
     const closing = driver.close();
 
     await expect(
@@ -295,7 +302,9 @@ describe("SqliteStorageDriver", () => {
 
     await driver.transaction("write", async c => {
       await c.execute("INSERT INTO t VALUES (?, ?)", ["outer", "1"]);
-      await other.withConnection("write", inner => inner.execute("INSERT INTO o VALUES (?)", ["x"]));
+      await other.withConnection("write", inner =>
+        inner.execute("INSERT INTO o VALUES (?)", ["x"])
+      );
     });
 
     const rows = await other.withConnection("write", c => c.query("SELECT id FROM o"));
@@ -519,9 +528,9 @@ describe("PostgresStorageDriver", () => {
     const driver = new PostgresStorageDriver({ app: "a" }, fakePool(seen));
 
     for (const statement of ["BEGIN", "commit", " ROLLBACK", "SAVEPOINT s1", "END"]) {
-      await expect(
-        driver.withConnection("write", c => c.execute(statement))
-      ).rejects.toThrow(/transaction control/);
+      await expect(driver.withConnection("write", c => c.execute(statement))).rejects.toThrow(
+        /transaction control/
+      );
     }
     expect(seen).toEqual([]);
     await driver.close();

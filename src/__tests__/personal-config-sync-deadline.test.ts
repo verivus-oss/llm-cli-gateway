@@ -154,9 +154,9 @@ describe("Personal Agent Config Kit sync deadline", () => {
   afterEach(async () => {
     vi.restoreAllMocks();
     await saturatedJobs?.dispose();
-    saturatedStore?.close();
+    await saturatedStore?.close();
     await jobs.dispose();
-    store.close();
+    await store.close();
     rmSync(root, { recursive: true, force: true });
     if (originalDeadline === undefined) delete process.env.SYNC_DEADLINE_MS;
     else process.env.SYNC_DEADLINE_MS = originalDeadline;
@@ -284,7 +284,7 @@ describe("Personal Agent Config Kit sync deadline", () => {
       completedJobMemoryTtlMs: 60_000,
       maxJobOutputBytes: 1_024 * 1_024,
     });
-    const held = saturatedJobs.startJob("sleep" as LlmCli, ["5"], "hold-capacity");
+    const held = await saturatedJobs.startJob("sleep" as LlmCli, ["5"], "hold-capacity");
     expect(saturatedJobs.getLimiterSnapshot().running).toBe(1);
 
     const sessions = new FileSessionManager(join(root, "saturated-sessions.json"));
@@ -342,6 +342,6 @@ describe("Personal Agent Config Kit sync deadline", () => {
     expect(releasedAttemptId).toMatch(/^[0-9a-f-]{36}$/i);
     expect(sessions.getSession(releasedSessionId!)?.metadata?.kit?.attempt).toBeUndefined();
 
-    saturatedJobs.cancelJob(held.id);
+    await saturatedJobs.cancelJob(held.id);
   });
 });

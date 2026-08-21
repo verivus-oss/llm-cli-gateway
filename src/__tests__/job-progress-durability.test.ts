@@ -7,7 +7,7 @@ import { JobProgressTracker, parseStoredJobProgress } from "../job-progress.js";
 import { MemoryJobStore, SqliteJobStore, type JobStoreStatus } from "../job-store.js";
 import { noopLogger } from "../logger.js";
 
-async function waitFor(condition: () => boolean, label: string): Promise<void> {
+async function waitFor(condition: () => boolean | Promise<boolean>, label: string): Promise<void> {
   const deadline = Date.now() + 5_000;
   while (Date.now() < deadline) {
     if (condition()) return;
@@ -62,13 +62,13 @@ describe("job progress durability", () => {
   it("keeps progress dirty after a status mismatch or store failure and retries it", async () => {
     const store = new FlakyProgressStore();
     const manager = new AsyncJobManager(noopLogger, undefined, store);
-    const started = manager.startJob("sleep" as LlmCli, ["30"], "progress-retry");
+    const started = await manager.startJob("sleep" as LlmCli, ["30"], "progress-retry");
 
     try {
       await waitFor(
-        () =>
-          manager.getJobSnapshot(started.id)?.status === "running" &&
-          store.getById(started.id)?.status === "running",
+        async () =>
+          (await manager.getJobSnapshot((started).id))?.status === "running" &&
+          (await store.getById((started).id))?.status === "running",
         "running job admission"
       );
       const internals = manager as unknown as ProgressManagerHarness;
@@ -85,7 +85,7 @@ describe("job progress durability", () => {
 
       internals.maybeFlushProgress(job!, true);
       expect(job!.progressDirty).toBe(false);
-      expect(parseStoredJobProgress(store.getById(started.id)?.progressJson)?.lastSeq).toBe(
+      expect(parseStoredJobProgress((await store.getById(started.id))?.progressJson)?.lastSeq).toBe(
         job!.progress.snapshot().lastSeq
       );
 
@@ -98,13 +98,16 @@ describe("job progress durability", () => {
       internals.maybeFlushProgress(job!, true);
       expect(job!.progressDirty).toBe(false);
       expect(store.guardedWrites).toBeGreaterThanOrEqual(5);
-      expect(parseStoredJobProgress(store.getById(started.id)?.progressJson)?.lastSeq).toBe(
+      expect(parseStoredJobProgress((await store.getById(started.id))?.progressJson)?.lastSeq).toBe(
         job!.progress.snapshot().lastSeq
       );
     } finally {
-      manager.cancelJob(started.id);
+      await manager.cancelJob(started.id);
       await waitFor(
-        () => !["queued", "running"].includes(manager.getJobSnapshot(started.id)?.status ?? ""),
+        async () =>
+          !["queued", "running"].includes(
+            (await manager.getJobSnapshot((started).id))?.status ?? ""
+          ),
         "canceled job termination"
       );
       await manager.dispose({ timeoutMs: 1_000 });
@@ -120,7 +123,7 @@ describe("job progress durability", () => {
     const tracker = new JobProgressTracker("claude", "stream-json", null, startedAt);
 
     try {
-      writer.recordStart({
+      await writer.recordStart({
         id: "shared-review-job",
         correlationId: "shared-review-correlation",
         requestKey: "shared-review-key",
@@ -132,27 +135,27 @@ describe("job progress durability", () => {
         ownerInstance: "writer-instance",
         transport: "process",
       });
-      expect(writer.markRunning("shared-review-job", { pid: null })).toBe(true);
+      expect(await writer.markRunning("shared-review-job", { pid: null })).toBe(true);
       tracker.emit("starting", "lifecycle", "Review started");
       expect(
-        writer.recordProgressIfStatus("shared-review-job", "running", tracker.serialize())
+        await writer.recordProgressIfStatus("shared-review-job", "running", tracker.serialize())
       ).toBe(true);
 
-      const first = observer.getJobSnapshot("shared-review-job");
+      const first = await observer.getJobSnapshot("shared-review-job");
       expect(first).toMatchObject({ status: "running" });
       expect(first?.progress.lastSeq).toBe(1);
 
       tracker.emit("tool", "tool_start", "Inspecting repository evidence", "provider");
       expect(
-        writer.recordProgressIfStatus("shared-review-job", "running", tracker.serialize())
+        await writer.recordProgressIfStatus("shared-review-job", "running", tracker.serialize())
       ).toBe(true);
-      const refreshed = observer.getJobSnapshot("shared-review-job");
+      const refreshed = await observer.getJobSnapshot("shared-review-job");
       expect(refreshed).toMatchObject({ status: "running" });
       expect(refreshed?.progress.lastSeq).toBe(2);
       expect(refreshed?.progress.events.at(-1)?.message).toBe("Using a provider tool");
 
       tracker.emit("completed", "terminal", "Review completed");
-      writer.recordComplete({
+      await writer.recordComplete({
         id: "shared-review-job",
         status: "completed",
         exitCode: 0,
@@ -163,7 +166,7 @@ describe("job progress durability", () => {
         finishedAt: "2026-07-15T00:01:00.000Z",
         progressJson: tracker.serialize(),
       });
-      const terminal = observer.getJobSnapshot("shared-review-job");
+      const terminal = await observer.getJobSnapshot("shared-review-job");
       expect(terminal).toMatchObject({ status: "completed", exitCode: 0 });
       expect(terminal?.progress.events.at(-1)).toMatchObject({
         kind: "terminal",
@@ -171,8 +174,8 @@ describe("job progress durability", () => {
       });
     } finally {
       await observer.dispose({ timeoutMs: 100 });
-      reader.close();
-      writer.close();
+      await reader.close();
+      await writer.close();
     }
   });
 
@@ -186,7 +189,7 @@ describe("job progress durability", () => {
 
     try {
       initial.emit("starting", "lifecycle", "Review started");
-      store.recordStart({
+      await store.recordStart({
         id: "orphaned-review-job",
         correlationId: "orphaned-review-correlation",
         requestKey: "orphaned-review-key",
@@ -200,14 +203,14 @@ describe("job progress durability", () => {
         ownerInstance: "stale-owner",
         transport: "process",
       });
-      expect(store.markRunning("orphaned-review-job", { pid: null })).toBe(true);
+      expect(await store.markRunning("orphaned-review-job", { pid: null })).toBe(true);
       expect(
-        store.recordProgressIfStatus("orphaned-review-job", "running", initial.serialize())
+        await store.recordProgressIfStatus("orphaned-review-job", "running", initial.serialize())
       ).toBe(true);
-      expect(observer.getJobSnapshot("orphaned-review-job")?.progress.capability).toBe(
+      expect((await observer.getJobSnapshot("orphaned-review-job"))?.progress.capability).toBe(
         "structured"
       );
-      store.recordComplete({
+      await store.recordComplete({
         id: "orphaned-review-job",
         status: "orphaned",
         exitCode: null,
@@ -223,18 +226,20 @@ describe("job progress durability", () => {
 
       stale.emit("thinking", "activity", "Stale owner is still writing", "provider");
       expect(
-        store.recordProgressIfStatus("orphaned-review-job", "running", stale.serialize())
+        await store.recordProgressIfStatus("orphaned-review-job", "running", stale.serialize())
       ).toBe(false);
-      const persisted = parseStoredJobProgress(store.getById("orphaned-review-job")?.progressJson);
+      const persisted = parseStoredJobProgress(
+        (await store.getById("orphaned-review-job"))?.progressJson
+      );
       expect(persisted?.capability).toBe("structured");
       expect(persisted?.events.at(-1)).toMatchObject({
         kind: "terminal",
         message: "Job orphaned after its gateway lease expired",
       });
-      expect(store.getById("orphaned-review-job")?.status).toBe("orphaned");
+      expect((await store.getById("orphaned-review-job"))?.status).toBe("orphaned");
     } finally {
       await observer.dispose({ timeoutMs: 100 });
-      store.close();
+      await store.close();
     }
   });
 

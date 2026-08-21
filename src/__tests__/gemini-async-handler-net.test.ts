@@ -129,7 +129,7 @@ describe("handleGeminiRequestAsync async-enqueue envelope (A3)", () => {
     expect(sm.createSession).not.toHaveBeenCalled();
     expect(sm.updateSessionUsage).not.toHaveBeenCalled();
 
-    ajm.cancelJob(body.job.id);
+    await ajm.cancelJob(body.job.id);
     await ajm.dispose();
   });
 
@@ -153,7 +153,7 @@ describe("handleGeminiRequestAsync async-enqueue envelope (A3)", () => {
     expect(sm.createSession).toHaveBeenCalledTimes(1);
     expect(sm.updateSessionUsage).toHaveBeenCalledWith("user-gemini-abc");
 
-    ajm.cancelJob(body.job.id);
+    await ajm.cancelJob(body.job.id);
     await ajm.dispose();
   });
 

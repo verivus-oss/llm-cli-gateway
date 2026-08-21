@@ -175,10 +175,10 @@ function callFor(calls: CliStartCall[], provider: ValidationProvider): CliStartC
 }
 
 describe("repository review integration", () => {
-  it("rejects a Git root outside the caller-authorized repository path before dispatch", () => {
+  it("rejects a Git root outside the caller-authorized repository path before dispatch", async () => {
     const fake = makeManager();
 
-    expect(() =>
+    await expect(
       startReviewRun(
         {
           asyncJobManager: fake.manager as never,
@@ -201,11 +201,11 @@ describe("repository review integration", () => {
           },
         }
       )
-    ).toThrow(ReviewRunAuthorizationError);
+    ).rejects.toThrow(ReviewRunAuthorizationError);
     expect(fake.calls).toHaveLength(0);
   });
 
-  it("uses provider-native read-only review argv in the authorized repository", () => {
+  it("uses provider-native read-only review argv in the authorized repository", async () => {
     const fake = makeManager();
     const providers: ValidationProvider[] = [
       "claude",
@@ -218,7 +218,7 @@ describe("repository review integration", () => {
     ];
     const prompt = "FENCED REVIEW EVIDENCE";
 
-    const report = startReviewRun(
+    const report = await startReviewRun(
       {
         asyncJobManager: fake.manager as never,
         getProviderRuntimeStatus: runtime,
@@ -301,7 +301,7 @@ describe("repository review integration", () => {
     }
   });
 
-  it("keeps API review evidence out of the non-expiring flight recorder", () => {
+  it("keeps API review evidence out of the non-expiring flight recorder", async () => {
     const fake = makeManager();
     const apiProvider: ApiProviderRuntime = {
       name: "ollama",
@@ -313,7 +313,7 @@ describe("repository review integration", () => {
     };
     const prompt = "PERSIST ONLY WITH JOB RETENTION";
 
-    startReviewRun(
+    await startReviewRun(
       {
         asyncJobManager: fake.manager as never,
         apiProviders: [apiProvider],
@@ -342,7 +342,7 @@ describe("repository review integration", () => {
     expect(JSON.stringify(fake.httpCalls[0].apiRequest.messages)).toContain(prompt);
   });
 
-  it("dispatches no reviewer when durable API-judge authorization persistence fails", () => {
+  it("dispatches no reviewer when durable API-judge authorization persistence fails", async () => {
     const fake = makeManager();
     const apiProvider: ApiProviderRuntime = {
       name: "ollama",
@@ -358,7 +358,7 @@ describe("repository review integration", () => {
       },
     };
 
-    expect(() =>
+    await expect(
       startReviewRun(
         {
           asyncJobManager: fake.manager as never,
@@ -383,12 +383,12 @@ describe("repository review integration", () => {
           },
         }
       )
-    ).toThrow(ValidationRunPersistenceError);
+    ).rejects.toThrow(ValidationRunPersistenceError);
     expect(fake.calls).toHaveLength(0);
     expect(fake.httpCalls).toHaveLength(0);
   });
 
-  it("cancels the prepared roster without dispatch when a later atomic admission fails", () => {
+  it("cancels the prepared roster without dispatch when a later atomic admission fails", async () => {
     const apiProviders: ApiProviderRuntime[] = [
       {
         name: "review-api",
@@ -467,7 +467,7 @@ describe("repository review integration", () => {
       },
     };
 
-    expect(() =>
+    await expect(
       startReviewRun(
         {
           asyncJobManager: manager as never,
@@ -492,7 +492,7 @@ describe("repository review integration", () => {
           },
         }
       )
-    ).toThrow(/injected atomic provider-link admission failure/);
+    ).rejects.toThrow(/injected atomic provider-link admission failure/);
     expect(prepared).toBe(2);
     expect(released).toBe(0);
     expect(canceled).toBe(1);

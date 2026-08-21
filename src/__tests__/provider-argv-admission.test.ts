@@ -463,7 +463,7 @@ describe("provider argv admission", () => {
     } finally {
       restorePlatform();
       await manager.dispose();
-      store.close();
+      await store.close();
       rmSync(repository, { recursive: true, force: true });
     }
   });

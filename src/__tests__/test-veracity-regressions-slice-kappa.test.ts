@@ -406,39 +406,39 @@ describe("REGRESSIONS Kδ — executor + AsyncJobManager stdin (slice κ)", () =
     expect(result.stdout).toBe("");
   }, 5000);
 
-  it("Kδ-3: AsyncJobManager dedup key includes stdin (two jobs with same args, different stdin do NOT collide)", () => {
+  it("Kδ-3: AsyncJobManager dedup key includes stdin (two jobs with same args, different stdin do NOT collide)", async () => {
     const mgr = new AsyncJobManager(noopLogger, undefined, new MemoryJobStore());
     // Use a long-running sleep so neither job has terminated by the
     // time we inspect their snapshots. We never await — the manager
     // never blocks on the child.
-    const a = mgr.startJobWithDedup("claude", ["sleep", "30"], "corr-a", {
+    const a = await mgr.startJobWithDedup("claude", ["sleep", "30"], "corr-a", {
       stdin: "payload-A",
     });
-    const b = mgr.startJobWithDedup("claude", ["sleep", "30"], "corr-b", {
+    const b = await mgr.startJobWithDedup("claude", ["sleep", "30"], "corr-b", {
       stdin: "payload-B",
     });
     expect(b.deduped).toBe(false);
     expect(b.snapshot.id).not.toBe(a.snapshot.id);
     // Same stdin: now dedup MUST trip (regression — non-stdin path is
     // unchanged).
-    const c = mgr.startJobWithDedup("claude", ["sleep", "30"], "corr-c", {
+    const c = await mgr.startJobWithDedup("claude", ["sleep", "30"], "corr-c", {
       stdin: "payload-A",
     });
     expect(c.deduped).toBe(true);
     expect(c.snapshot.id).toBe(a.snapshot.id);
 
     // Cleanup so the test process exits cleanly.
-    mgr.cancelJob(a.snapshot.id);
-    mgr.cancelJob(b.snapshot.id);
+    await mgr.cancelJob(a.snapshot.id);
+    await mgr.cancelJob(b.snapshot.id);
   });
 
-  it("Kδ-4: AsyncJobManager dedup still fires for identical-no-stdin requests (regression)", () => {
+  it("Kδ-4: AsyncJobManager dedup still fires for identical-no-stdin requests (regression)", async () => {
     const mgr = new AsyncJobManager(noopLogger, undefined, new MemoryJobStore());
-    const a = mgr.startJobWithDedup("claude", ["sleep", "30"], "corr-a", {});
-    const b = mgr.startJobWithDedup("claude", ["sleep", "30"], "corr-b", {});
+    const a = await mgr.startJobWithDedup("claude", ["sleep", "30"], "corr-a", {});
+    const b = await mgr.startJobWithDedup("claude", ["sleep", "30"], "corr-b", {});
     expect(b.deduped).toBe(true);
     expect(b.snapshot.id).toBe(a.snapshot.id);
-    mgr.cancelJob(a.snapshot.id);
+    await mgr.cancelJob(a.snapshot.id);
   });
 
   // #44: codex now emits `--json` on every request, so a text request and a json
@@ -446,29 +446,29 @@ describe("REGRESSIONS Kδ — executor + AsyncJobManager stdin (slice κ)", () =
   // dedup key they would collide and the second caller would be rendered with the
   // first job's stored outputFormat (a text caller deduping onto a json job gets
   // raw JSONL via llm_job_result). outputFormat must therefore split the key.
-  it("#44: dedup key includes outputFormat (codex text vs json with same argv do NOT collide)", () => {
+  it("#44: dedup key includes outputFormat (codex text vs json with same argv do NOT collide)", async () => {
     const mgr = new AsyncJobManager(noopLogger, undefined, new MemoryJobStore());
-    const a = mgr.startJobWithDedup("codex", ["sleep", "30"], "corr-a", {
+    const a = await mgr.startJobWithDedup("codex", ["sleep", "30"], "corr-a", {
       outputFormat: "json",
     });
-    const b = mgr.startJobWithDedup("codex", ["sleep", "30"], "corr-b", {
+    const b = await mgr.startJobWithDedup("codex", ["sleep", "30"], "corr-b", {
       outputFormat: "text",
     });
     expect(b.deduped).toBe(false);
     expect(b.snapshot.id).not.toBe(a.snapshot.id);
     // Same outputFormat: dedup MUST still fire (regression guard).
-    const c = mgr.startJobWithDedup("codex", ["sleep", "30"], "corr-c", {
+    const c = await mgr.startJobWithDedup("codex", ["sleep", "30"], "corr-c", {
       outputFormat: "json",
     });
     expect(c.deduped).toBe(true);
     expect(c.snapshot.id).toBe(a.snapshot.id);
     // Omitted outputFormat (undefined) is normalised to codex's default "text",
     // so it dedups with the explicit-text job `b` (not split into a third run).
-    const d = mgr.startJobWithDedup("codex", ["sleep", "30"], "corr-d", {});
+    const d = await mgr.startJobWithDedup("codex", ["sleep", "30"], "corr-d", {});
     expect(d.deduped).toBe(true);
     expect(d.snapshot.id).toBe(b.snapshot.id);
-    mgr.cancelJob(a.snapshot.id);
-    mgr.cancelJob(b.snapshot.id);
+    await mgr.cancelJob(a.snapshot.id);
+    await mgr.cancelJob(b.snapshot.id);
   });
 });
 

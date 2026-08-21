@@ -113,6 +113,34 @@ describe("ADD-form negative controls", () => {
   });
 });
 
+describe("await removal", () => {
+  const AWAITED = `
+import { describe, expect, it } from "vitest";
+it("reads a row", async () => {
+  expect(await store.getById("a")).toEqual({ id: "a" });
+});
+`;
+
+  it("FIRES when an await is REMOVED from an assertion subject", () => {
+    // Not on the allowlist, and not harmless. Hoisting an await off a subject
+    // onto its declaration turned two concurrently-submitted transactions into
+    // sequential ones, so a test named "serialises transactions" stopped
+    // exercising the queue and still passed. The matcher and the expected value
+    // are identical either side, so this is the only place it can be caught.
+    const head = AWAITED.replace('expect(await store.getById("a"))', 'expect(store.getById("a"))');
+    const v = compareTestFile(AWAITED, head, "t.test.ts");
+    expect(v).toHaveLength(1);
+    expect(v[0]).toMatch(/outside the allowlist/);
+  });
+
+  it("still ACCEPTS an await being inserted, which is the permitted direction", () => {
+    // The control. A checker that rejected both directions would block the
+    // migration this constraint was amended to allow.
+    const base = AWAITED.replace('expect(await store.getById("a"))', 'expect(store.getById("a"))');
+    expect(compareTestFile(base, AWAITED, "t.test.ts")).toEqual([]);
+  });
+});
+
 describe("pre-existing bare matchers", () => {
   const BARE = `
 import { describe, expect, it } from "vitest";
@@ -159,10 +187,15 @@ describe("the checker's own parsing", () => {
     expect(normaliseSubject("() => store.recordStart({ id: 1 })")).toEqual({
       subject: "store.recordStart({ id: 1 })",
       thunk: true,
+      awaited: false,
     });
+    // `awaited` is reported rather than normalised away: it is part of the
+    // assertion's identity, because removing an await is not a permitted
+    // rewrite even though it leaves the matcher untouched.
     expect(normaliseSubject("await store.recordStart({ id: 1 })")).toEqual({
       subject: "store.recordStart({ id: 1 })",
       thunk: false,
+      awaited: true,
     });
   });
 

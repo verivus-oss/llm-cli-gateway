@@ -418,7 +418,7 @@ describe("Session Migration", () => {
           dedupWindowMs: 60_000,
         }
       );
-      runtimeStore.recordStart({
+      await runtimeStore.recordStart({
         id: "migration-dml-only-job",
         correlationId: "migration-dml-only-corr",
         requestKey: "migration-dml-only-key",
@@ -432,7 +432,7 @@ describe("Session Migration", () => {
         mcpArtifactPath: "/tmp/migration-dml-only-mcp.json",
         mcpArtifactScope: "migration-dml-only-scope",
       });
-      expect(runtimeStore.getById("migration-dml-only-job")).toMatchObject({
+      expect(await runtimeStore.getById("migration-dml-only-job")).toMatchObject({
         id: "migration-dml-only-job",
         status: "queued",
         compressResponse: true,
@@ -443,7 +443,7 @@ describe("Session Migration", () => {
         mcpArtifactCleanupPending: true,
       });
     } finally {
-      runtimeStore?.close();
+      await runtimeStore?.close();
       if (client) {
         await client.query("RESET search_path");
         client.release();
@@ -465,7 +465,7 @@ describe("Session Migration", () => {
       schemaCreated = true;
       const env = { ...process.env, DATABASE_URL: schemaScopedDsn(schema) };
       const [first, second] = await Promise.all([
-        execFileAsync(process.execPath, ["dist/migrate.js"], { cwd: process.cwd(), env }),
+        await execFileAsync(process.execPath, ["dist/migrate.js"], { cwd: process.cwd(), env }),
         execFileAsync(process.execPath, ["dist/migrate.js"], { cwd: process.cwd(), env }),
       ]);
 
@@ -515,7 +515,7 @@ describe("Session Migration", () => {
         VALUES (12, 'wrong_async_job_response_compression');
       `);
 
-      const failure = await execFileAsync(process.execPath, ["dist/migrate.js"], {
+      const failure = await await execFileAsync(process.execPath, ["dist/migrate.js"], {
         cwd: process.cwd(),
         env: { ...process.env, DATABASE_URL: schemaScopedDsn(schema) },
       }).catch(error => error as { stderr?: string });
@@ -591,7 +591,7 @@ describe("Session Migration", () => {
       await pool.query(`CREATE SCHEMA ${quoteIdentifier(schema)}`);
       schemaCreated = true;
       const env = { ...process.env, DATABASE_URL: schemaScopedDsn(schema) };
-      await execFileAsync(process.execPath, ["dist/migrate.js"], { cwd: process.cwd(), env });
+      execFileAsync(process.execPath, ["dist/migrate.js"], { cwd: process.cwd(), env });
 
       client = await pool.connect();
       await client.query(`SET search_path TO ${quoteIdentifier(schema)}`);
@@ -1512,7 +1512,7 @@ describe("Session Migration", () => {
         id,
       ]);
 
-      const { stderr } = await execFileAsync(process.execPath, ["dist/migrate.js"], {
+      const { stderr } = execFileAsync(process.execPath, ["dist/migrate.js"], {
         cwd: process.cwd(),
         env: { ...process.env, DATABASE_URL: schemaScopedDsn(schema) },
       });

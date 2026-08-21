@@ -147,7 +147,7 @@ describe("cross-engine WAL crash-recovery (plan B3/B8)", () => {
   // (FlightRecorder + SqliteJobStore on node:sqlite) open and exercise it.
   // ───────────────────────────────────────────────────────────────────────
   describe("Direction 1 — upgrade: better-sqlite3 writer → node:sqlite production reader/writer", () => {
-    it("recovers WAL-only rows for logs.db AND jobs.db, then operates normally", () => {
+    it("recovers WAL-only rows for logs.db AND jobs.db, then operates normally", async () => {
       // ── Arrange: write logs.db + jobs.db with better-sqlite3 in WAL mode,
       //    autocheckpoint OFF, using the SAME schema the production modules
       //    create (so the production reader opens an identical layout — the
@@ -291,7 +291,7 @@ describe("cross-engine WAL crash-recovery (plan B3/B8)", () => {
 
         // Every seeded job is visible through the production getById path.
         for (let i = 0; i < JOB_ROWS; i++) {
-          const rec = store.getById(`legacy-job-${i}`);
+          const rec = await store.getById(`legacy-job-${i}`);
           expect(rec).not.toBeNull();
           expect(rec?.cli).toBe("codex");
         }
@@ -321,7 +321,7 @@ describe("cross-engine WAL crash-recovery (plan B3/B8)", () => {
         expect(readBack[0].response).toBe("ok");
 
         // create/update/get a job through the production store.
-        store.recordStart({
+        await store.recordStart({
           id: "post-recovery-job",
           correlationId: "corr-pr",
           requestKey: "rk-pr",
@@ -330,7 +330,7 @@ describe("cross-engine WAL crash-recovery (plan B3/B8)", () => {
           startedAt: new Date().toISOString(),
           pid: 999,
         });
-        store.recordComplete({
+        await store.recordComplete({
           id: "post-recovery-job",
           status: "completed",
           exitCode: 0,
@@ -340,7 +340,7 @@ describe("cross-engine WAL crash-recovery (plan B3/B8)", () => {
           error: null,
           finishedAt: new Date().toISOString(),
         });
-        const prJob = store.getById("post-recovery-job");
+        const prJob = await store.getById("post-recovery-job");
         expect(prJob?.status).toBe("completed");
         expect(prJob?.stdout).toBe("done");
 
@@ -357,7 +357,7 @@ describe("cross-engine WAL crash-recovery (plan B3/B8)", () => {
         expect(logsIntegrity[0].integrity_check).toBe("ok");
       } finally {
         recorder.close();
-        store.close();
+        await store.close();
       }
 
       // Independent integrity_check on jobs.db via a raw node:sqlite reader
@@ -382,7 +382,7 @@ describe("cross-engine WAL crash-recovery (plan B3/B8)", () => {
   // left behind, including WAL-only rows.
   // ───────────────────────────────────────────────────────────────────────
   describe("Direction 2 — rollback: node:sqlite production writer → better-sqlite3 reader", () => {
-    it("better-sqlite3 recovers WAL-only rows that node:sqlite production modules wrote", () => {
+    it("better-sqlite3 recovers WAL-only rows that node:sqlite production modules wrote", async () => {
       // ── Arrange: write through the production FlightRecorder + SqliteJobStore
       //    (both run PRAGMA journal_mode = WAL in their constructors). Turn
       //    autocheckpoint OFF on each connection so rows stay in the WAL. ──
@@ -422,7 +422,7 @@ describe("cross-engine WAL crash-recovery (plan B3/B8)", () => {
 
       const JOB_ROWS = 35;
       for (let i = 0; i < JOB_ROWS; i++) {
-        store.recordStart({
+        await store.recordStart({
           id: `prod-job-${i}`,
           correlationId: `c-${i}`,
           requestKey: `k-${i}`,
@@ -431,7 +431,7 @@ describe("cross-engine WAL crash-recovery (plan B3/B8)", () => {
           startedAt: new Date().toISOString(),
           pid: i,
         });
-        store.recordComplete({
+        await store.recordComplete({
           id: `prod-job-${i}`,
           status: "completed",
           exitCode: 0,
@@ -467,7 +467,7 @@ describe("cross-engine WAL crash-recovery (plan B3/B8)", () => {
 
       // Close production connections (snapshot already captured = crash).
       recorder.close();
-      store.close();
+      await store.close();
 
       // Snapshots carry a non-empty WAL.
       expect(statSync(logsSnap + "-wal").size).toBeGreaterThan(0);

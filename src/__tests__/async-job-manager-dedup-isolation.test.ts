@@ -66,11 +66,11 @@ describe("AsyncJobManager principal-safe dedup (issue #130)", () => {
     expect(l2.snapshot.id).toBe(l1.snapshot.id);
   });
 
-  it("uses managed config fingerprints to dedup equal content but separate different content", () => {
+  it("uses managed config fingerprints to dedup equal content but separate different content", async () => {
     const manager = new AsyncJobManager(noopLogger, undefined, new MemoryJobStore());
     const firstFingerprint = "a".repeat(64);
     const secondFingerprint = "b".repeat(64);
-    const first = manager.startJobWithDedup(
+    const first = await manager.startJobWithDedup(
       "echo" as LlmCli,
       ["--mcp-config", "/tmp/request-a.json", "--", "hello"],
       "artifact-a",
@@ -78,7 +78,7 @@ describe("AsyncJobManager principal-safe dedup (issue #130)", () => {
         dedupArgs: ["--mcp-config", `[gateway-claude-mcp:${firstFingerprint}]`, "--", "hello"],
       }
     );
-    const second = manager.startJobWithDedup(
+    const second = await manager.startJobWithDedup(
       "echo" as LlmCli,
       ["--mcp-config", "/tmp/request-b.json", "--", "hello"],
       "artifact-b",
@@ -86,7 +86,7 @@ describe("AsyncJobManager principal-safe dedup (issue #130)", () => {
         dedupArgs: ["--mcp-config", `[gateway-claude-mcp:${firstFingerprint}]`, "--", "hello"],
       }
     );
-    const changedConfig = manager.startJobWithDedup(
+    const changedConfig = await manager.startJobWithDedup(
       "echo" as LlmCli,
       ["--mcp-config", "/tmp/request-c.json", "--", "hello"],
       "artifact-c",
@@ -102,7 +102,7 @@ describe("AsyncJobManager principal-safe dedup (issue #130)", () => {
     expect(changedConfig.snapshot.id).not.toBe(first.snapshot.id);
   });
 
-  it("keeps cross-principal isolation across the store-hydration (restart) reuse path", () => {
+  it("keeps cross-principal isolation across the store-hydration (restart) reuse path", async () => {
     // The reuse path prefers an in-memory record but falls back to hydrating
     // from the store (e.g. after a gateway restart). Prove isolation holds on
     // that path too: a fresh manager sharing the same store must not let a
@@ -110,7 +110,7 @@ describe("AsyncJobManager principal-safe dedup (issue #130)", () => {
     const store = new MemoryJobStore();
     const seeder = new AsyncJobManager(noopLogger, undefined, store);
     const alice = startAs(seeder, httpCtx("alice"), ["backstop"], "seed");
-    expect(store.getById(alice.snapshot.id)!.ownerPrincipal).toBe("alice");
+    expect((await store.getById(alice.snapshot.id)!).ownerPrincipal).toBe("alice");
 
     // Fresh manager = empty in-memory map, so any reuse MUST hydrate from store.
     const restarted = new AsyncJobManager(noopLogger, undefined, store);

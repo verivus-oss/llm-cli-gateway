@@ -16,25 +16,25 @@ describe.runIf(process.platform !== "win32")("job progress wire capability", () 
     const env = { PATH: root };
 
     try {
-      const validation = manager.startJobWithDedup(
+      const validation = await manager.startJobWithDedup(
         "codex",
         ["exec", "--skip-git-repo-check", "--", "-"],
         "codex-validation-progress",
         { cwd: root, stdin: "validation prompt", env, forceRefresh: true }
       );
-      const review = manager.startJobWithDedup(
+      const review = await manager.startJobWithDedup(
         "codex",
         ["exec", "--skip-git-repo-check", "--sandbox", "read-only", "--", "-"],
         "codex-review-progress",
         { cwd: root, stdin: "review prompt", env, forceRefresh: true }
       );
-      const jsonl = manager.startJobWithDedup(
+      const jsonl = await manager.startJobWithDedup(
         "codex",
         ["exec", "--json", "--skip-git-repo-check", "--", "-"],
         "codex-jsonl-progress",
         { cwd: root, stdin: "direct request prompt", env, forceRefresh: true }
       );
-      const promptNamedJson = manager.startJobWithDedup(
+      const promptNamedJson = await manager.startJobWithDedup(
         "codex",
         ["exec", "--skip-git-repo-check", "--", "--json"],
         "codex-prompt-named-json-progress",
@@ -46,10 +46,10 @@ describe.runIf(process.platform !== "win32")("job progress wire capability", () 
       expect(jsonl.snapshot.progress.capability).toBe("structured");
       expect(promptNamedJson.snapshot.progress.capability).toBe("activity_only");
 
-      manager.cancelJob(validation.snapshot.id);
-      manager.cancelJob(review.snapshot.id);
-      manager.cancelJob(jsonl.snapshot.id);
-      manager.cancelJob(promptNamedJson.snapshot.id);
+      await manager.cancelJob(validation.snapshot.id);
+      await manager.cancelJob(review.snapshot.id);
+      await manager.cancelJob(jsonl.snapshot.id);
+      await manager.cancelJob(promptNamedJson.snapshot.id);
     } finally {
       await manager.dispose({ timeoutMs: 2_000 });
       rmSync(root, { recursive: true, force: true });

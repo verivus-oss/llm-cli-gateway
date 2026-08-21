@@ -135,7 +135,7 @@ describe("embedded NUL CLI admission", () => {
     const manager = new AsyncJobManager(logger, undefined, store);
 
     try {
-      const started = manager.startJob(
+      const started = await manager.startJob(
         "codex",
         ["exec", SENSITIVE_NUL_VALUE],
         "corr-nul-async",
@@ -150,8 +150,8 @@ describe("embedded NUL CLI admission", () => {
       });
 
       const result = manager.getJobResult(started.id);
-      const durable = store.getById(started.id);
-      expect(result).toMatchObject({
+      const durable = await store.getById(started.id);
+      expect(await result).toMatchObject({
         errorCategory: CLI_INVALID_INPUT_CATEGORY,
         retryable: false,
       });
@@ -188,7 +188,7 @@ describe("embedded NUL CLI admission", () => {
     let jobId = "";
 
     try {
-      const started = firstManager.startJob(
+      const started = await firstManager.startJob(
         "codex",
         ["exec", SENSITIVE_NUL_VALUE],
         "corr-nul-hydration",
@@ -197,7 +197,7 @@ describe("embedded NUL CLI admission", () => {
       jobId = started.id;
     } finally {
       await firstManager.dispose();
-      firstStore.close();
+      await firstStore.close();
     }
 
     const restartedStore = new SqliteJobStore(dbPath);
@@ -207,15 +207,15 @@ describe("embedded NUL CLI admission", () => {
       restartedStore
     );
     try {
-      const durable = restartedStore.getById(jobId);
+      const durable = await restartedStore.getById(jobId);
       const snapshot = restartedManager.getJobSnapshot(jobId);
       const result = restartedManager.getJobResult(jobId);
-      expect(snapshot).toMatchObject({
+      expect(await snapshot).toMatchObject({
         status: "failed",
         errorCategory: CLI_INVALID_INPUT_CATEGORY,
         retryable: false,
       });
-      expect(result).toMatchObject({
+      expect(await result).toMatchObject({
         status: "failed",
         errorCategory: CLI_INVALID_INPUT_CATEGORY,
         retryable: false,
@@ -232,7 +232,7 @@ describe("embedded NUL CLI admission", () => {
       });
     } finally {
       await restartedManager.dispose();
-      restartedStore.close();
+      await restartedStore.close();
       rmSync(root, { recursive: true, force: true });
     }
   });
@@ -249,7 +249,7 @@ describe("embedded NUL CLI admission", () => {
     );
 
     try {
-      const outcome = manager.startJobWithDedup(
+      const outcome = await manager.startJobWithDedup(
         "codex",
         ["exec", SENSITIVE_NUL_VALUE],
         "corr-nul-flight",
@@ -278,7 +278,7 @@ describe("embedded NUL CLI admission", () => {
       ]);
 
       const durable = store.getById(outcome.snapshot.id);
-      expect(durable).toMatchObject({
+      expect(await durable).toMatchObject({
         argsJson: JSON.stringify([INVALID_ARGV_REDACTION_MARKER]),
         payloadJson: null,
         errorCategory: CLI_INVALID_INPUT_CATEGORY,
@@ -314,7 +314,7 @@ describe("embedded NUL CLI admission", () => {
     } finally {
       await manager.dispose();
       flight.close();
-      store.close();
+      await store.close();
       rmSync(root, { recursive: true, force: true });
     }
   });

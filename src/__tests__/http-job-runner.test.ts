@@ -32,7 +32,7 @@ interface ServerControl {
 async function waitForTerminal(mgr: AsyncJobManager, id: string, timeoutMs = 3000): Promise<void> {
   const start = Date.now();
   while (Date.now() - start < timeoutMs) {
-    const snap = mgr.getJobSnapshot(id);
+    const snap = await mgr.getJobSnapshot(id);
     if (snap && snap.status !== "running") return;
     await new Promise(r => setTimeout(r, 10));
   }
@@ -97,7 +97,7 @@ describe("Slice 1 — HttpJobRunner", () => {
     expect(snapshot.progress.capability).toBe("lifecycle_only");
 
     await waitForTerminal(mgr, snapshot.id);
-    const result = mgr.getJobResult(snapshot.id)!;
+    const result = (await mgr.getJobResult(snapshot.id))!;
     expect(result.status).toBe("completed");
     expect(result.stdout).toBe("pong");
     expect(result.exitCode).toBe(0);
@@ -111,7 +111,7 @@ describe("Slice 1 — HttpJobRunner", () => {
       correlationId: "c-secret",
     });
     await waitForTerminal(mgr, snapshot.id);
-    const row = store.getById(snapshot.id)!;
+    const row = (await store.getById(snapshot.id))!;
     expect(row.transport).toBe("http");
     expect(row.payloadJson).not.toBeNull();
     expect(row.payloadJson!).not.toContain("sk-super-secret-value");
@@ -139,13 +139,13 @@ describe("Slice 1 — HttpJobRunner", () => {
       correlationId: "c-fail",
     });
     await waitForTerminal(mgr, snapshot.id, 8000);
-    const result = mgr.getJobResult(snapshot.id)!;
+    const result = (await mgr.getJobResult(snapshot.id))!;
     expect(result.status).toBe("failed");
     expect(result.exitCode).toBe(1);
     expect(result.error).toMatch(/503/);
     // exitCode (1) and the real HTTP status (503) are kept SEPARATE — the store
     // row carries http_status=503, never overloading exitCode.
-    const row = store.getById(snapshot.id)!;
+    const row = (await store.getById(snapshot.id))!;
     expect(row.exitCode).toBe(1);
     expect(row.httpStatus).toBe(503);
   });
@@ -157,21 +157,21 @@ describe("Slice 1 — HttpJobRunner", () => {
       apiRequest: apiReq(),
       correlationId: "c-cancel",
     });
-    const res = mgr.cancelJob(snapshot.id);
+    const res = await mgr.cancelJob(snapshot.id);
     expect(res.canceled).toBe(true);
-    expect(mgr.getJobSnapshot(snapshot.id)?.status).toBe("canceled");
+    expect((await mgr.getJobSnapshot(snapshot.id))?.status).toBe("canceled");
   });
 
   it("dedups two identical http requests but not when the model differs", async () => {
     const provider = new OpenAiCompatibleProvider("ollama");
-    const first = mgr.startHttpJob({ provider, apiRequest: apiReq(), correlationId: "d1" });
+    const first = await mgr.startHttpJob({ provider, apiRequest: apiReq(), correlationId: "d1" });
     await waitForTerminal(mgr, first.snapshot.id);
 
-    const second = mgr.startHttpJob({ provider, apiRequest: apiReq(), correlationId: "d2" });
+    const second = await mgr.startHttpJob({ provider, apiRequest: apiReq(), correlationId: "d2" });
     expect(second.deduped).toBe(true);
     expect(second.snapshot.id).toBe(first.snapshot.id);
 
-    const third = mgr.startHttpJob({
+    const third = await mgr.startHttpJob({
       provider,
       apiRequest: apiReq({ model: "m2" }),
       correlationId: "d3",
@@ -182,13 +182,13 @@ describe("Slice 1 — HttpJobRunner", () => {
 
   it("dedup misses when only previousResponseId differs", async () => {
     const provider = new OpenAiCompatibleProvider("ollama");
-    const a = mgr.startHttpJob({
+    const a = await mgr.startHttpJob({
       provider,
       apiRequest: apiReq({ previousResponseId: "r1" }),
       correlationId: "p1",
     });
     await waitForTerminal(mgr, a.snapshot.id);
-    const b = mgr.startHttpJob({
+    const b = await mgr.startHttpJob({
       provider,
       apiRequest: apiReq({ previousResponseId: "r2" }),
       correlationId: "p2",
@@ -210,10 +210,10 @@ describe("Slice 1 — http job persistence + orphan + migration (SqliteJobStore)
     rmSync(tempDir, { recursive: true, force: true });
   });
 
-  it("force-orphans an in-flight http row on restart and refuses to cancel it", () => {
+  it("force-orphans an in-flight http row on restart and refuses to cancel it", async () => {
     // First store: record a running http job, then "crash" (close).
     const store1 = new SqliteJobStore(dbPath, mockLogger);
-    store1.recordStart({
+    await store1.recordStart({
       id: "job-http-1",
       correlationId: "orph-1",
       requestKey: "k1",
@@ -227,7 +227,7 @@ describe("Slice 1 — http job persistence + orphan + migration (SqliteJobStore)
       transport: "http",
       payloadJson: JSON.stringify({ model: "m" }),
     });
-    store1.close();
+    await store1.close();
 
     // #139: the owner crashed, so its lease lapses. Age the lease into the past
     // (a still-valid lease must NOT be orphaned by a fresh instance; that is the
@@ -239,20 +239,20 @@ describe("Slice 1 — http job persistence + orphan + migration (SqliteJobStore)
     // New gateway boot: a fresh store + manager flips the dead-owner row to orphaned.
     const store2 = new SqliteJobStore(dbPath, mockLogger);
     const mgr = new AsyncJobManager(mockLogger, undefined, store2);
-    const row = store2.getById("job-http-1")!;
+    const row = (await store2.getById("job-http-1"))!;
     expect(row.status).toBe("orphaned");
     expect(row.transport).toBe("http");
 
     // Hydrated http row has no live abort handle → cancel is refused.
-    const snap = mgr.getJobSnapshot("job-http-1");
+    const snap = await mgr.getJobSnapshot("job-http-1");
     expect(snap?.cli).toBe("ollama");
     expect(snap?.progress.capability).toBe("lifecycle_only");
-    const cancel = mgr.cancelJob("job-http-1");
+    const cancel = await mgr.cancelJob("job-http-1");
     expect(cancel.canceled).toBe(false);
-    store2.close();
+    await store2.close();
   });
 
-  it("migrates a legacy jobs table (no transport column) and backfills 'process'", () => {
+  it("migrates a legacy jobs table (no transport column) and backfills 'process'", async () => {
     // Build a legacy schema lacking transport/http_status/payload_json.
     const legacy = openDatabase(dbPath);
     legacy.exec(`
@@ -271,10 +271,10 @@ describe("Slice 1 — http job persistence + orphan + migration (SqliteJobStore)
 
     // Opening via SqliteJobStore runs ensureJobsTransportColumns.
     const store = new SqliteJobStore(dbPath, mockLogger);
-    const row = store.getById("legacy-1")!;
+    const row = (await store.getById("legacy-1"))!;
     expect(row.transport).toBe("process");
     expect(row.httpStatus).toBeNull();
     expect(row.payloadJson).toBeNull();
-    store.close();
+    await store.close();
   });
 });

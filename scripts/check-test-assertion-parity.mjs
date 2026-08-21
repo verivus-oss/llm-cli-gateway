@@ -35,8 +35,9 @@ export function normaliseSubject(text) {
     t = arrow[1].trim();
     if (t.startsWith("{") && t.endsWith("}")) t = t.slice(1, -1).trim();
   }
+  const awaited = /^await\s+/.test(t);
   t = t.replace(/^await\s+/, "");
-  return { subject: t.replace(/\s+/g, " ").trim(), thunk };
+  return { subject: t.replace(/\s+/g, " ").trim(), thunk, awaited };
 }
 
 function collapse(text) {
@@ -54,7 +55,7 @@ export function extractAssertions(source, filename = "f.ts") {
       node.expression.text === "expect" &&
       node.arguments.length > 0
     ) {
-      const { subject, thunk } = normaliseSubject(node.arguments[0].getText(sf));
+      const { subject, thunk, awaited } = normaliseSubject(node.arguments[0].getText(sf));
       const chain = [];
       let cursor = node;
       let matcher = null;
@@ -75,6 +76,7 @@ export function extractAssertions(source, filename = "f.ts") {
         out.push({
           subject,
           thunk,
+          awaited,
           modifiers: chain,
           matcher,
           args,
@@ -128,6 +130,13 @@ function sameArgs(a, b) {
  */
 export function permittedRewrite(base, head) {
   if (base.subject !== head.subject) return false;
+  // Removing an await is NOT on the allowlist. It looked harmless until it was
+  // measured: hoisting an await off an assertion subject and onto its
+  // declaration turned two concurrently-submitted transactions into sequential
+  // ones, so a test named "serialises transactions" stopped exercising the
+  // queue while still passing. The matcher and the expected value were
+  // identical either side, which is exactly why the checker has to look here.
+  if (base.awaited && !head.awaited) return false;
   if (base.matcher !== head.matcher) return false;
   if (!sameArgs(base.args, head.args)) return false;
   const sameModifiers =
@@ -144,7 +153,10 @@ export function permittedRewrite(base, head) {
 }
 
 function key(a) {
-  return `${a.subject}|${a.modifiers.join(".")}|${a.matcher}|${(a.args ?? []).join(",")}`;
+  // `awaited` is part of identity. Without it an await REMOVED from a subject
+  // produces a byte-identical fingerprint and takes the exact-match fast path,
+  // which is how 106 removals once passed this checker unclassified.
+  return `${a.subject}|${a.awaited ? "await" : "sync"}|${a.modifiers.join(".")}|${a.matcher}|${(a.args ?? []).join(",")}`;
 }
 
 /**

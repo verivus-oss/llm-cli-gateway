@@ -65,27 +65,27 @@ describe("AsyncJobManager HTTP limiter (issue #130)", () => {
 
     const manager = new AsyncJobManager(undefined, undefined, null, undefined, limits());
 
-    const a = manager.startHttpJob({
+    const a = await manager.startHttpJob({
       provider,
       apiRequest: apiReq("model-a"),
       correlationId: "c-a",
     });
-    const b = manager.startHttpJob({
+    const b = await manager.startHttpJob({
       provider,
       apiRequest: apiReq("model-b"),
       correlationId: "c-b",
     });
 
     // a is running (invoked once), b is queued (NOT invoked yet).
-    expect(manager.getJobSnapshot(a.snapshot.id)!.status).toBe("running");
-    expect(manager.getJobSnapshot(b.snapshot.id)!.status).toBe("queued");
+    expect((await manager.getJobSnapshot(a.snapshot.id)!).status).toBe("running");
+    expect((await manager.getJobSnapshot(b.snapshot.id)!).status).toBe("queued");
     expect(runApiRequestMock).toHaveBeenCalledTimes(1);
 
     // Free the slot: a completes, which pumps the queue and starts b.
     releaseFirst(result("first-done"));
-    await vi.waitFor(() => {
+    await vi.waitFor(async () => {
       expect(runApiRequestMock).toHaveBeenCalledTimes(2);
-      expect(manager.getJobSnapshot(b.snapshot.id)!.status).toBe("completed");
+      expect((await manager.getJobSnapshot((b).snapshot.id)!).status).toBe("completed");
     });
   });
 
@@ -99,10 +99,10 @@ describe("AsyncJobManager HTTP limiter (issue #130)", () => {
       limits({ maxQueuedJobs: 0 })
     );
 
-    manager.startHttpJob({ provider, apiRequest: apiReq("m1"), correlationId: "c1" }); // running
-    expect(() =>
+    await manager.startHttpJob({ provider, apiRequest: apiReq("m1"), correlationId: "c1" }); // running
+    await expect(
       manager.startHttpJob({ provider, apiRequest: apiReq("m2"), correlationId: "c2" })
-    ).toThrow(/at capacity/i);
+    ).rejects.toThrow(/at capacity/i);
     // Only the first job's request was ever fired.
     expect(runApiRequestMock).toHaveBeenCalledTimes(1);
   });

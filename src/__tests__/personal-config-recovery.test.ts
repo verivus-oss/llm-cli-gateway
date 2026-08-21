@@ -151,7 +151,7 @@ describe("config_recover_kit_attempt", () => {
 
   afterEach(async () => {
     await jobs.dispose();
-    store.close();
+    await store.close();
     rmSync(root, { recursive: true, force: true });
   });
 
@@ -368,7 +368,7 @@ describe("config_recover_kit_attempt", () => {
     const startJob = vi
       .spyOn(jobs, "startJob")
       .mockImplementation(
-        (
+        async (
           cli,
           args,
           correlationId,
@@ -407,7 +407,7 @@ describe("config_recover_kit_attempt", () => {
             error: null,
             exited: true,
           };
-          store.recordStart({
+          await store.recordStart({
             id: jobId,
             correlationId,
             requestKey: `terminal-release-${jobId}`,
@@ -419,7 +419,7 @@ describe("config_recover_kit_attempt", () => {
             kitSessionId,
             ownerPrincipal: "local",
           });
-          store.recordComplete({
+          await store.recordComplete({
             id: jobId,
             status: "completed",
             exitCode: 0,
@@ -459,7 +459,7 @@ describe("config_recover_kit_attempt", () => {
           const binding = getKitSessionBinding(sessions.getSession(input[3])!);
           expect(binding?.attempt?.id).toBe(input[4]);
           expect(
-            runWithRequestContext(localContext(), () => {
+            await runWithRequestContext(localContext(), async () => {
               return sessions.updateKitSessionBinding(
                 input[3],
                 {
@@ -487,7 +487,7 @@ describe("config_recover_kit_attempt", () => {
         release.mockRestore();
       }
 
-      expect(store.getById(admitted!.jobId)?.kitTerminalFinalized).toBe(true);
+      expect((await store.getById(admitted!.jobId))?.kitTerminalFinalized).toBe(true);
       expect(
         getKitSessionBinding(sessions.getSession(admitted!.kitSessionId)!)?.attempt
       ).toBeUndefined();
@@ -530,7 +530,7 @@ describe("config_recover_kit_attempt", () => {
     const held = createHeldSession();
     const legacyNativeHandle = "a3a3a3a3-a3a3-4a3a-8a3a-a3a3a3a3a3a3";
     const finishedAt = new Date().toISOString();
-    store.recordStart({
+    await store.recordStart({
       id: held.attempt.id,
       correlationId: "restart-native-handle-retirement",
       requestKey: "restart-native-handle-retirement",
@@ -542,7 +542,7 @@ describe("config_recover_kit_attempt", () => {
       kitSessionId: held.sessionId,
       ownerPrincipal: "local",
     });
-    store.recordComplete({
+    await store.recordComplete({
       id: held.attempt.id,
       status: "completed",
       exitCode: 0,
@@ -564,11 +564,14 @@ describe("config_recover_kit_attempt", () => {
       });
 
       const deadline = Date.now() + 1_000;
-      while (!store.getById(held.attempt.id)?.kitTerminalFinalized && Date.now() < deadline) {
+      while (
+        !(await store.getById(held.attempt.id))?.kitTerminalFinalized &&
+        Date.now() < deadline
+      ) {
         await new Promise(resolve => setTimeout(resolve, 10));
       }
 
-      expect(store.getById(held.attempt.id)?.kitTerminalFinalized).toBe(true);
+      expect((await store.getById(held.attempt.id))?.kitTerminalFinalized).toBe(true);
       expect(getKitSessionBinding(sessions.getSession(held.sessionId)!)?.attempt).toBeUndefined();
       expect(
         sessions.getActiveKitSession("claude", held.execution.scopeRoot, held.execution)
@@ -692,21 +695,21 @@ describe("config_recover_kit_attempt", () => {
     expect(result.content[0]?.text).not.toContain("nativeSessionId");
     expect(getKitSessionBinding(sessions.getSession(held.sessionId)!)?.attempt).toBeUndefined();
 
-    expect(() =>
+    await expect(
       jobs.startJobWithDedup("claude", ["-p", "late admission"], "late-admission-corr", {
         forceRefresh: true,
         kitExecution: held.execution,
         kitSessionId: held.sessionId,
         jobId: held.attempt.id,
       })
-    ).toThrow(/Durable job admission failed/);
-    expect(store.getById(held.attempt.id)).toBeNull();
+    ).rejects.toThrow(/Durable job admission failed/);
+    expect(await store.getById(held.attempt.id)).toBeNull();
   });
 
   it("retries an exact recovered fence and retains attempts when a job is found or unavailable", async () => {
     const retried = createHeldSession();
     expect(
-      store.fenceUnadmittedKitAttempt({
+      await store.fenceUnadmittedKitAttempt({
         attemptId: retried.attempt.id,
         cli: "claude",
         kitExecution: retried.execution,
@@ -721,7 +724,7 @@ describe("config_recover_kit_attempt", () => {
     expect(getKitSessionBinding(sessions.getSession(retried.sessionId)!)?.attempt).toBeUndefined();
 
     const found = createHeldSession();
-    store.recordStart({
+    await store.recordStart({
       id: found.attempt.id,
       correlationId: "found-job",
       requestKey: "found-job-key",
@@ -758,7 +761,7 @@ describe("config_recover_kit_attempt", () => {
   it("retains the exact lease on fence conflict, legacy attempts, and release failure", async () => {
     const conflicting = createHeldSession();
     expect(
-      store.fenceUnadmittedKitAttempt({
+      await store.fenceUnadmittedKitAttempt({
         attemptId: conflicting.attempt.id,
         cli: "claude",
         kitExecution: conflicting.execution,

@@ -146,11 +146,11 @@ describe("issue #269: an empty completed reviewer is not agreement", () => {
     expect(parsed.emptyOutput).toBe(true);
   });
 
-  it("does not feed an empty reviewer to the judge as evidence", () => {
+  it("does not feed an empty reviewer to the judge as evidence", async () => {
     // Round 1 (codex and grok, independently): startJudgeSynthesis filtered on
     // status === "completed", so the reviewer just declared unusable was still
     // handed to the judge as a participant.
-    const synthesis = startJudgeSynthesis({ asyncJobManager: {} as never }, {
+    const synthesis = await startJudgeSynthesis({ asyncJobManager: {} as never }, {
       judgeProvider: "claude",
       providerResults: [
         result({ provider: "mistral", verdict: null, rationale: null, emptyOutput: true }),

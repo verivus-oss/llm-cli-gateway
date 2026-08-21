@@ -82,21 +82,21 @@ describe("F3b request-handler ownership isolation", () => {
   }
 
   it("claude_request refuses to resume another principal's session id", async () => {
-    const bob = create("claude", "bob");
+    const bob = await create("claude", "bob");
     const res = await call("claude_request", { prompt: "hi", sessionId: bob.id }, "alice");
     expect(res.isError).toBe(true);
     expect(res.text).toMatch(/not accessible/i);
   });
 
   it("codex_request refuses to resume another principal's session id", async () => {
-    const bob = create("codex", "bob");
+    const bob = await create("codex", "bob");
     const res = await call("codex_request", { prompt: "hi", sessionId: bob.id }, "alice");
     expect(res.isError).toBe(true);
     expect(res.text).toMatch(/not accessible/i);
   });
 
   it("codex_request_async refuses to resume another principal's session id", async () => {
-    const bob = create("codex", "bob");
+    const bob = await create("codex", "bob");
     const res = await call("codex_request_async", { prompt: "hi", sessionId: bob.id }, "alice");
     expect(res.isError).toBe(true);
     expect(res.text).toMatch(/not accessible/i);
@@ -105,7 +105,7 @@ describe("F3b request-handler ownership isolation", () => {
   it("a foreign session id is rejected even though it is the provider-type match (no provider-leak)", async () => {
     // Bob owns a codex session; alice asking codex_request must be denied on
     // ownership, never told what provider the id belongs to.
-    const bob = create("codex", "bob");
+    const bob = await create("codex", "bob");
     const res = await call("codex_request", { prompt: "hi", sessionId: bob.id }, "alice");
     expect(res.text).not.toMatch(/belongs to provider/i);
     expect(res.text).toMatch(/not accessible/i);
@@ -115,13 +115,13 @@ describe("F3b request-handler ownership isolation", () => {
     // Alice resuming her own session must not hit the "not accessible" guard.
     // (It may fail later for lack of a real CLI binary; that is a different
     // error and proves the guard did not fire.)
-    const mine = create("claude", "alice");
+    const mine = await create("claude", "alice");
     const res = await call("claude_request", { prompt: "hi", sessionId: mine.id }, "alice");
     expect(res.text).not.toMatch(/not accessible/i);
   });
 
   it("session_get does not expose internal worktree ownership to an HTTP owner", async () => {
-    const mine = create("mistral", "alice");
+    const mine = await create("mistral", "alice");
     sessions.updateSessionMetadata(mine.id, {
       worktreeOwnerHostname: "developer-workstation",
       worktreeOwnerInstanceId: "gateway-instance-uuid",
@@ -168,8 +168,8 @@ describe("F3b sessions://* resource ownership isolation", () => {
   }
 
   it("sessions://all hides another principal's session ids", async () => {
-    const alice = create("claude", "alice");
-    const bob = create("claude", "bob");
+    const alice = await create("claude", "alice");
+    const bob = await create("claude", "bob");
 
     const aliceView = await read("sessions://all", "alice");
     const ids = aliceView.sessions.map((s: any) => s.id);
@@ -179,8 +179,10 @@ describe("F3b sessions://* resource ownership isolation", () => {
   });
 
   it("sessions://all hides another principal's active-session pointer", async () => {
-    const bob = create("codex", "bob");
-    runWithRequestContext(ctx("bob"), () => sessions.setActiveSession("codex", bob.id));
+    const bob = await create("codex", "bob");
+    await runWithRequestContext(ctx("bob"), async () =>
+      sessions.setActiveSession("codex", (bob).id)
+    );
 
     const aliceView = await read("sessions://all", "alice");
     expect(aliceView.activeSessions.codex).toBeNull();
@@ -190,8 +192,8 @@ describe("F3b sessions://* resource ownership isolation", () => {
   });
 
   it("per-provider sessions://claude is owner-filtered", async () => {
-    const alice = create("claude", "alice");
-    const bob = create("claude", "bob");
+    const alice = await create("claude", "alice");
+    const bob = await create("claude", "bob");
 
     const aliceView = await read("sessions://claude", "alice");
     const ids = aliceView.sessions.map((s: any) => s.id);
@@ -200,7 +202,7 @@ describe("F3b sessions://* resource ownership isolation", () => {
   });
 
   it("sessions://all does not expose internal worktree ownership to an HTTP owner", async () => {
-    const alice = create("mistral", "alice");
+    const alice = await create("mistral", "alice");
     sessions.updateSessionMetadata(alice.id, {
       worktreeOwnerHostname: "developer-workstation",
       worktreeOwnerInstanceId: "gateway-instance-uuid",
@@ -208,7 +210,7 @@ describe("F3b sessions://* resource ownership isolation", () => {
     });
 
     const view = await read("sessions://all", "alice");
-    const projected = view.sessions.find((session: any) => session.id === alice.id);
+    const projected = view.sessions.find(async (session: any) => session.id === (alice).id);
     expect(projected.metadata?.worktreeOwnerHostname).toBeUndefined();
     expect(projected.metadata?.worktreeOwnerInstanceId).toBeUndefined();
     expect(projected.metadata?.worktreeCleanupPending).toBeUndefined();
@@ -221,8 +223,8 @@ describe("F3b sessions://* resource ownership isolation", () => {
   });
 
   it("the local (stdio) principal sees legacy-unowned + local rows, not a remote principal's", async () => {
-    const localSession = create("grok"); // owner "local"
-    const remote = create("grok", "alice");
+    const localSession = await create("grok"); // owner "local"
+    const remote = await create("grok", "alice");
 
     const localView = await read("sessions://all", undefined);
     const ids = localView.sessions.map((s: any) => s.id);

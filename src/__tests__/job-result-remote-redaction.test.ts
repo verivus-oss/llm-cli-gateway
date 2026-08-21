@@ -107,16 +107,16 @@ describe("Phase 7 B3: llm_job_result remote redaction of providerSessionId", () 
     return JSON.parse(result.content[0].text);
   }
 
-  function seedGrokJob(
+  async function seedGrokJob(
     id: string,
     owner: string,
     stdout = GROK_STDOUT,
     status: "completed" | "failed" | "canceled" | "orphaned" = "completed",
     error: string | null = null,
     classification?: { errorCategory: typeof CLI_INPUT_TOO_LARGE_CATEGORY; retryable: boolean }
-  ): void {
+  ): Promise<void> {
     const now = new Date().toISOString();
-    store.recordStart({
+    await store.recordStart({
       id,
       correlationId: `corr-${id}`,
       requestKey: id,
@@ -128,7 +128,7 @@ describe("Phase 7 B3: llm_job_result remote redaction of providerSessionId", () 
       transport: "process",
       ownerPrincipal: owner,
     });
-    store.recordComplete({
+    await store.recordComplete({
       id,
       status,
       exitCode: status === "completed" ? 0 : 1,
@@ -279,7 +279,7 @@ describe("Phase 7 B3: llm_job_result remote redaction of providerSessionId", () 
 
       // Failed/canceled/orphaned jobs are not resumable even to the local
       // operator. The manager retains parsed metadata only for remote scrubbing.
-      expect(manager.getJobResult(jobId)).not.toHaveProperty("providerSessionId");
+      expect(await manager.getJobResult(jobId)).not.toHaveProperty("providerSessionId");
     }
   });
 

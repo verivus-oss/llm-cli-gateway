@@ -358,7 +358,7 @@ describe("handleMistralRequest terminal net: deferred (Mode B) + D4 split", () =
       expect(logStart).toHaveBeenCalledTimes(1);
       expect(arm).toHaveBeenCalledTimes(1);
       expect(logComplete).not.toHaveBeenCalled();
-      manager.cancelJob(body.jobId);
+      await manager.cancelJob(body.jobId);
     } finally {
       slot.release();
       await manager.dispose();
@@ -401,7 +401,7 @@ describe("handleMistralRequest terminal net: deferred (Mode B) + D4 split", () =
       expect(mintedBody.status).toBe("deferred");
       expect(mintedBody.sessionId).toMatch(/^gw-/);
       expect(updateUsage).not.toHaveBeenCalled();
-      manager.cancelJob(mintedBody.jobId);
+      await manager.cancelJob(mintedBody.jobId);
 
       // User-provided: usage update fires for the provided id.
       const providedId = "22222222-2222-4222-8222-222222222222";
@@ -415,7 +415,7 @@ describe("handleMistralRequest terminal net: deferred (Mode B) + D4 split", () =
       expect(providedBody.status).toBe("deferred");
       expect(providedBody.sessionId).toBe(providedId);
       expect(updateUsage).toHaveBeenCalledWith(providedId);
-      manager.cancelJob(providedBody.jobId);
+      await manager.cancelJob(providedBody.jobId);
     } finally {
       slot.release();
       await manager.dispose();

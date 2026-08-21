@@ -152,7 +152,7 @@ describe("handleGeminiRequestAsync", () => {
     expect(body.resumable).toBe(false);
 
     // Cleanup
-    ajm.cancelJob(body.job.id);
+    await ajm.cancelJob(body.job.id);
   });
 
   it("rejects mcp_managed async jobs before approval or enqueue", async () => {
@@ -288,7 +288,7 @@ describe("handleGeminiRequestAsync", () => {
     expect(body.resumable).toBe(true);
     expect(body.sessionId).toBe("user-abc");
 
-    ajm.cancelJob(body.job.id);
+    await ajm.cancelJob(body.job.id);
   });
 
   it("should return error when sessionId has reserved gw- prefix", async () => {
@@ -360,7 +360,7 @@ describe("handleGeminiRequestAsync", () => {
     expect(args).not.toContain("--conversation");
     expect(args).not.toContain("--continue");
 
-    ajm.cancelJob(body.job.id);
+    await ajm.cancelJob(body.job.id);
   });
 
   it("should pass --conversation args for user-provided sessionId", async () => {
@@ -386,7 +386,7 @@ describe("handleGeminiRequestAsync", () => {
     expect(args).toContain("user-sess-42");
 
     const jobId = startJobSpy.mock.results[0].value.id;
-    ajm.cancelJob(jobId);
+    await ajm.cancelJob(jobId);
   });
 
   it("should emit no session flag when createNewSession=true", async () => {
@@ -413,7 +413,7 @@ describe("handleGeminiRequestAsync", () => {
     expect(args).not.toContain("--session-id");
 
     const jobId = startJobSpy.mock.results[0].value.id;
-    ajm.cancelJob(jobId);
+    await ajm.cancelJob(jobId);
   });
 
   it("fails closed when resumeLatest has no stable cwd", async () => {
@@ -686,6 +686,6 @@ describe("handleCodexRequestAsync", () => {
     const body = JSON.parse(result.content[0].text);
     expect(body.success).toBe(true);
 
-    ajm.cancelJob(body.job.id);
+    await ajm.cancelJob(body.job.id);
   });
 });

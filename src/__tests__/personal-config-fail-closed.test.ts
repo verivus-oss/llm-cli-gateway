@@ -579,7 +579,7 @@ describe("codex_request default-workspace scope wiring", () => {
 
   afterEach(async () => {
     await jobs.dispose();
-    store.close();
+    await store.close();
     rmSync(root, { recursive: true, force: true });
   });
 
@@ -684,7 +684,7 @@ describe("config_init enablement gate", () => {
 
   afterEach(async () => {
     await jobs.dispose();
-    store.close();
+    await store.close();
     rmSync(root, { recursive: true, force: true });
   });
 

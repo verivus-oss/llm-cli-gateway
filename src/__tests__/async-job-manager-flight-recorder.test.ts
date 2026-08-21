@@ -99,15 +99,15 @@ class FlakyOnceFlightRecorder implements FlightRecorderLike {
 }
 
 function waitForJobDone(manager: AsyncJobManager, jobId: string, timeoutMs = 5000): Promise<void> {
-  return new Promise((resolve, reject) => {
+  return new Promise(async (resolve, reject) => {
     const deadline = Date.now() + timeoutMs;
-    const check = () => {
-      const s = manager.getJobSnapshot(jobId);
+    const check = async () => {
+      const s = await manager.getJobSnapshot(jobId);
       if (s && !isAsyncJobInProgress(s.status)) return resolve();
       if (Date.now() > deadline) return reject(new Error("waitForJobDone timed out"));
       setTimeout(check, 50);
     };
-    check();
+    await check();
   });
 }
 
@@ -153,7 +153,7 @@ describe("AsyncJobManager + flight-recorder (slice 1.5)", () => {
     it("writes logStart with asyncJobId+stablePrefixHash when writeFlightStart=true", async () => {
       const fr = new CapturingFlightRecorder();
       const manager = new AsyncJobManager(noopLogger, undefined, new MemoryJobStore(), fr);
-      const outcome = manager.startJobWithDedup("claude" as LlmCli, ["nothing"], "corr-a", {
+      const outcome = await manager.startJobWithDedup("claude" as LlmCli, ["nothing"], "corr-a", {
         writeFlightStart: true,
         flightRecorderEntry: entry(),
         extractUsage: fakeUsage,
@@ -175,7 +175,7 @@ describe("AsyncJobManager + flight-recorder (slice 1.5)", () => {
     it("does NOT write logStart when writeFlightStart=false (sync-deferred regression for Codex-F1)", async () => {
       const fr = new CapturingFlightRecorder();
       const manager = new AsyncJobManager(noopLogger, undefined, new MemoryJobStore(), fr);
-      const outcome = manager.startJobWithDedup(
+      const outcome = await manager.startJobWithDedup(
         "echo" as LlmCli,
         ["hello-sync-deferred"],
         "corr-a2",
@@ -203,7 +203,7 @@ describe("AsyncJobManager + flight-recorder (slice 1.5)", () => {
       // the rich row is preempted by the manager's minimal payload.
       const fr = new CapturingFlightRecorder();
       const manager = new AsyncJobManager(noopLogger, undefined, new MemoryJobStore(), fr);
-      const outcome = manager.startJobWithDedup(
+      const outcome = await manager.startJobWithDedup(
         "echo" as LlmCli,
         ["hello-sync-inline"],
         "corr-a3",
@@ -222,7 +222,7 @@ describe("AsyncJobManager + flight-recorder (slice 1.5)", () => {
     it("armFlightCompleteForDeferral after job already terminal still writes (race mitigation)", async () => {
       const fr = new CapturingFlightRecorder();
       const manager = new AsyncJobManager(noopLogger, undefined, new MemoryJobStore(), fr);
-      const outcome = manager.startJobWithDedup("echo" as LlmCli, ["fast"], "corr-a4", {
+      const outcome = await manager.startJobWithDedup("echo" as LlmCli, ["fast"], "corr-a4", {
         writeFlightStart: false,
         flightRecorderEntry: entry(),
         extractUsage: fakeUsage,
@@ -244,18 +244,18 @@ describe("AsyncJobManager + flight-recorder (slice 1.5)", () => {
         fr,
         limiterLimits()
       );
-      const running = manager.startJobWithDedup("sleep" as LlmCli, ["2"], "corr-running");
-      const queued = manager.startJobWithDedup("echo" as LlmCli, ["queued"], "corr-queued", {
+      const running = await manager.startJobWithDedup("sleep" as LlmCli, ["2"], "corr-running");
+      const queued = await manager.startJobWithDedup("echo" as LlmCli, ["queued"], "corr-queued", {
         writeFlightStart: false,
         flightRecorderEntry: entry(),
         extractUsage: fakeUsage,
       });
 
-      expect(manager.getJobSnapshot(queued.snapshot.id)?.status).toBe("queued");
+      expect((await manager.getJobSnapshot(queued.snapshot.id))?.status).toBe("queued");
       manager.armFlightCompleteForDeferral(queued.snapshot.id);
       expect(fr.completes).toHaveLength(0);
 
-      manager.cancelJob(running.snapshot.id);
+      await manager.cancelJob(running.snapshot.id);
       await waitForJobDone(manager, queued.snapshot.id);
       await tick();
       expect(fr.completes).toHaveLength(1);
@@ -266,7 +266,7 @@ describe("AsyncJobManager + flight-recorder (slice 1.5)", () => {
     it("writes nothing when flightRecorderEntry is omitted (regression guard for case i)", async () => {
       const fr = new CapturingFlightRecorder();
       const manager = new AsyncJobManager(noopLogger, undefined, new MemoryJobStore(), fr);
-      const outcome = manager.startJobWithDedup("echo" as LlmCli, ["silent"], "corr-i");
+      const outcome = await manager.startJobWithDedup("echo" as LlmCli, ["silent"], "corr-i");
       await waitForJobDone(manager, outcome.snapshot.id);
       expect(fr.starts).toHaveLength(0);
       expect(fr.completes).toHaveLength(0);
@@ -277,7 +277,7 @@ describe("AsyncJobManager + flight-recorder (slice 1.5)", () => {
     it("clean exit (exitCode=0) → status='completed' + usage populated (case b)", async () => {
       const fr = new CapturingFlightRecorder();
       const manager = new AsyncJobManager(noopLogger, undefined, new MemoryJobStore(), fr);
-      const outcome = manager.startJobWithDedup("echo" as LlmCli, ["clean-b"], "corr-b", {
+      const outcome = await manager.startJobWithDedup("echo" as LlmCli, ["clean-b"], "corr-b", {
         writeFlightStart: true,
         flightRecorderEntry: entry(),
         extractUsage: fakeUsage,
@@ -295,7 +295,7 @@ describe("AsyncJobManager + flight-recorder (slice 1.5)", () => {
     it("non-zero exit with job.error=null falls back to stderr / 'Exit code N' (Codex-F2)", async () => {
       const fr = new CapturingFlightRecorder();
       const manager = new AsyncJobManager(noopLogger, undefined, new MemoryJobStore(), fr);
-      const outcome = manager.startJobWithDedup(
+      const outcome = await manager.startJobWithDedup(
         "sh" as LlmCli,
         ["-c", "echo trouble >&2; exit 7"],
         "corr-c",
@@ -317,7 +317,7 @@ describe("AsyncJobManager + flight-recorder (slice 1.5)", () => {
     it("launch failure populates errorMessage from launch-error text (Codex-F2)", async () => {
       const fr = new CapturingFlightRecorder();
       const manager = new AsyncJobManager(noopLogger, undefined, new MemoryJobStore(), fr);
-      const outcome = manager.startJobWithDedup(
+      const outcome = await manager.startJobWithDedup(
         "missing-cli-for-fr-test" as LlmCli,
         [],
         "corr-c2",
@@ -338,12 +338,12 @@ describe("AsyncJobManager + flight-recorder (slice 1.5)", () => {
     it("cancelJob → status='failed' + errorMessage='canceled by caller' (case d)", async () => {
       const fr = new CapturingFlightRecorder();
       const manager = new AsyncJobManager(noopLogger, undefined, new MemoryJobStore(), fr);
-      const outcome = manager.startJobWithDedup("sleep" as LlmCli, ["10"], "corr-d", {
+      const outcome = await manager.startJobWithDedup("sleep" as LlmCli, ["10"], "corr-d", {
         writeFlightStart: true,
         flightRecorderEntry: entry(),
         extractUsage: fakeUsage,
       });
-      manager.cancelJob(outcome.snapshot.id);
+      await manager.cancelJob(outcome.snapshot.id);
       await waitForJobDone(manager, outcome.snapshot.id);
       await tick();
       const c = fr.completes.find(x => x.correlationId === "corr-d");
@@ -355,7 +355,7 @@ describe("AsyncJobManager + flight-recorder (slice 1.5)", () => {
     it("idle timeout → status='failed' + errorMessage contains 'inactivity' (case e)", async () => {
       const fr = new CapturingFlightRecorder();
       const manager = new AsyncJobManager(noopLogger, undefined, new MemoryJobStore(), fr);
-      const outcome = manager.startJobWithDedup("sleep" as LlmCli, ["10"], "corr-e", {
+      const outcome = await manager.startJobWithDedup("sleep" as LlmCli, ["10"], "corr-e", {
         idleTimeoutMs: 200,
         writeFlightStart: true,
         flightRecorderEntry: entry(),
@@ -374,12 +374,12 @@ describe("AsyncJobManager + flight-recorder (slice 1.5)", () => {
       const fr = new CapturingFlightRecorder();
       const manager = new AsyncJobManager(noopLogger, undefined, new MemoryJobStore(), fr);
       // Long-running job so the second call dedups onto it while still running.
-      const first = manager.startJobWithDedup("sleep" as LlmCli, ["1"], "corr-f1", {
+      const first = await manager.startJobWithDedup("sleep" as LlmCli, ["1"], "corr-f1", {
         writeFlightStart: true,
         flightRecorderEntry: entry(),
         extractUsage: fakeUsage,
       });
-      const second = manager.startJobWithDedup("sleep" as LlmCli, ["1"], "corr-f2", {
+      const second = await manager.startJobWithDedup("sleep" as LlmCli, ["1"], "corr-f2", {
         writeFlightStart: true,
         flightRecorderEntry: entry(),
         extractUsage: fakeUsage,
@@ -398,11 +398,11 @@ describe("AsyncJobManager + flight-recorder (slice 1.5)", () => {
   });
 
   describe("orphan recovery on constructor (cases g + h, Mistral-F1)", () => {
-    it("seeded running rows produce one logComplete each, status='failed', 'orphaned'", () => {
+    it("seeded running rows produce one logComplete each, status='failed', 'orphaned'", async () => {
       const fr = new CapturingFlightRecorder();
       const store = new MemoryJobStore();
       const startedAt = new Date(Date.now() - 60000).toISOString();
-      store.recordStart({
+      await store.recordStart({
         id: "orph-1",
         correlationId: "corr-orph-1",
         requestKey: "k-orph-1",
@@ -575,7 +575,7 @@ describe("AsyncJobManager + flight-recorder (slice 1.5)", () => {
       // Use an idle-timeout job so the timeout cb fires first (and throws on
       // the first logComplete attempt), then the child's close handler
       // retries the logComplete which succeeds the second time.
-      const outcome = manager.startJobWithDedup("sleep" as LlmCli, ["10"], "corr-j", {
+      const outcome = await manager.startJobWithDedup("sleep" as LlmCli, ["10"], "corr-j", {
         idleTimeoutMs: 200,
         writeFlightStart: true,
         flightRecorderEntry: entry(),
@@ -594,7 +594,7 @@ describe("AsyncJobManager + flight-recorder (slice 1.5)", () => {
     it("Codex-F5: post-write clear releases flightRecorderEntry + extractUsage", async () => {
       const fr = new CapturingFlightRecorder();
       const manager = new AsyncJobManager(noopLogger, undefined, new MemoryJobStore(), fr);
-      const outcome = manager.startJobWithDedup("echo" as LlmCli, ["clear-k"], "corr-k", {
+      const outcome = await manager.startJobWithDedup("echo" as LlmCli, ["clear-k"], "corr-k", {
         writeFlightStart: true,
         flightRecorderEntry: entry(),
         extractUsage: fakeUsage,
@@ -757,11 +757,11 @@ describe("AsyncJobManager — provider sessionId + stopReason (phase 7)", () => 
     return job;
   }
 
-  it("getJobResult surfaces the provider sessionId + stopReason parsed from stdout", () => {
+  it("getJobResult surfaces the provider sessionId + stopReason parsed from stdout", async () => {
     const fr = new CapturingFlightRecorder();
     const manager = new AsyncJobManager(noopLogger, undefined, new MemoryJobStore(), fr);
     seedCompletedGrokJob(manager, "job-grok-1");
-    const result = manager.getJobResult("job-grok-1");
+    const result = await manager.getJobResult("job-grok-1");
     // Mutation that flips this red: not calling extractProviderOutputMetadata in
     // getJobResult (a deferred grok job would then lose the id needed to resume).
     expect(result?.providerSessionId).toBe("grok-uuid-7777");

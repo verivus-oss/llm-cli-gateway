@@ -86,9 +86,9 @@ function fakeAsyncJobManager() {
 }
 
 describe("Layer 4 validation orchestration", () => {
-  it("fans out to multiple providers and preserves partial skipped providers", () => {
+  it("fans out to multiple providers and preserves partial skipped providers", async () => {
     const fake = fakeAsyncJobManager();
-    const report = startValidationRun(
+    const report = await startValidationRun(
       {
         asyncJobManager: fake.manager as any,
         getProviderRuntimeStatus: provider => runtime(provider, provider !== "grok"),
@@ -119,7 +119,7 @@ describe("Layer 4 validation orchestration", () => {
     );
   });
 
-  it("keeps judge synthesis waiting until provider jobs are terminal", () => {
+  it("keeps judge synthesis waiting until provider jobs are terminal", async () => {
     const fake = fakeAsyncJobManager();
     const pending: NormalizedValidationResult = {
       provider: "claude",
@@ -137,7 +137,7 @@ describe("Layer 4 validation orchestration", () => {
       error: null,
     };
 
-    const synthesis = startJudgeSynthesis(
+    const synthesis = await startJudgeSynthesis(
       {
         asyncJobManager: fake.manager as any,
         getProviderRuntimeStatus: provider => runtime(provider),
@@ -154,7 +154,7 @@ describe("Layer 4 validation orchestration", () => {
     expect(fake.startCalls).toHaveLength(0);
   });
 
-  it("skips judge synthesis when no completed provider results are available", () => {
+  it("skips judge synthesis when no completed provider results are available", async () => {
     const fake = fakeAsyncJobManager();
     const skipped: NormalizedValidationResult = {
       provider: "grok",
@@ -182,7 +182,7 @@ describe("Layer 4 validation orchestration", () => {
       error: "CLI failed.",
     };
 
-    const synthesis = startJudgeSynthesis(
+    const synthesis = await startJudgeSynthesis(
       {
         asyncJobManager: fake.manager as any,
         getProviderRuntimeStatus: provider => runtime(provider),
@@ -200,9 +200,9 @@ describe("Layer 4 validation orchestration", () => {
     expect(fake.startCalls).toHaveLength(0);
   });
 
-  it("starts judge synthesis from collected terminal provider results", () => {
+  it("starts judge synthesis from collected terminal provider results", async () => {
     const fake = fakeAsyncJobManager();
-    const report = startValidationRun(
+    const report = await startValidationRun(
       {
         asyncJobManager: fake.manager as any,
         getProviderRuntimeStatus: provider => runtime(provider),
@@ -216,15 +216,15 @@ describe("Layer 4 validation orchestration", () => {
     );
 
     expect(report.synthesis.status).toBe("waiting_for_provider_results");
-    const normalized = report.results.map(result =>
+    const normalized = (await report.results.map(result =>
       collectValidationJobResult(
         { asyncJobManager: fake.manager as any },
         result.provider,
         result.rawJobReference!.jobId,
         result.model
       )
-    ) as NormalizedValidationResult[];
-    const synthesis = startJudgeSynthesis(
+    )) as NormalizedValidationResult[];
+    const synthesis = await startJudgeSynthesis(
       {
         asyncJobManager: fake.manager as any,
         getProviderRuntimeStatus: provider => runtime(provider),
@@ -244,7 +244,7 @@ describe("Layer 4 validation orchestration", () => {
     expect(fake.startCalls.at(-1)?.args.join("\n")).toContain('"provider": "claude"');
   });
 
-  it("omits skipped or failed provider results from judge evidence", () => {
+  it("omits skipped or failed provider results from judge evidence", async () => {
     const fake = fakeAsyncJobManager();
     const completed: NormalizedValidationResult = {
       provider: "claude",
@@ -272,7 +272,7 @@ describe("Layer 4 validation orchestration", () => {
       error: "grok runtime is not installed.",
     };
 
-    const synthesis = startJudgeSynthesis(
+    const synthesis = await startJudgeSynthesis(
       {
         asyncJobManager: fake.manager as any,
         getProviderRuntimeStatus: provider => runtime(provider),
@@ -295,9 +295,9 @@ describe("Layer 4 validation orchestration", () => {
     expect(judgePrompt).not.toContain('"provider": "grok"');
   });
 
-  it("U22 routes mistral as a validation provider and uses an inline -p prompt", () => {
+  it("U22 routes mistral as a validation provider and uses an inline -p prompt", async () => {
     const fake = fakeAsyncJobManager();
-    const report = startValidationRun(
+    const report = await startValidationRun(
       {
         asyncJobManager: fake.manager as any,
         getProviderRuntimeStatus: provider => runtime(provider),
@@ -316,9 +316,9 @@ describe("Layer 4 validation orchestration", () => {
     expect(fake.startCalls[0].args[0]).toMatch(/^-p=/);
   });
 
-  it("U22 skips mistral when its runtime is not installed", () => {
+  it("U22 skips mistral when its runtime is not installed", async () => {
     const fake = fakeAsyncJobManager();
-    const report = startValidationRun(
+    const report = await startValidationRun(
       {
         asyncJobManager: fake.manager as any,
         getProviderRuntimeStatus: provider => runtime(provider, provider !== "mistral"),

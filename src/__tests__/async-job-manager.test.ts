@@ -2,22 +2,26 @@ import { describe, it, expect, vi } from "vitest";
 import { AsyncJobManager, type LlmCli } from "../async-job-manager.js";
 
 /** Poll until predicate returns true, or reject after timeoutMs. */
-function waitFor(fn: () => boolean, timeoutMs: number, intervalMs = 100): Promise<void> {
+function waitFor(
+  fn: () => boolean | Promise<boolean>,
+  timeoutMs: number,
+  intervalMs = 100
+): Promise<void> {
   return new Promise((resolve, reject) => {
     const deadline = Date.now() + timeoutMs;
-    const check = () => {
-      if (fn()) return resolve();
+    const check = async () => {
+      if (await fn()) return resolve();
       if (Date.now() > deadline) return reject(new Error("waitFor timed out"));
-      setTimeout(check, intervalMs);
+      setTimeout(() => void check(), intervalMs);
     };
-    check();
+    void check();
   });
 }
 
 /** Helper: wait for a job to leave "running" status. */
 function waitForJobDone(manager: AsyncJobManager, jobId: string, timeoutMs = 5000): Promise<void> {
-  return waitFor(() => {
-    const s = manager.getJobSnapshot(jobId);
+  return waitFor(async () => {
+    const s = await manager.getJobSnapshot(jobId);
     return s !== null && s.status !== "running";
   }, timeoutMs);
 }
@@ -26,54 +30,54 @@ describe("AsyncJobManager", () => {
   describe("basic lifecycle", () => {
     it("should start and complete a job", async () => {
       const manager = new AsyncJobManager();
-      const job = manager.startJob("echo" as LlmCli, ["hello"], "corr-1");
+      const job = await manager.startJob("echo" as LlmCli, ["hello"], "corr-1");
       expect(job.status).toBe("running");
 
       await waitForJobDone(manager, job.id);
 
-      const snapshot = manager.getJobSnapshot(job.id)!;
+      const snapshot = (await manager.getJobSnapshot(job.id))!;
       expect(snapshot.status).toBe("completed");
       expect(snapshot.exitCode).toBe(0);
 
-      const result = manager.getJobResult(job.id)!;
+      const result = (await manager.getJobResult(job.id))!;
       expect(result.stdout.trim()).toBe("hello");
     });
 
     it("should track a failed job", async () => {
       const manager = new AsyncJobManager();
-      const job = manager.startJob("sh" as LlmCli, ["-c", "exit 42"], "corr-2");
+      const job = await manager.startJob("sh" as LlmCli, ["-c", "exit 42"], "corr-2");
 
       await waitForJobDone(manager, job.id);
 
-      const snapshot = manager.getJobSnapshot(job.id)!;
+      const snapshot = (await manager.getJobSnapshot(job.id))!;
       expect(snapshot.status).toBe("failed");
       expect(snapshot.exitCode).toBe(42);
     });
 
     it("should normalize missing CLI launch failures", async () => {
       const manager = new AsyncJobManager();
-      const job = manager.startJob("missing-cli-for-test" as LlmCli, [], "corr-missing");
+      const job = await manager.startJob("missing-cli-for-test" as LlmCli, [], "corr-missing");
 
       await waitForJobDone(manager, job.id);
 
-      const snapshot = manager.getJobSnapshot(job.id)!;
+      const snapshot = (await manager.getJobSnapshot(job.id))!;
       expect(snapshot.status).toBe("failed");
       expect(snapshot.exitCode).toBe(127);
       expect(snapshot.error).toContain("command was not found");
 
-      const result = manager.getJobResult(job.id)!;
+      const result = (await manager.getJobResult(job.id))!;
       expect(result.stderr).toContain("command was not found");
     });
 
-    it("should return null for unknown job ID", () => {
+    it("should return null for unknown job ID", async () => {
       const manager = new AsyncJobManager();
-      expect(manager.getJobSnapshot("nonexistent")).toBeNull();
-      expect(manager.getJobResult("nonexistent")).toBeNull();
+      expect(await manager.getJobSnapshot("nonexistent")).toBeNull();
+      expect(await manager.getJobResult("nonexistent")).toBeNull();
     });
 
     it("should truncate job results from the beginning of each stream", async () => {
       const manager = new AsyncJobManager();
-      const job = manager.startJob(
+      const job = await manager.startJob(
         "sh" as LlmCli,
         ["-c", "printf abcdefghij; printf klmnopqrst >&2"],
         "corr-truncate"
@@ -81,7 +85,7 @@ describe("AsyncJobManager", () => {
 
       await waitForJobDone(manager, job.id);
 
-      const result = manager.getJobResult(job.id, 4)!;
+      const result = (await manager.getJobResult(job.id, 4))!;
       expect(result.stdout).toBe("abcd");
       expect(result.stderr).toBe("klmn");
       expect(result.stdoutTruncated).toBe(true);
@@ -90,7 +94,7 @@ describe("AsyncJobManager", () => {
 
     it("should expose resumable stdout and stderr pages without losing captured bytes", async () => {
       const manager = new AsyncJobManager();
-      const job = manager.startJob(
+      const job = await manager.startJob(
         "sh" as LlmCli,
         ["-c", "printf abcdefghij; printf klmnopqrst >&2"],
         "corr-paginated-result"
@@ -98,7 +102,7 @@ describe("AsyncJobManager", () => {
 
       await waitForJobDone(manager, job.id);
 
-      const first = manager.getJobResult(job.id, 4)!;
+      const first = (await manager.getJobResult(job.id, 4))!;
       expect(first.stdout).toBe("abcd");
       expect(first.stderr).toBe("klmn");
       expect(first.stdoutOffsetChars).toBe(0);
@@ -108,14 +112,14 @@ describe("AsyncJobManager", () => {
       expect(first.stderrTotalChars).toBe(10);
       expect(first.stderrNextOffsetChars).toBe(4);
 
-      const second = manager.getJobResult(job.id, 4, {
+      const second = (await manager.getJobResult(job.id, 4, {
         stdoutOffsetChars: first.stdoutNextOffsetChars!,
         stderrOffsetChars: first.stderrNextOffsetChars!,
-      })!;
-      const third = manager.getJobResult(job.id, 4, {
+      }))!;
+      const third = (await manager.getJobResult(job.id, 4, {
         stdoutOffsetChars: second.stdoutNextOffsetChars!,
         stderrOffsetChars: second.stderrNextOffsetChars!,
-      })!;
+      }))!;
 
       expect(first.stdout + second.stdout + third.stdout).toBe("abcdefghij");
       expect(first.stderr + second.stderr + third.stderr).toBe("klmnopqrst");
@@ -129,11 +133,11 @@ describe("AsyncJobManager", () => {
   describe("idle timeout", () => {
     it("should kill job after idle timeout with no output", async () => {
       const manager = new AsyncJobManager();
-      const job = manager.startJob("sleep" as LlmCli, ["30"], "corr-idle-1", undefined, 500);
+      const job = await manager.startJob("sleep" as LlmCli, ["30"], "corr-idle-1", undefined, 500);
 
       await waitForJobDone(manager, job.id, 10000);
 
-      const snapshot = manager.getJobSnapshot(job.id)!;
+      const snapshot = (await manager.getJobSnapshot(job.id))!;
       expect(snapshot.status).toBe("failed");
       expect(snapshot.exitCode).toBe(125);
       expect(snapshot.error).toContain("inactivity");
@@ -142,7 +146,7 @@ describe("AsyncJobManager", () => {
     it("should reset idle timer on output", async () => {
       const manager = new AsyncJobManager();
       // Process outputs every 200ms — idle timeout of 500ms should not fire
-      const job = manager.startJob(
+      const job = await manager.startJob(
         "sh" as LlmCli,
         ["-c", "for i in 1 2 3 4 5; do echo tick; sleep 0.2; done"],
         "corr-idle-2",
@@ -152,28 +156,28 @@ describe("AsyncJobManager", () => {
 
       await waitForJobDone(manager, job.id);
 
-      const snapshot = manager.getJobSnapshot(job.id)!;
+      const snapshot = (await manager.getJobSnapshot(job.id))!;
       expect(snapshot.status).toBe("completed");
       expect(snapshot.exitCode).toBe(0);
     }, 15000);
 
     it("should not idle-timeout when idleTimeoutMs is not set", async () => {
       const manager = new AsyncJobManager();
-      const job = manager.startJob("sleep" as LlmCli, ["1"], "corr-idle-3");
+      const job = await manager.startJob("sleep" as LlmCli, ["1"], "corr-idle-3");
 
       await waitForJobDone(manager, job.id, 5000);
 
-      const snapshot = manager.getJobSnapshot(job.id)!;
+      const snapshot = (await manager.getJobSnapshot(job.id))!;
       expect(snapshot.status).toBe("completed");
     }, 15000);
 
     it("should set exitCode 125 distinct from wall-clock timeout 124", async () => {
       const manager = new AsyncJobManager();
-      const job = manager.startJob("sleep" as LlmCli, ["30"], "corr-idle-4", undefined, 300);
+      const job = await manager.startJob("sleep" as LlmCli, ["30"], "corr-idle-4", undefined, 300);
 
       await waitForJobDone(manager, job.id, 10000);
 
-      const snapshot = manager.getJobSnapshot(job.id)!;
+      const snapshot = (await manager.getJobSnapshot(job.id))!;
       expect(snapshot.exitCode).toBe(125);
       expect(snapshot.exitCode).not.toBe(124);
     }, 15000);
@@ -182,33 +186,33 @@ describe("AsyncJobManager", () => {
   describe("cancel", () => {
     it("should cancel a running job", async () => {
       const manager = new AsyncJobManager();
-      const job = manager.startJob("sleep" as LlmCli, ["30"], "corr-cancel-1");
+      const job = await manager.startJob("sleep" as LlmCli, ["30"], "corr-cancel-1");
 
-      const result = manager.cancelJob(job.id);
+      const result = await manager.cancelJob(job.id);
       expect(result.canceled).toBe(true);
 
       // SIGTERM is only a request. The provider attempt remains owned until
       // ChildProcess `close` proves it cannot keep running.
       await waitForJobDone(manager, job.id);
-      const snapshot = manager.getJobSnapshot(job.id)!;
+      const snapshot = (await manager.getJobSnapshot(job.id))!;
       expect(snapshot.status).toBe("canceled");
       expect(snapshot.finishedAt).toBeTruthy();
     });
 
-    it("should return error for non-existent job", () => {
+    it("should return error for non-existent job", async () => {
       const manager = new AsyncJobManager();
-      const result = manager.cancelJob("nonexistent-id");
+      const result = await manager.cancelJob("nonexistent-id");
       expect(result.canceled).toBe(false);
       expect(result.reason).toContain("not found");
     });
 
     it("should return error for already completed job", async () => {
       const manager = new AsyncJobManager();
-      const job = manager.startJob("true" as LlmCli, [], "corr-cancel-2");
+      const job = await manager.startJob("true" as LlmCli, [], "corr-cancel-2");
 
       await waitForJobDone(manager, job.id);
 
-      const result = manager.cancelJob(job.id);
+      const result = await manager.cancelJob(job.id);
       expect(result.canceled).toBe(false);
       expect(result.reason).toContain("already");
     });
@@ -218,7 +222,7 @@ describe("AsyncJobManager", () => {
       // process dies. If the old proc.killed bug was present, SIGKILL
       // would never fire and the process would hang for 30s (timeout).
       const manager = new AsyncJobManager();
-      const job = manager.startJob(
+      const job = await manager.startJob(
         "bash" as LlmCli,
         ["-c", "trap '' TERM; sleep 30"],
         "corr-cancel-3"
@@ -226,17 +230,17 @@ describe("AsyncJobManager", () => {
 
       // Give process time to set up trap
       await new Promise(r => setTimeout(r, 200));
-      manager.cancelJob(job.id);
+      await manager.cancelJob(job.id);
 
       // Wait for the process to actually exit via SIGKILL escalation (~5s).
       // Signal-killed processes have code=null, so exitCode stays null for
       // canceled jobs. Use the exited flag instead.
-      await waitFor(() => {
-        const s = manager.getJobSnapshot(job.id);
+      await waitFor(async () => {
+        const s = await manager.getJobSnapshot((job).id);
         return s !== null && s.exited === true;
       }, 10000);
 
-      const snapshot = manager.getJobSnapshot(job.id)!;
+      const snapshot = (await manager.getJobSnapshot(job.id))!;
       expect(snapshot.status).toBe("canceled");
     }, 15000);
   });
@@ -244,7 +248,7 @@ describe("AsyncJobManager", () => {
   describe("process health", () => {
     it("should return health for running jobs", async () => {
       const manager = new AsyncJobManager();
-      const job = manager.startJob("sleep" as LlmCli, ["10"], "corr-health-1");
+      const job = await manager.startJob("sleep" as LlmCli, ["10"], "corr-health-1");
       expect(job.status).toBe("running");
 
       const running = manager.getRunningJobs();
@@ -259,7 +263,7 @@ describe("AsyncJobManager", () => {
       expect(health.jobs[0].processHealth?.alive).toBe(true);
 
       // Cleanup
-      manager.cancelJob(job.id);
+      await manager.cancelJob(job.id);
     });
 
     it("should return empty health when no jobs are running", () => {
@@ -275,7 +279,7 @@ describe("AsyncJobManager", () => {
   describe("outputFormat tracking", () => {
     it("should store and retrieve output format", async () => {
       const manager = new AsyncJobManager();
-      const job = manager.startJob(
+      const job = await manager.startJob(
         "echo" as LlmCli,
         ["test"],
         "corr-fmt-1",
@@ -291,7 +295,7 @@ describe("AsyncJobManager", () => {
 
     it("should return undefined for jobs without output format", async () => {
       const manager = new AsyncJobManager();
-      const job = manager.startJob("echo" as LlmCli, ["test"], "corr-fmt-2");
+      const job = await manager.startJob("echo" as LlmCli, ["test"], "corr-fmt-2");
 
       expect(manager.getJobOutputFormat(job.id)).toBeUndefined();
 
@@ -308,11 +312,11 @@ describe("AsyncJobManager", () => {
     it("should fire callback exactly once on successful completion", async () => {
       const callback = vi.fn();
       const manager = new AsyncJobManager(undefined, callback);
-      const job = manager.startJob("echo" as LlmCli, ["hello"], "corr-metrics-1");
+      const job = await manager.startJob("echo" as LlmCli, ["hello"], "corr-metrics-1");
 
       await waitForJobDone(manager, job.id);
 
-      const snapshot = manager.getJobSnapshot(job.id)!;
+      const snapshot = (await manager.getJobSnapshot(job.id))!;
       expect(snapshot.status).toBe("completed");
       expect(callback).toHaveBeenCalledTimes(1);
       expect(callback).toHaveBeenCalledWith("echo", expect.any(Number), true);
@@ -321,11 +325,11 @@ describe("AsyncJobManager", () => {
     it("should fire callback exactly once on failure", async () => {
       const callback = vi.fn();
       const manager = new AsyncJobManager(undefined, callback);
-      const job = manager.startJob("sh" as LlmCli, ["-c", "exit 42"], "corr-metrics-2");
+      const job = await manager.startJob("sh" as LlmCli, ["-c", "exit 42"], "corr-metrics-2");
 
       await waitForJobDone(manager, job.id);
 
-      const snapshot = manager.getJobSnapshot(job.id)!;
+      const snapshot = (await manager.getJobSnapshot(job.id))!;
       expect(snapshot.status).toBe("failed");
       expect(callback).toHaveBeenCalledTimes(1);
       expect(callback).toHaveBeenCalledWith("sh", expect.any(Number), false);
@@ -334,13 +338,13 @@ describe("AsyncJobManager", () => {
     it("should NOT fire callback on cancellation", async () => {
       const callback = vi.fn();
       const manager = new AsyncJobManager(undefined, callback);
-      const job = manager.startJob("sleep" as LlmCli, ["30"], "corr-metrics-3");
+      const job = await manager.startJob("sleep" as LlmCli, ["30"], "corr-metrics-3");
 
-      manager.cancelJob(job.id);
+      await manager.cancelJob(job.id);
 
       // Wait for process exit
-      await waitFor(() => {
-        const s = manager.getJobSnapshot(job.id);
+      await waitFor(async () => {
+        const s = await manager.getJobSnapshot((job).id);
         return s !== null && s.exited === true;
       }, 10000);
 
@@ -350,7 +354,13 @@ describe("AsyncJobManager", () => {
     it("should fire callback on idle timeout kill", async () => {
       const callback = vi.fn();
       const manager = new AsyncJobManager(undefined, callback);
-      const job = manager.startJob("sleep" as LlmCli, ["30"], "corr-metrics-4", undefined, 300);
+      const job = await manager.startJob(
+        "sleep" as LlmCli,
+        ["30"],
+        "corr-metrics-4",
+        undefined,
+        300
+      );
 
       await waitForJobDone(manager, job.id, 10000);
 
@@ -365,16 +375,16 @@ describe("AsyncJobManager", () => {
       const manager = new AsyncJobManager(undefined, throwingCallback);
 
       // First job — callback throws
-      const job1 = manager.startJob("echo" as LlmCli, ["first"], "corr-metrics-5");
+      const job1 = await manager.startJob("echo" as LlmCli, ["first"], "corr-metrics-5");
       await waitForJobDone(manager, job1.id);
       expect(throwingCallback).toHaveBeenCalledTimes(1);
-      expect(manager.getJobSnapshot(job1.id)!.status).toBe("completed");
+      expect((await manager.getJobSnapshot(job1.id)!).status).toBe("completed");
 
       // Second job — manager still works after throw
-      const job2 = manager.startJob("echo" as LlmCli, ["second"], "corr-metrics-6");
+      const job2 = await manager.startJob("echo" as LlmCli, ["second"], "corr-metrics-6");
       await waitForJobDone(manager, job2.id);
       expect(throwingCallback).toHaveBeenCalledTimes(2);
-      expect(manager.getJobSnapshot(job2.id)!.status).toBe("completed");
+      expect((await manager.getJobSnapshot(job2.id)!).status).toBe("completed");
     });
 
     it("should fire callback exactly once even if error and close both fire", async () => {
@@ -382,7 +392,7 @@ describe("AsyncJobManager", () => {
       // by using a command that fails. The metricsRecorded guard prevents double-counting.
       const callback = vi.fn();
       const manager = new AsyncJobManager(undefined, callback);
-      const job = manager.startJob(
+      const job = await manager.startJob(
         "sh" as LlmCli,
         ["-c", "echo err >&2; exit 1"],
         "corr-metrics-7"

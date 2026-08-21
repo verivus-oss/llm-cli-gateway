@@ -158,7 +158,7 @@ function harness() {
     getJobOwner: (jobId: string) => (results.has(jobId) ? "alice" : null),
     getJobResult: (jobId: string) => results.get(jobId) ?? null,
     getJobSnapshot: () => null,
-    startJobWithDedup(
+    async startJobWithDedup(
       cli: ValidationProvider,
       args: string[],
       correlationId: string,
@@ -176,14 +176,14 @@ function harness() {
       starts.push({ cli, args, validationId: admission.validationId, role });
       const jobSnapshot = snapshot(cli, id, correlationId);
       if (role === "judge") {
-        store.setValidationJudgeLink(admission.validationId, {
+        await store.setValidationJudgeLink(admission.validationId, {
           provider: cli,
           jobId: id,
           correlationId,
         });
       } else {
-        const run = store.getValidationRun(admission.validationId)!;
-        store.setValidationProviderLinks(admission.validationId, [
+        const run = (await store.getValidationRun(admission.validationId))!;
+        await store.setValidationProviderLinks(admission.validationId, [
           ...run.providerLinks,
           { provider: cli, jobId: id, correlationId },
         ]);
@@ -248,7 +248,7 @@ describe("durable cursor trust consent across review tool calls", () => {
     const kickoffResponse = await kickoff(true);
     expect(kickoffResponse.structuredContent).toMatchObject({ success: true });
     const validationId = kickoffResponse.structuredContent.report.validationId as string;
-    const storedRequest = JSON.parse(store.getValidationRun(validationId)!.requestJson);
+    const storedRequest = JSON.parse((await store.getValidationRun(validationId)!).requestJson);
 
     expect(storedRequest.reviewAuthorization.trustCursorWorkspace).toBe(true);
     expect(starts).toHaveLength(1);
@@ -276,7 +276,7 @@ describe("durable cursor trust consent across review tool calls", () => {
     const kickoffResponse = await kickoff(false);
     expect(kickoffResponse.structuredContent).toMatchObject({ success: true });
     const validationId = kickoffResponse.structuredContent.report.validationId as string;
-    const storedRequest = JSON.parse(store.getValidationRun(validationId)!.requestJson);
+    const storedRequest = JSON.parse((await store.getValidationRun(validationId)!).requestJson);
 
     expect(storedRequest.reviewAuthorization.trustCursorWorkspace).toBe(false);
     const synthesisResponse = await synthesize(validationId);

@@ -125,7 +125,7 @@ describe("handleCursorRequestAsync async-enqueue envelope (A1)", () => {
     // D4: a minted (not user-provided) session gets NO durable usage update.
     expect(sm.updateSessionUsage).not.toHaveBeenCalled();
 
-    ajm.cancelJob(body.job.id);
+    await ajm.cancelJob(body.job.id);
     await ajm.dispose();
   });
 
@@ -146,7 +146,7 @@ describe("handleCursorRequestAsync async-enqueue envelope (A1)", () => {
     expect(startJob).toHaveBeenCalledTimes(1);
     expect(sm.updateSessionUsage).toHaveBeenCalledWith("user-abc");
 
-    ajm.cancelJob(body.job.id);
+    await ajm.cancelJob(body.job.id);
     await ajm.dispose();
   });
 

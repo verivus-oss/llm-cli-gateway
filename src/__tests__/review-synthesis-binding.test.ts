@@ -83,7 +83,7 @@ function runRecord(overrides: Partial<ValidationRunRecord> = {}): ValidationRunR
   };
 }
 
-function harness(options: {
+async function harness(options: {
   run?: ValidationRunRecord;
   reverseIndexedRun?: ValidationRunRecord;
   providerResult?: AsyncJobResult | null;
@@ -94,8 +94,8 @@ function harness(options: {
   directories.push(directory);
   const store = new SqliteJobStore(join(directory, "jobs.db"));
   const run = options.run ?? runRecord();
-  if (options.reverseIndexedRun) store.recordValidationRun(options.reverseIndexedRun);
-  store.recordValidationRun(run);
+  if (options.reverseIndexedRun) await store.recordValidationRun(options.reverseIndexedRun);
+  await store.recordValidationRun(run);
 
   const handlers: Record<string, ToolHandler> = {};
   const httpStarts: Array<Record<string, any>> = [];
@@ -108,7 +108,7 @@ function harness(options: {
       Object.hasOwn(providerResultsById, jobId) ? providerOwner : "alice",
     getJobResult: (jobId: string) => providerResultsById[jobId] ?? null,
     getJobSnapshot: () => null,
-    startHttpJob(input: Record<string, any>) {
+    async startHttpJob(input: Record<string, any>) {
       httpStarts.push(input);
       const snapshot: AsyncJobSnapshot = {
         id: "job-judge",
@@ -132,7 +132,7 @@ function harness(options: {
         },
       };
       if (input.validationAdmission?.role === "judge") {
-        store.setValidationJudgeLink(input.validationAdmission.validationId, {
+        await store.setValidationJudgeLink(input.validationAdmission.validationId, {
           provider: input.validationAdmission.provider,
           jobId: snapshot.id,
           correlationId: snapshot.correlationId,
@@ -217,7 +217,7 @@ describe("durable review synthesis input binding", () => {
     expect(prompt).toContain("durable provider finding");
     expect(prompt).not.toContain("fabricated caller question");
     expect(prompt).not.toContain("fabricated caller result");
-    expect(store.getValidationRun("review-1")?.judgeLink?.jobId).toBe("job-judge");
+    expect((await store.getValidationRun("review-1"))?.judgeLink?.jobId).toBe("job-judge");
   });
 
   it("preserves a material finding beyond normalized rationale limits", async () => {
