@@ -990,7 +990,7 @@ export class FileSessionManager
     const session = this.storage.sessions[sessionId];
     if (!session) return null;
     if (this.isExpired(session)) {
-      this.deleteSession(sessionId);
+      this.evictSessionRow(sessionId);
       return null;
     }
     const binding = getKitSessionBinding(session);
@@ -1332,7 +1332,7 @@ export class FileSessionManager
     if (this.isPendingWorktreeDeletion(session)) return null;
     if (this.isExpired(session)) {
       if (this.storageFault) return null;
-      this.deleteSession(sessionId);
+      this.evictSessionRow(sessionId);
       return null;
     }
     return session;
@@ -1356,13 +1356,32 @@ export class FileSessionManager
     if (this.storageLockDepth === 0) {
       return this.withStorageLock(() => this.deleteSession(sessionId));
     }
+    // The caller's ownership is re-decided inside the lock hold that removes
+    // the row, not in the handler that called us. A handler's decision is
+    // separated from this write by at least one await, and an id whose row was
+    // TTL-evicted in that window can be re-created under another principal.
+    return this.removeSessionRow(sessionId, resolveOwnerPrincipal(getRequestContext()));
+  }
+
+  /**
+   * TTL/lifecycle eviction. Deliberately unowned: the row is already expired or
+   * otherwise unreachable, and whichever principal happens to touch the store
+   * first must be able to clear it.
+   */
+  private evictSessionRow(sessionId: string): boolean {
+    return this.removeSessionRow(sessionId, null);
+  }
+
+  private removeSessionRow(sessionId: string, caller: string | null): boolean {
     this.assertStorageWritable();
-    if (!this.storage.sessions[sessionId]) {
+    const session = this.storage.sessions[sessionId];
+    if (!session) {
       return false;
     }
 
-    const session = this.storage.sessions[sessionId];
     if (this.isPendingWorktreeDeletion(session)) return false;
+    // Own-or-not-found, same response shape as an unknown id: no oracle.
+    if (caller !== null && !principalCanAccess(session.ownerPrincipal, caller)) return false;
     if (getKitSessionBinding(session)?.attempt) {
       // Deleting a binding while its provider child owns the attempt would let
       // a later request allocate a competing native turn. Cancellation must
@@ -1385,10 +1404,15 @@ export class FileSessionManager
       const session = this.storage.sessions[sessionId];
       if (!session || this.isPendingWorktreeDeletion(session)) return false;
       if (this.isExpired(session)) {
-        this.deleteSession(sessionId);
+        this.evictSessionRow(sessionId);
         return false;
       }
       if (session.cli !== cli) return false;
+      // Same rule as deleteSession: the caller's ownership is re-decided in the
+      // lock hold that writes the pointer, not in the handler an await earlier.
+      if (!principalCanAccess(session.ownerPrincipal, resolveOwnerPrincipal(getRequestContext()))) {
+        return false;
+      }
     }
 
     this.storage.activeSession[cli] = sessionId;
@@ -1439,7 +1463,7 @@ export class FileSessionManager
       const session = this.storage.sessions[sessionId];
       if (!session) return false;
       if (this.isExpired(session)) {
-        this.deleteSession(sessionId);
+        this.evictSessionRow(sessionId);
         return false;
       }
       const binding = getKitSessionBinding(session);
@@ -1514,20 +1538,29 @@ export class FileSessionManager
     return session;
   }
 
-  updateSessionUsage(sessionId: string): void {
+  /**
+   * A write is a USE.
+   *
+   * This reaped a session that crossed its TTL here, on the one path that
+   * proves the session is still in use, and the `void` return meant no caller
+   * could be told: the request that deleted the session went on to report
+   * success and hand back an id that no longer existed. PostgreSQL never
+   * carried the check at all, so honouring the write is also what makes the two
+   * engines agree rather than a new third behaviour.
+   *
+   * Returns whether the row was written, because a caller that reports a
+   * session id needs to know the write landed.
+   */
+  updateSessionUsage(sessionId: string): boolean {
     if (this.storageLockDepth === 0) {
-      this.withStorageLock(() => this.updateSessionUsage(sessionId));
-      return;
+      return this.withStorageLock(() => this.updateSessionUsage(sessionId));
     }
     this.assertStorageWritable();
     const session = this.storage.sessions[sessionId];
-    if (!session || this.isPendingWorktreeDeletion(session)) return;
-    if (this.isExpired(session)) {
-      this.deleteSession(sessionId);
-      return;
-    }
+    if (!session || this.isPendingWorktreeDeletion(session)) return false;
     session.lastUsedAt = new Date().toISOString();
     this.saveStorage();
+    return true;
   }
 
   updateSessionMetadata(sessionId: string, metadata: Record<string, any>): boolean {
@@ -1538,12 +1571,14 @@ export class FileSessionManager
     if (Object.prototype.hasOwnProperty.call(metadata, "kit")) return false;
     const session = this.storage.sessions[sessionId];
     if (!session || this.isPendingWorktreeDeletion(session)) return false;
-    if (this.isExpired(session)) {
-      this.deleteSession(sessionId);
-      return false;
-    }
 
     session.metadata = { ...session.metadata, ...metadata };
+    // Same rule as updateSessionUsage. A session that was live when its request
+    // resolved and crossed the TTL while the provider ran is refreshed here
+    // rather than deleted under a response that reports it. Only when expired:
+    // a live session's clock stays with updateSessionUsage, so an ordinary
+    // metadata stamp does not silently extend every session by a whole TTL.
+    if (this.isExpired(session)) session.lastUsedAt = new Date().toISOString();
     this.saveStorage();
     return true;
   }
@@ -1607,7 +1642,7 @@ export class FileSessionManager
     const session = this.storage.sessions[sessionId];
     if (!session) return false;
     if (this.isExpired(session)) {
-      this.deleteSession(sessionId);
+      this.evictSessionRow(sessionId);
       return false;
     }
     const existing = getKitSessionBinding(session);
@@ -1709,7 +1744,7 @@ export interface ISessionManager {
   deleteSession(sessionId: string): boolean | Promise<boolean>;
   setActiveSession(cli: ProviderType, sessionId: string | null): boolean | Promise<boolean>;
   getActiveSession(cli: ProviderType): Session | null | Promise<Session | null>;
-  updateSessionUsage(sessionId: string): void | Promise<void>;
+  updateSessionUsage(sessionId: string): boolean | Promise<boolean>;
   updateSessionMetadata(
     sessionId: string,
     metadata: Record<string, any>

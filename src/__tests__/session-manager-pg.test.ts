@@ -219,6 +219,124 @@ describe("PostgreSQLSessionManager", () => {
       expect(deleted).toBe(false);
     });
 
+    it("admits one of two concurrent continuation writes from the same basis", async () => {
+      const s = await manager.createSession("claude", "two turns");
+      const basis = { ...(s.metadata ?? {}) };
+      const identity = sessionGenerationIdentity(s);
+      const fenced = await Promise.all([
+        manager.compareAndSetSession(identity, {
+          kind: "replace_metadata",
+          expectedMetadata: basis,
+          metadata: { ...basis, apiPreviousResponseId: "A" },
+        }),
+        manager.compareAndSetSession(identity, {
+          kind: "replace_metadata",
+          expectedMetadata: basis,
+          metadata: { ...basis, apiPreviousResponseId: "B" },
+        }),
+      ]);
+      expect(fenced.filter(Boolean)).toHaveLength(1);
+      const row = await manager.getSession(s.id);
+      expect((row?.metadata as Record<string, unknown>).apiPreviousResponseId).toBe(
+        fenced[0] ? "A" : "B"
+      );
+
+      // The negative control, in the same test: the unfenced merge these writes
+      // used to take admits BOTH, which is how an earlier turn's handle could
+      // end up in the row with both callers told true.
+      const merged = await Promise.all([
+        manager.updateSessionMetadata(s.id, { apiPreviousResponseId: "A" }),
+        manager.updateSessionMetadata(s.id, { apiPreviousResponseId: "B" }),
+      ]);
+      expect(merged).toEqual([true, true]);
+    });
+
+    it("selects the active pointer's target by owner in the same statement", async () => {
+      const alice = await runWithRequestContext(
+        { transport: "http", authScopes: [], authPrincipal: "alice" },
+        () => manager.createSession("claude", "alice session")
+      );
+      const bobOwn = await runWithRequestContext(
+        { transport: "http", authScopes: [], authPrincipal: "bob" },
+        () => manager.createSession("claude", "bob session")
+      );
+      await runWithRequestContext({ transport: "http", authScopes: [], authPrincipal: "bob" }, () =>
+        manager.setActiveSession("claude", bobOwn.id)
+      );
+
+      const pointed = await runWithRequestContext(
+        { transport: "http", authScopes: [], authPrincipal: "bob" },
+        () => manager.setActiveSession("claude", alice.id)
+      );
+
+      expect(pointed).toBe(false);
+      expect((await manager.getActiveSession("claude"))?.id).toBe(bobOwn.id);
+    });
+
+    it("carries the owner into the DELETE, not only into the caller's decision", async () => {
+      const alice = await runWithRequestContext(
+        { transport: "http", authScopes: [], authPrincipal: "alice" },
+        () => manager.createSession("claude", "alice session")
+      );
+
+      const deleted = await runWithRequestContext(
+        { transport: "http", authScopes: [], authPrincipal: "bob" },
+        () => manager.deleteSession(alice.id)
+      );
+
+      // The DATABASE, not the return value: an unfenced DELETE returns false
+      // from a re-read and still removes the row.
+      expect(deleted).toBe(false);
+      expect(await manager.getSession(alice.id)).toMatchObject({ ownerPrincipal: "alice" });
+    });
+
+    it("does not delete a row another principal took over mid-request", async () => {
+      const alice = await runWithRequestContext(
+        { transport: "http", authScopes: [], authPrincipal: "alice" },
+        () => manager.createSession("claude", "alice session")
+      );
+
+      // A gate the test owns, holding alice's delete between its ownership
+      // read and its statement. It resolves whether or not the fence exists.
+      let release!: () => void;
+      let arrived!: () => void;
+      const gate = new Promise<void>(resolve => (release = resolve));
+      // A two-way barrier. Without the arrival half the swap could land before
+      // the held read completes, the read would return null, and the test would
+      // pass against the unfenced DELETE without ever running it.
+      const reached = new Promise<void>(resolve => (arrived = resolve));
+      const realGetSession = manager.getSession.bind(manager);
+      let held = false;
+      (manager as unknown as Record<string, unknown>).getSession = async (id: string) => {
+        const found = await realGetSession(id);
+        if (!held && id === alice.id) {
+          held = true;
+          arrived();
+          await gate;
+        }
+        return found;
+      };
+
+      const deleting = runWithRequestContext(
+        { transport: "http", authScopes: [], authPrincipal: "alice" },
+        () => manager.deleteSession(alice.id)
+      );
+      await reached;
+
+      // Alice's row goes away legitimately, and bob claims the freed id.
+      await manager.clearAllSessions();
+      await runWithRequestContext({ transport: "http", authScopes: [], authPrincipal: "bob" }, () =>
+        manager.createSession("claude", "bob session", alice.id)
+      );
+      expect(await realGetSession(alice.id)).toMatchObject({ ownerPrincipal: "bob" });
+
+      release();
+      await deleting;
+
+      (manager as unknown as Record<string, unknown>).getSession = realGetSession;
+      expect(await realGetSession(alice.id)).toMatchObject({ ownerPrincipal: "bob" });
+    });
+
     it("should clear active session if deleting active session", async () => {
       const session = await manager.createSession("claude", "Test Session");
       await manager.setActiveSession("claude", session.id);

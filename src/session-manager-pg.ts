@@ -13,7 +13,12 @@ import {
   type SessionCompareAndSetMutation,
   type SessionGenerationIdentity,
 } from "./session-manager.js";
-import { getRequestContext, principalCanAccess, resolveOwnerPrincipal } from "./request-context.js";
+import {
+  getRequestContext,
+  principalCanAccess,
+  principalScopeSql,
+  resolveOwnerPrincipal,
+} from "./request-context.js";
 import {
   cloneKitSessionBinding,
   cloneKitSessionAttempt,
@@ -1077,20 +1082,31 @@ export class PostgreSQLSessionManager
    * Delete a session.
    */
   async deleteSession(sessionId: string): Promise<boolean> {
+    const caller = resolveOwnerPrincipal(getRequestContext());
     const session = await this.getSession(sessionId);
     if (!session) {
       return false;
     }
+    if (!principalCanAccess(session.ownerPrincipal, caller)) return false;
 
     if (getKitSessionBinding(session)?.attempt) return false;
     // Recheck the JSON binding in the DELETE itself. A concurrent Kit claim
     // between getSession() and this statement must win over user deletion.
+    // The OWNER is rechecked here for the same reason, and it was missing: a
+    // handler decides ownership an await earlier, and an id whose row is
+    // deleted in that window can be re-created under another principal before
+    // this statement runs. `principalScopeSql` is the one spelling of that
+    // rule, so the predicate here cannot drift from the in-memory one.
+    // `?` placeholders (not `$n`) because the driver numbers them; the Kit arm
+    // uses jsonb_exists rather than the `?` operator, so nothing collides.
+    const scope = principalScopeSql("owner_principal", caller);
     const rowsAffected = await this.execute(
       `DELETE FROM sessions
-       WHERE id = $1
+       WHERE id = ?
+         AND ${scope.sql}
          AND (NOT jsonb_exists(COALESCE(metadata, '{}'::jsonb), 'kit')
               OR NOT jsonb_exists(COALESCE(metadata, '{}'::jsonb)->'kit', 'attempt'))`,
-      [sessionId]
+      [sessionId, ...scope.params]
     );
     if (rowsAffected === 0) return false;
     this.notifySessionRemoved(session);
@@ -1102,22 +1118,36 @@ export class PostgreSQLSessionManager
    * PostgreSQL and the session FK keeps stale IDs from being recorded.
    */
   async setActiveSession(cli: ProviderType, sessionId: string | null): Promise<boolean> {
-    if (sessionId !== null) {
-      const session = await this.getSession(sessionId);
-      if (!session || session.cli !== cli) {
-        return false;
-      }
+    await this.ensureSessionSchema();
+    const now = new Date().toISOString();
+    if (sessionId === null) {
+      await this.execute(
+        `INSERT INTO active_sessions (cli, session_id, updated_at)
+         VALUES ($1, NULL, $2)
+         ON CONFLICT (cli) DO UPDATE SET session_id = NULL, updated_at = $2`,
+        [cli, now]
+      );
+      return true;
     }
 
-    const now = new Date().toISOString();
-    await this.execute(
+    // The target's provider and OWNER are selected by the same statement that
+    // writes the pointer. Read-then-write let a row deleted and re-created
+    // under another principal in the gap inherit this caller's decision.
+    const scope = principalScopeSql(
+      "s.owner_principal",
+      resolveOwnerPrincipal(getRequestContext())
+    );
+    const rowsAffected = await this.execute(
       `INSERT INTO active_sessions (cli, session_id, updated_at)
-       VALUES ($1, $2, $3)
-       ON CONFLICT (cli) DO UPDATE SET session_id = $2, updated_at = $3`,
-      [cli, sessionId, now]
+       SELECT ?, s.id, ?
+         FROM sessions s
+        WHERE s.id = ? AND s.cli = ? AND ${scope.sql}
+       ON CONFLICT (cli) DO UPDATE
+          SET session_id = EXCLUDED.session_id, updated_at = EXCLUDED.updated_at`,
+      [cli, now, sessionId, cli, ...scope.params]
     );
 
-    return true;
+    return rowsAffected !== 0;
   }
 
   /**
@@ -1257,9 +1287,16 @@ export class PostgreSQLSessionManager
   /**
    * Update session usage timestamp.
    */
-  async updateSessionUsage(sessionId: string): Promise<void> {
+  async updateSessionUsage(sessionId: string): Promise<boolean> {
     const now = new Date().toISOString();
-    await this.execute("UPDATE sessions SET last_used_at = $1 WHERE id = $2", [now, sessionId]);
+    // Reports whether the row was written. The previous `void` contract could
+    // not tell a caller that the session it is about to report no longer
+    // exists, which is the same swallowed-loss shape the file store had.
+    const rowsAffected = await this.execute("UPDATE sessions SET last_used_at = $1 WHERE id = $2", [
+      now,
+      sessionId,
+    ]);
+    return rowsAffected !== 0;
   }
 
   /**
