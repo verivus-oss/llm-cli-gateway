@@ -12,7 +12,12 @@
  * reports false. That is accurate rather than a limitation to hide, and it is
  * the honest answer to "is role separation in force here".
  */
-import { openDatabase, openReadOnly, type GatewayDatabase } from "../../sqlite-driver.js";
+import {
+  openDatabase,
+  openReadOnly,
+  type GatewayDatabase,
+  type GatewayStatement,
+} from "../../sqlite-driver.js";
 import { resolveStorageRole, type StorageOperationClass, type StorageRole } from "../roles.js";
 import { inTransactionOn, nestedConnectionRefusal, runInTransaction } from "../reentrancy.js";
 import { isTransactionControl, transactionControlRefusal } from "../statements.js";
@@ -28,6 +33,42 @@ const READ_ONLY_OPERATIONS: ReadonlySet<StorageOperationClass> = new Set([
   "transcript_read",
   "analytics_read",
 ]);
+
+/**
+ * Prepared statements, cached per database handle.
+ *
+ * The subsystems moving onto this port prepared their statements ONCE in a
+ * constructor and reused them; SqliteJobStore alone holds 27 such fields.
+ * Re-preparing on every call would make the port a throughput regression
+ * against the code it replaces, which is not a trade this programme is asking
+ * anyone to make: the port exists to remove a second write path, not to make
+ * the first one slower.
+ *
+ * Keyed by statement text, which is safe here BECAUSE of the ratchet: SQL is
+ * confined to the storage modules (`npm run storage:port:check`), so the key
+ * space is the finite set of statements this repository contains, not anything
+ * a caller can grow. The cap is belt and braces against that ceasing to be
+ * true, and evicts rather than growing without bound.
+ */
+const STATEMENT_CACHE_LIMIT = 256;
+const statementCaches = new WeakMap<GatewayDatabase, Map<string, GatewayStatement>>();
+
+function preparedFor(db: GatewayDatabase, statement: string): GatewayStatement {
+  let cache = statementCaches.get(db);
+  if (!cache) {
+    cache = new Map();
+    statementCaches.set(db, cache);
+  }
+  const hit = cache.get(statement);
+  if (hit) return hit;
+  const prepared = db.prepare(statement);
+  if (cache.size >= STATEMENT_CACHE_LIMIT) {
+    const oldest = cache.keys().next();
+    if (!oldest.done) cache.delete(oldest.value);
+  }
+  cache.set(statement, prepared);
+  return prepared;
+}
 
 // `async` deliberately: node:sqlite throws synchronously, and an async surface
 // that sometimes throws instead of rejecting cannot be handled with .catch().
@@ -45,14 +86,14 @@ function connectionOver(db: GatewayDatabase, transactionControl: boolean): Stora
   return {
     async query<T>(statement: string, params: readonly unknown[] = []): Promise<T[]> {
       guard(statement);
-      return db.prepare(statement).all(...params) as T[];
+      return preparedFor(db, statement).all(...params) as T[];
     },
     async execute(
       statement: string,
       params: readonly unknown[] = []
     ): Promise<{ rowsAffected: number }> {
       guard(statement);
-      return { rowsAffected: db.prepare(statement).run(...params).changes };
+      return { rowsAffected: preparedFor(db, statement).run(...params).changes };
     },
   };
 }

@@ -72,6 +72,41 @@ describe("SqliteStorageDriver", () => {
     rmSync(dir, { recursive: true, force: true });
   });
 
+  it("prepares each distinct statement ONCE per handle, and reuses it", async () => {
+    // The subsystems moving onto this port prepared their statements once in a
+    // constructor and reused them: SqliteJobStore alone holds 27 such fields.
+    // Without a cache the port would re-prepare on every call and be a straight
+    // throughput regression against the code it replaces.
+    //
+    // Counting real prepare() calls rather than asserting the cache exists: a
+    // test that reads the Map would still pass if connectionOver stopped
+    // consulting it.
+    const prepared: string[] = [];
+    const handle = (driver as unknown as { writable: { prepare: (sql: string) => unknown } })
+      .writable;
+    const realPrepare = handle.prepare.bind(handle);
+    handle.prepare = (sql: string) => {
+      prepared.push(sql);
+      return realPrepare(sql);
+    };
+
+    const insert = "INSERT INTO t VALUES (?, ?)";
+    for (const id of ["p1", "p2", "p3"]) {
+      await driver.withConnection("write", c => c.execute(insert, [id, id]));
+    }
+    await driver.withConnection("write", c => c.execute("DELETE FROM t WHERE id = ?", ["p3"]));
+
+    // Three executions of one statement, one preparation of it.
+    expect(prepared.filter(sql => sql === insert)).toHaveLength(1);
+    // A DIFFERENT statement is still prepared, so the cache is keyed, not stuck.
+    expect(prepared).toContain("DELETE FROM t WHERE id = ?");
+    // And the writes actually landed, so the cached statement is still bound.
+    const rows = await driver.withConnection("analytics_read", c =>
+      c.query<{ id: string }>("SELECT id FROM t ORDER BY id")
+    );
+    expect(rows.map(r => r.id)).toEqual(["p1", "p2"]);
+  });
+
   it("round-trips a write and a read", async () => {
     await driver.withConnection("write", c => c.execute("INSERT INTO t VALUES (?, ?)", ["a", "1"]));
 
