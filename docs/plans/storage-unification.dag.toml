@@ -17,7 +17,6 @@ scope_0a = "Option A. b1, s3sig, s5, s6, s8, s9, s11 in full; s7 stops with the 
 retirement_0b = "Superseded state is proposed per file and may be moved to a quarantine directory so it stops looking live. Nothing is deleted by this run."
 
 [facts]
-# Measurements live in the evidence file named above, not here.
 driver_internal = "PRAGMA x12 and VACUUM x2 must be UNREACHABLE from the port, not translated"
 schema_gap = "`requests` and `gateway_metadata` exist ONLY in SQLite. The Postgres transcript schema is new authorship, not a migration."
 the_choke_point = "every inline flight write funnels through ONE sync class, FlightOwnership at index.ts:2587, whose started/managerOwnsCompletion flags are idempotence fences"
@@ -81,7 +80,8 @@ critical = true
 depends_on = ["s4.two-drivers"]
 role = "It already has both engines, so the *-pg suites prove the port against real dual-engine behaviour before anything irreversible."
 action = "Move JobStore onto the port; delete the worker-thread sync-over-async shim."
-constraint = "npm run test:pg must pass unchanged. A green suite that needed edits proves the edits, not the port."
+constraint = "AMENDED 2026-08-21. `unchanged` cannot hold with this action: an async interface delivers failure as a rejection, and drivers/sqlite.ts:24 already forbids the alternative. The replacement is stronger and machine-checked: same tests, same matchers, same errors, no assertion weakened, across EVERY reached test file rather than the five *-pg ones. Sync-throw to rejects is the only permitted rewrite, by allowlist, with an ADD-form negative control."
+bootstrap_ddl = "Stays under `app` for now. Design 3.1 process-separates the migrate credential, but moving it is a grant change on a live host, which operator decision 0a held. Recorded as gated, not deferred, and it is NOT routed through an operation class."
 affects = ["s3sig.operation-signatures", "s6.write-ordering", "s8.sessions"]
 
 [[node]]
@@ -124,7 +124,7 @@ affects = ["s9.one-selector"]
 id = "s9.one-selector"
 depends_on = ["s7.flight-recorder-onto-the-port", "s8.sessions"]
 role = "The point of the whole exercise: one config value that actually moves everything."
-action = "Demote DATABASE_URL and LLM_GATEWAY_LOGS_DB from selectors to deprecated compatibility inputs, asymmetrically per design 3.3."
+action = "Demote DATABASE_URL and LLM_GATEWAY_LOGS_DB to deprecated compatibility inputs, asymmetrically per design 3.3, AND carry [persistence.roles] through to PostgresStorageDriver. Design 3.1: unifying the config and unifying the pool are one task, and no node owned the second half."
 constraint = "DATABASE_URL is a DSN and today emits NO deprecation warning, unlike LLM_GATEWAY_LOGS_DB. Conflicts must be a startup error, never a silent precedence rule."
 affects = ["s10.cutover"]
 
