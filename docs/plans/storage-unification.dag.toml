@@ -3,7 +3,7 @@
 
 [meta]
 surface = "FlightRecorder, JobStore and ISessionManager: 3 interfaces, 2 engines. RECOUNTED 2026-08-21: 53 members, not the 42 this line carried since before s2 split queryRequests into seven named reads. JobStore 26, ISessionManager 13, FlightRecorder 14. s3sig signs 12 recorder operations and excludes 2 by name, which is where its own figure of 48 comes from; both are above 42 and that is the point."
-status = "2026-08-21. s1, s2, s4 done, s3 part 1 done. b1 measured, awaiting its results review. b1 and s5 DONE and merged. s3sig, s6, s7, s8, s12, s13 are unblocked; s10 held. s3sig, s6, s8 and s12 unblock when s5 lands."
+status = "2026-08-21. s1, s2, s3 part 1, s4, b1, s5, s3sig and s8 DONE. s6, s7, s12, s13 unblocked; s9 needs s7; s10 held. s6 and s7 are authored against s3sig's signatures."
 
 # WHY: `[persistence].backend` selects the job store and nothing else, so one
 # request's two halves live in two engines 15 ms apart, beside an abandoned
@@ -100,6 +100,8 @@ depends_on = ["s5.job-store-first"]
 role = "Deliberately after s5, so two real drivers and one migrated subsystem shape the signatures rather than being authored blind."
 action = "Author the per-subsystem operations across the inventory, and update STATE_INVENTORY where a determination changed."
 constraint = "PRAGMA and VACUUM must be UNREACHABLE from the surface, not translated. No SQL string in any signature."
+status = "done 2026-08-21. `src/storage/operations.ts`: FlightRecorderOperations, 12 async operations each declaring its class as DATA rather than as a literal per call site, plus FlightStartSink/FlightCompleteSink for the s6 conversion of FlightOwnership's two `() => void` slots. FOUR determinations s1 and s3 part 1 got wrong. (1) The audit's `FlightRecorder 7` is stale: s2 turned queryRequests into seven named reads, so the recorder is 13 members and the port's `42 operations` is 48. (2) `inPort = true` on approvals, admin_audit and workspace_registry names no node in this DAG and never did; STATE_INVENTORY now carries `owningNode` and the suite pins that unowned set at exactly those three. (3) The surface did not make PRAGMA and VACUUM unreachable and neither did the ratchet, which scanned template literals only while every PRAGMA in the tree sits in a quoted string. Rule 3 closes it, two-state control 6-of-12 red to 12 green. (4) Role separation is INERT for the job store: job-store.ts passes `write` at every call site including its reads, so on a four-credential deployment its reads still run as `app`. Declared classes are how s7 avoids inheriting that; s9 owns whether s5 is retrofitted."
+not_authored = "Postgres transcript operations, per decision 0a and [facts].schema_gap: that schema is new authorship and this run does not do it. Sessions, because s8 owns them and is live. approvals, admin_audit and workspace_registry, because no node implements them and a surface with no implementer is the speculative generality this programme keeps paying for. `flush()`, which has zero callers and is a no-op. Retention terminations, which are s11's."
 affects = ["s6.write-ordering", "s7.flight-recorder-onto-the-port"]
 
 [[node]]
