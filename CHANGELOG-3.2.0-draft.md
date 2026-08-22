@@ -238,7 +238,7 @@ will be no 3.1.0 stable; the first candidate under the new number is
 - **A real `/install` page and site-wide navigation on llm-cli-gateway.dev.**
   Seven secondary pages previously rendered with no navbar or footer and were
   dead ends, and the top nav pointed humans at raw markdown. Note this deploys
-  only on a stable, highest release, so it is not live until 3.1.0 publishes.
+  only on a stable, highest release, so it is not live until 3.2.0 publishes.
 
 - **Skill coverage for `llm_request_result` and `provider_version_guard`**,
   neither of which any shipped skill mentioned.
