@@ -48,6 +48,79 @@ will be no 3.1.0 stable; the first candidate under the new number is
 
 ### Added
 
+- **A storage port, with a SQLite driver and a PostgreSQL driver, under all
+  three durable subsystems.** `src/storage/` defines one `StorageDriver`
+  (`withConnection`, `transaction`, `close`), and the job store, the session
+  store and the flight recorder now reach their database through it instead of
+  each owning its own connection handling and its own dialect. Every operation
+  declares what class of work it is, as data rather than as a literal at the
+  call site: `write`, `transcript_read`, `analytics_read`, `retention`. The
+  driver routes each class to a runtime role: `app`, `reader`, `analytics`,
+  `retention`. `migrate` is deliberately not a runtime role, because a
+  long-running gateway process holding owner-equivalent credentials would be a
+  privilege regression; DDL stays with `npm run migrate`. Placeholder
+  translation lives in the PostgreSQL driver and never in a caller.
+
+- **`[persistence.roles]` in `~/.llm-cli-gateway/config.toml`**, so a deployment
+  that has separated its database credentials can give each class its own DSN.
+  It is a strict table: `reader`, `analytics` and `retention` only. `app` always
+  comes from `[persistence].dsn`, and `app` and `migrate` are refused by name if
+  written here. A misspelled role is refused outright rather than silently
+  degrading a reader onto `app` while the operator believes separation is in
+  force, and the whole table is refused unless `backend = "postgres"`. The role
+  DSNs reach both driver sites, the job store and the session store. The startup
+  `Storage:` block says whether separation is in force, partial or absent, and
+  names any role that degraded.
+
+  One call site changed role: job-store eviction now runs as `retention`, which
+  is what lets `llmgw_app` hold no `DELETE` on `jobs`. Job-store reads
+  deliberately stay on `app`, because `llmgw_reader` is scoped to the transcript
+  tables and holds no grant on `jobs`; routing them to it would ask a credential
+  for tables it cannot see. SQLite is unchanged by that, checked in code rather
+  than assumed by symmetry: `READ_ONLY_OPERATIONS` in
+  `src/storage/drivers/sqlite.ts` is `{transcript_read, analytics_read}`, so
+  `retention` still resolves to the writable handle.
+
+- **A PostgreSQL transcript schema**,
+  `migrations/022_flight_recorder_transcripts.sql`. `requests` and
+  `gateway_metadata` had only ever existed in SQLite, so this is new authorship
+  rather than a translation, and the types were decided against `pg`'s measured
+  behaviour rather than against the SQL standard. `DOUBLE PRECISION` not
+  `NUMERIC`, and `INTEGER` not `BIGINT`, because `pg` returns both of those as
+  strings: the "better" type would silently turn `cost_usd` and every token
+  counter into a string at every reader. `datetime_utc` stays `TEXT` because
+  `TIMESTAMPTZ` comes back as a `Date`, and `COUNT(*)` is cast to `::int` for
+  the same reason. The bootstrap DDL and the migration are held identical by a
+  control that applies both to real schemas and diffs `information_schema`.
+
+- **A whole-operation transaction deadline**, `STORAGE_TRANSACTION_DEADLINE_MS`
+  (60,000 ms), on `driver.transaction` for both engines from one constant. It
+  ends the operation rather than abandoning it, which is the whole difference
+  between a deadline and a `Promise.race`: rejecting a wrapper leaves the client
+  running and the connection busy, and tells the caller a mutation failed that
+  may still commit, which is precisely the ambiguity these timeouts exist to
+  remove. PostgreSQL destroys the pinned client, so `COMMIT` can no longer be
+  sent and the transaction cannot land. SQLite cannot use a timer at all, since
+  a contended statement blocks for the full `busy_timeout` and a timer armed
+  first only runs after it, so it reads the clock at each statement boundary and
+  rolls back. The deadline is disarmed and checked in one synchronous block
+  before `COMMIT`, because firing there is the only case that would manufacture
+  the ambiguity. Bootstrap DDL and `withConnection` are deliberately unbounded
+  and say so. Residual, measured rather than assumed: PostgreSQL does not notice
+  a dead client mid-statement, so the backend survives the destroy until its
+  statement ends, bounded by `statement_timeout`.
+
+- **A `storage` block in `doctor --json`, at `schema_version` 1.1.** The report
+  carried no storage health at all before this, so a corrupt or unreadable
+  transcript database produced a report byte-identical to a quiet one. The block
+  covers recorder state, file and WAL bytes, schema version, row counts,
+  retention state and co-resident tables, and a corrupt recorder now sets
+  `ok: false`. `null` in it means NOT MEASURED rather than zero, and
+  `scanned: false` marks a caller that ran no asynchronous scan.
+  `setup/status.schema.json` forbids unspecified fields, so it moves to 1.1 with
+  the block required. Any consumer pinning `schema_version` to `"1.0"` must
+  move.
+
 - **`provider_version_guard`, a read-only tool that compares installed provider
   CLI versions against the contract the gateway carries.** The comparison
   itself is offline: `src/provider-version-guard.ts` reads only
@@ -171,6 +244,112 @@ will be no 3.1.0 stable; the first candidate under the new number is
 
 ### Changed
 
+- **`[persistence].backend` now selects the engine for request history as well,
+  on a LOCAL deployment only, and migrates nothing.** Until this release the
+  flight recorder was always SQLite regardless of `[persistence]`, so on a
+  Postgres host the two halves of one request sat in two engines. The recorder
+  now takes that decision at one point, `flightRecorderEngineDecision`, and
+  there are two limits on it that matter more than the capability does.
+
+  **The gate is deployment shape, and it fails closed.** `backend = "postgres"`
+  is honoured only when the DSN can be PROVEN to reach a database running as
+  this same OS user: a unix socket whose `.s.PGSQL.<port>` file this uid owns,
+  or a loopback literal (`127.0.0.0/8`, `::1`, or their IPv4-mapped forms) or
+  the bare name `localhost`, with a listener on that port whose uid in
+  `/proc/net/tcp{,6}` equals this process's effective uid. A wildcard bind
+  counts, because the reference rootless-podman deployment publishes through a
+  userspace forwarder and a checker demanding a literal loopback bind would
+  refuse the exact shape this rule exists to admit. Any other host name is
+  refused WITHOUT resolution, because the decision is read by surfaces that
+  cannot await one; write `127.0.0.1` if it is loopback. An unreadable `/proc`,
+  an unparseable DSN, a platform with no effective uid: all refused. Anything
+  refused stays on SQLite and says why, on `llm_process_health`, on
+  `health://status` and in the startup `Storage:` block. A refusal is not a
+  failure; the recorder keeps working.
+
+  **There is NO data migration, in either direction.** A host that switches
+  backend starts writing transcripts to the new engine, and the rows already in
+  `~/.llm-cli-gateway/logs.db` stay exactly where they are. They are not
+  backfilled, not dual-written and not read from. `llm_process_health` and the
+  startup block both report the split, because the previous cutover in this
+  project abandoned 31,895 rows in place and nothing said so. The lossless
+  restartable backfill is a separate, human-supervised run, held by operator
+  decision.
+
+  **Disclosed and not fixed:** a loopback SSH tunnel or a `socat` forwarder
+  defeats the check. It presents as a local listener owned by this user while
+  the database is remote, and the check admits it. Closing that needs a
+  server-side fact, and this decision has to be synchronous, so it cannot go and
+  get one. Related: the uid the check proves is the LISTENER's, not the
+  PostgreSQL backend's, and under rootless podman those differ by design.
+
+  **Not exercised end to end.** No live gateway has been switched to
+  `backend = "postgres"` and run through. The path is covered by the suite and
+  by the `*-pg` suites against a real server, which is not the same claim.
+
+  On a shared or remote PostgreSQL nothing changes: transcripts remain gated on
+  steps 3 through 8 of `docs/plans/postgres-security-hardening.md`, and the
+  refusal names that document.
+
+- **The async job store runs on the storage port, and the PostgreSQL worker
+  thread is gone.** `PostgresJobStore` used to run its work in
+  `src/postgres-job-store-worker.ts` and block on each result, because the
+  `JobStore` interface was synchronous. The interface is asynchronous now, the
+  worker thread and its sync-over-async bridge are deleted, and Postgres job
+  work runs on the driver's pool like everything else.
+
+  Two consequences an operator can see. `canAdmitDurableJobs()` is a
+  synchronous snapshot that several fail-closed gates read, and an asynchronous
+  store cannot finish registering inside its constructor the way the synchronous
+  one did; inside that startup window the first Kit request would be refused
+  `kit_busy`, the API sync path would run inline and skip dedup, and
+  `llm_process_health` would report async jobs disabled. `main()` now awaits
+  `whenStartupSettled()` before connecting a transport, and the job manager
+  awaits it at every public entry point that observes durable state. And
+  `jobStore.close()` is awaited in shutdown, which it was not: the bounded drain
+  defeated itself.
+
+  The conversion cost is recorded rather than glossed. Eighteen regressions
+  landed on the branch invisible to both the suite and the assertion-parity
+  gate, found only by diffing two complete runs, and five more in review, two of
+  them durability defects: terminal persistence became re-entrant so the
+  late-output rescue disarmed itself, and shutdown stopped waiting for non-Kit
+  terminal writes.
+
+- **The session store runs on the storage port, and `src/db.ts` no longer builds
+  a second connection pool.** It had been constructing its own `pg.Pool` from
+  `DATABASE_URL`, so a Postgres host ran two independent pools against one
+  database with two different configurations. Twelve hand-rolled transactions
+  are the driver's now, and no `pg` import survives outside
+  `src/storage/drivers/`.
+
+  A blocker recorded earlier in this line turned out to be wrong and is
+  withdrawn: four drifted `CHECK (cli IN ...)` lists in `migrations/001` and
+  `003` were said to reject devin and cursor on a Postgres host. The drift is
+  real, the consequence is not. `migrations/005` already drops both enumerated
+  constraints for a format regex and `006` never carried them, so a database at
+  head admits every provider, proven by applying the real migrations with the
+  pre-005 rejection as the control. They also cannot be corrected:
+  `POSTGRES_IMMUTABLE_MIGRATION_SHA256` pins each file and the runner refuses a
+  mismatch, so editing one byte would brick migration for every installation
+  that has already run it. They are frozen with a pinned count instead, and the
+  provider domain is asserted from `PROVIDER_TYPES` in a test.
+
+- **`DATABASE_URL` precedence is durable data, not only a boot warning.**
+  `resolveDatabaseUrlPrecedence` is the one place the rule lives, and the
+  outcome is reported on `llm_process_health` as `deprecatedInputs`, so an
+  operator who missed the startup line can still find out that the variable was
+  ignored and why. Warn-and-refuse stays the behaviour rather than becoming a
+  startup abort: a conflict is already fully determined and resolves to what the
+  config file says, so aborting would protect nothing and would take down a
+  mid-migration host over a variable the gateway ignores.
+
+- **`backend = "none"` still does not silence the flight recorder**, and the
+  startup block now says so out loud. Two subsystems, two switches:
+  `[persistence].backend` governs async job persistence, and
+  `LLM_GATEWAY_LOGS_DB=none` is the recorder's own switch, on either engine.
+  This is unchanged behaviour made visible, not a behaviour change.
+
 - **BREAKING: `grok_request` and `grok_request_async` no longer accept `bestOfN`
   or `check`.** Grok's CLI moved from `0.2.101` to `1.0.4` and stopped
   advertising `--best-of-n` and `--check`. The gateway passes through what the
@@ -225,9 +404,12 @@ will be no 3.1.0 stable; the first candidate under the new number is
   config file, and refusing it would silently move their sessions to an empty
   file store.
 
-  This does not complete the single-store goal. Prompt and response bodies stay
-  in SQLite in `~/.llm-cli-gateway/logs.db` behind a deliberate gate; three
-  stores become two, not one.
+  On its own this did not complete the single-store goal, and an earlier draft
+  of this entry said prompt and response bodies stay in SQLite behind a
+  deliberate gate. That gate has since been re-drawn: on a deployment the
+  gateway can prove local, transcripts follow `[persistence]` too. See the
+  entry at the head of this section for the shape of that proof and for what it
+  does not cover.
 
 - **The idle timeout is derived from the registry, and terminal-burst providers
   get a total-runtime bound instead.** A hand-maintained table gave gemini,
