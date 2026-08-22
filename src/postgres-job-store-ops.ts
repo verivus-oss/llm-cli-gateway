@@ -25,6 +25,10 @@ import {
   type KitExecutionRef,
 } from "./personal-config-types.js";
 import { assertMcpArtifactAdmissionInvariant } from "./mcp-artifact-admission.js";
+import {
+  SQL_COUNT_WEDGED_VALIDATION_RUNS,
+  SQL_SELECT_WEDGED_VALIDATION_RUNS,
+} from "./validation-wedge-sql.js";
 import { POSTGRES_JOB_STORE_REQUIRED_COLUMNS } from "./postgres-job-store-schema.js";
 import { principalCanAccess } from "./request-context.js";
 import type { PostgresStorageDriver } from "./storage/drivers/postgres.js";
@@ -1317,6 +1321,35 @@ export function createPostgresJobStoreOps(
           [args[0]]
         );
         return result.rows[0] ?? null;
+      }
+      case "countWedgedValidationRuns": {
+        const result = await driver.withConnection("retention", connection =>
+          rows<{ c: number }>(connection, SQL_COUNT_WEDGED_VALIDATION_RUNS, [args[0]])
+        );
+        return Number(result.rows[0]?.c ?? 0);
+      }
+      case "evictWedgedValidationRuns": {
+        // `retention`, not `write`, and one transaction for both deletes: the
+        // link rows are read by the wedge predicate itself, so a caller that
+        // deleted them first would widen the set the second statement matches.
+        return driver.transaction("retention", async client => {
+          const wedged = await rows<{ validation_id: string }>(
+            client,
+            SQL_SELECT_WEDGED_VALIDATION_RUNS,
+            [args[0], args[1]]
+          );
+          if (wedged.rows.length === 0) return 0;
+          const ids = wedged.rows.map(row => row.validation_id);
+          await affected(client, "DELETE FROM validation_run_jobs WHERE validation_id = ANY($1)", [
+            ids,
+          ]);
+          const deleted = await affected(
+            client,
+            "DELETE FROM validation_runs WHERE validation_id = ANY($1)",
+            [ids]
+          );
+          return deleted.rowCount ?? 0;
+        });
       }
       case "close":
         await driver.close();

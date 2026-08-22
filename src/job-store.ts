@@ -14,6 +14,10 @@ import {
   type KitExecutionRef,
 } from "./personal-config-types.js";
 import { assertMcpArtifactAdmissionInvariant } from "./mcp-artifact-admission.js";
+import {
+  SQL_COUNT_WEDGED_VALIDATION_RUNS,
+  SQL_SELECT_WEDGED_VALIDATION_RUNS,
+} from "./validation-wedge-sql.js";
 import type { PersonalKitTerminalMetadata } from "./provider-output-metadata.js";
 import { principalCanAccess } from "./request-context.js";
 import {
@@ -1044,6 +1048,25 @@ export interface ValidationRunStore {
    */
   finalizeValidationReceipt(receipt: ValidationReceiptRecord): Promise<ValidationReceiptRecord>;
   getValidationReceipt(validationId: string): Promise<ValidationReceiptRecord | null>;
+  /**
+   * s11: how many runs a wedge sweep WOULD delete. Read-only, and reported by
+   * `doctor --json` whether or not the bound is set, because an operator has to
+   * be able to see the number before agreeing to lose it.
+   */
+  countWedgedValidationRuns(createdBeforeIso: string): Promise<number>;
+  /**
+   * Delete at most `limit` wedged runs and their link rows, in one transaction.
+   *
+   * WEDGED is defined in `storage/retention.ts` and enforced by the statement,
+   * not by the caller: not `finalized`, older than the horizon, and with no
+   * link row still pointing at a surviving job. The last clause is what makes
+   * this a reaper rather than a race with an in-flight validation.
+   *
+   * The link delete is the cascade `validation_run_jobs` never had. Job
+   * retention orphaned 207 of 1094 rows on the measured host precisely because
+   * a delete on one table did not reach the table pointing at it.
+   */
+  evictWedgedValidationRuns(createdBeforeIso: string, limit: number): Promise<number>;
 }
 
 /** True when a job store also persists validation runs and their job links. */
@@ -1185,6 +1208,7 @@ const SQL_DELETE_EXPIRED = `
         )
         AND COALESCE(mcp_artifact_cleanup_pending, 0) = 0
     `;
+
 
 const SQL_MARK_RUNNING = `
       UPDATE jobs
@@ -2452,6 +2476,40 @@ export class SqliteJobStore implements JobStore, ValidationRunStore {
     });
   }
 
+  async countWedgedValidationRuns(createdBeforeIso: string): Promise<number> {
+    await this.ensureSchema();
+    const rows = await this.driver.withConnection("retention", conn =>
+      conn.query<{ c: number }>(SQL_COUNT_WEDGED_VALIDATION_RUNS, [createdBeforeIso])
+    );
+    return Number(rows[0]?.c ?? 0);
+  }
+
+  async evictWedgedValidationRuns(createdBeforeIso: string, limit: number): Promise<number> {
+    await this.ensureSchema();
+    return this.driver.transaction("retention", async conn => {
+      // The ids are SELECTED first and then deleted BY ID. Repeating the
+      // predicate in both DELETEs would re-evaluate it after the link rows had
+      // gone, and the third clause reads those very link rows: the run delete
+      // would then match a different, larger set than the one counted.
+      const wedged = await conn.query<{ validation_id: string }>(SQL_SELECT_WEDGED_VALIDATION_RUNS, [
+        createdBeforeIso,
+        limit,
+      ]);
+      if (wedged.length === 0) return 0;
+      const ids = wedged.map(row => row.validation_id);
+      const placeholders = ids.map(() => "?").join(", ");
+      await conn.execute(
+        `DELETE FROM validation_run_jobs WHERE validation_id IN (${placeholders})`,
+        ids
+      );
+      const result = await conn.execute(
+        `DELETE FROM validation_runs WHERE validation_id IN (${placeholders})`,
+        ids
+      );
+      return Number(result.rowsAffected);
+    });
+  }
+
   async getValidationReceipt(
     validationId: string,
     conn?: StorageConnection
@@ -3458,6 +3516,14 @@ export class PostgresJobStore implements JobStore, ValidationRunStore {
     receipt: ValidationReceiptRecord
   ): Promise<ValidationReceiptRecord> {
     return rowToValidationReceiptRecord(await this.call("finalizeValidationReceipt", receipt));
+  }
+
+  async countWedgedValidationRuns(createdBeforeIso: string): Promise<number> {
+    return this.call("countWedgedValidationRuns", createdBeforeIso);
+  }
+
+  async evictWedgedValidationRuns(createdBeforeIso: string, limit: number): Promise<number> {
+    return this.call("evictWedgedValidationRuns", createdBeforeIso, limit);
   }
 
   async getValidationReceipt(validationId: string): Promise<ValidationReceiptRecord | null> {

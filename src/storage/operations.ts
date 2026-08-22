@@ -73,6 +73,20 @@ export interface FlightRecorderOperations {
   readRoutingDecisions(limit: number): Promise<RoutingDecisionRow[]>;
   /** Sizes, counts and what other subsystems left in this file. Reports no bodies. */
   readStorageStats(retentionCutoffIso?: string): Promise<FlightRecorderStorageStats>;
+  /**
+   * s11's termination for transcripts: delete at most `limit` request rows
+   * older than `cutoffIso`, and the `gateway_metadata` row of each with them.
+   *
+   * BOUNDED BY ARGUMENT, not by the implementation's own judgement, because
+   * the SQLite recorder serialises every operation onto one driver queue and
+   * an unbounded DELETE there is an unbounded pause on the request path. The
+   * caller loops; the sweeper's per-tick budget is what decides how far.
+   *
+   * Returns the rows removed. The count is not decoration: `retention.ts`
+   * carries it into a report a health surface prints, so a sweep that deletes
+   * nothing cannot be mistaken for a sweep that never ran.
+   */
+  evictExpiredRequests(cutoffIso: string, limit: number): Promise<number>;
   /** Drain, then shut the handles. Callers must await it; see note 3 above. */
   close(): Promise<void>;
 }
@@ -104,6 +118,10 @@ export const FLIGHT_RECORDER_OPERATION_CLASSES = {
   // COUNTS and table names, never a body, so it routes on the analytics
   // credential like every other projection rather than the transcript one.
   readStorageStats: "analytics_read",
+  // The one `retention` operation on this surface, and the reason the class
+  // exists at all: on a four-credential deployment `llmgw_app` can then hold no
+  // DELETE on `requests`. It is also the only operation that removes a body.
+  evictExpiredRequests: "retention",
   close: "lifecycle",
 } as const satisfies Record<keyof FlightRecorderOperations, SubsystemOperationClass>;
 

@@ -27,6 +27,7 @@ import { chmodSync } from "fs";
 import os from "os";
 import path from "path";
 import { SqliteStorageDriver } from "./storage/drivers/sqlite.js";
+import { openDatabase } from "./sqlite-driver.js";
 import type { StorageConnection } from "./storage/store.js";
 import { FLIGHT_RECORDER_OPERATION_CLASSES } from "./storage/operations.js";
 import type { FlightRecorderOperations } from "./storage/operations.js";
@@ -410,6 +411,12 @@ export interface FlightRecorderStorageStats {
   oldestRequest: string | null;
   newestRequest: string | null;
   requestsBeyondRetention: number | null;
+  /**
+   * Bytes a compaction would return to the filesystem, or null on an engine
+   * where that is not a question the operator has to act on. SQLite never
+   * shrinks a file on DELETE, so retention alone leaves 1.2 GB at 1.2 GB.
+   */
+  reclaimableBytes: number | null;
   coResident: CoResidentTableStats[];
 }
 
@@ -606,6 +613,18 @@ const SQL_SCHEMA = `
     `;
 
 const SQL_RECORD_MIGRATION = "INSERT OR IGNORE INTO _migrations(version, applied_at) VALUES(?, ?)";
+
+/**
+ * The transcript termination, in the order the foreign key requires.
+ *
+ * The subselect is repeated rather than shared because the metadata delete has
+ * to name the SAME row set the request delete will take, and by the time the
+ * second statement runs the first has changed nothing in `requests`.
+ */
+const SQL_EXPIRED_REQUEST_IDS =
+  "SELECT id FROM requests WHERE datetime_utc < ? ORDER BY datetime_utc LIMIT ?";
+const SQL_DELETE_EXPIRED_METADATA = `DELETE FROM gateway_metadata WHERE request_id IN (${SQL_EXPIRED_REQUEST_IDS})`;
+const SQL_DELETE_EXPIRED_REQUESTS = `DELETE FROM requests WHERE id IN (${SQL_EXPIRED_REQUEST_IDS})`;
 
 /**
  * Every recorder operation except `close`, which is `lifecycle` rather than one
@@ -1180,14 +1199,51 @@ export class FlightRecorder implements FlightRecorderOperations {
         unfinished: rows[0]?.unfinished ?? 0,
       });
     }
+    // Free pages, which is what a DELETE leaves behind. Read here rather than
+    // in `compact` so an operator can see the number WITHOUT taking the lock.
+    // The column names are the PRAGMA names. An alias would need `PRAGMA` in a
+    // SELECT, and reading `row.n` off an unaliased result silently yields
+    // undefined, which reads back as a truthful-looking zero.
+    const free = await this.read<{ freelist_count: number }>(
+      "readStorageStats",
+      "PRAGMA freelist_count"
+    );
+    const page = await this.read<{ page_size: number }>("readStorageStats", "PRAGMA page_size");
+    const freePages = free[0]?.freelist_count ?? 0;
+    const pageBytes = page[0]?.page_size ?? 0;
     return {
       schemaVersion: version[0]?.v ?? null,
       requestRows: totals[0]?.c ?? 0,
       oldestRequest: totals[0]?.oldest ?? null,
       newestRequest: totals[0]?.newest ?? null,
       requestsBeyondRetention: beyondRetention,
+      reclaimableBytes: freePages * pageBytes,
       coResident,
     };
+  }
+
+  /**
+   * Delete a bounded batch of expired transcripts, metadata row first.
+   *
+   * FOUND BY RUNNING IT: `gateway_metadata.request_id REFERENCES requests(id)`
+   * and this connection runs with `PRAGMA foreign_keys = ON`, so the obvious
+   * single `DELETE FROM requests` fails the constraint on every row that has a
+   * metadata row, which is all of them. Both statements share one transaction,
+   * so no reader can see a request whose metadata has already gone.
+   *
+   * `LIMIT` inside a subselect rather than on the DELETE: SQLite only compiles
+   * `DELETE ... LIMIT` when built with SQLITE_ENABLE_UPDATE_DELETE_LIMIT, which
+   * `node:sqlite` is not, and PostgreSQL never accepts it. One statement shape
+   * for both engines.
+   */
+  async evictExpiredRequests(cutoffIso: string, limit: number): Promise<number> {
+    let deleted = 0;
+    await this.write("evictExpiredRequests", async conn => {
+      await conn.execute(SQL_DELETE_EXPIRED_METADATA, [cutoffIso, limit]);
+      const result = await conn.execute(SQL_DELETE_EXPIRED_REQUESTS, [cutoffIso, limit]);
+      deleted = Number(result.rowsAffected ?? 0);
+    });
+    return deleted;
   }
 
   /**
@@ -1294,8 +1350,13 @@ export class NoopFlightRecorder implements FlightRecorderOperations {
       oldestRequest: null,
       newestRequest: null,
       requestsBeyondRetention: null,
+      reclaimableBytes: null,
       coResident: [],
     };
+  }
+  /** Nothing was recorded here, so nothing is retained and nothing is deleted. */
+  async evictExpiredRequests(_cutoffIso: string, _limit: number): Promise<number> {
+    return 0;
   }
   async close(): Promise<void> {}
 }
@@ -1311,6 +1372,41 @@ export class NoopFlightRecorder implements FlightRecorderOperations {
 export type FlightRecorderLike = FlightRecorderOperations & {
   health(): FlightRecorderHealth;
 };
+
+export interface FlightRecorderCompaction {
+  path: string;
+  beforeBytes: number;
+  afterBytes: number;
+}
+
+/**
+ * Return the free pages of a SQLite transcript file to the filesystem.
+ *
+ * DELIBERATELY NOT AN OPERATION AND DELIBERATELY NOT ON A TIMER. `VACUUM`
+ * rewrites the whole database under an exclusive lock, which on the measured
+ * 1.2 GB file is minutes of a recorder that sits on the request path. s3sig's
+ * constraint is that the maintenance verbs stay unreachable from the routed
+ * surface, so this is a free function taking a PATH, invoked only by
+ * `llm-cli-gateway storage compact` with the gateway stopped. Retention frees
+ * pages; this is the separate, explicit step that frees bytes.
+ *
+ * The connection is its own. Sharing the running recorder's driver would put
+ * the vacuum on the same queue as live writes, and SQLite refuses a VACUUM
+ * inside a transaction, so it would fail exactly when the gateway is busy.
+ */
+export async function compactFlightRecorderFile(
+  dbPath: string
+): Promise<FlightRecorderCompaction> {
+  const { statSync } = await import("fs");
+  const beforeBytes = statSync(dbPath).size;
+  const db = openDatabase(dbPath);
+  try {
+    db.exec("VACUUM");
+  } finally {
+    db.close();
+  }
+  return { path: dbPath, beforeBytes, afterBytes: statSync(dbPath).size };
+}
 
 /** The recorder the operator asked NOT to have. */
 export function flightRecorderDisabled(): NoopFlightRecorder {

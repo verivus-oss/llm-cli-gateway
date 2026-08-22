@@ -38,6 +38,11 @@ const SQL_OWNERS = new Set([
   "postgres-job-store-ops.ts",
   "postgres-job-store-schema.ts",
   "session-manager-pg.ts",
+  // s11: the wedged-validation-run predicate, shared verbatim by the SQLite
+  // store and the Postgres worker. A leaf with no imports, because job-store.ts
+  // already imports postgres-job-store-ops.ts and either of those two owning it
+  // would invert or close that direction.
+  "validation-wedge-sql.ts",
   "sqlite-driver.ts",
   "migrate.ts",
   "db.ts",
