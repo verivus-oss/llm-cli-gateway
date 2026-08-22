@@ -33,6 +33,14 @@ export const POSTGRES_IMMUTABLE_MIGRATION_SHA256 = {
     "00df4b73c4a4c00839cd7e22d9e2fb7336ed24b4f2ff8dd3f1e0066f173e3d6d",
   "005_provider_type_open_api_names.sql":
     "7b31c0d4759335ab06177245acc8ac854e360aafd8b77b98df54d217e6b7618a",
+  // 022 joins BEFORE its first release, deliberately. It creates the
+  // transcript tables, and an edit to those after any host has applied them
+  // bricks `npm run migrate` for that host via assertRecordedMigrationChecksum.
+  // Pinning at authorship makes that a build failure here instead of a
+  // migration failure there. NOTE, and it is a gap rather than a rule: 006
+  // through 021 are absent from this list and are pinned only by the databases
+  // that already recorded them.
+  "022_flight_recorder_transcripts.sql": "64f2e6515cb0e10c9ce484088258e930a6ca1ffce3a0c146d1fe11d0e3c90489",
 } as const;
 
 /**
