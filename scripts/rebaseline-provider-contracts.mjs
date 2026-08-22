@@ -39,6 +39,7 @@
 //                                                            # skip declaring
 //                                                            # NEW commands
 import { readdirSync, readFileSync, realpathSync, writeFileSync } from "node:fs";
+import { execFileSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
 import { dirname, join, relative, resolve, sep } from "node:path";
 import ts from "typescript";
@@ -867,7 +868,7 @@ async function main() {
       source = rewriteTargetVersion(source, update.cli, spelled);
       applied.push(`PROVIDER_TARGET_VERSIONS.${update.cli}: ${update.from} -> ${spelled}`);
     }
-    writeFileSync(DEFINITIONS, source);
+    writeFormatted(DEFINITIONS, source);
     console.error(
       "\nNOTE: version targets moved. src/__tests__/provider-version-guard.test.ts " +
         "pins REAL_INSTALLED to the exact strings this host reported, and is " +
@@ -937,7 +938,7 @@ async function main() {
         applied.push(`${item.cli}: catalogued root command(s) ${outcome.declared.join(" ")}`);
       }
     }
-    writeFileSync(CONTRACTS, contractSource);
+    writeFormatted(CONTRACTS, contractSource);
   }
 
   // 2. Declare admin families, so discovered commands become REACHABLE rather
@@ -968,7 +969,7 @@ async function main() {
         applied.push(`${item.cli}: admin family reachable ${outcome.declared.join(" ")}`);
       }
     }
-    writeFileSync(DEFINITIONS, defsSource);
+    writeFormatted(DEFINITIONS, defsSource);
   }
 
   const skippedAcknowledgements = [];
@@ -987,7 +988,7 @@ async function main() {
         applied.push(`${add.cli}${where}: acknowledged ${add.flags.join(" ")}`);
       }
     }
-    writeFileSync(CONTRACTS, source);
+    writeFormatted(CONTRACTS, source);
   }
 
   // REMOVALS ARE NEVER APPLIED. Fenced 2026-08-19.
@@ -1117,6 +1118,34 @@ async function main() {
  * the path is reached through a symlink, because node canonicalizes
  * import.meta.url while a hand-built URL does not.
  */
+/**
+ * Write, then format. `npm run check` runs `format:check` as its third step, so
+ * a tool that emits unformatted TypeScript makes the gate red every time it is
+ * used, and the operator has to know to run Prettier afterwards. Nothing said
+ * so: CLAUDE.md tells you to run this tool and stops there.
+ *
+ * Emitting output that fails the project's own gate is the tool's defect, not
+ * the operator's step to remember. Four call sites wrote files; they all go
+ * through here now, so a fifth cannot reintroduce it.
+ *
+ * A formatter failure is reported and NOT swallowed: the file has already been
+ * written at that point, so silence would leave a rebaseline half-applied and
+ * looking clean.
+ */
+function writeFormatted(path, contents) {
+  writeFileSync(path, contents);
+  try {
+    execFileSync("npx", ["prettier", "--write", path], { cwd: REPO, stdio: "pipe" });
+  } catch (error) {
+    console.error(
+      `rebaseline: wrote ${relative(REPO, path)} but could not format it: ` +
+        `${error instanceof Error ? error.message : String(error)}\n` +
+        `Run \`npx prettier --write ${relative(REPO, path)}\` before committing, ` +
+        `or npm run check will fail at format:check.`
+    );
+  }
+}
+
 function isDirectInvocation(metaUrl, argv1) {
   if (!argv1) return false;
   try {
