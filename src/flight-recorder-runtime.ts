@@ -54,6 +54,30 @@ export function truncateThinkingBlocks(blocks: string[]): string[] {
 }
 
 /**
+ * A failure an operator can act on, never an empty string.
+ *
+ * `error.message` alone produced `""` for the failure most worth naming: `pg`
+ * reports an unreachable server as an AggregateError whose own message is
+ * empty and whose causes carry the ECONNREFUSED. The health surface then said
+ * `degraded` with no reason, which is the silent-empty-success shape the obs
+ * node exists to remove, one layer in.
+ */
+export function describeFailure(error: unknown): string {
+  if (!(error instanceof Error)) return String(error);
+  const parts: string[] = [];
+  if (error.message) parts.push(error.message);
+  const nested = (error as { errors?: unknown }).errors;
+  if (Array.isArray(nested)) {
+    parts.push(...nested.map(describeFailure).filter(Boolean));
+  } else if (error.cause !== undefined) {
+    const cause = describeFailure(error.cause);
+    if (cause) parts.push(cause);
+  }
+  const joined = [...new Set(parts)].join("; ");
+  return joined || error.name || "unknown failure";
+}
+
+/**
  * The lifecycle every recorder has, whatever engine is underneath it.
  *
  * Extracted at the point a second engine appeared, and deliberately only this
@@ -96,10 +120,7 @@ export class FlightRecorderRuntime {
 
   private noteFailure(error: unknown): void {
     this.failureCount += 1;
-    this.lastFailure = {
-      error: error instanceof Error ? error.message : String(error),
-      at: new Date().toISOString(),
-    };
+    this.lastFailure = { error: describeFailure(error), at: new Date().toISOString() };
   }
 
   /**

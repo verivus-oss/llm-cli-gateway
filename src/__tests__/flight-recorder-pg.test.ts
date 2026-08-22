@@ -296,6 +296,45 @@ describe("a whole transcript round trip", () => {
   });
 });
 
+describe("the five states", () => {
+  it("reaches `active` on its own, with NO operation forcing the bootstrap", async () => {
+    // The SQLite twin kicks its bootstrap off in the constructor. Without the
+    // same kick-off here an idle gateway reports `initialising` for as long as
+    // nothing logs a request, and every request-history read is reported as
+    // non-authoritative on a recorder that is perfectly healthy.
+    const fresh = new PostgresFlightRecorder({ app: scoped(SCHEMA) }, { redactSecrets: false });
+    try {
+      expect(fresh.health().state).toBe("initialising");
+      for (
+        let attempt = 0;
+        attempt < 200 && fresh.health().state === "initialising";
+        attempt += 1
+      ) {
+        await new Promise(resolve => setTimeout(resolve, 25));
+      }
+      expect(fresh.health().state).toBe("active");
+      expect(fresh.health().closed).toBe(false);
+    } finally {
+      await fresh.close();
+    }
+  });
+
+  it("reports `degraded` with the real error when the server is unreachable", async () => {
+    const url = new URL(BASE_DSN);
+    url.port = "1";
+    const broken = new PostgresFlightRecorder({ app: url.toString() }, { redactSecrets: false });
+    try {
+      await expect(broken.readStorageStats()).rejects.toThrow();
+      const health = broken.health();
+      expect(health.state).toBe("degraded");
+      expect(health.error).toBeTruthy();
+      expect(health.failureCount).toBeGreaterThan(0);
+    } finally {
+      await broken.close();
+    }
+  });
+});
+
 describe("the bootstrap and the migration are the same schema", () => {
   it("produces identical columns and indexes either way", async () => {
     // Migration path: the real file, into the mirror schema.

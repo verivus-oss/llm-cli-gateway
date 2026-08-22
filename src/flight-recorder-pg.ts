@@ -207,6 +207,17 @@ export class PostgresFlightRecorder implements FlightRecorderOperations {
     this.logger = options.logger ?? null;
     this.target = redactDsn(roleDsns.app);
     this.runtime = new FlightRecorderRuntime(this.target);
+
+    // STARTED here, not awaited here, exactly as the SQLite twin does. Without
+    // it an idle gateway reports `initialising` for as long as nothing logs a
+    // request, and `readsAreAuthoritative` stays false on a recorder that is
+    // perfectly healthy. Swallowed HERE so a constructor's async tail cannot
+    // raise an unhandled rejection with nobody to receive it; the memo is
+    // cleared by ensureReady's own handler, so the next operation retries and
+    // rejects where a caller can be told.
+    void this.ensureReady().catch((error: unknown) => {
+      this.logger?.error("Flight recorder PostgreSQL bootstrap failed", error);
+    });
   }
 
   health(): FlightRecorderHealth {
