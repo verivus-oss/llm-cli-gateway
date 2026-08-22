@@ -273,9 +273,11 @@ will be no 3.1.0 stable; the first candidate under the new number is
   `~/.llm-cli-gateway/logs.db` stay exactly where they are. They are not
   backfilled, not dual-written and not read from. `llm_process_health` and the
   startup block both report the split, because the previous cutover in this
-  project abandoned 31,895 rows in place and nothing said so. The lossless
-  restartable backfill is a separate, human-supervised run, held by operator
-  decision.
+  project abandoned its old rows in place and nothing said so: on the reference
+  dev host that left a stale `jobs` table of 31,895 rows inside `logs.db`,
+  frozen months ago and still answering queries beside a live `requests` table.
+  The lossless restartable backfill is a separate,
+  human-supervised run, held by operator decision.
 
   **Disclosed and not fixed:** a loopback SSH tunnel or a `socat` forwarder
   defeats the check. It presents as a local listener owned by this user while
@@ -525,16 +527,17 @@ will be no 3.1.0 stable; the first candidate under the new number is
   open, and that no-op returns a successful empty result for every read. So an
   unreadable transcript database presented to `llm_process_health` as
   `LLM_GATEWAY_LOGS_DB=none` and to `doctor` as normal zero-valued data. That is
-  the silent empty-success symptom of the June 2026 `logs.db` corruption, still
-  present two releases later. An asynchronous schema-bootstrap failure was a
-  third state again: it logged, and the real recorder object stayed installed.
+  the silent empty-success symptom of the June 2026 `logs.db` corruption, whose
+  root cause was never determined and whose reporting hole was still open. An
+  asynchronous schema-bootstrap failure was a third state again: it logged, and
+  the real recorder object stayed installed.
 
   The recorder now carries five named states, `disabled`, `unavailable`,
   `initialising`, `degraded` and `active`, and ONE function owns the operator
   sentence for each, so no surface authors its own claim about why history is
   missing. They reach `llm_process_health`, `health://status`,
-  `metrics://process-health`, the startup `Storage:` block, the new `doctor
-  --json` storage block, and both request-history read tools, whose hints
+  `metrics://process-health`, the startup `Storage:` block, the new storage
+  block in `doctor --json`, and both request-history read tools, whose hints
   previously named `LLM_GATEWAY_LOGS_DB` as the only cause an empty answer could
   have. The health read is a synchronous snapshot, so it reports `initialising`
   rather than `active` for a recorder whose bootstrap has not settled.
@@ -952,16 +955,16 @@ will be no 3.1.0 stable; the first candidate under the new number is
 
 ### Security
 
-- **A security bar was LOWERED to let transcripts into a local PostgreSQL. It
-  was granted explicitly by the operator on 2026-08-22 and the argument is
-  recorded rather than applied quietly.**
+- **A security bar was LOWERED to let transcripts into a local PostgreSQL. The
+  operator granted it explicitly on 2026-08-22, and the argument is written down
+  in section 6.1 of the hardening design rather than applied quietly.**
   `docs/plans/postgres-security-hardening.md` sequenced transcripts into
   PostgreSQL as step 9, "only then", behind steps 3 through 8: an authenticated
   confidential channel, role separation with generated grants, a LUKS volume
   move, row-level security, envelope encryption of the three transcript columns,
   and HTTP principal granularity. Read literally that blocked the storage
   unification indefinitely on key management, and it was enforced that way
-  through two nodes of the programme.
+  through two nodes of the programme before anyone questioned it.
 
   Section 6.1 amends it on that document's OWN threat model, not on convenience.
   Section 3 says threat 1, a local process running as the same OS user, is
@@ -1000,7 +1003,8 @@ will be no 3.1.0 stable; the first candidate under the new number is
   defect class as the 2.10.0 principal-isolation fixes, one layer further in:
   the handler was correct and the store did not agree with it.
 
-  Worse than read-then-write on PostgreSQL. `PostgreSQLSessionManager` had no
+  On PostgreSQL it was worse than read-then-write.
+  `PostgreSQLSessionManager` had no
   owner check of its own at all, so one principal deleting another's session
   returned true and removed the row, and the handler was the only control
   standing between them. `setActiveSession` had the same separation and was
