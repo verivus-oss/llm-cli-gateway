@@ -33,7 +33,8 @@ of three: the job store, the session store and the flight recorder now sit on
 one storage port with a SQLite driver and a PostgreSQL driver under it, so a
 request's two halves can finally live in one engine.
 
-Read the two limits before assuming they do. Request history follows
+Read the two limits before assuming that happens on your host. Request history
+follows
 `[persistence].backend` **only where the database can be proven local**, and
 when it does, **nothing already written is migrated**. Both are stated in full
 under Changed, and both are visible on `llm_process_health`.
@@ -951,6 +952,85 @@ will be no 3.1.0 stable; the first candidate under the new number is
 
 ### Security
 
+- **A security bar was LOWERED to let transcripts into a local PostgreSQL. It
+  was granted explicitly by the operator on 2026-08-22 and the argument is
+  recorded rather than applied quietly.**
+  `docs/plans/postgres-security-hardening.md` sequenced transcripts into
+  PostgreSQL as step 9, "only then", behind steps 3 through 8: an authenticated
+  confidential channel, role separation with generated grants, a LUKS volume
+  move, row-level security, envelope encryption of the three transcript columns,
+  and HTTP principal granularity. Read literally that blocked the storage
+  unification indefinitely on key management, and it was enforced that way
+  through two nodes of the programme.
+
+  Section 6.1 amends it on that document's OWN threat model, not on convenience.
+  Section 3 says threat 1, a local process running as the same OS user, is
+  DOMINANT, that it "defeats the encryption controls available today", and that
+  LUKS "answers threat 4 only". Steps 5 and 7, the two expensive ones, do
+  nothing about the dominant threat. Then compare source and destination for the
+  default deployment. Transcripts sit today in `~/.llm-cli-gateway/logs.db`,
+  mode 0600, owned by the account the provider CLIs run as. The PostgreSQL in
+  question is on the same host, under the same account, with its DSN in a
+  `config.toml` at 0600. Against threat 1 those are the same exposure. Against
+  threats 3 and 4 they are the same exposure too, because the SQLite file is
+  equally unencrypted and equally backed up.
+
+  The bar being applied was "the destination must be better than the source".
+  The honest bar is "not worse", and the local case already meets it.
+
+  **This does NOT claim the local case is secure against threat 1. It is not,
+  and SQLite never was.** Nothing in that document claims otherwise. The claim
+  is only that a refactor is not the place to fix it.
+
+  What stays genuinely gated is the SHARED deployment: a PostgreSQL reachable by
+  another principal, or serving several gateway instances, or reached over the
+  OAuth-gated HTTP transport. There threats 2, 3 and 4 are real and steps 3
+  through 8 remain the answer. The admission check refuses everything it cannot
+  prove local, and the two things it cannot see, a loopback tunnel and the
+  distinction between a listener's uid and the database backend's, are stated
+  under Changed.
+
+- **Two session tools decided who owned a session in a handler and then acted in
+  a statement that did not re-decide it.** `session_delete` read the row,
+  checked the caller could access it, and issued a `DELETE` on the id alone.
+  `session_set_active` read the target, checked the same thing, and wrote the
+  active-session pointer without re-selecting by owner. In both, an id whose row
+  is deleted and re-created under a different principal in the gap between the
+  read and the write inherits the first caller's decision. This is the same
+  defect class as the 2.10.0 principal-isolation fixes, one layer further in:
+  the handler was correct and the store did not agree with it.
+
+  Worse than read-then-write on PostgreSQL. `PostgreSQLSessionManager` had no
+  owner check of its own at all, so one principal deleting another's session
+  returned true and removed the row, and the handler was the only control
+  standing between them. `setActiveSession` had the same separation and was
+  found while fixing the first.
+
+  Both now carry the owner into the statement that acts, on both engines, with
+  `principalScopeSql` supplying the single spelling of the rule so the SQL
+  predicate cannot drift from the in-memory one. TTL eviction moved to a private
+  unowned path so an expired row is still cleared. Every control was run in both
+  states and asserts the STORE, not the caller's return value.
+
+  **Surveyed, disclosed and NOT fixed:** `clearAllSessions` deletes every row
+  regardless of owner, on both managers. It has no production caller, and the
+  `session_clear_all` tool does not use it: that handler lists the caller's own
+  sessions and deletes them one at a time. It is a loaded gun left on the
+  interface, and the next caller to reach for the obvious method gets the wrong
+  behaviour.
+
+- **A full disk destroyed the evidence of a full disk.** SQLite auto-rolls-back
+  on `SQLITE_FULL` and on some I/O errors, so the storage driver's `ROLLBACK` in
+  the failure path then failed with "cannot rollback - no transaction is active"
+  and, unguarded, that was the message the caller received. The one failure an
+  operator most needs named was the one whose cause got overwritten. The
+  rollback failure now rides out on the real error's `cause` instead of
+  replacing it. It is filed here rather than under Fixed because this project
+  has had one `logs.db` corruption whose root cause was never determined, and an
+  error path that overwrites a diagnosis is how that stays true. Found by
+  injecting real faults, an `RLIMIT_FSIZE` cap and a 200 KB tmpfs, not by
+  reading.
+
 - **Publishing authority is separated from repository execution.** Until this
   release a single npm-publish job held `id-token: write`, checked out the
   repository, and then executed repository-controlled build, test, audit and
@@ -1047,9 +1127,14 @@ Also in this release, and worth one line each rather than a section:
   double-completion fence recorded under Fixed. It accounts for roughly 85% of
   the churn in `src/index.ts`.
 
-- **Materially expanded test coverage.** `src/__tests__` grows from 228 to 258
-  files and from roughly 3,208 to 3,493 tests, including per-provider
-  terminal-state and net-output suites for all seven providers, async handler
-  suites for four, cancel-and-output-retention suites driving real spawned
-  children, and script-level suites for the contract rebaseliner and the
-  consumer-tree gate.
+- **Materially expanded test coverage.** `src/__tests__` grows from 228 to 303
+  files, and the default suite from roughly 3,208 to 4,687 tests across 315
+  collected files. Beyond the provider work (per-provider terminal-state and
+  net-output suites for all seven, async handler suites for four,
+  cancel-and-output-retention suites driving real spawned children, and
+  script-level suites for the contract rebaseliner and the consumer-tree gate),
+  the storage programme's suites are largely fault injection and mutation
+  controls: real truncated and garbage-header SQLite files, `ENOSPC` against a
+  real tmpfs, concurrency driven by two-way barriers rather than sleeps, and
+  every fix carrying a control that was run red on the unfixed code and green on
+  the fixed one.
