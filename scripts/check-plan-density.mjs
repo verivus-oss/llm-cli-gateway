@@ -13,6 +13,7 @@
  * the baseline or its ceiling silently returns if the file is ever re-added.
  */
 import { existsSync, readFileSync, writeFileSync } from "node:fs";
+import { parse as parseToml } from "smol-toml";
 import { execFileSync } from "node:child_process";
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -64,6 +65,30 @@ try {
   baseline = JSON.parse(readFileSync(BASELINE, "utf8"));
 } catch {
   console.error(`missing ${BASELINE}; run: npm run plans:density:update`);
+  process.exit(1);
+}
+
+// PARSE every plan, do not merely count its lines. A merge resolution left two
+// `id =` keys under one `[[node]]` header, so the document stopped being TOML
+// and stayed that way for a day: this gate counts lines and the citation gate
+// regexes for paths, so BOTH were green over a file nothing could read. The
+// hand-check that was supposed to catch it matched `^id = ` over raw text and
+// reported a healthy node count on a file that does not parse.
+//
+// A plan nothing can parse is not a plan, and a gate that never parses it
+// cannot say otherwise. See [non_goals].a_constraint_is_not_a_gate in
+// storage-unification.dag.toml, which this is the third instance of.
+const unparseable = [];
+for (const file of scanned) {
+  try {
+    parseToml(readFileSync(join(PLANS, file), "utf8"));
+  } catch (error) {
+    unparseable.push(`${file}: ${error instanceof Error ? error.message.split("\n")[0] : error}`);
+  }
+}
+if (unparseable.length > 0) {
+  console.error("plan:density:check\n\n  FAIL: plan file does not parse as TOML");
+  for (const u of unparseable) console.error(`    ${u}`);
   process.exit(1);
 }
 
