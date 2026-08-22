@@ -67,7 +67,7 @@ describe("PostgresJobStore", () => {
   it("reports whether the completion guard admitted the terminal write", async () => {
     // Postgres is the backend where this actually matters: it is the shared
     // store, so a wrong `true` here would let one gateway instance overwrite
-    // another instance's terminal output through the unfenced recordOutput.
+    // another instance's terminal output through a wrongly-fenced recordOutput.
     const t = new Date().toISOString();
     await store.recordStart({
       id: "pg-guard-job",
@@ -114,7 +114,7 @@ describe("PostgresJobStore", () => {
       pid: 123,
       ownerPrincipal: "alice@example.com",
     });
-    await store.recordOutput("pg-job-1", "partial", "", false);
+    await store.recordOutput("pg-job-1", "partial", "", false, ["queued", "running"]);
     await store.recordComplete({
       id: "pg-job-1",
       status: "completed",
@@ -599,7 +599,10 @@ describe("PostgresJobStore", () => {
       kitExecution: execution,
       kitSessionId: "gateway-pg-kit-session",
     });
-    await store.recordOutput("pg-kit-finalization", privateContext, privateContext, false);
+    await store.recordOutput("pg-kit-finalization", privateContext, privateContext, false, [
+      "queued",
+      "running",
+    ]);
     await store.recordComplete({
       id: "pg-kit-finalization",
       status: "completed",

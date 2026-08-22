@@ -449,14 +449,14 @@ async function tryMint(deps: ReceiptDeps, run: ValidationRunRecord): Promise<Min
     hasMaterialDisagreement: structuredContent.disagreements.hasMaterialDisagreement,
     confidence: structuredContent.confidence,
   };
-  await store.recordValidationReceipt(record);
-  // Mark the run finalized now that a receipt exists (idempotent). This keeps
-  // validation_runs.status authoritative (running -> finalized) rather than
-  // leaving a minted run perpetually "running".
-  await store.setValidationRunStatus(run.validationId, "finalized");
-  // Re-read so a concurrent winner's row (not ours) is what we return.
-  const stored = await store.getValidationReceipt(run.validationId);
-  return { kind: "minted", record: stored ?? record };
+  // ONE transaction: insert the receipt, finalize the run, read back the row
+  // that actually exists. As three awaits a mint could leave the receipt with
+  // the run still `running`, or the run `finalized` with no receipt, and the
+  // `stored ?? record` fallback reported `minted` for the second case. The
+  // returned record is the STORED row, so a concurrent winner's receipt (not
+  // ours) is still what the caller gets.
+  const stored = await store.finalizeValidationReceipt(record);
+  return { kind: "minted", record: stored };
 }
 
 function equalSha256(left: string, right: string): boolean {

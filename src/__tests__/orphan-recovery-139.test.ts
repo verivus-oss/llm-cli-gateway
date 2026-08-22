@@ -522,12 +522,12 @@ describe("#139 AsyncJobManager lease lifecycle (M/N series)", () => {
       recordStart: () => {},
       markRunning: () => {},
       registerInstance: () => {},
-      heartbeat: () => {},
+      heartbeat: () => ({ instanceRowRefreshed: true, jobLeasesAdvanced: 0 }),
       deregisterInstance: () => {},
       selectStaleProcessCandidates: () => [],
       recoverStaleJobs: () => [],
       gcInstances: () => 0,
-      recordOutput: () => {},
+      recordOutput: () => true,
       recordComplete: () => {},
       getById: () => null,
       findByRequestKey: () => null,
@@ -674,6 +674,7 @@ describe("#139 AsyncJobManager lease lifecycle (M/N series)", () => {
       },
       heartbeat: () => {
         if (failHeartbeat) throw new Error("transient store outage");
+        return { instanceRowRefreshed: true, jobLeasesAdvanced: 0 };
       },
     });
     const mgr = new AsyncJobManager(noopLogger, undefined, store);
@@ -737,6 +738,7 @@ describe("#139 AsyncJobManager lease lifecycle (M/N series)", () => {
     const store = mockStore({
       heartbeat: () => {
         if (failHeartbeat) throw new Error("transient store outage");
+        return { instanceRowRefreshed: true, jobLeasesAdvanced: 0 };
       },
       gcInstances: () => {
         gcCalls++;
@@ -772,6 +774,7 @@ describe("#139 AsyncJobManager lease lifecycle (M/N series)", () => {
     const store = mockStore({
       heartbeat: () => {
         if (failHeartbeat) throw new Error("transient store outage");
+        return { instanceRowRefreshed: true, jobLeasesAdvanced: 0 };
       },
       evictExpired: () => {
         evictionCalls++;

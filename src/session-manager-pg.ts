@@ -1288,14 +1288,27 @@ export class PostgreSQLSessionManager
    * Update session usage timestamp.
    */
   async updateSessionUsage(sessionId: string): Promise<boolean> {
-    const now = new Date().toISOString();
     // Reports whether the row was written. The previous `void` contract could
     // not tell a caller that the session it is about to report no longer
     // exists, which is the same swallowed-loss shape the file store had.
-    const rowsAffected = await this.execute("UPDATE sessions SET last_used_at = $1 WHERE id = $2", [
-      now,
-      sessionId,
-    ]);
+    //
+    // The TIMESTAMP is the database's and the column can only move FORWARD.
+    // It was a client `new Date()` captured before the await, written by an
+    // unguarded last-writer-wins UPDATE on a ten-connection pool, so of two
+    // concurrent turns the later-finishing EARLIER one wrote the older value
+    // and the column went backwards. migrations/009's
+    // `cleanup_expired_sessions` DELETEs on this column, so a regressed
+    // timestamp is a live session an operator's cron can remove.
+    //
+    // A wall clock is not an ordering on a store shared across instances (the
+    // reason the continuation fence is a compare-and-set on what the turn READ,
+    // not a timestamp), so this does not fence on a clock: `clock_timestamp()`
+    // is the one clock every writer shares, and GREATEST makes the write
+    // monotonic whichever writer commits last.
+    const rowsAffected = await this.execute(
+      "UPDATE sessions SET last_used_at = GREATEST(last_used_at, clock_timestamp()) WHERE id = $1",
+      [sessionId]
+    );
     return rowsAffected !== 0;
   }
 

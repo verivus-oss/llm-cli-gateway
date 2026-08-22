@@ -3,7 +3,7 @@ import { PROVIDER_TYPES, sessionGenerationIdentity } from "../session-manager.js
 import { PostgreSQLSessionManager } from "../session-manager-pg.js";
 import { resolveGatewayServerRuntime, resolveWorktreeForRequest } from "../index.js";
 import { runWithRequestContext } from "../request-context.js";
-import { cleanTestDatabase, setupTestStorageDriver } from "./setup.js";
+import { cleanTestDatabase, setupTestDatabase, setupTestStorageDriver } from "./setup.js";
 
 describe("PostgreSQLSessionManager", () => {
   let manager: PostgreSQLSessionManager;
@@ -566,6 +566,71 @@ describe("PostgreSQLSessionManager", () => {
 
     it("should not throw error for non-existent session", async () => {
       await expect(manager.updateSessionUsage("non-existent-id")).resolves.not.toThrow();
+    });
+
+    it("never moves last_used_at backwards, even from a writer with an older basis", async () => {
+      // DEFECT 4. The statement was `SET last_used_at = $1` with a client
+      // `new Date()` captured before the await, unguarded, on a pool of ten.
+      // Of two concurrent turns the later-finishing EARLIER one wrote the older
+      // value and the column regressed. migrations/009's
+      // `cleanup_expired_sessions` DELETEs on this column, so a regressed
+      // timestamp is a live session an operator's cron can remove.
+      const session = await manager.createSession("claude", "monotonic", "monotonic-session");
+      const { pool } = await setupTestDatabase();
+
+      // A writer whose basis is LATER than this process's clock has committed.
+      const ahead = await pool.query<{ last_used_at: Date }>(
+        `UPDATE sessions SET last_used_at = clock_timestamp() + interval '1 hour'
+         WHERE id = $1 RETURNING last_used_at`,
+        [session.id]
+      );
+      const aheadAt = ahead.rows[0].last_used_at;
+
+      expect(await manager.updateSessionUsage(session.id)).toBe(true);
+
+      const after = await pool.query<{ last_used_at: Date }>(
+        "SELECT last_used_at FROM sessions WHERE id = $1",
+        [session.id]
+      );
+      // Read off the DATABASE, not off the boolean the call returned.
+      expect(after.rows[0].last_used_at.getTime()).toBeGreaterThanOrEqual(aheadAt.getTime());
+    });
+
+    it("cannot regress the column while waiting on another writer's row lock", async () => {
+      // The same defect under a REAL serialization conflict rather than a
+      // pre-set value, which is also what proves the guard survives Postgres
+      // re-evaluating the SET expression against the newer row version.
+      //
+      // The barrier is the row lock itself, not a sleep: the UPDATE below is
+      // AWAITED inside an open transaction, so the lock is provably held before
+      // updateSessionUsage is issued, and updateSessionUsage cannot proceed
+      // until the COMMIT.
+      const session = await manager.createSession("claude", "locked", "locked-session");
+      const { pool } = await setupTestDatabase();
+      const holder = await pool.connect();
+      let aheadAt: Date;
+      let usage: Promise<boolean>;
+      try {
+        await holder.query("BEGIN");
+        const ahead = await holder.query<{ last_used_at: Date }>(
+          `UPDATE sessions SET last_used_at = clock_timestamp() + interval '1 hour'
+           WHERE id = $1 RETURNING last_used_at`,
+          [session.id]
+        );
+        aheadAt = ahead.rows[0].last_used_at;
+        // Issued while the lock is held; it blocks in the server.
+        usage = manager.updateSessionUsage(session.id);
+        await holder.query("COMMIT");
+      } finally {
+        holder.release();
+      }
+      expect(await usage).toBe(true);
+
+      const after = await pool.query<{ last_used_at: Date }>(
+        "SELECT last_used_at FROM sessions WHERE id = $1",
+        [session.id]
+      );
+      expect(after.rows[0].last_used_at.getTime()).toBeGreaterThanOrEqual(aheadAt.getTime());
     });
   });
 
