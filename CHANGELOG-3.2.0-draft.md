@@ -518,6 +518,115 @@ will be no 3.1.0 stable; the first candidate under the new number is
 
 ### Fixed
 
+- **A corrupt or unreadable `logs.db` looked exactly like a recorder the
+  operator had switched off.** `createFlightRecorder` returned the same no-op
+  recorder from two different situations, deliberate disablement and a failed
+  open, and that no-op returns a successful empty result for every read. So an
+  unreadable transcript database presented to `llm_process_health` as
+  `LLM_GATEWAY_LOGS_DB=none` and to `doctor` as normal zero-valued data. That is
+  the silent empty-success symptom of the June 2026 `logs.db` corruption, still
+  present two releases later. An asynchronous schema-bootstrap failure was a
+  third state again: it logged, and the real recorder object stayed installed.
+
+  The recorder now carries five named states, `disabled`, `unavailable`,
+  `initialising`, `degraded` and `active`, and ONE function owns the operator
+  sentence for each, so no surface authors its own claim about why history is
+  missing. They reach `llm_process_health`, `health://status`,
+  `metrics://process-health`, the startup `Storage:` block, the new `doctor
+  --json` storage block, and both request-history read tools, whose hints
+  previously named `LLM_GATEWAY_LOGS_DB` as the only cause an empty answer could
+  have. The health read is a synchronous snapshot, so it reports `initialising`
+  rather than `active` for a recorder whose bootstrap has not settled.
+
+  Degrading rather than crashing is deliberate and unchanged. Only the
+  visibility changed. The faults were injected against real files rather than a
+  stubbed flag: a truncated database and a garbage-header file both open
+  successfully and then fail every operation, an unopenable path throws at
+  construction, and a second writer dropping a table gives both a read and a
+  write failure after a successful open. `RLIMIT_FSIZE` and a real 200 KB tmpfs
+  produced `disk I/O error` and `ENOSPC` outside the test process.
+
+- **Four durable writes were safe only because the store was synchronous and the
+  next line could not yield.** Making the port asynchronous broke all four, and
+  all four are now fixed with a control that fails on the unfixed code and was
+  run in both states.
+
+  `recordOutput` is fenced on an expected-status set the job manager decides
+  once, on both engines, so an orphaned row stops absorbing this instance's
+  output while its monotonic status hides the move, and the routine flush and
+  the late-output write cannot disagree. A rejected write is now reported rather
+  than discarded by a `void` return. The SQLite instance heartbeat is one
+  transaction, as Postgres already was, so the orphan sweep cannot slot between
+  the instance row and the job leases, and it returns an outcome, so a
+  garbage-collected instance row is re-registered rather than heartbeated into
+  nothing forever. A validation receipt, its run status and the read-back land
+  in one transaction, so a run that cannot be finalised rolls the receipt back
+  with it, and `stored ?? record` no longer reports `minted` for something that
+  was never stored. And `sessions.last_used_at` comes off the client clock: it
+  is `GREATEST(last_used_at, clock_timestamp())`, the database's own clock,
+  chosen because the store is shared across instances and a wall clock on one of
+  them is not an ordering.
+
+- **Two concurrent turns on one session could leave the earlier turn's provider
+  handle in the row, and both callers were told they had won.** Reproduced
+  through the real request path against a real PostgreSQL server rather than
+  inferred: 3 of 200 concurrent pairs, 9 to 38 of 200 at a synthetic 9
+  microsecond dispatch gap, 1 to 7 of 30 with the pool saturated, and 0 of 50
+  when the turns were awaited. Fixed with a compare-and-set on the metadata the
+  turn actually read, chosen over a timestamp fence for the same reason as
+  above. The semantics change and are worth knowing: the first committer owns
+  the thread, and the loser is TOLD, through `sessionContinuityPersisted`,
+  instead of a `void` return swallowing the loss.
+
+- **An expiring file session deleted itself out from under a successful
+  response.** `updateSessionMetadata` and `updateSessionUsage` ran the TTL check
+  and evicted, on the one path that PROVES the session is in use, while the
+  response reported success and handed the id back. The write is honoured now,
+  and `lastUsedAt` is refreshed only where the row had actually expired.
+  Honouring rather than refusing was chosen because the PostgreSQL store never
+  carried the expiry check at all, so this makes the two engines agree instead
+  of inventing a third rule. `updateSessionUsage` returns a boolean rather than
+  `void`, so a lost write reaches the caller.
+
+- **Every ACP flight-recorder write was being dropped in silence, and no lint
+  rule could see it.** `AcpFlightSink` declared `logStart(entry): void`. Once
+  the recorder became asynchronous its promises were absorbed by the TYPE, not
+  by a missing `await` at any one call site, so nothing floated and nothing
+  warned. The sink returns `Promise<void>` now, and the test checks the class of
+  declaration rather than the site.
+
+- **`logStart(x)` immediately followed by `close()` lost the row to the very
+  call meant to save it.** `close()` drained the driver's queue but not the gap
+  between an operation being called and reaching that queue. Related, and on the
+  same shutdown path: `performShutdown` awaited the HTTP gateway, the server and
+  the job store, but not `flightRecorder.close()`, which was harmless only while
+  the recorder was synchronous.
+
+- **Twenty places where a call stopped throwing and started rejecting, inside a
+  `try` whose `catch` could therefore no longer fire.** Eleven of them lost a
+  control rather than a log line, including `recordStartOrFailClosed` inverting
+  on the path every async job takes. Graded, nine of them defects: one security,
+  four durability, four correctness. Two of the mechanisms are worth naming
+  because neither is visible to an ordinary review. Making a method `async`
+  silently disarms every condition written against the synchronous one, because
+  `!promise` is always false; seven such conditions had stopped being evaluated,
+  among them an ownership guard and two terminal-write guards. And a shutdown
+  drain bounded by `Promise.race` against a timer is not bounded at all when the
+  queue starves the timer: measured running 2,598 ms past a 2,000 ms bound,
+  rejecting nothing.
+
+  Type-aware lint catches only the unawaited half. It reports nothing at all for
+  a promise consumed as a `||` operand, verified as zero messages on the line.
+  `npm run promise:conditions:check` is the type-checker gate built for the
+  other half, it runs inside `npm run check`, and it found the ninth defect.
+  `npm run storage:port:check` is the companion structural ratchet: SQL confined
+  to the storage-owning modules, no `PRAGMA` or `VACUUM` outside them, and no
+  new caller of the caller-supplies-the-SQL read that used to serve seven
+  production sites with SQLite placeholders PostgreSQL does not accept. Its
+  `PRAGMA` rule had been cited by name in the design since the port was proposed
+  and was wired to nothing; when it was finally written it scanned template
+  literals only, while every `PRAGMA` in the tree sits in a quoted string.
+
 - **The gateway refused grok effort levels the binary accepts.** grok 1.0.4
   declares `--reasoning-effort <EFFORT>` with `[aliases: --effort]` and **no**
   possible-values set. The contract enum-locked the ALIAS with an invented
