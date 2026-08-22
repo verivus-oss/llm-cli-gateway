@@ -625,6 +625,54 @@ OS user.
 8. http principal granularity (4.5).
 9. Only then: transcripts into Postgres, per `storage-unification.md`.
 
+### 6.1 AMENDMENT 2026-08-22: the gate is deployment shape, not step 8
+
+Step 9 read as "finish 3 through 8 first". Applied literally it blocked the
+storage unification indefinitely on LUKS volumes and key management, and it was
+enforced that way through nodes s7 and s9.
+
+That reading is stricter than this document's own threat model supports.
+
+Section 3 says threat 1, a local process under the same OS user, is DOMINANT,
+that it "defeats the encryption controls available today", and that LUKS
+"answers threat 4 only". Steps 5 and 7, the two expensive ones, do nothing about
+the dominant threat. Section 3 then says the rest of the document addresses
+threats 2, 3 and 4.
+
+Now compare source and destination for the DEFAULT deployment. Transcripts sit
+today in `~/.llm-cli-gateway/logs.db`, mode 0600, owned by the account the
+provider CLIs run as. The Postgres in section 2 is `127.0.0.1:5432`, rootless
+podman, same host, same account, DSN in `config.toml` at 0600. Against threat 1
+those are the same exposure. Against threats 3 and 4 they are the same exposure,
+because the SQLite file is equally unencrypted and equally backed up.
+
+So for a local single-user deployment, moving transcripts into that Postgres is
+NOT a regression. The bar this document was being held to was "the destination
+must be better than the source". The honest bar is "not worse", and the local
+case already meets it.
+
+**What is still genuinely gated is the SHARED deployment.** A Postgres reachable
+by another principal, or one serving several gateway instances, or one reached
+over the OAuth-gated HTTP transport, is a different threat model, and
+`listen_addresses = *` is mitigated only by the podman port binding. There
+threats 2, 3 and 4 are real and steps 3 through 8 are the right answer.
+
+**Therefore the admission rule for transcript bodies is deployment shape:**
+
+- Loopback or unix-socket DSN, gateway and database under the same OS user:
+  transcripts may enter Postgres. This is the local developer tool this project
+  is, and it is threat-equivalent to the file it replaces.
+- Anything else, including any non-loopback host in the DSN: refused until
+  steps 3 through 8 are complete.
+
+The check fails CLOSED: a DSN it cannot prove is loopback is treated as remote.
+
+This amendment lowers a bar that was set deliberately, so it is recorded here
+rather than applied quietly. What it does NOT do is claim the local case is
+secure against threat 1. Nothing in this document does. It claims only that
+SQLite was never secure against threat 1 either, and that a refactor is not the
+place to fix that.
+
 ## 7. Residual risks
 
 - **`llmgw_app` sees plaintext bodies in process.** Unavoidable; it writes them.
