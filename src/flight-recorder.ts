@@ -421,7 +421,11 @@ export interface FlightRecorderHealth {
   /** Message of the failure that produced `unavailable` / `degraded`. */
   error: string | null;
   errorAt: string | null;
-  /** Total failed operations, so a recorder that flaps is visible when its last call succeeded. */
+  /**
+   * Failed ATTEMPTS, so a recorder that flaps is visible when its last call
+   * happened to succeed. A bootstrap failure counts once for itself and once
+   * for the operation that awaited it, because both genuinely failed.
+   */
   failureCount: number;
   /** close() has run. Every operation rejects from that point; reads are not empty, they refuse. */
   closed: boolean;
