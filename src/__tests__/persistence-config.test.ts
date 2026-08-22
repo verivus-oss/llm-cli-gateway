@@ -407,7 +407,7 @@ describe("MemoryJobStore", () => {
       startedAt: new Date().toISOString(),
       pid: 1234,
     });
-    await store.recordOutput("j1", "stdout-here", "stderr-here", false);
+    await store.recordOutput("j1", "stdout-here", "stderr-here", false, ["queued", "running"]);
     await store.recordComplete({
       id: "j1",
       status: "completed",

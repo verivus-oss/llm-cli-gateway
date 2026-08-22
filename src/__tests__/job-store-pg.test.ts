@@ -67,7 +67,7 @@ describe("PostgresJobStore", () => {
   it("reports whether the completion guard admitted the terminal write", async () => {
     // Postgres is the backend where this actually matters: it is the shared
     // store, so a wrong `true` here would let one gateway instance overwrite
-    // another instance's terminal output through the unfenced recordOutput.
+    // another instance's terminal output through a wrongly-fenced recordOutput.
     const t = new Date().toISOString();
     await store.recordStart({
       id: "pg-guard-job",
@@ -98,6 +98,95 @@ describe("PostgresJobStore", () => {
     expect(await store.recordComplete({ ...terminal, id: "pg-no-such-row" })).toBe(false);
   });
 
+  it("fences an output write on the status the caller claims", async () => {
+    // Postgres is the engine where this matters most: a shared store means the
+    // other writer is another gateway instance. Unfenced, a flush decided
+    // before that instance's sweep moved the body of an already-orphaned row
+    // while the status stayed monotonic and hid it.
+    const t = new Date().toISOString();
+    await store.recordStart({
+      id: "pg-fence-job",
+      correlationId: "pg-fence-corr",
+      requestKey: computeRequestKey("claude", ["-p", "fence"]),
+      cli: "claude",
+      args: ["-p", "fence"],
+      startedAt: t,
+      pid: 11,
+    });
+    expect(await store.recordOutput("pg-fence-job", "A", "", false, ["queued", "running"])).toBe(
+      true
+    );
+    expect(await store.recordOutput("pg-fence-job", "B", "", false, ["orphaned"])).toBe(false);
+    expect((await store.getById("pg-fence-job"))?.stdout).toBe("A");
+    expect(await store.recordOutput("pg-no-such-row", "C", "", false, ["running"])).toBe(false);
+  });
+
+  it("reports what one heartbeat did rather than returning void", async () => {
+    await store.registerInstance({ instanceId: "pg-inst", hostname: "pg-host", pid: 5 });
+    await store.recordStart({
+      id: "pg-leased-job",
+      correlationId: "pg-leased-corr",
+      requestKey: computeRequestKey("claude", ["-p", "leased"]),
+      cli: "claude",
+      args: ["-p", "leased"],
+      startedAt: new Date().toISOString(),
+      pid: 5,
+      ownerInstance: "pg-inst",
+      ownerHostname: "pg-host",
+    });
+    expect(await store.heartbeat("pg-inst")).toEqual({
+      instanceRowRefreshed: true,
+      jobLeasesAdvanced: 1,
+    });
+    // An instance row every other instance already treats as dead.
+    expect(await store.gcInstances(-1)).toBe(1);
+    expect(await store.heartbeat("pg-inst")).toEqual({
+      instanceRowRefreshed: false,
+      jobLeasesAdvanced: 1,
+    });
+  });
+
+  it("rolls the receipt back with the run status it could not finalize", async () => {
+    const receipt = {
+      validationId: "pg-mint",
+      ownerPrincipal: "alice",
+      mintedAt: new Date().toISOString(),
+      schemaVersion: "validation-receipt.v1",
+      reportJson: JSON.stringify({ ok: true }),
+      canonicalSha256: "a".repeat(64),
+      prevSha256: null,
+      seq: null,
+      signature: null,
+      models: ["claude"],
+      hasMaterialDisagreement: false,
+      confidence: "high",
+    };
+    expect(isValidationRunStore(store)).toBe(true);
+
+    // No run row: as three awaits the INSERT still landed and the unfenced
+    // status UPDATE matched nothing.
+    let rejectedWith = "";
+    await store.finalizeValidationReceipt(receipt).catch(err => {
+      rejectedWith = err instanceof Error ? err.message : String(err);
+    });
+    expect(await store.getValidationReceipt("pg-mint")).toBeNull();
+    expect(rejectedWith).toMatch(/missing or owned by another principal/);
+
+    await store.recordValidationRun({
+      validationId: "pg-mint",
+      ownerPrincipal: "alice",
+      intent: "review",
+      status: "running",
+      requestJson: JSON.stringify({ question: "q", content: "c", modelList: ["claude"] }),
+      createdAt: new Date().toISOString(),
+      providerLinks: [],
+      judgeLink: null,
+    });
+    expect((await store.finalizeValidationReceipt(receipt)).validationId).toBe("pg-mint");
+    expect(await store.getValidationReceipt("pg-mint")).toMatchObject({ validationId: "pg-mint" });
+    expect(await store.getValidationRun("pg-mint")).toMatchObject({ status: "finalized" });
+  });
+
   it("round-trips a completed process job", async () => {
     const startedAt = new Date().toISOString();
     const finishedAt = new Date().toISOString();
@@ -114,7 +203,7 @@ describe("PostgresJobStore", () => {
       pid: 123,
       ownerPrincipal: "alice@example.com",
     });
-    await store.recordOutput("pg-job-1", "partial", "", false);
+    await store.recordOutput("pg-job-1", "partial", "", false, ["queued", "running"]);
     await store.recordComplete({
       id: "pg-job-1",
       status: "completed",
@@ -599,7 +688,10 @@ describe("PostgresJobStore", () => {
       kitExecution: execution,
       kitSessionId: "gateway-pg-kit-session",
     });
-    await store.recordOutput("pg-kit-finalization", privateContext, privateContext, false);
+    await store.recordOutput("pg-kit-finalization", privateContext, privateContext, false, [
+      "queued",
+      "running",
+    ]);
     await store.recordComplete({
       id: "pg-kit-finalization",
       status: "completed",

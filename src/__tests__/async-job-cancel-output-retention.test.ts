@@ -96,9 +96,14 @@ describe("recordComplete reports whether the completion guard admitted the write
     expect(await store.recordComplete({ ...terminal, stdout: "PARTIAL+LATE" })).toBe(false);
     expect((await store.getById("guard-job"))?.stdout).toBe("PARTIAL");
 
-    // ...but the unfenced output write still lands, without disturbing the
-    // committed terminal state. That is the path persistComplete falls back to.
-    await store.recordOutput("guard-job", "PARTIAL+LATE", "", false);
+    // ...but the fenced output write still lands on the terminal state the
+    // winning writer committed, without disturbing it. That is the path
+    // persistComplete falls back to, and the fence is what stops the SAME write
+    // landing on a row some other writer terminalized.
+    expect(await store.recordOutput("guard-job", "PARTIAL+LATE", "", false, ["canceled"])).toBe(
+      true
+    );
+    expect(await store.recordOutput("guard-job", "NOT-OURS", "", false, ["running"])).toBe(false);
     const row = await store.getById("guard-job");
     expect(row?.stdout).toBe("PARTIAL+LATE");
     expect(row?.status).toBe("canceled");
@@ -301,8 +306,8 @@ describe("late child output survives a terminal-status-before-close transition",
     //   2. our cancel calls recordComplete and the guard REJECTS it;
     //   3. the child then closes, and persistComplete runs a SECOND time.
     // Step 3 is where an ownership-blind implementation writes our stdout over
-    // their result. recordOutput has no owner predicate, so nothing downstream
-    // would catch it.
+    // their result. Before the status fence, recordOutput carried no predicate
+    // at all, so nothing downstream would catch it.
     const job = await manager.startJob("node" as LlmCli, FLUSH_ON_SIGTERM, "corr-foreign-row");
     await waitFor(
       async () => ((await manager.getJobSnapshot(job.id))?.stdoutBytes ?? 0) >= 11,
@@ -339,8 +344,8 @@ describe("late child output survives a terminal-status-before-close transition",
   }, 60_000);
 
   it("never overwrites a foreign row through the routine throttled flush either", async () => {
-    // The ownership rule has to hold for EVERY route that calls the unfenced
-    // recordOutput, not just the post-terminal one. The routine flush in
+    // The ownership rule has to hold for EVERY route that calls recordOutput,
+    // not just the post-terminal one. The routine flush in
     // maybeFlushOutput is throttled by OUTPUT_FLUSH_INTERVAL_MS (1000ms), so a
     // chunk arriving after that window is its own way onto the row. This case
     // deliberately waits past the throttle before the foreign write, which the
@@ -378,7 +383,7 @@ describe("late child output survives a terminal-status-before-close transition",
   it("persists bytes the child emits between an idle-timeout kill and close", async () => {
     // idleTimeoutMs fires because the child stays silent after its first bytes.
     // Keep it under OUTPUT_FLUSH_INTERVAL_MS (1000ms) so the late flush lands
-    // while the throttled output write is still closed; otherwise the unfenced
+    // while the throttled output write is still closed; otherwise a late
     // recordOutput would mask the fenced terminal write and this would pass
     // even without the fix.
     const job = await manager.startJob(

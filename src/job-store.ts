@@ -40,6 +40,19 @@ export type JobStoreStatus =
 
 export type TerminalJobStoreStatus = Exclude<JobStoreStatus, "queued" | "running">;
 
+/**
+ * What one heartbeat actually did, because `void` could not say.
+ *
+ * `instanceRowRefreshed = false` means this instance has no `gateway_instances`
+ * row: it was GC'd, so every other instance already treats it as dead and its
+ * jobs are being swept. `jobLeasesAdvanced` is how many open rows it still
+ * holds, which a caller that knows how many it launched can compare against.
+ */
+export interface HeartbeatOutcome {
+  instanceRowRefreshed: boolean;
+  jobLeasesAdvanced: number;
+}
+
 /** #139: the two non-terminal durable statuses the lease sweep considers. */
 export type JobStoreActiveStatus = Extract<JobStoreStatus, "queued" | "running">;
 
@@ -731,7 +744,7 @@ export interface JobStore {
    * `queued`/`running` job it owns, so heartbeat and sweep contend on the same
    * job rows.
    */
-  heartbeat(instanceId: string): Promise<void>;
+  heartbeat(instanceId: string): Promise<HeartbeatOutcome>;
   /** #139: remove this instance's `gateway_instances` row (graceful shutdown). */
   deregisterInstance(instanceId: string): Promise<void>;
   /**
@@ -782,7 +795,27 @@ export interface JobStore {
   ): Promise<OrphanedJobSnapshot[]>;
   /** #139: delete `gateway_instances` rows whose last_heartbeat is older than instanceGcMs. */
   gcInstances(instanceGcMs: number): Promise<number>;
-  recordOutput(id: string, stdout: string, stderr: string, outputTruncated: boolean): Promise<void>;
+  /**
+   * Write output onto a row whose status is still one of `expectedStatuses`.
+   *
+   * The predicate is REQUIRED and there is no unfenced overload, because the
+   * unfenced version was a monotonic-companion loss: the orphan sweep fences
+   * status and snapshots stdout in one statement, `recordOutput` fenced
+   * neither, and a flush arriving afterwards moved the body while the status
+   * stayed `orphaned`. `llm_job_result` and `llm_request_result` could then
+   * disagree, and the `Promise<void>` return meant 0-row versus 1-row was never
+   * seen. Returns whether a row was written.
+   *
+   * This was unreachable in-process while the store was synchronous: a sweep
+   * and a flush could not overlap on one event loop.
+   */
+  recordOutput(
+    id: string,
+    stdout: string,
+    stderr: string,
+    outputTruncated: boolean,
+    expectedStatuses: readonly JobStoreStatus[]
+  ): Promise<boolean>;
   /** Replace one job's complete bounded progress projection atomically. */
   recordProgress(id: string, progressJson: string): Promise<void>;
   /** Replace progress only while the durable row still has the expected status. */
@@ -799,8 +832,9 @@ export interface JobStore {
    * A `false` is NOT a failure to retry: the terminal state is settled and the
    * caller must not replay `recordComplete`. It is also NOT an invitation to
    * force the same data in through `recordOutput`. A rejected guard means some
-   * OTHER writer owns this row, and `recordOutput` carries no owner predicate,
-   * so writing there would clobber that writer's result on a shared store.
+   * OTHER writer owns this row, and `recordOutput`'s status fence would reject
+   * the write anyway, because the row is no longer in a state this instance
+   * owns.
    * Only a caller whose own `recordComplete` returned true may follow up with
    * `recordOutput` to land output captured after the terminal write.
    */
@@ -976,6 +1010,14 @@ export interface ValidationRunStore {
     provider: string,
     ownerPrincipal: string
   ): Promise<void>;
+  /**
+   * Unfenced status write. NO production caller: the mint that used to hold the
+   * only one now goes through `finalizeValidationReceipt`, and every other
+   * transition is the owner-scoped `transitionValidationRunStatus`. It survives
+   * as a test fixture setter only. Do not reach for it to advance a real run:
+   * it carries no expected state, no owner, and no row count, which is what
+   * made a receipt and its run status disagree.
+   */
   setValidationRunStatus(
     validationId: string,
     status: ValidationRunRecord["status"]
@@ -984,6 +1026,23 @@ export interface ValidationRunStore {
   getValidationRunIdByJobId(jobId: string): Promise<string | null>;
   /** Insert the immutable receipt once. Idempotent on validation_id (INSERT OR IGNORE). */
   recordValidationReceipt(receipt: ValidationReceiptRecord): Promise<void>;
+  /**
+   * Mint: insert the receipt, finalize the run, and read back the authoritative
+   * row, in ONE transaction.
+   *
+   * The mint used to be three awaits. The insert is INSERT OR IGNORE and
+   * returned void, the status write was an unfenced UPDATE with no expected
+   * state and no row count, and the re-read fell back to the in-memory record.
+   * So a receipt could exist with the run still `running`, or the run could
+   * read `finalized` with no receipt row, and `stored ?? record` reported
+   * `minted` for something that was never stored. Nothing could interleave
+   * there while the store was synchronous.
+   *
+   * Throws if the run row is missing or owned by another principal, which rolls
+   * the receipt back with it: there is no state where one landed and the other
+   * did not. The returned record is always the stored row.
+   */
+  finalizeValidationReceipt(receipt: ValidationReceiptRecord): Promise<ValidationReceiptRecord>;
   getValidationReceipt(validationId: string): Promise<ValidationReceiptRecord | null>;
 }
 
@@ -997,7 +1056,8 @@ export function isValidationRunStore(store: unknown): store is ValidationRunStor
     typeof (store as ValidationRunStore).setValidationProviderLinks === "function" &&
     typeof (store as ValidationRunStore).transitionValidationRunStatus === "function" &&
     typeof (store as ValidationRunStore).skipValidationJudge === "function" &&
-    typeof (store as ValidationRunStore).recordValidationReceipt === "function"
+    typeof (store as ValidationRunStore).recordValidationReceipt === "function" &&
+    typeof (store as ValidationRunStore).finalizeValidationReceipt === "function"
   );
 }
 
@@ -1043,6 +1103,7 @@ const SQL_UPDATE_OUTPUT = `
           stderr = CASE WHEN kit_execution_json IS NULL THEN @stderr ELSE '' END,
           output_truncated = @output_truncated
       WHERE id = @id
+        AND status IN (SELECT value FROM json_each(@expected_json))
     `;
 
 const SQL_UPDATE_PROGRESS = `
@@ -1806,13 +1867,33 @@ export class SqliteJobStore implements JobStore, ValidationRunStore {
     ]);
   }
 
-  async heartbeat(instanceId: string): Promise<void> {
+  async heartbeat(instanceId: string): Promise<HeartbeatOutcome> {
     // Advance the observability row AND the authoritative per-job lease. The
     // job-lease UPDATE is what serializes against the sweep on the row lock.
-    await this.execSql(SQL_HEARTBEAT_INSTANCE, [{ instance_id: instanceId }]);
-    await this.execSql(SQL_HEARTBEAT_JOBS, [
-      { instance_id: instanceId, lease_ttl_ms: this.leaseTtlMs },
-    ]);
+    //
+    // ONE transaction, matching Postgres. As two, each `execSql` opened its own
+    // `driver.transaction("write")` and the sweep could commit between them:
+    // tx1 said the instance was alive, the sweep orphaned its jobs, and tx2's
+    // `WHERE status IN ('queued','running')` then matched nothing. The instance
+    // was alive and its jobs were orphaned, and the `void` return meant nobody
+    // learned. Two `.run()` calls with no yield between them could not do this.
+    await this.ensureSchema();
+    return this.driver.transaction("write", async conn => {
+      const instance = await this.execSql(
+        SQL_HEARTBEAT_INSTANCE,
+        [{ instance_id: instanceId }],
+        conn
+      );
+      const leases = await this.execSql(
+        SQL_HEARTBEAT_JOBS,
+        [{ instance_id: instanceId, lease_ttl_ms: this.leaseTtlMs }],
+        conn
+      );
+      return {
+        instanceRowRefreshed: Number(instance.changes) > 0,
+        jobLeasesAdvanced: Number(leases.changes),
+      };
+    });
   }
 
   async deregisterInstance(instanceId: string): Promise<void> {
@@ -1965,16 +2046,19 @@ export class SqliteJobStore implements JobStore, ValidationRunStore {
     id: string,
     stdout: string,
     stderr: string,
-    outputTruncated: boolean
-  ): Promise<void> {
-    await this.execSql(SQL_UPDATE_OUTPUT, [
+    outputTruncated: boolean,
+    expectedStatuses: readonly JobStoreStatus[]
+  ): Promise<boolean> {
+    const result = await this.execSql(SQL_UPDATE_OUTPUT, [
       {
         id,
         stdout,
         stderr,
         output_truncated: outputTruncated ? 1 : 0,
+        expected_json: JSON.stringify([...expectedStatuses]),
       },
     ]);
+    return Number(result.changes) > 0;
   }
 
   async recordProgress(id: string, progressJson: string): Promise<void> {
@@ -2340,6 +2424,34 @@ export class SqliteJobStore implements JobStore, ValidationRunStore {
     );
   }
 
+  async finalizeValidationReceipt(
+    receipt: ValidationReceiptRecord
+  ): Promise<ValidationReceiptRecord> {
+    await this.ensureSchema();
+    return this.driver.transaction("write", async conn => {
+      await this.recordValidationReceipt(receipt, conn);
+      const finalized = await this.execSql(
+        `UPDATE validation_runs SET status = 'finalized'
+           WHERE validation_id = ? AND owner_principal = ?`,
+        [receipt.validationId, receipt.ownerPrincipal],
+        conn
+      );
+      if (Number(finalized.changes) !== 1) {
+        throw new Error(
+          `Validation run ${receipt.validationId} is missing or owned by another principal; ` +
+            `the receipt was not minted`
+        );
+      }
+      const stored = await this.getValidationReceipt(receipt.validationId, conn);
+      if (!stored) {
+        throw new Error(
+          `Validation receipt for ${receipt.validationId} was not readable after its own insert`
+        );
+      }
+      return stored;
+    });
+  }
+
   async getValidationReceipt(
     validationId: string,
     conn?: StorageConnection
@@ -2646,17 +2758,21 @@ export class MemoryJobStore implements JobStore {
   // only ever one owner and no cross-process visibility).
   async registerInstance(_meta: GatewayInstanceMeta): Promise<void> {}
 
-  async heartbeat(instanceId: string): Promise<void> {
+  async heartbeat(instanceId: string): Promise<HeartbeatOutcome> {
     // Still advance in-memory leases for parity (harmless; recover is a no-op).
     const deadline = Date.now() + this.leaseTtlMs;
+    let jobLeasesAdvanced = 0;
     for (const row of this.rows.values()) {
       if (
         row.ownerInstance === instanceId &&
         (row.status === "queued" || row.status === "running")
       ) {
         row.leaseDeadline = deadline;
+        jobLeasesAdvanced++;
       }
     }
+    // There is no instance table in-process, and one owner by construction.
+    return { instanceRowRefreshed: true, jobLeasesAdvanced };
   }
 
   async deregisterInstance(_instanceId: string): Promise<void> {}
@@ -2740,13 +2856,16 @@ export class MemoryJobStore implements JobStore {
     id: string,
     stdout: string,
     stderr: string,
-    outputTruncated: boolean
-  ): Promise<void> {
+    outputTruncated: boolean,
+    expectedStatuses: readonly JobStoreStatus[]
+  ): Promise<boolean> {
     const row = this.rows.get(id);
-    if (!row) return;
+    if (!row) return false;
+    if (!expectedStatuses.includes(row.status)) return false;
     row.stdout = row.kitExecution ? "" : stdout;
     row.stderr = row.kitExecution ? "" : stderr;
     row.outputTruncated = outputTruncated;
+    return true;
   }
 
   async recordProgress(id: string, progressJson: string): Promise<void> {
@@ -3108,8 +3227,8 @@ export class PostgresJobStore implements JobStore, ValidationRunStore {
     await this.call("registerInstance", meta);
   }
 
-  async heartbeat(instanceId: string): Promise<void> {
-    await this.call("heartbeat", instanceId);
+  async heartbeat(instanceId: string): Promise<HeartbeatOutcome> {
+    return this.call("heartbeat", instanceId);
   }
 
   async deregisterInstance(instanceId: string): Promise<void> {
@@ -3179,9 +3298,10 @@ export class PostgresJobStore implements JobStore, ValidationRunStore {
     id: string,
     stdout: string,
     stderr: string,
-    outputTruncated: boolean
-  ): Promise<void> {
-    await this.call("recordOutput", id, stdout, stderr, outputTruncated);
+    outputTruncated: boolean,
+    expectedStatuses: readonly JobStoreStatus[]
+  ): Promise<boolean> {
+    return this.call("recordOutput", id, stdout, stderr, outputTruncated, [...expectedStatuses]);
   }
 
   async recordProgress(id: string, progressJson: string): Promise<void> {
@@ -3332,6 +3452,12 @@ export class PostgresJobStore implements JobStore, ValidationRunStore {
 
   async recordValidationReceipt(receipt: ValidationReceiptRecord): Promise<void> {
     await this.call("recordValidationReceipt", receipt);
+  }
+
+  async finalizeValidationReceipt(
+    receipt: ValidationReceiptRecord
+  ): Promise<ValidationReceiptRecord> {
+    return rowToValidationReceiptRecord(await this.call("finalizeValidationReceipt", receipt));
   }
 
   async getValidationReceipt(validationId: string): Promise<ValidationReceiptRecord | null> {

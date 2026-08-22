@@ -200,7 +200,10 @@ describe("AsyncJobManager + JobStore (durability + dedup)", () => {
         startedAt,
         pid: 123,
       });
-      await store.recordOutput("captured-output", "usable provider response\n", "", false);
+      await store.recordOutput("captured-output", "usable provider response\n", "", false, [
+        "queued",
+        "running",
+      ]);
       await rec.logStart({
         correlationId: "corr-captured-output",
         cli: "grok",

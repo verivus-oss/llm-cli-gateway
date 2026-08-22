@@ -29,7 +29,9 @@ import {
   computeRequestKey,
   isValidationRunStore,
   type AcknowledgedKitAttemptRelease,
+  type HeartbeatOutcome,
   type JobRecord,
+  type JobStoreStatus,
   type KitAttemptFenceResult,
   type ValidationJobAdmission,
 } from "./job-store.js";
@@ -839,6 +841,13 @@ interface AsyncJobRecord {
   resolveTerminalHookCompletion?: (success: boolean) => void;
   terminalHookOutcome?: boolean;
   outputDirty: boolean; // true if stdout/stderr changed since last DB flush
+  /**
+   * A status-fenced `recordOutput` was rejected, so the durable row is no
+   * longer this instance's to write output to. Latched to stop one rejected
+   * write per flush interval; cleared if this instance's own terminal write is
+   * later admitted, because that wins the row back.
+   */
+  durableOutputRowLost?: boolean;
   /**
    * Serialises this job's durable output writes. PER JOB, not global: two
    * different jobs have no ordering relationship and serialising them would be
@@ -1733,7 +1742,15 @@ export class AsyncJobManager {
       // AWAITED: unawaited, a rejected heartbeat skipped this catch entirely and
       // the failure counters below were reset as though it had succeeded, so a
       // dead lease kept reporting healthy.
-      await this.store.heartbeat(this.instanceId);
+      //
+      // The id set is taken on BOTH sides of the write. A job open at both
+      // instants was open when the statement ran, because a job status only
+      // ever moves toward terminal, so a lease that was not advanced for one of
+      // them is a row some other writer took.
+      const openBefore = this.openDurableJobIds();
+      const outcome = await this.store.heartbeat(this.instanceId);
+      const heldThroughout = [...this.openDurableJobIds()].filter(id => openBefore.has(id)).length;
+      await this.reportHeartbeatOutcome(outcome, heldThroughout);
       this.consecutiveHeartbeatFailures = 0;
       if (!this.durableAdmission) {
         this.consecutiveHeartbeatSuccesses++;
@@ -1777,6 +1794,50 @@ export class AsyncJobManager {
   }
 
   /** #139: the periodic orphan reaper. */
+  /** Jobs this instance launched that its durable row should still show open. */
+  private openDurableJobIds(): Set<string> {
+    const open = new Set<string>();
+    for (const job of this.jobs.values()) {
+      if (job.hydratedFromStore) continue;
+      if (job.status === "queued" || job.status === "running") open.add(job.id);
+    }
+    return open;
+  }
+
+  /**
+   * Act on what the heartbeat reported, because `void` reported nothing.
+   *
+   * Two facts the previous contract could not carry. An instance row that no
+   * longer exists was GC'd, so every other instance already treats this one as
+   * dead; `registerInstance` is an upsert, so re-issuing it is the repair. And
+   * zero leases advanced while this instance still holds open jobs is the
+   * split-heartbeat symptom itself: alive instance, orphaned jobs.
+   */
+  private async reportHeartbeatOutcome(
+    outcome: HeartbeatOutcome,
+    heldThroughout: number
+  ): Promise<void> {
+    if (!this.store) return;
+    if (outcome.jobLeasesAdvanced === 0 && heldThroughout > 0) {
+      logWarn(
+        this.logger,
+        `#139 heartbeat advanced no job leases while this instance holds ${heldThroughout} open job(s); ` +
+          `another writer has taken those rows`
+      );
+    }
+    if (outcome.instanceRowRefreshed) return;
+    logWarn(
+      this.logger,
+      `#139 heartbeat found no gateway_instances row for ${this.instanceId}; re-registering`
+    );
+    await this.store.registerInstance({
+      instanceId: this.instanceId,
+      role: this.lease.role ?? "gateway",
+      hostname: this.hostname,
+      pid: this.instancePid,
+    });
+  }
+
   private startReaper(): void {
     // `void`: a timer cannot await its callback, and this tick is deliberately
     // fire-and-forget. The body below owns its own errors, so nothing escapes.
@@ -3348,14 +3409,71 @@ export class AsyncJobManager {
 
   /**
    * Whether this instance may still write this job's output to the durable
-   * store. `recordOutput` carries no owner predicate in any backend, so the
-   * single rule for EVERY route that calls it is: never write to a row whose
-   * terminal transition another writer won. Before any terminal write is
-   * attempted the row is ours by construction (we hold the lease), so this only
-   * closes once a `recordComplete` of ours has been guard-rejected.
+   * store. This is the in-process half of the rule the store's status fence
+   * enforces durably: never write to a row whose terminal transition another
+   * writer won. Before any terminal write is attempted the row is ours by
+   * construction (we hold the lease), so this only closes once a
+   * `recordComplete` of ours has been guard-rejected, or a fenced write has
+   * told us the row moved.
    */
   private mayWriteOutputFor(job: AsyncJobRecord): boolean {
+    // A rejected fenced write means the row moved out from under this instance
+    // (a foreign sweep orphaned it), so stop issuing writes that cannot land
+    // rather than re-issuing one per flush interval. Cleared again if our own
+    // recordComplete later wins the row back.
+    if (job.durableOutputRowLost) return false;
     return !job.terminalPersisted || job.terminalRowOwned;
+  }
+
+  /**
+   * The durable statuses on which THIS instance owns this job's output row.
+   *
+   * ONE decision for both `recordOutput` call sites, so the fence cannot be
+   * right at the routine flush and wrong at the late write. Before our terminal
+   * write lands, the row is ours under the lease and must still be open. After
+   * it lands and was admitted, the only row we own is the one carrying the
+   * terminal state we committed, and nothing may move a terminal row again.
+   */
+  private ownedOutputStatuses(job: AsyncJobRecord): JobStoreStatus[] {
+    // Read at WRITE time, not at the moment the flush was decided on. Decision
+    // time would additionally reject a queued flush whose own terminal write
+    // landed while it waited, which is a real (and pre-existing) truncation,
+    // but it is not this defect and it cannot be told apart from a foreign
+    // writer without more state than the rejection currently carries.
+    if (job.terminalPersisted && job.terminalRowOwned) return [job.status];
+    return ["queued", "running"];
+  }
+
+  /**
+   * Run one fenced output write and report whether the row was still ours.
+   *
+   * A `false` here is the loss the unfenced write used to hide, so it is logged
+   * once per job rather than discarded.
+   */
+  private async writeOwnedOutput(
+    job: AsyncJobRecord,
+    stdout: string,
+    stderr: string,
+    truncated: boolean
+  ): Promise<void> {
+    if (!this.store) return;
+    let applied = true;
+    await this.safeStoreCall("recordOutput", async () => {
+      applied = await this.store!.recordOutput(
+        job.id,
+        stdout,
+        stderr,
+        truncated,
+        this.ownedOutputStatuses(job)
+      );
+    });
+    if (applied || job.durableOutputRowLost) return;
+    job.durableOutputRowLost = true;
+    logWarn(
+      this.logger,
+      `Job ${job.id} durable output write rejected: another writer owns the row, ` +
+        `so this instance's output is no longer being persisted for it`
+    );
   }
 
   /**
@@ -3370,10 +3488,10 @@ export class AsyncJobManager {
     // Keep process output in memory until terminal metadata has been extracted;
     // never stream that raw material to the durable job store.
     if (job.kitExecution) return;
-    // The routine flush is an unfenced `recordOutput` too, so it needs the same
-    // ownership rule as the late-output write: once some other writer has
-    // terminalized this row, a child chunk arriving after the throttle window
-    // would otherwise overwrite their result.
+    // The routine flush needs the same ownership rule as the late-output write:
+    // once some other writer has terminalized this row, a child chunk arriving
+    // after the throttle window would otherwise overwrite their result. The
+    // store's fence is the authority; this only saves a doomed round trip.
     if (!this.mayWriteOutputFor(job)) {
       job.outputDirty = false;
       return;
@@ -3392,11 +3510,7 @@ export class AsyncJobManager {
     const previous = job.outputWriteChain ?? Promise.resolve();
     const write = previous
       .catch(() => undefined)
-      .then(() =>
-        this.safeStoreCall("recordOutput", () =>
-          this.store!.recordOutput(job.id, stdout, stderr, truncated)
-        )
-      );
+      .then(() => this.writeOwnedOutput(job, stdout, stderr, truncated));
     job.outputWriteChain = write;
     // Registered so dispose() drains it. Without this, shutdown can complete
     // with an output write outstanding, which is the close() drain defect one
@@ -3545,14 +3659,17 @@ export class AsyncJobManager {
       job.terminalPersisted = true;
       job.terminalPersistenceAcknowledged = true;
       // Ownership is a SEPARATE fact from settlement, and only ownership
-      // licenses the unfenced late-output write (here and at close).
+      // licenses the late-output write (here and at close).
       job.terminalRowOwned = applied;
+      // An admitted terminal write wins the row back, including from the
+      // mistakenly-orphaned case #139 deliberately still admits.
+      if (applied) job.durableOutputRowLost = false;
       if (!applied) {
         // The guard rejected this write, which means SOME OTHER writer already
         // committed a terminal state for this row. On a shared Postgres store
-        // that writer is another gateway instance, and `recordOutput` carries
-        // no owner predicate, so forcing our bytes in here would overwrite an
-        // outcome we do not own. Leave the row alone and say so: losing our
+        // that writer is another gateway instance, so forcing our bytes in
+        // here would overwrite an outcome we do not own, and the status fence
+        // would reject it. Leave the row alone and say so: losing our
         // copy of the output is strictly better than corrupting theirs.
         this.logger.info(
           `Job ${job.id} terminal write rejected: row was already terminal, leaving its output untouched`,
@@ -3575,17 +3692,14 @@ export class AsyncJobManager {
    * terminal state wins" (#139) is preserved. Kit jobs are excluded because
    * their raw process output must never reach the durable store.
    *
-   * Only ever called on a row whose terminal transition this instance won. A
-   * row terminalized by someone else is left untouched, because `recordOutput`
-   * has no owner predicate and could otherwise clobber another instance's
-   * result on a shared Postgres store.
+   * Only ever called on a row whose terminal transition this instance won, and
+   * fenced on that exact terminal status, so a row terminalized by someone else
+   * is left untouched rather than clobbered on a shared Postgres store.
    */
   private async persistLateOutput(job: AsyncJobRecord): Promise<void> {
     job.outputDirty = false;
     if (!this.store || job.kitExecution) return;
-    await this.safeStoreCall("recordOutput", () =>
-      this.store!.recordOutput(job.id, job.stdout, job.stderr, job.outputTruncated)
-    );
+    await this.writeOwnedOutput(job, job.stdout, job.stderr, job.outputTruncated);
   }
 
   /**

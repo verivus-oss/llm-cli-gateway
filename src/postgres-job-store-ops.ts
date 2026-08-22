@@ -778,20 +778,23 @@ export function createPostgresJobStoreOps(
         const instanceId = args[0];
         // Advance the observability row AND the authoritative per-job lease so
         // heartbeat and sweep are same-row UPDATEs (serialize on the row lock).
-        await withClient(async client => {
-          await affected(
+        return await withClient(async client => {
+          const instance = await affected(
             client,
             `UPDATE gateway_instances SET last_heartbeat = ${PG_NOW_MS} WHERE instance_id = $1`,
             [instanceId]
           );
-          await affected(
+          const leases = await affected(
             client,
             `UPDATE jobs SET lease_deadline = ${PG_NOW_MS} + $2
              WHERE owner_instance = $1 AND status IN ('queued', 'running')`,
             [instanceId, config.leaseTtlMs]
           );
+          return {
+            instanceRowRefreshed: (instance.rowCount ?? 0) > 0,
+            jobLeasesAdvanced: leases.rowCount ?? 0,
+          };
         });
-        return null;
       }
       case "deregisterInstance": {
         await poolAffected("DELETE FROM gateway_instances WHERE instance_id = $1", [args[0]]);
@@ -947,16 +950,20 @@ export function createPostgresJobStoreOps(
         );
         return result.rowCount ?? 0;
       }
-      case "recordOutput":
-        await poolAffected(
+      case "recordOutput": {
+        // Status-fenced, matching SQL_UPDATE_OUTPUT on SQLite. Unfenced, a
+        // flush landing after another writer's sweep moved the body of an
+        // already-orphaned row while its status stayed monotonic.
+        const result = await poolAffected(
           `UPDATE jobs
          SET stdout = CASE WHEN kit_execution_json IS NULL THEN $2 ELSE '' END,
              stderr = CASE WHEN kit_execution_json IS NULL THEN $3 ELSE '' END,
              output_truncated = $4
-         WHERE id = $1`,
+         WHERE id = $1 AND status = ANY($5::text[])`,
           args
         );
-        return null;
+        return (result.rowCount ?? 0) > 0;
+      }
       case "recordProgress":
         await poolAffected("UPDATE jobs SET progress_json = $2 WHERE id = $1", args);
         return null;
@@ -1249,6 +1256,60 @@ export function createPostgresJobStoreOps(
           ]
         );
         return null;
+      }
+      case "finalizeValidationReceipt": {
+        // Receipt insert, run finalization and read-back in ONE transaction, so
+        // there is no state where the receipt exists with the run still
+        // `running`, or the run reads `finalized` with no receipt row.
+        const receipt = args[0];
+        return await withClient(async client => {
+          await affected(
+            client,
+            `INSERT INTO validation_receipts
+             (validation_id, owner_principal, minted_at, schema_version, report_json,
+              canonical_sha256, prev_sha256, seq, signature, models,
+              has_material_disagreement, confidence)
+           VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
+           ON CONFLICT (validation_id) DO NOTHING`,
+            [
+              receipt.validationId,
+              receipt.ownerPrincipal,
+              receipt.mintedAt,
+              receipt.schemaVersion,
+              receipt.reportJson,
+              receipt.canonicalSha256,
+              receipt.prevSha256,
+              receipt.seq,
+              receipt.signature,
+              JSON.stringify(receipt.models),
+              receipt.hasMaterialDisagreement,
+              receipt.confidence,
+            ]
+          );
+          const finalized = await affected(
+            client,
+            `UPDATE validation_runs SET status = 'finalized'
+             WHERE validation_id = $1 AND owner_principal = $2`,
+            [receipt.validationId, receipt.ownerPrincipal]
+          );
+          if ((finalized.rowCount ?? 0) !== 1) {
+            throw new Error(
+              `Validation run ${receipt.validationId} is missing or owned by another principal; ` +
+                `the receipt was not minted`
+            );
+          }
+          const stored = await rows(
+            client,
+            "SELECT * FROM validation_receipts WHERE validation_id = $1",
+            [receipt.validationId]
+          );
+          if (!stored.rows[0]) {
+            throw new Error(
+              `Validation receipt for ${receipt.validationId} was not readable after its own insert`
+            );
+          }
+          return stored.rows[0];
+        });
       }
       case "getValidationReceipt": {
         const result = await poolRows(
