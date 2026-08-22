@@ -142,7 +142,7 @@ describe("Layer 6 doctor report (U20)", () => {
     const report = createDoctorReport({});
     validateAgainstSchema(report, schema, "doctor");
 
-    expect(report.schema_version).toBe("1.1");
+    expect(report.schema_version).toBe("1.2");
     expect(report.gateway.name).toBe("llm-cli-gateway");
     expect(report.transport.default).toBe("stdio");
     expect(report.endpoint_exposure.mode).toBe("local_only");

@@ -52,7 +52,9 @@ describe("the policy is one declaration, and its destructive bounds are OFF", ()
     expect(retentionCutoffIso(policy, "requests", now)).toBe(
       new Date(now - 90 * MILLIS_PER_DAY).toISOString()
     );
-    expect(retentionCutoffIso(resolveRetentionPolicy({ jobRetentionDays: 30 }), "requests", now)).toBeNull();
+    expect(
+      retentionCutoffIso(resolveRetentionPolicy({ jobRetentionDays: 30 }), "requests", now)
+    ).toBeNull();
   });
 
   it("answers a hand-built config with the same resolver, not a second opinion", () => {
@@ -108,9 +110,11 @@ describe("the transcript termination", () => {
   function ids(table: string, column: string): string[] {
     const db = openDatabase(dbPath);
     try {
-      return (db.prepare(`SELECT ${column} AS k FROM ${table} ORDER BY ${column}`).all() as Array<{
-        k: string;
-      }>).map(row => row.k);
+      return (
+        db.prepare(`SELECT ${column} AS k FROM ${table} ORDER BY ${column}`).all() as Array<{
+          k: string;
+        }>
+      ).map(row => row.k);
     } finally {
       db.close();
     }
@@ -170,12 +174,14 @@ describe("the transcript termination", () => {
     // written down, and this proves what the driver was actually asked for.
     const classes: string[] = [];
     const real = SqliteStorageDriver.prototype.transaction;
-    const spy = vi
-      .spyOn(SqliteStorageDriver.prototype, "transaction")
-      .mockImplementation(function (this: SqliteStorageDriver, operation, fn) {
-        classes.push(operation);
-        return real.call(this, operation, fn);
-      });
+    const spy = vi.spyOn(SqliteStorageDriver.prototype, "transaction").mockImplementation(function (
+      this: SqliteStorageDriver,
+      operation,
+      fn
+    ) {
+      classes.push(operation);
+      return real.call(this, operation, fn);
+    });
     try {
       await recorder.evictExpiredRequests("2030-01-01T00:00:00.000Z", 500);
     } finally {
@@ -255,7 +261,11 @@ describe("the wedged-validation-run termination", () => {
       intent: "validate",
       createdAt,
       requestJson: JSON.stringify({ question: "q", modelList: ["claude"] }),
-      providerLinks: jobIds.map(jobId => ({ provider: "claude", jobId, correlationId: `c-${jobId}` })),
+      providerLinks: jobIds.map(jobId => ({
+        provider: "claude",
+        jobId,
+        correlationId: `c-${jobId}`,
+      })),
       judgeLink: null,
       status,
     });
@@ -345,12 +355,14 @@ describe("the wedged-validation-run termination", () => {
   it("runs as `retention`, not as `write`", async () => {
     const classes: string[] = [];
     const real = SqliteStorageDriver.prototype.transaction;
-    const spy = vi
-      .spyOn(SqliteStorageDriver.prototype, "transaction")
-      .mockImplementation(function (this: SqliteStorageDriver, operation, fn) {
-        classes.push(operation);
-        return real.call(this, operation, fn);
-      });
+    const spy = vi.spyOn(SqliteStorageDriver.prototype, "transaction").mockImplementation(function (
+      this: SqliteStorageDriver,
+      operation,
+      fn
+    ) {
+      classes.push(operation);
+      return real.call(this, operation, fn);
+    });
     try {
       await store.evictWedgedValidationRuns(CUTOFF, 500);
     } finally {

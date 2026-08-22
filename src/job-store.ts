@@ -1209,7 +1209,6 @@ const SQL_DELETE_EXPIRED = `
         AND COALESCE(mcp_artifact_cleanup_pending, 0) = 0
     `;
 
-
 const SQL_MARK_RUNNING = `
       UPDATE jobs
       SET status = 'running', pid = @pid, lease_deadline = ${SQLITE_NOW_MS} + @lease_ttl_ms
@@ -2491,10 +2490,10 @@ export class SqliteJobStore implements JobStore, ValidationRunStore {
       // predicate in both DELETEs would re-evaluate it after the link rows had
       // gone, and the third clause reads those very link rows: the run delete
       // would then match a different, larger set than the one counted.
-      const wedged = await conn.query<{ validation_id: string }>(SQL_SELECT_WEDGED_VALIDATION_RUNS, [
-        createdBeforeIso,
-        limit,
-      ]);
+      const wedged = await conn.query<{ validation_id: string }>(
+        SQL_SELECT_WEDGED_VALIDATION_RUNS,
+        [createdBeforeIso, limit]
+      );
       if (wedged.length === 0) return 0;
       const ids = wedged.map(row => row.validation_id);
       const placeholders = ids.map(() => "?").join(", ");

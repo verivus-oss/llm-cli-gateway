@@ -33,6 +33,11 @@ import {
   type ProvidersConfig,
   type RemoteOAuthConfigDiagnostics,
 } from "./config.js";
+import {
+  persistenceRetentionPolicy,
+  unboundedRetentionSubsystems,
+  type RetentionSubsystemId,
+} from "./storage/retention.js";
 import { telemetryTierFor, type TelemetryTier } from "./lcr-telemetry.js";
 import { API_CATALOG_AS_OF, PRICING_AS_OF, getModelCost, modelIdToFamily } from "./pricing.js";
 import { computeLcrPriorsFromDb } from "./lcr-priors.js";
@@ -538,11 +543,24 @@ export interface StorageHealthReport {
     shares_flight_recorder_file: boolean;
   };
   retention: {
-    /** Configured for the job store. Nothing applies it to the transcript. */
+    /** The job store's bound. Kept under its old name and old meaning. */
     days: number | null;
-    /** Subsystems in the recorder's file that no retention policy bounds. */
+    /**
+     * Subsystems the resolved policy does not bound, DERIVED from it. It was a
+     * hard-coded `["requests"]`, which is the second place a retention decision
+     * was being taken.
+     */
     unbounded: string[];
+    /** Days per subsystem, or null where nothing deletes. The dry-run's basis. */
+    policy: Record<string, number | null> | null;
+    /** What a `requests` sweep would delete right now. Counted, never deleted. */
     requests_beyond_retention: number | null;
+    /**
+     * Bytes a compaction would return to the filesystem. SQLite only: a DELETE
+     * frees pages onto a freelist and never shrinks the file, so retention
+     * alone leaves a 1.2 GB file at 1.2 GB.
+     */
+    reclaimable_bytes: number | null;
   };
   /**
    * Tables in the recorder's file belonging to other subsystems, with their
@@ -554,7 +572,7 @@ export interface StorageHealthReport {
 }
 
 export interface DoctorReport {
-  schema_version: "1.1";
+  schema_version: "1.2";
   ok: boolean;
   storage: StorageHealthReport;
   generated_at: string;
@@ -1505,10 +1523,27 @@ export function unscannedStorageHealth(): StorageHealthReport {
       newest_request: null,
     },
     job_store: { backend: "unknown", path: null, shares_flight_recorder_file: false },
-    retention: { days: null, unbounded: [], requests_beyond_retention: null },
+    retention: {
+      days: null,
+      unbounded: [],
+      policy: null,
+      requests_beyond_retention: null,
+      reclaimable_bytes: null,
+    },
     co_resident: [],
     warnings: [],
   };
+}
+
+/**
+ * A file this big with no bound is the symptom an operator feels. 256 MiB is
+ * well below the measured 1.2 GB and well above any fresh installation, so it
+ * fires long before the file is a problem and never on a quiet one.
+ */
+const UNBOUNDED_TRANSCRIPT_WARN_BYTES = 256 * 1024 * 1024;
+
+function policyDays(persistence: PersistenceConfig, id: RetentionSubsystemId): number | null {
+  return persistenceRetentionPolicy(persistence).days[id];
 }
 
 /** doctor writes its own report; the factory's progress lines are not part of it. */
@@ -1553,6 +1588,9 @@ export async function collectStorageHealth(
       ),
     };
     block.retention.days = persistence.retentionDays;
+    const policy = persistenceRetentionPolicy(persistence);
+    block.retention.policy = { ...policy.days };
+    block.retention.unbounded = unboundedRetentionSubsystems(policy);
   }
 
   if (!dbPath) {
@@ -1587,10 +1625,14 @@ export async function collectStorageHealth(
   }
   const onSqliteFile = recorder instanceof FlightRecorder;
 
+  // The `requests` bound when one is set, otherwise the job bound, which is
+  // what this line has always used. Reporting the JOB window as "requests
+  // beyond retention" was the closest thing to a transcript number that
+  // existed; now it is only a fallback, and a set bound answers with its own.
+  const cutoffDays =
+    (persistence ? policyDays(persistence, "requests") : null) ?? block.retention.days;
   const cutoff =
-    block.retention.days !== null
-      ? new Date(Date.now() - block.retention.days * 86_400_000).toISOString()
-      : undefined;
+    cutoffDays !== null ? new Date(Date.now() - cutoffDays * 86_400_000).toISOString() : undefined;
   try {
     const stats = await recorder.readStorageStats(cutoff);
     block.flight_recorder.schema_version = stats.schemaVersion;
@@ -1598,6 +1640,7 @@ export async function collectStorageHealth(
     block.flight_recorder.oldest_request = stats.oldestRequest;
     block.flight_recorder.newest_request = stats.newestRequest;
     block.retention.requests_beyond_retention = stats.requestsBeyondRetention;
+    block.retention.reclaimable_bytes = stats.reclaimableBytes;
     block.co_resident = stats.coResident.map((row: CoResidentTableStats) => ({
       table: row.table,
       rows: row.rows,
@@ -1635,12 +1678,20 @@ export async function collectStorageHealth(
   const recorderMessage = flightRecorderHealthMessage(health);
   if (recorderMessage) block.warnings.push(recorderMessage);
 
-  // Retention is expressed for the job store only. `requests` and
-  // `validation_runs` grow without limit, which is why a 1.2 GB transcript file
-  // is not a fault and is also nobody's job.
-  block.retention.unbounded = ["requests"];
-  if (block.co_resident.some(row => row.table === "validation_runs")) {
-    block.retention.unbounded.push("validation_runs");
+  // `unbounded` is set from the resolved policy above, not decided here.
+  // s11 left the two destructive bounds OFF by default, so on an unchanged
+  // installation this still reports `requests` and `wedgedValidationRuns`, and
+  // the numbers beside it are what an operator needs to decide otherwise.
+  if (
+    block.retention.unbounded.includes("requests") &&
+    (block.flight_recorder.file_bytes ?? 0) > UNBOUNDED_TRANSCRIPT_WARN_BYTES
+  ) {
+    block.warnings.push(
+      `The flight recorder holds ${block.flight_recorder.request_rows ?? "?"} request(s) in ` +
+        `${Math.round((block.flight_recorder.file_bytes ?? 0) / 1_048_576)} MiB with NO retention bound. ` +
+        `Set [persistence.retention].requests = <days> to bound it; ` +
+        `deleting rows frees pages but not bytes, so run 'llm-cli-gateway storage compact' after.`
+    );
   }
   for (const row of block.co_resident) {
     if (!row.live && row.rows > 0) {
@@ -1724,7 +1775,7 @@ export function createDoctorReport(
     opts.personalConfigReadiness ?? loadPersonalConfigReadinessReport(env);
 
   const report: DoctorReport = {
-    schema_version: "1.1",
+    schema_version: "1.2",
     ok: true,
     storage: opts.storage ?? unscannedStorageHealth(),
     generated_at: generatedAt,

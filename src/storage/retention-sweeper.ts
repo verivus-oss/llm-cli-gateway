@@ -114,9 +114,16 @@ export class RetentionSweeper {
     this.timer = null;
   }
 
-  /** Count what a sweep WOULD delete. Deletes nothing. */
-  async preview(): Promise<RetentionSweepReport> {
-    return this.run(false);
+  /**
+   * Count what a sweep WOULD delete. Deletes nothing.
+   *
+   * The policy is a PARAMETER because the most useful preview on a host with
+   * every bound off is the hypothetical one: "if I set 30 days, what goes".
+   * Under the configured policy an unset bound counts nothing, which is
+   * correct and also unhelpful for the decision the operator is making.
+   */
+  async preview(policy: RetentionPolicy = this.options.policy): Promise<RetentionSweepReport> {
+    return this.run(false, policy);
   }
 
   /** Count, then delete, then report what happened. */
@@ -127,7 +134,7 @@ export class RetentionSweeper {
     if (this.inFlight) return this.last ?? emptyRetentionSweepReport(this.nowIso());
     this.inFlight = true;
     try {
-      const report = await this.run(true);
+      const report = await this.run(true, this.options.policy);
       this.last = report;
       this.report(report);
       return report;
@@ -140,10 +147,9 @@ export class RetentionSweeper {
     return new Date(this.options.now?.() ?? Date.now()).toISOString();
   }
 
-  private async run(destructive: boolean): Promise<RetentionSweepReport> {
+  private async run(destructive: boolean, policy: RetentionPolicy): Promise<RetentionSweepReport> {
     const nowMs = this.options.now?.() ?? Date.now();
     const report = emptyRetentionSweepReport(new Date(nowMs).toISOString());
-    const policy = this.options.policy;
 
     const requestsCutoff = retentionCutoffIso(policy, "requests", nowMs);
     if (requestsCutoff !== null) {

@@ -1394,9 +1394,7 @@ export interface FlightRecorderCompaction {
  * the vacuum on the same queue as live writes, and SQLite refuses a VACUUM
  * inside a transaction, so it would fail exactly when the gateway is busy.
  */
-export async function compactFlightRecorderFile(
-  dbPath: string
-): Promise<FlightRecorderCompaction> {
+export async function compactFlightRecorderFile(dbPath: string): Promise<FlightRecorderCompaction> {
   const { statSync } = await import("fs");
   const beforeBytes = statSync(dbPath).size;
   const db = openDatabase(dbPath);

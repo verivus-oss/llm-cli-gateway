@@ -25,7 +25,7 @@
     "next_actions"
   ],
   "properties": {
-    "schema_version": { "const": "1.1" },
+    "schema_version": { "const": "1.2" },
     "ok": { "type": "boolean" },
     "storage": {
       "description": "Storage health for the flight recorder and the job store. Added at schema_version 1.1: 1.0 reported none, so a corrupt or unreadable transcript database produced a report byte-identical to a quiet one. `scanned` is false for a caller that ran no asynchronous scan, and every measurement is null in that case rather than zero.",
@@ -76,12 +76,38 @@
           "additionalProperties": false
         },
         "retention": {
+          "description": "The resolved retention policy and what it would delete. Extended at schema_version 1.2: 1.1 reported the job store's `days` and a hard-coded `unbounded` list, so an operator could see that transcripts were unbounded but not how much that cost or what a bound would remove.",
           "type": "object",
-          "required": ["days", "unbounded", "requests_beyond_retention"],
+          "required": [
+            "days",
+            "unbounded",
+            "policy",
+            "requests_beyond_retention",
+            "reclaimable_bytes"
+          ],
           "properties": {
-            "days": { "type": ["integer", "null"] },
-            "unbounded": { "type": "array", "items": { "type": "string" } },
-            "requests_beyond_retention": { "type": ["integer", "null"] }
+            "days": {
+              "type": ["integer", "null"],
+              "description": "The job store's bound, in days. Unchanged in meaning."
+            },
+            "unbounded": {
+              "type": "array",
+              "items": { "type": "string" },
+              "description": "Subsystems the policy does not bound, derived from it. The two destructive bounds default to OFF, so an unchanged installation lists `requests` and `wedgedValidationRuns` here."
+            },
+            "policy": {
+              "type": ["object", "null"],
+              "additionalProperties": { "type": ["integer", "null"] },
+              "description": "Days per subsystem; null per key means nothing deletes it. null for the whole object means the persistence config could not be read."
+            },
+            "requests_beyond_retention": {
+              "type": ["integer", "null"],
+              "description": "Rows a `requests` sweep would delete right now. A dry run: counted, never deleted. Falls back to the job window when no transcript bound is set."
+            },
+            "reclaimable_bytes": {
+              "type": ["integer", "null"],
+              "description": "Bytes a compaction would return to the filesystem. SQLite only; null on PostgreSQL, where autovacuum reuses the space and there is no operator step. A DELETE frees pages, never bytes."
+            }
           },
           "additionalProperties": false
         },

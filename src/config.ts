@@ -337,11 +337,7 @@ const PersistenceRetentionSchema = z
     jobs: z.number().positive().optional(),
     requests: z.number().positive().optional(),
     wedgedValidationRuns: z.number().min(1).optional(),
-    sweepIntervalMs: z
-      .number()
-      .int()
-      .positive()
-      .default(DEFAULT_RETENTION_SWEEP_INTERVAL_MS),
+    sweepIntervalMs: z.number().int().positive().default(DEFAULT_RETENTION_SWEEP_INTERVAL_MS),
   })
   .strict();
 
@@ -778,9 +774,7 @@ export function loadPersistenceConfig(logger: Logger = noopLogger): PersistenceC
       jobRetentionDays: parsed.retentionDays,
       overrides: {
         ...(parsed.retention.jobs !== undefined ? { jobs: parsed.retention.jobs } : {}),
-        ...(parsed.retention.requests !== undefined
-          ? { requests: parsed.retention.requests }
-          : {}),
+        ...(parsed.retention.requests !== undefined ? { requests: parsed.retention.requests } : {}),
         ...(parsed.retention.wedgedValidationRuns !== undefined
           ? { wedgedValidationRuns: parsed.retention.wedgedValidationRuns }
           : {}),
