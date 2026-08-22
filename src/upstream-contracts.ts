@@ -1108,7 +1108,19 @@ export const UPSTREAM_CLI_CONTRACTS: Record<CliType, CliContract> = {
       agents: subcommand(
         ["agents"],
         "Upstream-declared codex command (auto-catalogued, unverified).",
-        "writes_local_config"
+        "writes_local_config",
+        [],
+        {
+          acknowledgedUpstreamFlags: [
+            "--cd",
+            "--config",
+            "--disable",
+            "--enable",
+            "--no-alt-screen",
+            "--remote",
+            "--remote-auth-token-env",
+          ],
+        }
       ),
       // Auto-declared by `npm run providers:rebaseline`: upstream advertises
       // this command. Catalogued only (exposure defaults to tracked_only, so it
@@ -1117,7 +1129,20 @@ export const UPSTREAM_CLI_CONTRACTS: Record<CliType, CliContract> = {
       "migrate-rollouts": subcommand(
         ["migrate-rollouts"],
         "Upstream-declared codex command (auto-catalogued, unverified).",
-        "writes_local_config"
+        "writes_local_config",
+        [],
+        {
+          acknowledgedUpstreamFlags: [
+            "--apply",
+            "--config",
+            "--disable",
+            "--enable",
+            "--json",
+            "--max-mib-per-second",
+            "--thread",
+            "--verbose",
+          ],
+        }
       ),
       // Auto-declared by `npm run providers:rebaseline`: upstream advertises
       // this command. Catalogued only (exposure defaults to tracked_only, so it
@@ -1126,7 +1151,31 @@ export const UPSTREAM_CLI_CONTRACTS: Record<CliType, CliContract> = {
       queue: subcommand(
         ["queue"],
         "Upstream-declared codex command (auto-catalogued, unverified).",
-        "writes_local_config"
+        "writes_local_config",
+        [],
+        {
+          acknowledgedUpstreamFlags: [
+            "--add-dir",
+            "--approve-for-me",
+            "--cd",
+            "--config",
+            "--dangerously-bypass-approvals-and-sandbox",
+            "--dangerously-bypass-hook-trust",
+            "--disable",
+            "--enable",
+            "--image",
+            "--local-provider",
+            "--message",
+            "--model",
+            "--oss",
+            "--profile",
+            "--remote",
+            "--remote-auth-token-env",
+            "--sandbox",
+            "--strict-config",
+            "--thread",
+          ],
+        }
       ),
       exec: subcommand(
         ["exec"],
@@ -1973,6 +2022,12 @@ export const UPSTREAM_CLI_CONTRACTS: Record<CliType, CliContract> = {
       // a noted one and take capability from a customer who changed nothing,
       // which is the defect this branch opened by undoing. It stays a visible
       // drift finding until it is wired for real.
+      //
+      // `providers:rebaseline --apply` RE-ADDS this line every run: it reads the
+      // binary, not the floor. The comment is documentation; the control is
+      // capability:floor:check, which fails the build. Until the tool consults
+      // the floor before acknowledging a flag, removing this line is a step in
+      // the rebaseline procedure, not a one-time fix.
       "--json-schema",
       "--log-file",
       "--output-format",
