@@ -1699,8 +1699,17 @@ export async function collectStorageHealth(
         `The flight recorder's file also holds an ABANDONED '${row.table}' table of ${row.rows} rows (${row.unfinished} never finished). The live job store is '${block.job_store.backend}'. A direct reader of this file cannot tell that table is frozen.`
       );
     } else if (row.unfinished > 0 && row.table === "validation_runs") {
+      // s11 gave validation_runs a bound, so "nothing covers this" stopped
+      // being true and the warning now names the key instead of the absence.
+      // `unfinished` is `status = 'running'`, which is a SUPERSET of wedged: a
+      // run whose linked jobs are alive is unfinished and is not reapable.
+      const bounded = !block.retention.unbounded.includes("wedgedValidationRuns");
       block.warnings.push(
-        `${row.unfinished} validation run(s) are still 'running' with nothing bounding them; no retention policy covers validation_runs.`
+        `${row.unfinished} validation run(s) are still 'running'. Some may be WEDGED (past the ` +
+          `horizon with every linked job already evicted), which nothing can ever finalize. ` +
+          (bounded
+            ? "[persistence.retention].wedgedValidationRuns is set, so the sweeper reaps those; llm_process_health reports the counts."
+            : "Set [persistence.retention].wedgedValidationRuns = <days> to reap them; llm_process_health reports what that would delete first.")
       );
     }
   }

@@ -5,6 +5,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { loadPersistenceConfig, DEFAULT_JOB_RETENTION_DAYS } from "../config.js";
 import { collectStorageHealth } from "../doctor.js";
 import { FlightRecorder } from "../flight-recorder.js";
+import { openDatabase } from "../sqlite-driver.js";
 import { runStorageCommand } from "../storage-cli.js";
 import { DEFAULT_RETENTION_SWEEP_INTERVAL_MS } from "../storage/retention.js";
 import { noopLogger } from "../logger.js";
@@ -111,6 +112,26 @@ describe("doctor reports the policy rather than deciding one", () => {
     expect(storage.retention.reclaimable_bytes).not.toBeNull();
     expect(storage.retention.reclaimable_bytes).toBeGreaterThanOrEqual(0);
     expect(storage.flight_recorder.file_bytes).toBe(statSync(dbPath).size);
+  });
+
+  it("stops telling an operator that nothing can cover validation_runs", async () => {
+    // A co-resident validation_runs table with a non-terminal row, which is the
+    // shape the measured host has. The warning used to end "no retention policy
+    // covers validation_runs", which s11 made untrue; it must name the key.
+    const db = openDatabase(dbPath);
+    try {
+      db.exec(
+        "CREATE TABLE IF NOT EXISTS validation_runs (validation_id TEXT PRIMARY KEY, status TEXT)"
+      );
+      db.prepare("INSERT INTO validation_runs VALUES (?, ?)").run("v-stuck", "running");
+    } finally {
+      db.close();
+    }
+    const storage = await collectStorageHealth(recorder);
+    const warning = storage.warnings.find(line => line.includes("validation run(s)"));
+    expect(warning).toBeDefined();
+    expect(warning).toMatch(/\[persistence\.retention\]\.wedgedValidationRuns/);
+    expect(warning).not.toMatch(/no retention policy covers/);
   });
 
   it("counts what a bound would take, without one being set", async () => {
