@@ -1,33 +1,50 @@
-# Changelog (draft entry for 3.1.0)
+# Changelog (draft entry for 3.2.0)
 
-Consolidates 3.1.0-rc.1 through 3.1.0-rc.8 plus the post-rc.8 release-blocker
-fixes into one release entry. The cross-LLM review fixes (#269 through #272) and
-the grok 1.0.4 / devin 3000.4.25 contract rebaseline shipped in rc.8, so they are
-no longer a separate "after rc.7" set.
+Consolidates the 3.1.0 candidate line, the post-rc.8 release-blocker fixes and
+the storage-unification programme into one release entry. The cross-LLM review
+fixes (#269 through #272) and the grok 1.0.4 / devin 3000.4.25 contract
+rebaseline shipped in rc.8, so they are no longer a separate "after rc.7" set.
+The number moves to 3.2.0 because the storage programme lands on top of that
+line; `package.json` is already at `3.2.0-rc.1`.
 
 Verified against the code, not against the candidate notes. Every claim in the
 three entries at the head of `### Fixed` was re-checked mechanically before this
 was written: contract state by enumerating declarations per provider, binary
 behaviour by probing the installed CLIs with a control that proves the probe can
 detect the thing it is looking for, and telemetry claims against a month of
-production flight-recorder rows.
+production flight-recorder rows. The storage entries were re-checked the same
+way, against `src/storage/`, `src/flight-recorder.ts`,
+`migrations/022_flight_recorder_transcripts.sql`, `setup/status.schema.json` and
+the recorded node status in `docs/plans/storage-unification.dag.toml`, rather
+than against the programme's own summary.
 
-Commit count is taken at the tip of `fix/p0-release-blockers` (PR #281) and must
-be re-taken when the stable is cut, since the merge commit will move it.
+Commit count is taken at `1dbc8d6`, the tip of `fix/p0-release-blockers` (PR
+#281), and must be re-taken when the stable is cut, since the merge commit will
+move it.
 
-## [3.1.0] - 2026-08-18: provider contracts that maintain themselves, one selector for sessions
+## [3.2.0] - 2026-08-22: provider contracts that maintain themselves, one storage port under all three subsystems
 
-295 commits since 3.0.0. The gateway now notices when a provider CLI has moved
+500 commits since 3.0.0. The gateway now notices when a provider CLI has moved
 underneath it, applies the upstream deprecation instead of queueing it for a
 human, and stops treating an absence of provider output as evidence that a job
 is stuck. It no longer treats an absence of reviewer output as agreement
-either. The session store moves onto the same `[persistence]` selector the job
-store and validation runs already use.
+either. And `[persistence]` stops being a setting that governs one subsystem out
+of three: the job store, the session store and the flight recorder now sit on
+one storage port with a SQLite driver and a PostgreSQL driver under it, so a
+request's two halves can finally live in one engine.
 
-Three release candidates in this line (rc.3, rc.4, rc.5) were tagged but never
-reached npm; see the publishing note under Security. rc.5 additionally
-disabled gateway-managed worktrees on Postgres-backed hosts. Anyone testing
-rc.1 or rc.2 should move to 3.1.0.
+Read the two limits before assuming they do. Request history follows
+`[persistence].backend` **only where the database can be proven local**, and
+when it does, **nothing already written is migrated**. Both are stated in full
+under Changed, and both are visible on `llm_process_health`.
+
+Candidate history, since it is not a straight line. rc.1, rc.2, rc.6, rc.7 and
+rc.8 were published to npm as 3.1.0 candidates. rc.3 and rc.4 exist in
+`package.json` history and carry no surviving tag in either repository. rc.5 was
+tagged, never published (see the publishing note under Security), and
+additionally disabled gateway-managed worktrees on Postgres-backed hosts. There
+will be no 3.1.0 stable; the first candidate under the new number is
+3.2.0-rc.1, and anyone on any 3.1.0 candidate should move to it.
 
 ### Added
 
