@@ -667,6 +667,12 @@ threats 2, 3 and 4 are real and steps 3 through 8 are the right answer.
 
 The check fails CLOSED: a DSN it cannot prove is loopback is treated as remote.
 
+**Granted by the operator on 2026-08-22**, explicitly and in response to being
+shown the steps this gate was demanding. Named here rather than only in a
+commit message, because a lowered security bar should be attributable in the
+document that carries it, the way `[decisions].scope_0a` in
+storage-unification.dag.toml names the 2026-08-21 scope decision.
+
 This amendment lowers a bar that was set deliberately, so it is recorded here
 rather than applied quietly. What it does NOT do is claim the local case is
 secure against threat 1. Nothing in this document does. It claims only that
@@ -682,4 +688,14 @@ place to fix that.
 - **Client certificates are still on-disk credentials.** Reduced, not
   eliminated; see 4.1.
 - **`listen_addresses = *`** is mitigated only by the podman port binding.
+- **A loopback tunnel defeats the 6.1 deployment-shape check.** `ssh -L
+  5432:remote:5432`, socat, or any forwarder owned by this user presents as a
+  loopback listener with our uid while the database is remote, and is ADMITTED.
+  The check proves the LISTENER's owner, not the PostgreSQL backend's, and under
+  rootless podman those differ by design. Closing it needs a server-side fact
+  such as `inet_client_addr()` after connecting, which is asynchronous and
+  therefore cannot gate the synchronous engine decision. That is a design
+  tension, not an oversight. Until this run it was disclosed only in host-local
+  evidence, which is to say nowhere a consumer of this repository could read it.
+
 - **Row counts in this document are snapshots** and drift on a live system.
