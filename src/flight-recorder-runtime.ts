@@ -160,8 +160,6 @@ export class FlightRecorderRuntime {
   }
 }
 
-
-
 /**
  * SQLite implementation of `FlightRecorderOperations`, over the storage port.
  *

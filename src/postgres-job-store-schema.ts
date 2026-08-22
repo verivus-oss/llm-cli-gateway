@@ -40,7 +40,8 @@ export const POSTGRES_IMMUTABLE_MIGRATION_SHA256 = {
   // migration failure there. NOTE, and it is a gap rather than a rule: 006
   // through 021 are absent from this list and are pinned only by the databases
   // that already recorded them.
-  "022_flight_recorder_transcripts.sql": "64f2e6515cb0e10c9ce484088258e930a6ca1ffce3a0c146d1fe11d0e3c90489",
+  "022_flight_recorder_transcripts.sql":
+    "64f2e6515cb0e10c9ce484088258e930a6ca1ffce3a0c146d1fe11d0e3c90489",
 } as const;
 
 /**

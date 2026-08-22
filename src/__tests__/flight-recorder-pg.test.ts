@@ -299,7 +299,10 @@ describe("a whole transcript round trip", () => {
 describe("the bootstrap and the migration are the same schema", () => {
   it("produces identical columns and indexes either way", async () => {
     // Migration path: the real file, into the mirror schema.
-    const sql = readFileSync(join(process.cwd(), "migrations/022_flight_recorder_transcripts.sql"), "utf8");
+    const sql = readFileSync(
+      join(process.cwd(), "migrations/022_flight_recorder_transcripts.sql"),
+      "utf8"
+    );
     await admin.query(
       `SET search_path TO ${MIRROR};
        CREATE TABLE IF NOT EXISTS schema_migrations (version INTEGER PRIMARY KEY, name TEXT NOT NULL);

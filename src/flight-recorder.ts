@@ -478,7 +478,6 @@ export function flightRecorderHealthMessage(health: FlightRecorderHealth): strin
   }
 }
 
-
 /**
  * Every statement the recorder issues, once, at module scope.
  *

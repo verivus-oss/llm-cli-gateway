@@ -677,11 +677,7 @@ function getFlightRecorder(runtimeLogger: GatewayLogger = logger): FlightRecorde
   // flightRecorderEngineDecision. Resolved through getPersistenceConfig so the
   // config is loaded once for both subsystems.
   const persistence = getPersistenceConfig(runtimeLogger);
-  flightRecorder ??= createFlightRecorder(
-    runtimeLogger,
-    persistence.backend,
-    persistence.roleDsns
-  );
+  flightRecorder ??= createFlightRecorder(runtimeLogger, persistence.backend, persistence.roleDsns);
   return flightRecorder;
 }
 

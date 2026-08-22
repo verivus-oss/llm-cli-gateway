@@ -59,7 +59,8 @@ function socketDir(port: number): string {
 
 afterEach(() => {
   resetTranscriptAdmission();
-  while (temporaries.length > 0) rmSync(temporaries.pop() as string, { recursive: true, force: true });
+  while (temporaries.length > 0)
+    rmSync(temporaries.pop() as string, { recursive: true, force: true });
 });
 
 describe("the admission matrix", () => {
@@ -147,7 +148,12 @@ describe("the admission matrix", () => {
   });
 
   it("REFUSES a malformed DSN", () => {
-    for (const dsn of ["not a dsn at all", "postgresql://u@[::1", "postgresql://u@h:99999/gw", ""]) {
+    for (const dsn of [
+      "not a dsn at all",
+      "postgresql://u@[::1",
+      "postgresql://u@h:99999/gw",
+      "",
+    ]) {
       const verdict = evaluateTranscriptAdmission(dsn, { uid });
       expect(verdict.admitted, dsn).toBe(false);
       expect(verdict.reason, dsn).not.toBeNull();
@@ -156,7 +162,9 @@ describe("the admission matrix", () => {
 
   it("REFUSES a missing DSN", () => {
     expect(evaluateTranscriptAdmission(null, { uid }).admitted).toBe(false);
-    expect(evaluateTranscriptAdmission(undefined, { uid }).reason).toContain("no [persistence].dsn");
+    expect(evaluateTranscriptAdmission(undefined, { uid }).reason).toContain(
+      "no [persistence].dsn"
+    );
   });
 
   it("REFUSES a loopback listener owned by ANOTHER uid", () => {
@@ -240,7 +248,14 @@ describe("the admission matrix", () => {
 
 describe("loopback literals", () => {
   it("accepts the whole of 127.0.0.0/8 and both IPv6 spellings", () => {
-    for (const host of ["127.0.0.1", "127.1.2.3", "127.255.255.255", "::1", "[::1]", "::ffff:127.0.0.1"]) {
+    for (const host of [
+      "127.0.0.1",
+      "127.1.2.3",
+      "127.255.255.255",
+      "::1",
+      "[::1]",
+      "::ffff:127.0.0.1",
+    ]) {
       expect(isLoopbackLiteral(host), host).toBe(true);
     }
   });
