@@ -157,6 +157,7 @@ path, sqlite_master on the sqlite path), NOT from a hand-maintained list. A
 hand-maintained list is the same defect class this phase exists to remove: it
 would only ever confirm the snapshot it was written against.
 """
+status = "PARTLY DONE 2026-08-22 by s11 of storage-unification. `src/storage/retention.ts` is the registry for THREE subsystems (jobs, requests, wedgedValidationRuns) and `[persistence.retention]` is its strict config table; `requests` and the wedge sweep default to OFF. NOT done and deliberately different: `validation_runs` is `wedge_reap`, not `ttl_after_terminal`, because a `finalized` run owns an immutable receipt and a TTL over terminal rows would orphan it, which needs p2.receipt-export-then-prune first. Receipts, sessions, kit fences and gateway_instances are still absent from the registry, and the enumerate-from-schema validation is NOT built, so the registry is still a hand-maintained list of three."
 
 [[node]]
 id = "p2.receipt-export-then-prune"
@@ -196,6 +197,7 @@ recovery. Any reconciler that reasons about rows it does not own repeats that
 bug in a new table. Scope by owner_instance or take a lease.
 """
 validation = "Run two instances concurrently. Instance B's reconciler must not move instance A's live runs. A test that only asserts the stuck run got cleaned up passes against the blanket-sweep version too."
+status = "STILL OPEN, and s11 did NOT do it. s11 DELETES a wedged run; this node TERMINALIZES it to `expired_unminted`, which is strictly better: it keeps the evidence that a run existed and failed, and it needs a new status value and a lease that retention has neither. s11 borrowed this node's classification for its wedge predicate (no linked job still present means unmintable) and defaults its sweep to OFF, so an operator who wants the rows kept simply does not set the bound."
 
 [[node]]
 id = "p2.cascade-link-rows"
@@ -210,6 +212,7 @@ paths that did not intend it; an explicit transactional delete is auditable and
 scoped to the eviction path.
 """
 validation = "Evict a job that is linked to a run; assert the link row is gone and the run reached `expired_unminted` rather than staying `running`."
+status = "PARTLY DONE 2026-08-22 by s11, from the RUN side only: `evictWedgedValidationRuns` deletes a wedged run's link rows in the same transaction as the run, on both engines. The JOB side is untouched, so `evictExpired` still orphans link rows, and that orphaning is precisely what MAKES a run wedged. Fixing this node properly is still worth doing, and it is p2.reconciler that decides what the run's status becomes."
 
 [[node]]
 id = "p2.session-ttl-parity"
