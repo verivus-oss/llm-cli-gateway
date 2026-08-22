@@ -95,6 +95,42 @@ describe("SqliteStorageDriver", () => {
     rmSync(dir, { recursive: true, force: true });
   });
 
+  it("a failing ROLLBACK does not replace the error that caused it", async () => {
+    // SQLite auto-rolls-back on SQLITE_FULL and some I/O errors, so the catch's
+    // own ROLLBACK then fails with "cannot rollback - no transaction is active"
+    // and, unguarded, REPLACES the real cause on the way out. A full disk
+    // destroying the evidence of a full disk is how an incident becomes
+    // undiagnosable, and this project has had one whose root cause was never
+    // determined.
+    //
+    // Driven by a body that ends its own transaction, which reaches the same
+    // state as the auto-rollback without needing a full disk. That is hazard
+    // 10's SQLite twin: on Postgres a self-issued ROLLBACK is answered by the
+    // driver's COMMIT with a WARNING, here it poisons the error.
+    const cause = new Error("the real cause, which the caller needs");
+    await expect(
+      driver.transaction("write", async conn => {
+        await conn.execute("ROLLBACK");
+        throw cause;
+      })
+    ).rejects.toBe(cause);
+  });
+
+  it("keeps the rollback failure as the cause, rather than dropping it", async () => {
+    // Swallowed is not the same as lost. There is no logger in this class, so
+    // the rollback failure rides out on `cause`, where a caller that wants it
+    // can still read it.
+    const original = new Error("body failed");
+    const rejected = await driver
+      .transaction("write", async conn => {
+        await conn.execute("ROLLBACK");
+        throw original;
+      })
+      .catch((e: unknown) => e as Error & { cause?: unknown });
+    expect(rejected).toBe(original);
+    expect(String((rejected.cause as Error | undefined)?.message)).toMatch(/cannot rollback/i);
+  });
+
   it("prepares each distinct statement ONCE per handle, and reuses it", async () => {
     // The subsystems moving onto this port prepared their statements once in a
     // constructor and reused them: SqliteJobStore alone holds 27 such fields.

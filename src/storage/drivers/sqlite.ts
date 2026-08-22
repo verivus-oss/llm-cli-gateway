@@ -312,7 +312,23 @@ export class SqliteStorageDriver implements StorageDriver {
         await connection.execute("COMMIT");
         return result;
       } catch (error) {
-        await connection.execute("ROLLBACK");
+        // The ROLLBACK must never replace the error that caused it. SQLite
+        // auto-rolls-back on SQLITE_FULL and on some I/O errors, so this
+        // statement then fails with "cannot rollback - no transaction is
+        // active" and, unguarded, that message is what the caller receives:
+        // a full disk destroying the evidence of a full disk. This project has
+        // had one corruption whose root cause was never determined.
+        //
+        // Swallowed is not lost. There is no logger in this class (see the
+        // drain refusal above for the same constraint), so the rollback failure
+        // rides out on `cause` where a caller that wants it can read it.
+        try {
+          await connection.execute("ROLLBACK");
+        } catch (rollbackError) {
+          if (error instanceof Error && error.cause === undefined) {
+            error.cause = rollbackError;
+          }
+        }
         throw error;
       }
     };
