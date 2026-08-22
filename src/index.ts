@@ -216,7 +216,7 @@ import {
   type AsyncJobSnapshot,
   type StartJobOutcome,
 } from "./async-job-manager.js";
-import { createJobStore, type JobStore } from "./job-store.js";
+import { createJobStore, isValidationRunStore, type JobStore } from "./job-store.js";
 import {
   MCP_ARTIFACT_RECOVERY_ACKNOWLEDGEMENT,
   recoverMcpArtifactCleanupPin,
@@ -320,6 +320,14 @@ import {
 } from "./request-context.js";
 import { passthroughArgvOrRejection, type PassthroughFlags } from "./provider-passthrough.js";
 import { printDoctorJson } from "./doctor.js";
+import { runStorageCommand } from "./storage-cli.js";
+import { RetentionSweeper } from "./storage/retention-sweeper.js";
+import {
+  DEFAULT_RETENTION_SWEEP_INTERVAL_MS,
+  persistenceRetentionPolicy,
+  resolveRetentionPolicy,
+  unboundedRetentionSubsystems,
+} from "./storage/retention.js";
 import { redactDiagnosticUrl } from "./endpoint-exposure.js";
 import { PrepPhase, PrepPipeline, type PrepStage } from "./prep-pipeline.js";
 import { applyProviderDisplayText } from "./provider-display.js";
@@ -722,6 +730,16 @@ function getProvidersConfig(runtimeLogger: GatewayLogger = logger): ProvidersCon
   providersConfig ??= loadProvidersConfig(runtimeLogger);
   return providersConfig;
 }
+
+/**
+ * The retention sweeper, or null when this process never built one.
+ *
+ * Module-level rather than a `GatewayServerDeps` member: a test that builds a
+ * server would then have to build a sweeper, and `llm_process_health` reporting
+ * `null` for a process that has none is the truthful answer rather than a
+ * constructed one. It is only ever built by `main()`.
+ */
+let retentionSweeper: RetentionSweeper | null = null;
 
 function getJobStore(runtimeLogger: GatewayLogger = logger): JobStore | null {
   if (jobStoreInitialized) return jobStore;
@@ -22580,11 +22598,40 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
       // block and the disposition cannot disagree about the same recorder.
       const recorderHealth = flightRecorderHealth(flightRecorder);
       const disposition = storageDisposition(persistence, recorderHealth);
+      // s11: the resolved policy, what the last sweep did, and what a bound
+      // WOULD delete on the subsystems that have none. The hypothetical is the
+      // useful number on an unchanged host: every destructive bound is off by
+      // default, so the configured preview correctly counts nothing.
+      const retentionPolicy = persistenceRetentionPolicy(persistence);
+      const unboundedNow = unboundedRetentionSubsystems(retentionPolicy);
+      const hypothetical =
+        retentionSweeper && unboundedNow.length > 0
+          ? await retentionSweeper.preview(
+              resolveRetentionPolicy({
+                jobRetentionDays: persistence.retentionDays,
+                overrides: { requests: 30, wedgedValidationRuns: 30 },
+              })
+            )
+          : null;
+      const retentionBlock = {
+        days: retentionPolicy.days,
+        unbounded: unboundedNow,
+        sweepIntervalMs:
+          persistence.retentionSweepIntervalMs ?? DEFAULT_RETENTION_SWEEP_INTERVAL_MS,
+        sweeperArmed: retentionSweeper?.armed ?? false,
+        // The count the sweep produced, carried out to a reader. Null means no
+        // sweep has completed in this process, which is NOT the same as a sweep
+        // that found nothing.
+        lastSweep: retentionSweeper?.lastSweep() ?? null,
+        // Deletes nothing. "If you set 30 days, this is what goes."
+        ifBoundedAt30Days: hypothetical ? hypothetical.subsystems : null,
+      };
       const persistenceBlock = {
         backend: persistence.backend,
         dbPath: persistence.path,
-        dsn: persistence.dsn ? "[redacted]" : null,
         retentionDays: persistence.retentionDays,
+        retention: retentionBlock,
+        dsn: persistence.dsn ? "[redacted]" : null,
         dedupWindowMs: persistence.dedupWindowMs,
         asyncJobsConfigured,
         storeAttached,
@@ -24033,6 +24080,15 @@ async function performShutdown(signal: string, exitCode: number): Promise<void> 
       }
     }
 
+    if (retentionSweeper) {
+      // Disarmed before the handles close, so a tick cannot start against a
+      // recorder that is already draining and fail with a closed-driver error
+      // that reads like a retention fault.
+      retentionSweeper.stop();
+      retentionSweeper = null;
+      logger.info("Retention sweeper stopped");
+    }
+
     // Kill all active process groups (SIGTERM → wait 3s → SIGKILL)
     await killAllProcessGroups();
     logger.info("All process groups terminated");
@@ -24525,6 +24581,7 @@ async function main() {
         "  llm-cli-gateway oauth client add <id> --redirect-uri <uri> [--print-once]",
         "  llm-cli-gateway connector setup [--client-id <id>] [--include-legacy-no-auth]",
         "  llm-cli-gateway workspace list|add|create",
+        "  llm-cli-gateway storage status|compact --yes",
         `  llm-cli-gateway mcp-artifact recover <job-id> --${MCP_ARTIFACT_RECOVERY_ACKNOWLEDGEMENT}`,
         "",
         "Remote connector (recommended OAuth path):",
@@ -24566,6 +24623,12 @@ async function main() {
   }
   if (args[0] === "workspace") {
     runWorkspaceCommand(args.slice(1));
+    return;
+  }
+  if (args[0] === "storage") {
+    // Awaited for runMcpArtifactCommand's reason: the command sets
+    // process.exitCode and a floating promise lets main() return first.
+    await runStorageCommand(args.slice(1));
     return;
   }
   if (args[0] === "mcp-artifact") {
@@ -24661,6 +24724,33 @@ async function main() {
   // therefore delays readiness rather than producing a server that connects and
   // refuses everything, which is what the branch had accidentally introduced.
   await runtimeAsyncJobManager.whenStartupSettled();
+
+  // s11: retention over every subsystem, from the ONE policy. Built after the
+  // store has settled so `validationRuns` is the store that actually opened,
+  // not the one that was configured.
+  const retentionStore = getJobStore(logger);
+  retentionSweeper = new RetentionSweeper({
+    recorder: getFlightRecorder(logger),
+    validationRuns: retentionStore && isValidationRunStore(retentionStore) ? retentionStore : null,
+    policy: persistenceRetentionPolicy(persistence),
+    logger,
+  });
+  const sweepInterval = persistence.retentionSweepIntervalMs ?? DEFAULT_RETENTION_SWEEP_INTERVAL_MS;
+  // The return value is READ. `start()` declines when every destructive bound
+  // is off, and a caller that logged "retention armed" unconditionally would be
+  // making the claim this node exists to stop being made.
+  if (retentionSweeper.start(sweepInterval)) {
+    logger.info(
+      `Retention sweeper armed every ${Math.round(sweepInterval / 1000)}s: ` +
+        JSON.stringify(persistenceRetentionPolicy(persistence).days)
+    );
+  } else {
+    logger.info(
+      "Retention: jobs only. `requests` and `wedgedValidationRuns` are UNBOUNDED; " +
+        "set [persistence.retention].requests / .wedgedValidationRuns (days) to bound them. " +
+        "`llm-cli-gateway doctor --json` reports what a bound would delete."
+    );
+  }
 
   const serverDeps: GatewayServerDeps = {
     sessionManager,

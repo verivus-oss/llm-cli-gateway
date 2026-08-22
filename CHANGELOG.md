@@ -6,6 +6,47 @@ All notable changes to the llm-cli-gateway project.
 
 ### Added
 
+- **Retention over the transcript and over wedged validation runs, opt-in.**
+  `[persistence].retentionDays` has always bounded exactly one table, `jobs`,
+  while the flight recorder's `requests` and `gateway_metadata` grew without any
+  limit at all, storing full prompt and response bodies. A measured host reached
+  1.2 GB. `validation_runs` had no reaper either, and rows that no code path can
+  ever finalize accumulated in it.
+
+  There is now ONE policy, `[persistence.retention]`, naming every subsystem:
+
+  ```toml
+  [persistence.retention]
+  requests = 90               # transcripts, in days
+  wedgedValidationRuns = 30   # runs nothing can finalize, in days
+  ```
+
+  **Both default to OFF and an upgrade deletes nothing.** Deleting a caller's
+  prompt history is destructive and user-visible, so the gateway does not decide
+  it for you: applying the 30-day job default to transcripts would silently
+  remove a year of history from every installed host. An unknown key under the
+  table is refused rather than quietly applying no bound.
+
+  A validation run is treated as WEDGED, rather than merely slow, only when it
+  is not `finalized`, is older than the configured horizon, AND has no linked
+  job row still present. While any linked job survives, `validation_receipt`
+  mint-on-read can still finalize the run. A `finalized` run is never deleted,
+  so no immutable receipt is ever orphaned, and the link rows in
+  `validation_run_jobs` go with the run they belong to.
+
+- **`llm-cli-gateway storage status` and `storage compact --yes`.** Deleting
+  rows frees SQLite pages but never bytes, so a bounded recorder still reports
+  the size it grew to. Compaction returns the space and is an explicit operator
+  action, never a background timer, because `VACUUM` holds an exclusive lock for
+  the length of a full rewrite of the database. Run it with the gateway stopped.
+
+- **`doctor --json` reports the bounds and what they would delete** (schema
+  version 1.2): the resolved policy per subsystem, which subsystems nothing
+  bounds, how many requests are past the bound, and how many bytes a compaction
+  would return. `llm_process_health` adds the same policy, the last sweep's
+  counts, and a preview of what a 30-day bound would remove on the subsystems
+  that have none. All of it counts; none of it deletes.
+
 - **`providerFlags`: reach a flag the gateway has never heard of.** New
   parameter on `grok_request` and `grok_request_async`, keyed exactly as the
   binary spells the flag:

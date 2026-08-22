@@ -189,6 +189,16 @@ export interface PostgresFlightRecorderOptions {
   poolFactory?: PgPoolFactory;
 }
 
+/**
+ * Metadata first: `gateway_metadata.request_id REFERENCES requests(id)` with no
+ * ON DELETE CASCADE, in migrations/022 exactly as in the SQLite schema, so the
+ * request delete alone raises a foreign-key violation on every row.
+ */
+const SQL_EXPIRED_REQUEST_IDS =
+  "SELECT id FROM requests WHERE datetime_utc < ? ORDER BY datetime_utc LIMIT ?";
+const SQL_DELETE_EXPIRED_METADATA = `DELETE FROM gateway_metadata WHERE request_id IN (${SQL_EXPIRED_REQUEST_IDS})`;
+const SQL_DELETE_EXPIRED_REQUESTS = `DELETE FROM requests WHERE id IN (${SQL_EXPIRED_REQUEST_IDS})`;
+
 export class PostgresFlightRecorder implements FlightRecorderOperations {
   private readonly roleDsns: PostgresRoleDsns;
   private readonly options: PostgresFlightRecorderOptions;
@@ -586,8 +596,37 @@ export class PostgresFlightRecorder implements FlightRecorderOperations {
       oldestRequest: totals[0]?.oldest ?? null,
       newestRequest: totals[0]?.newest ?? null,
       requestsBeyondRetention: beyondRetention,
+      // NULL, not 0. Reclaiming space is not an operator action on this engine:
+      // autovacuum returns dead tuples to the table for reuse, and the operator
+      // has nothing to run and no lock to schedule. Zero would claim a
+      // measurement was taken and came back empty.
+      reclaimableBytes: null,
       coResident,
     };
+  }
+
+  /**
+   * The Postgres termination of the same policy.
+   *
+   * s11's constraint expected this half to drop partitions. It does not, and
+   * cannot: migrations/022 authors `requests` and `gateway_metadata` as plain
+   * unpartitioned tables, so the two terminations differ in their AFTERMATH
+   * rather than in the statement. Here autovacuum reclaims the dead tuples with
+   * no exclusive lock and no operator step; on SQLite the pages go on a
+   * freelist and the file stays the size it was.
+   *
+   * The batch bound still matters even without that lock: `[persistence.roles]`
+   * may point this at a `llmgw_retention` credential on a SHARED store, and an
+   * unbounded DELETE there holds row locks against every other instance.
+   */
+  async evictExpiredRequests(cutoffIso: string, limit: number): Promise<number> {
+    let deleted = 0;
+    await this.write("evictExpiredRequests", async conn => {
+      await conn.execute(SQL_DELETE_EXPIRED_METADATA, [cutoffIso, limit]);
+      const result = await conn.execute(SQL_DELETE_EXPIRED_REQUESTS, [cutoffIso, limit]);
+      deleted = Number(result.rowsAffected ?? 0);
+    });
+    return deleted;
   }
 
   /** Drain what has started, then end the pools. MUST be awaited; see the SQLite twin. */

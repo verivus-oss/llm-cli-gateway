@@ -1398,6 +1398,101 @@ describe("PostgresJobStore", () => {
   });
 });
 
+describe("s11: the wedged-validation-run termination on PostgreSQL", () => {
+  let store: JobStore & ValidationRunStore;
+  let pool: Pool;
+
+  const OLD = "2020-01-01T00:00:00.000Z";
+  const RECENT = "2099-01-01T00:00:00.000Z";
+  const CUTOFF = "2030-01-01T00:00:00.000Z";
+
+  async function addJob(id: string): Promise<void> {
+    await store.recordStart({
+      id,
+      correlationId: `c-${id}`,
+      requestKey: computeRequestKey("claude", ["-p", id]),
+      cli: "claude",
+      args: ["-p", id],
+      startedAt: OLD,
+      pid: null,
+      ownerPrincipal: "alice",
+    });
+  }
+
+  async function addRun(
+    validationId: string,
+    status: "running" | "finalized",
+    createdAt: string,
+    jobIds: string[]
+  ): Promise<void> {
+    await store.recordValidationRun({
+      validationId,
+      ownerPrincipal: "alice",
+      intent: "validate",
+      createdAt,
+      requestJson: JSON.stringify({ question: "q", modelList: ["claude"] }),
+      providerLinks: jobIds.map(jobId => ({
+        provider: "claude",
+        jobId,
+        correlationId: `c-${jobId}`,
+      })),
+      judgeLink: null,
+      status,
+    });
+  }
+
+  async function runIds(): Promise<string[]> {
+    const result = await pool.query(
+      "SELECT validation_id FROM validation_runs ORDER BY validation_id"
+    );
+    return result.rows.map((row: { validation_id: string }) => row.validation_id);
+  }
+
+  beforeEach(async () => {
+    ({ pool } = await setupTestDatabase());
+    await cleanTestDatabase();
+    store = new PostgresJobStore(TEST_DATABASE_URL, undefined, {
+      retentionMs: 60_000,
+      dedupWindowMs: 60_000,
+    });
+    await addJob("job-live");
+    await addRun("wedged-zero-seat", "running", OLD, []);
+    await addRun("wedged-jobs-gone", "running", OLD, ["job-evicted"]);
+    await addRun("unfinished-job-alive", "running", OLD, ["job-live"]);
+    await addRun("recent", "running", RECENT, []);
+    await addRun("finalized-old", "finalized", OLD, []);
+  });
+
+  afterEach(async () => {
+    await store.close();
+  });
+
+  it("applies the SAME predicate the SQLite store does", async () => {
+    // The wedge SQL is one shared literal, and the Postgres driver rewrites `?`
+    // to `$n`. This is what proves the rewrite survives a correlated subquery
+    // with a join in it, which no unit test against SQLite can establish.
+    expect(await store.countWedgedValidationRuns(CUTOFF)).toBe(2);
+  });
+
+  it("deletes the wedged runs and LEAVES every other row", async () => {
+    expect(await store.evictWedgedValidationRuns(CUTOFF, 500)).toBe(2);
+    expect(await runIds()).toEqual(["finalized-old", "recent", "unfinished-job-alive"]);
+  });
+
+  it("cascades to validation_run_jobs", async () => {
+    await store.evictWedgedValidationRuns(CUTOFF, 500);
+    const links = await pool.query("SELECT validation_id FROM validation_run_jobs");
+    expect(links.rows.map((row: { validation_id: string }) => row.validation_id)).toEqual([
+      "unfinished-job-alive",
+    ]);
+  });
+
+  it("honours the row bound so a shared store is not locked in one statement", async () => {
+    expect(await store.evictWedgedValidationRuns(CUTOFF, 1)).toBe(1);
+    expect((await runIds()).length).toBe(4);
+  });
+});
+
 function postgresPersistence(): PersistenceConfig {
   return {
     backend: "postgres",

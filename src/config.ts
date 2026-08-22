@@ -11,6 +11,11 @@ import { isHttpsOrLoopbackUrl, isLoopbackUrl } from "./api-http.js";
 import type { ApiProviderKind } from "./api-provider.js";
 import { CLI_TYPES } from "./provider-types.js";
 import type { StorageRoleDsns } from "./storage/roles.js";
+import {
+  DEFAULT_RETENTION_SWEEP_INTERVAL_MS,
+  resolveRetentionPolicy,
+  type RetentionPolicy,
+} from "./storage/retention.js";
 import type { QualityTier } from "./least-cost-types.js";
 
 // Zod schemas for configuration validation
@@ -315,6 +320,27 @@ const REFUSED_ROLE_KEYS: Readonly<Record<string, string>> = {
     "the migrate credential is owner-equivalent and process-separated for `npm run migrate`; a running gateway must not hold it",
 };
 
+/**
+ * `[persistence.retention]`: one bound per subsystem the storage port carries.
+ *
+ * `.strict()` for the same reason `[persistence.roles]` is: a misspelled key
+ * under a permissive schema is silently no bound at all, and the operator has
+ * no way to tell that from a bound that ran and found nothing.
+ *
+ * `jobs` is an override for `[persistence].retentionDays`, which keeps meaning
+ * the job store and keeps its 30-day default. `requests` and
+ * `wedgedValidationRuns` have NO default: leaving them out deletes nothing,
+ * which is what an upgrade must do to a host that never asked for either.
+ */
+const PersistenceRetentionSchema = z
+  .object({
+    jobs: z.number().positive().optional(),
+    requests: z.number().positive().optional(),
+    wedgedValidationRuns: z.number().min(1).optional(),
+    sweepIntervalMs: z.number().int().positive().default(DEFAULT_RETENTION_SWEEP_INTERVAL_MS),
+  })
+  .strict();
+
 const PersistenceSchema = z
   .object({
     backend: z.enum(PERSISTENCE_BACKENDS).default("sqlite"),
@@ -322,6 +348,7 @@ const PersistenceSchema = z
     path: z.string().optional(),
     dsn: z.string().optional(),
     retentionDays: z.number().positive().default(DEFAULT_JOB_RETENTION_DAYS),
+    retention: PersistenceRetentionSchema.default({}),
     dedupWindowMs: z.number().int().nonnegative().default(DEFAULT_DEDUP_WINDOW_MS),
     acknowledgeEphemeral: z.boolean().default(false),
     // Issue #139 (interim gate, DEPRECATED): superseded by the durable per-job
@@ -386,7 +413,23 @@ export interface PersistenceConfig {
    * selector.
    */
   roleDsns: StorageRoleDsns;
+  /**
+   * The job store's bound. Unchanged in meaning and default; `retention.days.jobs`
+   * is the same number reached through the one policy.
+   */
   retentionDays: number;
+  /**
+   * Every bound, resolved once. `doctor` and `llm_process_health` report this
+   * rather than each deciding for itself which subsystems are unbounded.
+   *
+   * OPTIONAL, and `loadPersistenceConfig` always sets it. Read it through
+   * `persistenceRetentionPolicy`, never directly: this object is constructed by
+   * hand at 58 test call sites, and a required field there would be a runtime
+   * `undefined` in every one of them rather than a compile error in any.
+   */
+  retention?: RetentionPolicy;
+  /** How often the retention sweeper ticks. Never on the request path. */
+  retentionSweepIntervalMs?: number;
   dedupWindowMs: number;
   acknowledgeEphemeral: boolean;
   /**
@@ -727,6 +770,17 @@ export function loadPersistenceConfig(logger: Logger = noopLogger): PersistenceC
     dsn,
     roleDsns,
     retentionDays: parsed.retentionDays,
+    retention: resolveRetentionPolicy({
+      jobRetentionDays: parsed.retentionDays,
+      overrides: {
+        ...(parsed.retention.jobs !== undefined ? { jobs: parsed.retention.jobs } : {}),
+        ...(parsed.retention.requests !== undefined ? { requests: parsed.retention.requests } : {}),
+        ...(parsed.retention.wedgedValidationRuns !== undefined
+          ? { wedgedValidationRuns: parsed.retention.wedgedValidationRuns }
+          : {}),
+      },
+    }),
+    retentionSweepIntervalMs: parsed.retention.sweepIntervalMs,
     dedupWindowMs: parsed.dedupWindowMs,
     acknowledgeEphemeral: parsed.acknowledgeEphemeral,
     ownsOrphanRecovery: parsed.ownsOrphanRecovery,

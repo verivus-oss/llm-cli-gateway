@@ -392,3 +392,61 @@ describe("the bootstrap and the migration are the same schema", () => {
     expect(rows.rows).toEqual([{ version: 22, name: "022_flight_recorder_transcripts" }]);
   });
 });
+
+describe("s11: the transcript termination on PostgreSQL", () => {
+  const CUTOFF = "2030-01-01T00:00:00.000Z";
+
+  async function seed(id: string, datetimeUtc: string): Promise<void> {
+    await recorder.logStart({ ...START, correlationId: id, prompt: `p-${id}` });
+    await recorder.logComplete(id, { ...RESULT, response: `r-${id}` });
+    // `datetime_utc` is stamped at logStart, so ageing a row means writing the
+    // column. Done on a connection the recorder does not own.
+    await raw(`UPDATE requests SET datetime_utc = '${datetimeUtc}' WHERE id = '${id}'`);
+  }
+
+  beforeEach(async () => {
+    await recorder?.close();
+    recorder = new PostgresFlightRecorder({ app: scoped(SCHEMA) }, { redactSecrets: false });
+    await recorder.readStorageStats();
+    await raw("DELETE FROM gateway_metadata; DELETE FROM requests");
+    await seed("old-1", "2020-01-01T00:00:00.000Z");
+    await seed("old-2", "2020-01-01T00:00:00.000Z");
+    await seed("keep-1", "2099-01-01T00:00:00.000Z");
+  });
+
+  it("takes the metadata row first, which the foreign key requires here too", async () => {
+    // The CONTROL. migrations/022 carries `REFERENCES requests(id)` with no
+    // ON DELETE CASCADE, exactly as the SQLite schema does, so the obvious
+    // single DELETE fails on a real server rather than only on SQLite.
+    await expect(raw(`DELETE FROM requests WHERE datetime_utc < '${CUTOFF}'`)).rejects.toThrow(
+      /foreign key/i
+    );
+    expect(await recorder.evictExpiredRequests(CUTOFF, 500)).toBe(2);
+    const rows = await raw<{ id: string }>("SELECT id FROM requests ORDER BY id");
+    expect(rows.map(row => row.id)).toEqual(["keep-1"]);
+    const meta = await raw<{ request_id: string }>(
+      "SELECT request_id FROM gateway_metadata ORDER BY request_id"
+    );
+    expect(meta.map(row => row.request_id)).toEqual(["keep-1"]);
+  });
+
+  it("LEAVES the survivor's bodies untouched", async () => {
+    await recorder.evictExpiredRequests(CUTOFF, 500);
+    const row = await recorder.readRequestById("keep-1");
+    expect(row?.prompt).toBe("p-keep-1");
+    expect(row?.response).toBe("r-keep-1");
+  });
+
+  it("honours the row bound, so a shared store is not locked in one statement", async () => {
+    expect(await recorder.evictExpiredRequests(CUTOFF, 1)).toBe(1);
+    const stats = await recorder.readStorageStats(CUTOFF);
+    expect(stats.requestRows).toBe(2);
+    expect(stats.requestsBeyondRetention).toBe(1);
+  });
+
+  it("reports NO reclaimable bytes, because that is not a question here", async () => {
+    // Not zero. Autovacuum reuses the space and there is no operator step, so
+    // a number would imply a lock to schedule that does not exist.
+    expect((await recorder.readStorageStats()).reclaimableBytes).toBeNull();
+  });
+});

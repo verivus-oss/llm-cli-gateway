@@ -848,9 +848,21 @@ The job-store backend is configured by `~/.llm-cli-gateway/config.toml` (overrid
 backend = "sqlite"                          # "sqlite" | "memory" | "postgres" | "none"
 path = "~/.llm-cli-gateway/logs.db"         # for sqlite
 # dsn = "postgresql://user:pw@host/db"      # for postgres
-retentionDays = 30
+retentionDays = 30                          # the JOB store only; see [persistence.retention]
 dedupWindowMs = 3600000
 acknowledgeEphemeral = false                # required to enable async tools with memory backend
+
+# One retention policy, over every subsystem. `jobs` keeps the 30-day default
+# above; the other two are OFF unless you write a number, because deleting
+# prompt and response history is destructive and no upgrade should do it for
+# you. Unknown keys are refused rather than silently applying no bound.
+# `llm-cli-gateway doctor --json` -> .storage.retention reports what each bound
+# would delete BEFORE you set it.
+[persistence.retention]
+# jobs = 30                                 # overrides retentionDays above
+# requests = 90                             # flight-recorder transcripts, incl. bodies
+# wedgedValidationRuns = 30                 # validation runs nothing can ever finalize
+# sweepIntervalMs = 3600000                 # how often the sweeper ticks
 
 # Issue #139 durable orphan-recovery lease (defaults shown). Each instance
 # advances a per-job lease on every heartbeat; the sweep orphans a job only
@@ -973,7 +985,9 @@ after restart and `llm_process_health.backpressure` should be used to tune
 
 By default, **gateway state is global per user**, not per project. With no overrides, every Claude Code window across every repo spawns its own gateway subprocess but they all read and write the same state:
 
-- `~/.llm-cli-gateway/logs.db` (async jobs + flight recorder). **Only the async-job half is bounded.** `[persistence].retentionDays` prunes the `jobs` table and nothing else: the flight recorder's `requests` table (which stores full prompt and response bodies) and the `validation_runs`, `validation_run_jobs` and `validation_receipts` tables have no retention, no reaper, and no `VACUUM`, so this file grows monotonically. Set `LLM_GATEWAY_LOGS_DB=none` to disable the recorder entirely, or prune it out of band. See `docs/plans/durable-state-lifecycle.dag.toml`.
+- `~/.llm-cli-gateway/logs.db` (async jobs + flight recorder). **Two of the three halves are bounded, and only one of them by default.** `[persistence].retentionDays` prunes `jobs`. `[persistence.retention].requests` prunes the flight recorder's `requests` and `gateway_metadata` tables, which store full prompt and response bodies, and `[persistence.retention].wedgedValidationRuns` prunes validation runs that can never be finalized, with their `validation_run_jobs` links. **Both default to OFF**: an upgrade deletes nothing, and an operator opts in. `validation_receipts` is immutable by design and is never pruned; a finalized run is never pruned either, so no receipt is ever orphaned.
+
+  Deleting rows frees SQLite pages but never bytes, so the file does not shrink. `llm-cli-gateway storage compact --yes` returns the space, with the gateway stopped, because a `VACUUM` holds an exclusive lock for the length of a full rewrite. `doctor --json` -> `.storage.retention` reports the resolved bounds, what a sweep would delete, and how many bytes a compaction would return. See `docs/plans/durable-state-lifecycle.dag.toml`.
 - `~/.llm-cli-gateway/sessions.json` (gateway session metadata when using the default file session backend)
 - `~/.llm-cli-gateway/config.toml` (resolved config)
 
