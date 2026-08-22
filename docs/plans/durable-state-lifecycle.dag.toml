@@ -57,8 +57,8 @@ id = "store.validation_runs"
 kind = "durable_table"
 file = "src/job-store.ts"
 line = 1106
-role = "Unbounded. No reaper, no retention, no cascade. 97 of 353 live rows are wedged at 'running' with nothing able to move them."
-reaped_by = "NOTHING"
+role = "Unbounded until s11. No reaper, no retention, no cascade. 97 of 353 live rows were wedged at 'running' with nothing able to move them."
+reaped_by = "s11: evictWedgedValidationRuns, OPT-IN via [persistence.retention].wedgedValidationRuns, default OFF. WEDGED and not merely slow: not finalized, past the horizon, and no link row pointing at a surviving job. A finalized run is NEVER reaped, so no receipt is orphaned."
 affects = ["leak.zero_seat", "leak.unminted", "leak.dangling_links"]
 critical = true
 
@@ -67,8 +67,8 @@ id = "store.validation_run_jobs"
 kind = "durable_table"
 file = "src/job-store.ts"
 line = 1124
-role = "Unbounded and uncascaded. Declared with no REFERENCES clause in all three declaration sites, so job retention orphans link rows silently. 207 of 1094 live rows point at deleted jobs."
-reaped_by = "NOTHING (only role='provider' replacement within one run)"
+role = "Uncascaded from JOBS still: declared with no REFERENCES clause in all three declaration sites, so job retention orphans link rows silently. 207 of 1094 live rows point at deleted jobs."
+reaped_by = "s11, from the RUN side only: evictWedgedValidationRuns deletes a wedged run's link rows in the same transaction. The jobs-side orphaning is unchanged and is what MAKES a run wedged."
 affects = ["leak.unminted"]
 note = "Job ids are randomUUID, so a stale primary key cannot be re-bound. The dead rows are weight, not a correctness hazard. The uncoordinated jobs DELETE is the fault."
 
@@ -96,8 +96,8 @@ id = "store.flight_recorder"
 kind = "durable_table"
 file = "src/flight-recorder.ts"
 line = 1
-role = "Unbounded. 886 lines with no DELETE, no TTL, no rotation, no VACUUM. Stores full prompt and response bodies. Measured at 1.23 GB."
-reaped_by = "NOTHING"
+role = "Unbounded by default still, and now boundable. Stores full prompt and response bodies. Measured at 1.23 GB."
+reaped_by = "s11: evictExpiredRequests, OPT-IN via [persistence.retention].requests, default OFF because deleting a year of transcripts on upgrade is not a default anyone chose. gateway_metadata goes with the request row; the foreign key requires that order."
 affects = ["gap.retention_scope_misread"]
 
 # ---------------------------------------------------------------------------
@@ -212,7 +212,7 @@ id = "gap.retention_scope_misread"
 kind = "documentation_defect"
 file = "README.md"
 line = 959
-role = "retentionDays is presented next to logs.db in a way that reads as bounding the file. It prunes exactly one table. README:569 gets it right (`non-expiring flight recorder`) but the phrase sits in a privacy paragraph and is never connected to disk growth."
+role = "CLOSED by s11. README now says which subsystem each bound covers, that the two new ones default to OFF, and that deleting rows frees pages rather than bytes."
 affects = []
 
 [[node]]
@@ -228,7 +228,7 @@ id = "gap.no_vacuum"
 kind = "gap"
 file = "src/sqlite-driver.ts"
 line = 196
-role = "No VACUUM anywhere in production code; the only occurrence is the read-only rejection guard. Even the bounded jobs deletions never return pages, so the file is monotonic."
+role = "CLOSED by s11, as an operator command rather than a timer: `llm-cli-gateway storage compact --yes`, with the gateway stopped, because VACUUM holds an exclusive lock for a full rewrite. doctor --json reports reclaimable_bytes so the decision has a number."
 affects = []
 
 # ---------------------------------------------------------------------------
@@ -239,9 +239,9 @@ affects = []
 [[invariant]]
 id = "every-durable-table-names-its-reaper"
 question = "What deletes this row, and on what timer?"
-holds_for = ["store.jobs"]
-fails_for = ["store.validation_runs", "store.validation_run_jobs", "store.validation_receipts", "store.sessions_pg", "store.flight_recorder"]
-why = "Five of six durable stores have no answer. This is the whole finding in one line."
+holds_for = ["store.jobs", "store.flight_recorder", "store.validation_runs", "store.validation_run_jobs"]
+fails_for = ["store.validation_receipts", "store.sessions_pg"]
+why = "Was five of six with no answer. s11 answered three of those five with one policy. `validation_receipts` answers `immutable by design`, which the protocol accepts; `sessions_pg` is the one still answering nothing, and regression.session_ttl_lost is why."
 
 [[invariant]]
 id = "no-status-without-a-writer-to-terminal"
