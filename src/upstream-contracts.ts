@@ -1101,6 +1101,33 @@ export const UPSTREAM_CLI_CONTRACTS: Record<CliType, CliContract> = {
       ["exec", "resume", "--help"],
     ],
     subcommands: {
+      // Auto-declared by `npm run providers:rebaseline`: upstream advertises
+      // this command. Catalogued only (exposure defaults to tracked_only, so it
+      // is not reachable by callers); risk is a conservative default pending
+      // maintainer verification.
+      agents: subcommand(
+        ["agents"],
+        "Upstream-declared codex command (auto-catalogued, unverified).",
+        "writes_local_config"
+      ),
+      // Auto-declared by `npm run providers:rebaseline`: upstream advertises
+      // this command. Catalogued only (exposure defaults to tracked_only, so it
+      // is not reachable by callers); risk is a conservative default pending
+      // maintainer verification.
+      "migrate-rollouts": subcommand(
+        ["migrate-rollouts"],
+        "Upstream-declared codex command (auto-catalogued, unverified).",
+        "writes_local_config"
+      ),
+      // Auto-declared by `npm run providers:rebaseline`: upstream advertises
+      // this command. Catalogued only (exposure defaults to tracked_only, so it
+      // is not reachable by callers); risk is a conservative default pending
+      // maintainer verification.
+      queue: subcommand(
+        ["queue"],
+        "Upstream-declared codex command (auto-catalogued, unverified).",
+        "writes_local_config"
+      ),
       exec: subcommand(
         ["exec"],
         "Run Codex in non-interactive execution mode.",
@@ -1798,6 +1825,15 @@ export const UPSTREAM_CLI_CONTRACTS: Record<CliType, CliContract> = {
     },
     helpArgs: [["--help"]],
     subcommands: {
+      // Auto-declared by `npm run providers:rebaseline`: upstream advertises
+      // this command. Catalogued only (exposure defaults to tracked_only, so it
+      // is not reachable by callers); risk is a conservative default pending
+      // maintainer verification.
+      mcp: subcommand(
+        ["mcp"],
+        "Upstream-declared gemini command (auto-catalogued, unverified).",
+        "writes_local_config"
+      ),
       agent: subcommand(["agent"], "List available Antigravity agents.", "read_only", [], {
         aliases: ["agents"],
         tier: "inspect",
@@ -1930,6 +1966,13 @@ export const UPSTREAM_CLI_CONTRACTS: Record<CliType, CliContract> = {
       "--agent",
       "--disable-slash-commands",
       "--effort",
+      // NOT "--input-format". `providers:rebaseline` added it here and the
+      // capability floor refused the result: seed/capability-floor.json already
+      // records `--input-format:one` for gemini, so the gateway HAS offered it,
+      // discovered from the binary. Acknowledge-only would demote a live flag to
+      // a noted one and take capability from a customer who changed nothing,
+      // which is the defect this branch opened by undoing. It stays a visible
+      // drift finding until it is wired for real.
       "--json-schema",
       "--log-file",
       "--output-format",
