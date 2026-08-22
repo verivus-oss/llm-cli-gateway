@@ -364,6 +364,101 @@ export interface RoutingRecord {
   reroutes?: number | null;
 }
 
+/**
+ * Why there is no request history, decided at CONSTRUCTION and carried on the
+ * object rather than inferred from its class.
+ *
+ * `createFlightRecorder` returned `new NoopFlightRecorder()` from two entirely
+ * different situations, and the Noop answers every read with a successful empty
+ * result. So a corrupt or unreadable logs.db reached every downstream surface
+ * as "flight recording is disabled (LLM_GATEWAY_LOGS_DB=none)", which is the
+ * silent empty-success symptom recorded for the June 2026 corruption. A Noop
+ * that cannot say why it is a Noop IS that defect, so this is not optional
+ * metadata: it is the discriminant.
+ */
+export type FlightRecorderAbsence =
+  { kind: "disabled-by-config" } | { kind: "open-failed"; path: string; error: string; at: string };
+
+/**
+ * FIVE states, because there were five all along and the surfaces carried two.
+ *
+ * - `disabled`      the operator asked for no recording.
+ * - `unavailable`   construction FAILED. Nobody asked for this.
+ * - `initialising`  the file opened, the async schema bootstrap has not settled.
+ * - `degraded`      open, but the bootstrap or the last operation failed.
+ * - `active`        open, schema built, last operation succeeded.
+ *
+ * `initialising` exists because this snapshot is SYNCHRONOUS and construction
+ * stopped implying initialisation ran when s7 made the bootstrap async. Without
+ * it a health surface would report `active` for a recorder whose schema DDL is
+ * still in flight, and would keep doing so right up to the moment it fails.
+ */
+/** A table in the recorder's file that belongs to a DIFFERENT subsystem. */
+export interface CoResidentTableStats {
+  table: "jobs" | "validation_runs";
+  rows: number;
+  /** Rows in a non-terminal status. On an abandoned copy these never finish. */
+  unfinished: number;
+}
+
+export interface FlightRecorderStorageStats {
+  schemaVersion: number | null;
+  /** Null means NOT MEASURED. Zero means measured and empty. */
+  requestRows: number | null;
+  oldestRequest: string | null;
+  newestRequest: string | null;
+  requestsBeyondRetention: number | null;
+  coResident: CoResidentTableStats[];
+}
+
+export type FlightRecorderState =
+  "disabled" | "unavailable" | "initialising" | "degraded" | "active";
+
+export interface FlightRecorderHealth {
+  state: FlightRecorderState;
+  /** The file this recorder opened, or would have. Null when disabled. */
+  path: string | null;
+  /** Message of the failure that produced `unavailable` / `degraded`. */
+  error: string | null;
+  errorAt: string | null;
+  /** Total failed operations, so a recorder that flaps is visible when its last call succeeded. */
+  failureCount: number;
+  /** close() has run. Every operation rejects from that point; reads are not empty, they refuse. */
+  closed: boolean;
+}
+
+/**
+ * The ONE place an operator-facing sentence about recorder state is written.
+ *
+ * Every surface derives its warning from here, keyed on the discriminant, so
+ * no surface can author its own claim about WHY history is missing. That is
+ * what went wrong: `llm_process_health` and `doctor` each hard-coded
+ * "LLM_GATEWAY_LOGS_DB=none" as the only reason a recorder could be a Noop.
+ */
+export function flightRecorderHealthMessage(health: FlightRecorderHealth): string | null {
+  const empty =
+    "llm_request_list returns an empty list and llm_request_result finds nothing; this is not evidence that no request ran.";
+  switch (health.state) {
+    case "disabled":
+      return `Flight recording is disabled by configuration (LLM_GATEWAY_LOGS_DB=none). ${empty}`;
+    case "unavailable":
+      return `Flight recording is NOT disabled: the recorder FAILED TO OPEN ${health.path} (${health.error}). The gateway is degrading deliberately rather than crashing, so request logging is off by failure and not by choice. ${empty}`;
+    case "degraded":
+      return `The flight recorder opened ${health.path} but is DEGRADED: ${health.error}. Reads may be silently incomplete and writes may be failing. ${empty}`;
+    case "initialising":
+      return `The flight recorder opened ${health.path} and its schema bootstrap has not settled yet. A read taken now can return fewer rows than the file holds.`;
+    case "active":
+      return health.closed
+        ? `The flight recorder at ${health.path} has been closed; every further operation refuses rather than returning empty.`
+        : null;
+  }
+}
+
+/** True only when an empty read from this recorder means "nothing was recorded". */
+export function flightRecorderReadsAreAuthoritative(health: FlightRecorderHealth): boolean {
+  return health.state === "active" && !health.closed;
+}
+
 export function resolveFlightRecorderDbPath(): string | null {
   const configured = process.env.LLM_GATEWAY_LOGS_DB;
   if (configured !== undefined) {
@@ -581,6 +676,14 @@ export class FlightRecorder implements FlightRecorderOperations {
   private bootstrapPromise: Promise<void> | null = null;
   /** Set by close(); every operation refuses from that point on. */
   private closed = false;
+  /**
+   * Schema-bootstrap state, tracked because `health()` is a SYNCHRONOUS
+   * snapshot and construction stopped implying initialisation ran.
+   */
+  private schemaState: "initialising" | "ready" | "failed" = "initialising";
+  /** The most recent failure, cleared by the next operation that succeeds. */
+  private lastFailure: { error: string; at: string } | null = null;
+  private failureCount = 0;
 
   constructor(dbPath: string, options: { redactSecrets?: boolean; logger?: LoggerLike } = {}) {
     this.dbPath = dbPath;
@@ -627,11 +730,65 @@ export class FlightRecorder implements FlightRecorderOperations {
     // No closed-check here. `close()` refuses NEW operations and then waits for
     // the ones already in flight, and those still have to reach a built schema.
     // Refusing here would abandon exactly the writes the drain exists to save.
-    this.bootstrapPromise ??= this.bootstrapSchema().catch((error: unknown) => {
-      this.bootstrapPromise = null;
-      throw error;
-    });
+    this.bootstrapPromise ??= this.bootstrapSchema().then(
+      () => {
+        this.schemaState = "ready";
+      },
+      (error: unknown) => {
+        this.bootstrapPromise = null;
+        // Recorded HERE and not only at the constructor's swallowing catch:
+        // that catch fires once, and an operation that retries the bootstrap
+        // and fails again must still leave the failure on the health snapshot.
+        this.schemaState = "failed";
+        this.noteFailure(error);
+        throw error;
+      }
+    );
     return this.bootstrapPromise;
+  }
+
+  /**
+   * Record a failed operation. The recorder reports `degraded` until an
+   * operation SUCCEEDS, which is a live signal rather than a sticky one; the
+   * cumulative `failureCount` is what keeps a recorder that flaps visible after
+   * its last call happened to work.
+   */
+  private noteFailure(error: unknown): void {
+    this.failureCount += 1;
+    this.lastFailure = {
+      error: error instanceof Error ? error.message : String(error),
+      at: new Date().toISOString(),
+    };
+  }
+
+  private noteSuccess(): void {
+    this.lastFailure = null;
+  }
+
+  /**
+   * The synchronous state snapshot every health surface reads.
+   *
+   * Synchronous DELIBERATELY: this is a report, nothing gates on it, and a
+   * health surface that has to await the subsystem it is reporting on cannot
+   * answer while that subsystem is wedged. The cost of the snapshot is that it
+   * can be taken mid-bootstrap, which is exactly why `initialising` is a state
+   * rather than an optimistic `active`.
+   */
+  health(): FlightRecorderHealth {
+    const state: FlightRecorderState =
+      this.schemaState === "failed" || this.lastFailure
+        ? "degraded"
+        : this.schemaState === "initialising"
+          ? "initialising"
+          : "active";
+    return {
+      state,
+      path: this.dbPath,
+      error: this.lastFailure?.error ?? null,
+      errorAt: this.lastFailure?.at ?? null,
+      failureCount: this.failureCount,
+      closed: this.closed,
+    };
   }
 
   private async bootstrapSchema(): Promise<void> {
@@ -726,12 +883,35 @@ export class FlightRecorder implements FlightRecorderOperations {
   ): Promise<T[]> {
     if (this.closed) return Promise.reject(new Error("flight recorder is closed"));
     return this.track(
-      (async () => {
-        await this.ensureSchema();
-        return this.driver.withConnection(FLIGHT_RECORDER_OPERATION_CLASSES[operation], conn =>
-          conn.query<T>(sql, params)
-        );
-      })()
+      this.observe(
+        (async () => {
+          await this.ensureSchema();
+          return this.driver.withConnection(FLIGHT_RECORDER_OPERATION_CLASSES[operation], conn =>
+            conn.query<T>(sql, params)
+          );
+        })()
+      )
+    );
+  }
+
+  /**
+   * Watch one operation's outcome WITHOUT changing it.
+   *
+   * The rejection is re-thrown, not swallowed: a read failure that reached a
+   * caller before must still reach it. All this adds is that the failure is
+   * also on the health snapshot, so "read failed after a successful open" stops
+   * being a state only the stderr log knows about.
+   */
+  private observe<T>(operation: Promise<T>): Promise<T> {
+    return operation.then(
+      value => {
+        this.noteSuccess();
+        return value;
+      },
+      (error: unknown) => {
+        this.noteFailure(error);
+        throw error;
+      }
     );
   }
 
@@ -751,10 +931,12 @@ export class FlightRecorder implements FlightRecorderOperations {
   ): Promise<void> {
     if (this.closed) return Promise.reject(new Error("flight recorder is closed"));
     return this.track(
-      (async () => {
-        await this.ensureSchema();
-        await this.driver.transaction(FLIGHT_RECORDER_OPERATION_CLASSES[operation], fn);
-      })()
+      this.observe(
+        (async () => {
+          await this.ensureSchema();
+          await this.driver.transaction(FLIGHT_RECORDER_OPERATION_CLASSES[operation], fn);
+        })()
+      )
     );
   }
 
@@ -1073,6 +1255,78 @@ export class FlightRecorder implements FlightRecorderOperations {
   }
 
   /**
+   * How much is in this file, and what else is in it.
+   *
+   * `doctor --json` reported NO storage health at all: no size, no row counts,
+   * no retention state, no wedged-run counts. The SQL lives here rather than in
+   * doctor.ts because scripts/check-storage-port.mjs keeps SQL inside the
+   * storage-owning modules, and it is one operation rather than six so a
+   * degraded file fails the whole block instead of half of it.
+   *
+   * The co-resident scan is the point, not a bonus: on a host switched to
+   * Postgres, this file still holds a `jobs` table frozen at the switchover
+   * that answers queries as though it were live, and a direct reader cannot
+   * see that it is stale.
+   */
+  async readStorageStats(retentionCutoffIso?: string): Promise<FlightRecorderStorageStats> {
+    const version = await this.read<{ v: number | null }>(
+      "readStorageStats",
+      "SELECT MAX(version) AS v FROM _migrations"
+    );
+    const totals = await this.read<{ c: number; oldest: string | null; newest: string | null }>(
+      "readStorageStats",
+      "SELECT COUNT(*) AS c, MIN(datetime_utc) AS oldest, MAX(datetime_utc) AS newest FROM requests"
+    );
+    let beyondRetention: number | null = null;
+    if (retentionCutoffIso) {
+      const rows = await this.read<{ c: number }>(
+        "readStorageStats",
+        "SELECT COUNT(*) AS c FROM requests WHERE datetime_utc < ?",
+        [retentionCutoffIso]
+      );
+      beyondRetention = rows[0]?.c ?? 0;
+    }
+    const present = await this.read<{ name: string }>(
+      "readStorageStats",
+      "SELECT name FROM sqlite_master WHERE type = 'table' AND name IN ('jobs', 'validation_runs')"
+    );
+    const names = new Set(present.map(row => row.name));
+    const coResident: CoResidentTableStats[] = [];
+    if (names.has("jobs")) {
+      // Statements are literal per table. Interpolating a name from
+      // sqlite_master would put a database-supplied string into SQL for no gain.
+      const rows = await this.read<{ c: number; unfinished: number }>(
+        "readStorageStats",
+        "SELECT COUNT(*) AS c, SUM(CASE WHEN status IN ('queued', 'running') THEN 1 ELSE 0 END) AS unfinished FROM jobs"
+      );
+      coResident.push({
+        table: "jobs",
+        rows: rows[0]?.c ?? 0,
+        unfinished: rows[0]?.unfinished ?? 0,
+      });
+    }
+    if (names.has("validation_runs")) {
+      const rows = await this.read<{ c: number; unfinished: number }>(
+        "readStorageStats",
+        "SELECT COUNT(*) AS c, SUM(CASE WHEN status = 'running' THEN 1 ELSE 0 END) AS unfinished FROM validation_runs"
+      );
+      coResident.push({
+        table: "validation_runs",
+        rows: rows[0]?.c ?? 0,
+        unfinished: rows[0]?.unfinished ?? 0,
+      });
+    }
+    return {
+      schemaVersion: version[0]?.v ?? null,
+      requestRows: totals[0]?.c ?? 0,
+      oldestRequest: totals[0]?.oldest ?? null,
+      newestRequest: totals[0]?.newest ?? null,
+      requestsBeyondRetention: beyondRetention,
+      coResident,
+    };
+  }
+
+  /**
    * Drain, then shut the handles.
    *
    * MUST BE AWAITED. `performShutdown` did not await it, which was harmless
@@ -1101,6 +1355,42 @@ export class FlightRecorder implements FlightRecorderOperations {
  * await, or the disabled path would take a different code path at every site.
  */
 export class NoopFlightRecorder implements FlightRecorderOperations {
+  /**
+   * WHY this instance exists, not merely that it does.
+   *
+   * Defaulted to `disabled-by-config` because that is what a bare
+   * `new NoopFlightRecorder()` has always meant at every test call site, and
+   * because the failure path is what has to be explicit: `createFlightRecorder`
+   * reaches this class from two places and its catch now MUST hand over the
+   * error to construct one. See `flightRecorderOpenFailed`.
+   */
+  private readonly absence: FlightRecorderAbsence;
+
+  constructor(absence: FlightRecorderAbsence = { kind: "disabled-by-config" }) {
+    this.absence = absence;
+  }
+
+  health(): FlightRecorderHealth {
+    if (this.absence.kind === "open-failed") {
+      return {
+        state: "unavailable",
+        path: this.absence.path,
+        error: this.absence.error,
+        errorAt: this.absence.at,
+        failureCount: 1,
+        closed: false,
+      };
+    }
+    return {
+      state: "disabled",
+      path: null,
+      error: null,
+      errorAt: null,
+      failureCount: 0,
+      closed: false,
+    };
+  }
+
   async logStart(_entry: FlightLogStart): Promise<void> {}
   async logComplete(_correlationId: string, _result: FlightLogResult): Promise<void> {}
   async recordCompressionTelemetry(
@@ -1135,10 +1425,62 @@ export class NoopFlightRecorder implements FlightRecorderOperations {
   async readRoutingDecisions(_limit: number): Promise<RoutingDecisionRow[]> {
     return [];
   }
+  /**
+   * NULLS, not zeroes. A zero row count is a measurement; this is the absence
+   * of one, and reporting `requestRows: 0` from a recorder that never opened a
+   * file is the same substitution the whole node is about.
+   */
+  async readStorageStats(_retentionCutoffIso?: string): Promise<FlightRecorderStorageStats> {
+    return {
+      schemaVersion: null,
+      requestRows: null,
+      oldestRequest: null,
+      newestRequest: null,
+      requestsBeyondRetention: null,
+      coResident: [],
+    };
+  }
   async close(): Promise<void> {}
 }
 
 export type FlightRecorderLike = FlightRecorder | NoopFlightRecorder;
+
+/** The recorder the operator asked NOT to have. */
+export function flightRecorderDisabled(): NoopFlightRecorder {
+  return new NoopFlightRecorder({ kind: "disabled-by-config" });
+}
+
+/** The recorder that could not be built. Nobody asked for this one. */
+export function flightRecorderOpenFailed(path: string, error: unknown): NoopFlightRecorder {
+  return new NoopFlightRecorder({
+    kind: "open-failed",
+    path,
+    error: error instanceof Error ? error.message : String(error),
+    at: new Date().toISOString(),
+  });
+}
+
+/**
+ * The health of any recorder, including one that was never built.
+ *
+ * `null` is its own answer rather than a silent `disabled`: a surface reading
+ * the recorder before startup wired one has not learned that recording is off,
+ * it has learned nothing, and reporting that as a configuration choice is the
+ * same conflation one layer up.
+ */
+export function flightRecorderHealth(recorder: FlightRecorderLike | null): FlightRecorderHealth {
+  if (!recorder) {
+    return {
+      state: "unavailable",
+      path: resolveFlightRecorderDbPath(),
+      error: "no flight recorder has been constructed in this process yet",
+      errorAt: null,
+      failureCount: 0,
+      closed: false,
+    };
+  }
+  return recorder.health();
+}
 
 /** Projection behind the three cache-aggregate reads. */
 export interface CacheAggregateRow {
@@ -1337,7 +1679,7 @@ export function createFlightRecorder(
   const dbPath = resolveFlightRecorderDbPath();
   if (!dbPath) {
     logger.info("Flight recorder disabled (LLM_GATEWAY_LOGS_DB=none)");
-    return new NoopFlightRecorder();
+    return flightRecorderDisabled();
   }
 
   const decision = flightRecorderEngineDecision(persistenceBackend);
@@ -1352,7 +1694,12 @@ export function createFlightRecorder(
     }
     return recorder;
   } catch (error) {
+    // DEGRADE, deliberately and unchanged: losing request logging must not take
+    // the gateway down. What changed is that the object handed back can no
+    // longer be mistaken for the one above it. Same class, different answer to
+    // `health()`, so every downstream surface stops reading a failed open as a
+    // configuration choice.
     logger.error("Flight recorder unavailable; continuing without SQLite logging", error);
-    return new NoopFlightRecorder();
+    return flightRecorderOpenFailed(dbPath, error);
   }
 }

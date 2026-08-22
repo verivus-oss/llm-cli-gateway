@@ -282,7 +282,10 @@ import {
 import {
   createFlightRecorder,
   flightRecorderEngineDecision,
-  NoopFlightRecorder,
+  flightRecorderHealth,
+  flightRecorderHealthMessage,
+  flightRecorderReadsAreAuthoritative,
+  type FlightRecorderState,
   resolveFlightRecorderDbPath,
   FlightRecorderLike,
 } from "./flight-recorder.js";
@@ -17339,6 +17342,28 @@ function registerPersonalConfigTools(server: McpServer, runtime: GatewayServerRu
   );
 }
 
+/**
+ * What the request-history READ surfaces say about their own storage.
+ *
+ * `llm_request_list` answers `success: true, count: 0` and `llm_request_result`
+ * answers "not found" for a recorder that could not open its database, which is
+ * byte-identical to the answer for a database that is simply empty. That is the
+ * silent empty-success this node exists to remove, and the hint each of them
+ * already carried named LLM_GATEWAY_LOGS_DB as the only possible cause.
+ */
+function requestStorageNote(recorder: FlightRecorderLike | null): {
+  state: FlightRecorderState;
+  readsAreAuthoritative: boolean;
+  warning: string | null;
+} {
+  const health = flightRecorderHealth(recorder);
+  return {
+    state: health.state,
+    readsAreAuthoritative: flightRecorderReadsAreAuthoritative(health),
+    warning: flightRecorderHealthMessage(health),
+  };
+}
+
 export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
   const runtime = resolveGatewayServerRuntime(deps, { isolateState: true });
   ensureLiveKitSessionCleanup(runtime);
@@ -22428,6 +22453,9 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
                   error: "No persisted request found for this correlation id",
                   correlationId,
                   hint: "The id may be wrong, the row may have aged out of the flight recorder, or flight recording is disabled (LLM_GATEWAY_LOGS_DB=none).",
+                  // As on llm_request_list: "not found" and "could not look"
+                  // returned the same shape and the same hint.
+                  storage: requestStorageNote(flightRecorder),
                 },
                 null,
                 2
@@ -22510,6 +22538,11 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
                 count: requests.length,
                 requests,
                 hint: "Pass correlationId to llm_request_result for prompt/response, or asyncJobId to llm_job_status. An empty list is not proof nothing ran: cross-LLM validation seats write no flight-recorder row, and flight recording can be disabled (LLM_GATEWAY_LOGS_DB=none).",
+                // obs: the hint above lists ONE reason a list can be empty and
+                // there are five. This says which one is true right now, so an
+                // empty result from an unreadable database stops looking the
+                // same as an empty result from an empty one.
+                storage: requestStorageNote(flightRecorder),
               },
               null,
               2
@@ -22544,10 +22577,10 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
       const durableAdmission = asyncJobManager.getDurableAdmissionHealth();
       const asyncJobsConfigured = persistence.backend !== "none" && persistence.asyncJobsEnabled;
       const asyncJobsEffective = asyncJobsConfigured && storeAttached && durableAdmission.admitting;
-      const disposition = storageDisposition(
-        persistence,
-        !(flightRecorder instanceof NoopFlightRecorder)
-      );
+      // One snapshot, read by everything below. Taken ONCE so the recorder
+      // block and the disposition cannot disagree about the same recorder.
+      const recorderHealth = flightRecorderHealth(flightRecorder);
+      const disposition = storageDisposition(persistence, recorderHealth);
       const persistenceBlock = {
         backend: persistence.backend,
         dbPath: persistence.path,
@@ -22587,27 +22620,48 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
       // caller looking for request history went to Postgres and found none.
       // docs/plans/storage-unification.md is the fix; until it lands, the split
       // is at least stated rather than hidden.
-      const recorderEnabled = !(flightRecorder instanceof NoopFlightRecorder);
+      // obs: `enabled` is DERIVED from the recorder's own state, and the state
+      // is reported beside it. `!(x instanceof NoopFlightRecorder)` was the
+      // whole defect: it answered `false` for a recorder the operator turned
+      // off and for one that failed to open, and the warning below then named
+      // LLM_GATEWAY_LOGS_DB in both cases.
+      const recorderEnabled = disposition.requestHistory.enabled;
       // s7: the recorder now runs through the storage port's SQLite driver and
       // is TOLD what [persistence].backend asked for. `engineDeferredBecause`
       // is the difference between a setting that is ignored and one that is
       // refused with a reason.
       const recorderEngine = flightRecorderEngineDecision(persistence.backend);
+      const recorderMessage = flightRecorderHealthMessage(recorderHealth);
       const flightRecorderBlock = {
         engine: recorderEnabled ? recorderEngine.engine : null,
-        path: recorderEnabled ? resolveFlightRecorderDbPath() : null,
+        path: recorderEnabled ? resolveFlightRecorderDbPath() : recorderHealth.path,
         enabled: recorderEnabled,
+        // The five-way answer. `enabled: false` alone could not tell an
+        // operator whether to change a setting or to go and look at a file.
+        state: recorderHealth.state,
+        readsAreAuthoritative: flightRecorderReadsAreAuthoritative(recorderHealth),
+        lastError: recorderHealth.error,
+        lastErrorAt: recorderHealth.errorAt,
+        failureCount: recorderHealth.failureCount,
+        closed: recorderHealth.closed,
         // Stated as a fact rather than implied, because the whole failure mode
         // is a caller assuming one backend setting covers both subsystems.
         followsPersistenceBackend: false,
         engineRequested: recorderEngine.requested ?? null,
         engineDeferredBecause: recorderEngine.deferredBecause ?? null,
         holds: "requests (llm_request_list, llm_request_result)",
-        warning: !recorderEnabled
-          ? "Flight recording is disabled (LLM_GATEWAY_LOGS_DB=none). llm_request_list returns an empty list and llm_request_result finds nothing; this is not evidence that no request ran."
-          : persistence.backend === "sqlite" || persistence.backend === "none"
-            ? null
-            : `Storage is SPLIT: request history is in SQLite at ${resolveFlightRecorderDbPath()}, while the job store is '${persistence.backend}'. No single database holds a whole request. If this gateway previously ran on sqlite, that same file also still contains an abandoned 'jobs' table which is frozen at the switchover and will answer queries as though it were live. Read through llm_request_list / llm_request_result / llm_job_result, which span the split.`,
+        // Composed from two INDEPENDENT facts rather than a chain of else-ifs:
+        // a recorder can be degraded AND split, and the old chain reported at
+        // most one of them because "not enabled" short-circuited everything.
+        warning:
+          [
+            recorderMessage,
+            recorderEnabled && persistence.backend !== "sqlite" && persistence.backend !== "none"
+              ? `Storage is SPLIT: request history is in SQLite at ${resolveFlightRecorderDbPath()}, while the job store is '${persistence.backend}'. No single database holds a whole request. If this gateway previously ran on sqlite, that same file also still contains an abandoned 'jobs' table which is frozen at the switchover and will answer queries as though it were live. Read through llm_request_list / llm_request_result / llm_job_result, which span the split.`
+              : null,
+          ]
+            .filter((line): line is string => line !== null)
+            .join(" ") || null,
       };
       const outboundProviders = {
         xai: providers.xai
@@ -23863,11 +23917,30 @@ function registerHealthResource(server: McpServer): void {
       },
       async () => {
         const health = await checkHealth(db!);
+        // The recorder rides along because this resource exists only on a
+        // PostgreSQL host, which is precisely the host where request history
+        // is in a DIFFERENT engine that this block never mentioned. A green
+        // Postgres answer here said nothing about whether the transcript file
+        // was readable.
+        const recorder = flightRecorderHealth(flightRecorder);
         return {
           contents: [
             {
               uri: "health://status",
-              text: JSON.stringify(health, null, 2),
+              text: JSON.stringify(
+                {
+                  ...health,
+                  flightRecorder: {
+                    state: recorder.state,
+                    path: recorder.path,
+                    readsAreAuthoritative: flightRecorderReadsAreAuthoritative(recorder),
+                    lastError: recorder.error,
+                    warning: flightRecorderHealthMessage(recorder),
+                  },
+                },
+                null,
+                2
+              ),
               mimeType: "application/json",
             },
           ],
@@ -23890,13 +23963,27 @@ function registerHealthResource(server: McpServer): void {
       const manager = getAsyncJobManager();
       await manager.whenStartupSettled();
       const health = manager.getJobHealth();
+      const recorder = flightRecorderHealth(flightRecorder);
       return {
         contents: [
           {
             uri: uri.href,
             mimeType: "application/json",
             text: JSON.stringify(
-              { ...health, durableAdmission: manager.getDurableAdmissionHealth() },
+              {
+                ...health,
+                durableAdmission: manager.getDurableAdmissionHealth(),
+                // Same snapshot as llm_process_health. A resource and a tool
+                // reporting "process health" from different facts is how one
+                // of them ends up trusted and stale.
+                flightRecorder: {
+                  state: recorder.state,
+                  path: recorder.path,
+                  readsAreAuthoritative: flightRecorderReadsAreAuthoritative(recorder),
+                  lastError: recorder.error,
+                  warning: flightRecorderHealthMessage(recorder),
+                },
+              },
               null,
               2
             ),
@@ -24527,7 +24614,7 @@ async function main() {
   // written" is the recorder's real state and not the configured intent.
   const startupRecorder = getFlightRecorder(logger);
   for (const line of formatStorageDisposition(
-    storageDisposition(persistence, !(startupRecorder instanceof NoopFlightRecorder))
+    storageDisposition(persistence, flightRecorderHealth(startupRecorder))
   )) {
     logger.info(line);
   }

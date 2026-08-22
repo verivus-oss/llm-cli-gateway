@@ -18,6 +18,7 @@ import type {
   CompressionTelemetry,
   FlightLogResult,
   FlightLogStart,
+  FlightRecorderStorageStats,
   LcrPriorSourceRow,
   PersistedRequestRow,
   PersistedRequestSummaryRow,
@@ -70,6 +71,8 @@ export interface FlightRecorderOperations {
   listRequestSummaries(filter: RequestSummaryFilter): Promise<PersistedRequestSummaryRow[]>;
   readLcrPriorRows(): Promise<LcrPriorSourceRow[]>;
   readRoutingDecisions(limit: number): Promise<RoutingDecisionRow[]>;
+  /** Sizes, counts and what other subsystems left in this file. Reports no bodies. */
+  readStorageStats(retentionCutoffIso?: string): Promise<FlightRecorderStorageStats>;
   /** Drain, then shut the handles. Callers must await it; see note 3 above. */
   close(): Promise<void>;
 }
@@ -98,6 +101,9 @@ export const FLIGHT_RECORDER_OPERATION_CLASSES = {
   listRequestSummaries: "analytics_read",
   readLcrPriorRows: "analytics_read",
   readRoutingDecisions: "analytics_read",
+  // COUNTS and table names, never a body, so it routes on the analytics
+  // credential like every other projection rather than the transcript one.
+  readStorageStats: "analytics_read",
   close: "lifecycle",
 } as const satisfies Record<keyof FlightRecorderOperations, SubsystemOperationClass>;
 
@@ -110,6 +116,8 @@ export const FLIGHT_RECORDER_OPERATION_CLASSES = {
 export const FLIGHT_RECORDER_NON_OPERATIONS = {
   queryRequests:
     "Takes caller-supplied SQL, which is the anti-seam s2 removed. It survives as an internal of the SQLite implementation and the gate stops any other module calling it.",
+  health:
+    "A synchronous snapshot of the recorder's own state, not a storage operation: it reaches no connection, issues no statement and has no operation class to route on. It is what lets a health surface distinguish a recorder that is off from one that failed, which is the obs node's whole subject.",
 } as const;
 
 /**

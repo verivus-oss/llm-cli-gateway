@@ -6,6 +6,7 @@
   "required": [
     "schema_version",
     "ok",
+    "storage",
     "generated_at",
     "system",
     "gateway",
@@ -24,8 +25,87 @@
     "next_actions"
   ],
   "properties": {
-    "schema_version": { "const": "1.0" },
+    "schema_version": { "const": "1.1" },
     "ok": { "type": "boolean" },
+    "storage": {
+      "description": "Storage health for the flight recorder and the job store. Added at schema_version 1.1: 1.0 reported none, so a corrupt or unreadable transcript database produced a report byte-identical to a quiet one. `scanned` is false for a caller that ran no asynchronous scan, and every measurement is null in that case rather than zero.",
+      "type": "object",
+      "required": ["scanned", "flight_recorder", "job_store", "retention", "co_resident", "warnings"],
+      "properties": {
+        "scanned": { "type": "boolean" },
+        "flight_recorder": {
+          "type": "object",
+          "required": [
+            "state",
+            "path",
+            "reads_are_authoritative",
+            "error",
+            "file_bytes",
+            "wal_bytes",
+            "schema_version",
+            "request_rows",
+            "oldest_request",
+            "newest_request"
+          ],
+          "properties": {
+            "state": {
+              "type": ["string", "null"],
+              "enum": ["disabled", "unavailable", "initialising", "degraded", "active", null],
+              "description": "disabled = the operator turned recording off. unavailable = it failed to open. degraded = open, but the schema bootstrap or the last operation failed. initialising = open, bootstrap not settled. active = open and working. null = not scanned."
+            },
+            "path": { "type": ["string", "null"] },
+            "reads_are_authoritative": { "type": "boolean" },
+            "error": { "type": ["string", "null"] },
+            "file_bytes": { "type": ["integer", "null"] },
+            "wal_bytes": { "type": ["integer", "null"] },
+            "schema_version": { "type": ["integer", "null"] },
+            "request_rows": { "type": ["integer", "null"] },
+            "oldest_request": { "type": ["string", "null"] },
+            "newest_request": { "type": ["string", "null"] }
+          },
+          "additionalProperties": false
+        },
+        "job_store": {
+          "type": "object",
+          "required": ["backend", "path", "shares_flight_recorder_file"],
+          "properties": {
+            "backend": { "type": "string" },
+            "path": { "type": ["string", "null"] },
+            "shares_flight_recorder_file": { "type": "boolean" }
+          },
+          "additionalProperties": false
+        },
+        "retention": {
+          "type": "object",
+          "required": ["days", "unbounded", "requests_beyond_retention"],
+          "properties": {
+            "days": { "type": ["integer", "null"] },
+            "unbounded": { "type": "array", "items": { "type": "string" } },
+            "requests_beyond_retention": { "type": ["integer", "null"] }
+          },
+          "additionalProperties": false
+        },
+        "co_resident": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": ["table", "rows", "unfinished", "live"],
+            "properties": {
+              "table": { "type": "string" },
+              "rows": { "type": "integer" },
+              "unfinished": { "type": "integer" },
+              "live": {
+                "type": "boolean",
+                "description": "False means this table belongs to a subsystem that no longer uses this file. Its rows are frozen at the switchover and still answer queries."
+              }
+            },
+            "additionalProperties": false
+          }
+        },
+        "warnings": { "type": "array", "items": { "type": "string" } }
+      },
+      "additionalProperties": false
+    },
     "generated_at": { "type": "string", "format": "date-time" },
     "system": {
       "type": "object",
