@@ -32,10 +32,12 @@ describe("the flight recorder's declared operation set", () => {
   });
 
   it("keeps the one exclusion explicit rather than merely absent", async () => {
-    // ONE exclusion since s7, not two: `flush` was deleted from the recorder
-    // rather than ported, because a no-op named "flush" on an asynchronous
-    // surface reads as a durability guarantee nothing provides.
-    expect(Object.keys(FLIGHT_RECORDER_NON_OPERATIONS).sort()).toEqual(["queryRequests"]);
+    // TWO exclusions since obs, and `flush` is still not one of them: it was
+    // deleted from the recorder rather than ported, because a no-op named
+    // "flush" on an asynchronous surface reads as a durability guarantee
+    // nothing provides. `health` is the second, and it is a deliberate
+    // extension of this list rather than an omission from the operation set.
+    expect(Object.keys(FLIGHT_RECORDER_NON_OPERATIONS).sort()).toEqual(["health", "queryRequests"]);
     for (const reason of Object.values(FLIGHT_RECORDER_NON_OPERATIONS)) {
       expect(reason.length).toBeGreaterThan(20);
     }

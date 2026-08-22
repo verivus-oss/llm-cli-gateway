@@ -325,6 +325,7 @@ fixes = "gap.no_storage_health"
 role = "Every finding in this audit came from querying production by hand. doctor reports no storage health at all."
 action = "Add DB file sizes, per-table row counts, growth rate, non-terminal-run count, and pending-pin count to doctor --json and setup/status.schema.json. Have the soak check consume it rather than re-deriving with ad-hoc SQL."
 validation = "The 97 wedged runs would have been visible in doctor output on the day they crossed a threshold."
+status = "PARTLY DONE 2026-08-22 by obs of storage-unification: doctor --json carries a `storage` block at schema_version 1.1 with file and WAL bytes, request row counts, retention state, recorder state, and the non-terminal counts of the tables co-resident in the recorder file, so wedged validation_runs are visible without hand SQL. NOT done: growth rate, pending-pin count, per-table counts for a Postgres job store, and the soak check consuming it instead of its own SQL."
 
 [[node]]
 id = "p4.postgres-in-release-gate"

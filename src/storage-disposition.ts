@@ -25,7 +25,13 @@
  * one.
  */
 import { resolveDatabaseUrlPrecedence, type PersistenceConfig } from "./config.js";
-import { flightRecorderEngineDecision, resolveFlightRecorderDbPath } from "./flight-recorder.js";
+import {
+  flightRecorderEngineDecision,
+  flightRecorderHealthMessage,
+  resolveFlightRecorderDbPath,
+  type FlightRecorderHealth,
+  type FlightRecorderState,
+} from "./flight-recorder.js";
 import {
   resolveStorageRole,
   roleSeparationInForce,
@@ -51,6 +57,15 @@ export interface StorageDisposition {
   };
   requestHistory: {
     enabled: boolean;
+    /**
+     * The recorder's OBSERVED state, or null when no recorder was handed over
+     * and this disposition is reporting configured intent. `enabled` alone
+     * cannot separate "the operator turned it off" from "it failed to open",
+     * which is exactly how a corrupt logs.db read as a configuration choice.
+     */
+    state: FlightRecorderState | null;
+    /** The failure behind `unavailable` / `degraded`, never a guess at one. */
+    unavailableBecause: string | null;
     engine: "sqlite" | null;
     path: string | null;
     /** Which input decided on/off. */
@@ -92,16 +107,21 @@ function roleReport(
 
 /**
  * @param persistence Resolved persistence config.
- * @param recorderEnabled The recorder instance's real state, when it is already
- * built. Omitted, the disposition reports the configured intent; a recorder
- * that failed to open logs its own error at construction.
+ * @param recorder The recorder instance's real health, when it is already
+ * built. It used to be a BOOLEAN, and that is the defect this parameter now
+ * carries the fix for: `false` was produced both by `LLM_GATEWAY_LOGS_DB=none`
+ * and by a failed open, and the startup line then named the environment
+ * variable in both cases. Omitted, the disposition reports configured intent
+ * and says so by leaving `state` null.
  */
 export function storageDisposition(
   persistence: PersistenceConfig,
-  recorderEnabled?: boolean
+  recorder?: FlightRecorderHealth
 ): StorageDisposition {
   const recorderPath = resolveFlightRecorderDbPath();
-  const enabled = recorderEnabled ?? recorderPath !== null;
+  const enabled = recorder
+    ? recorder.state !== "disabled" && recorder.state !== "unavailable"
+    : recorderPath !== null;
   const engine = flightRecorderEngineDecision(persistence.backend);
   const databaseUrl = resolveDatabaseUrlPrecedence({
     databaseUrl: process.env.DATABASE_URL,
@@ -118,8 +138,13 @@ export function storageDisposition(
     },
     requestHistory: {
       enabled,
+      state: recorder?.state ?? null,
+      unavailableBecause: recorder?.error ?? null,
       engine: enabled ? engine.engine : null,
-      path: enabled ? recorderPath : null,
+      // The path is reported for a FAILED open too. "Which file could not be
+      // opened" is the first thing an operator needs and the old boolean
+      // nulled it out alongside a message blaming the configuration.
+      path: enabled ? recorderPath : (recorder?.path ?? null),
       decidedBy: process.env.LLM_GATEWAY_LOGS_DB !== undefined ? "LLM_GATEWAY_LOGS_DB" : "default",
       followsPersistenceBackend: false,
       engineRequested: engine.requested ?? null,
@@ -161,15 +186,44 @@ function logsDbReport(persistence: PersistenceConfig): DeprecatedInputReport {
   };
 }
 
+/**
+ * The recorder half of the startup block, in the recorder's own words.
+ *
+ * `state === null` means no recorder was handed over, so the only honest thing
+ * to report is the configured intent; every other case defers to
+ * `flightRecorderHealthMessage`, which is the single owner of these sentences.
+ */
+function recorderLine(requestHistory: StorageDisposition["requestHistory"]): string {
+  if (requestHistory.state === null) {
+    return "request history is NOT being written (LLM_GATEWAY_LOGS_DB=none); llm_request_list will return an empty list, which is not evidence that no request ran";
+  }
+  const message =
+    flightRecorderHealthMessage({
+      state: requestHistory.state,
+      path: requestHistory.path,
+      error: requestHistory.unavailableBecause,
+      errorAt: null,
+      failureCount: 0,
+      closed: false,
+    }) ?? `request history is being written to ${requestHistory.path}`;
+  const lead = requestHistory.enabled
+    ? "request history may be INCOMPLETE."
+    : "request history is NOT being written.";
+  return `${lead} ${message}`;
+}
+
 /** One block of stderr at startup, so the answer is in the log and not only in a tool. */
 export function formatStorageDisposition(disposition: StorageDisposition): string[] {
   const { jobStore, requestHistory, roles } = disposition;
   const lines = [
     `Storage: job store backend="${jobStore.backend}" (async jobs ${jobStore.asyncJobsEnabled ? "enabled" : "DISABLED"})` +
       `${jobStore.path ? ` at ${jobStore.path}` : ""}`,
-    requestHistory.enabled
+    requestHistory.enabled && requestHistory.state !== "degraded"
       ? `Storage: request history is being written to ${requestHistory.path} (engine: ${requestHistory.engine}), which does NOT follow [persistence].backend`
-      : "Storage: request history is NOT being written (LLM_GATEWAY_LOGS_DB=none); llm_request_list will return an empty list, which is not evidence that no request ran",
+      : // Derived, never authored here. The startup line used to name
+        // LLM_GATEWAY_LOGS_DB=none whenever the recorder was absent, including
+        // when the file was there and unreadable.
+        `Storage: ${recorderLine(requestHistory)}`,
   ];
   if (jobStore.backend === "none" && requestHistory.enabled) {
     lines.push(

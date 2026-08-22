@@ -1,6 +1,6 @@
-import { existsSync, readFileSync } from "node:fs";
+import { existsSync, readFileSync, statSync } from "node:fs";
 import { homedir, platform, arch, release } from "node:os";
-import { dirname, join } from "node:path";
+import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { loadAuthConfig } from "./auth.js";
 import {
@@ -48,7 +48,18 @@ import {
 import { buildRemoteConnectorUrls, resolveConfiguredRemoteOrigin } from "./remote-url.js";
 import { computeGlobalCacheStats } from "./cache-stats.js";
 import type { GlobalCacheStats } from "./cache-stats.js";
-import { FlightRecorder, resolveFlightRecorderDbPath } from "./flight-recorder.js";
+import {
+  FlightRecorder,
+  flightRecorderHealth,
+  flightRecorderHealthMessage,
+  flightRecorderDisabled,
+  flightRecorderOpenFailed,
+  flightRecorderReadsAreAuthoritative,
+  resolveFlightRecorderDbPath,
+  type CoResidentTableStats,
+  type FlightRecorderLike,
+  type FlightRecorderState,
+} from "./flight-recorder.js";
 import {
   buildUpstreamContractReport,
   type InstalledCliContractProbe,
@@ -489,9 +500,62 @@ export interface PersonalConfigReadinessInput {
   persistence?: Pick<PersistenceConfig, "backend" | "asyncJobsEnabled"> | null;
 }
 
+/**
+ * Storage health, which `doctor --json` reported NOTHING of.
+ *
+ * It opened the flight recorder inside a swallowing try/catch, ran two reads
+ * inside two more, and then emitted a normal zero-valued `cache_awareness`
+ * block either way. So a corrupt, unreadable or full transcript database
+ * produced a report indistinguishable from a quiet one.
+ */
+export interface StorageHealthReport {
+  /**
+   * FALSE when nobody performed the asynchronous scan, which is the case for
+   * every synchronous caller of `createDoctorReport`. Distinguished from a scan
+   * that ran and found nothing, because that distinction is the whole subject.
+   */
+  scanned: boolean;
+  flight_recorder: {
+    /** NULL when `scanned` is false. Nothing was observed, so nothing is claimed. */
+    state: FlightRecorderState | null;
+    path: string | null;
+    /** True only when an empty read here means "nothing was recorded". */
+    reads_are_authoritative: boolean;
+    error: string | null;
+    /** Null means not measured, never "zero bytes". */
+    file_bytes: number | null;
+    wal_bytes: number | null;
+    schema_version: number | null;
+    request_rows: number | null;
+    oldest_request: string | null;
+    newest_request: string | null;
+  };
+  job_store: {
+    backend: string;
+    path: string | null;
+    /** The job store and the transcript are in the SAME SQLite file. */
+    shares_flight_recorder_file: boolean;
+  };
+  retention: {
+    /** Configured for the job store. Nothing applies it to the transcript. */
+    days: number | null;
+    /** Subsystems in the recorder's file that no retention policy bounds. */
+    unbounded: string[];
+    requests_beyond_retention: number | null;
+  };
+  /**
+   * Tables in the recorder's file belonging to other subsystems, with their
+   * non-terminal row counts. On a host switched to Postgres this is the
+   * abandoned copy that still answers queries as though it were live.
+   */
+  co_resident: Array<{ table: string; rows: number; unfinished: number; live: boolean }>;
+  warnings: string[];
+}
+
 export interface DoctorReport {
-  schema_version: "1.0";
+  schema_version: "1.1";
   ok: boolean;
+  storage: StorageHealthReport;
   generated_at: string;
   system: {
     os: NodeJS.Platform;
@@ -941,6 +1005,13 @@ function chatGPTConnectorUrl(env: NodeJS.ProcessEnv, rawPublicUrl: string | null
 
 export interface CreateDoctorReportOptions {
   env?: NodeJS.ProcessEnv;
+  /**
+   * The asynchronous storage scan, performed by the caller. `createDoctorReport`
+   * stays a pure synchronous projection, exactly as it does for `cacheStats`
+   * and `lcrPriors`; omitted, the report says `scanned: false` rather than
+   * inventing zeroes.
+   */
+  storage?: StorageHealthReport;
   /**
    * Cache aggregates over the last 24h, ALREADY READ from the flight recorder.
    * Drives cache_awareness.last_24h and per_cli. When absent, those blocks
@@ -1416,6 +1487,163 @@ function buildProviderCapabilitySummary(
   };
 }
 
+/** The block a synchronous caller gets: no scan was run, and it says so. */
+export function unscannedStorageHealth(): StorageHealthReport {
+  return {
+    scanned: false,
+    flight_recorder: {
+      state: null,
+      path: resolveFlightRecorderDbPath(),
+      reads_are_authoritative: false,
+      error: null,
+      file_bytes: null,
+      wal_bytes: null,
+      schema_version: null,
+      request_rows: null,
+      oldest_request: null,
+      newest_request: null,
+    },
+    job_store: { backend: "unknown", path: null, shares_flight_recorder_file: false },
+    retention: { days: null, unbounded: [], requests_beyond_retention: null },
+    co_resident: [],
+    warnings: [],
+  };
+}
+
+function fileBytes(path: string): number | null {
+  try {
+    return statSync(path).size;
+  } catch {
+    // A missing WAL is normal; a missing main file is reported by the state.
+    return null;
+  }
+}
+
+/**
+ * Open the recorder, read its own numbers, and report the failure if either
+ * step fails INSTEAD of degrading to a zeroed block.
+ *
+ * The open and the read are separate states on purpose. "Could not open" and
+ * "opened and then the read failed" have different causes and different fixes,
+ * and doctor collapsed both into silence.
+ */
+export async function collectStorageHealth(
+  existing?: FlightRecorderLike | null
+): Promise<StorageHealthReport> {
+  const block = unscannedStorageHealth();
+  block.scanned = true;
+  const dbPath = resolveFlightRecorderDbPath();
+
+  let persistence: PersistenceConfig | null = null;
+  try {
+    persistence = loadPersistenceConfig();
+  } catch {
+    // A config that will not load is already reported by the gateway block.
+  }
+  if (persistence) {
+    block.job_store = {
+      backend: persistence.backend,
+      path: persistence.path,
+      shares_flight_recorder_file: Boolean(
+        dbPath && persistence.path && resolve(persistence.path) === resolve(dbPath)
+      ),
+    };
+    block.retention.days = persistence.retentionDays;
+  }
+
+  if (!dbPath) {
+    const disabled = flightRecorderHealth(flightRecorderDisabled());
+    block.flight_recorder.state = disabled.state;
+    block.flight_recorder.path = null;
+    block.flight_recorder.error = null;
+    const message = flightRecorderHealthMessage(disabled);
+    if (message) block.warnings.push(message);
+    return block;
+  }
+
+  // A caller that already holds one hands it over, so doctor does not put a
+  // second writer on the same file to ask it how big it is.
+  const ownsRecorder = !existing;
+  let recorder: FlightRecorderLike;
+  if (existing) {
+    recorder = existing;
+  } else {
+    try {
+      recorder = new FlightRecorder(dbPath);
+    } catch (error) {
+      // NOT swallowed. This is the state doctor could not previously express.
+      recorder = flightRecorderOpenFailed(dbPath, error);
+    }
+  }
+
+  const cutoff =
+    block.retention.days !== null
+      ? new Date(Date.now() - block.retention.days * 86_400_000).toISOString()
+      : undefined;
+  try {
+    const stats = await recorder.readStorageStats(cutoff);
+    block.flight_recorder.schema_version = stats.schemaVersion;
+    block.flight_recorder.request_rows = stats.requestRows;
+    block.flight_recorder.oldest_request = stats.oldestRequest;
+    block.flight_recorder.newest_request = stats.newestRequest;
+    block.retention.requests_beyond_retention = stats.requestsBeyondRetention;
+    block.co_resident = stats.coResident.map((row: CoResidentTableStats) => ({
+      table: row.table,
+      rows: row.rows,
+      unfinished: row.unfinished,
+      // A `jobs` table in this file is LIVE only while the job store is the
+      // same SQLite file. Otherwise it is the abandoned copy, frozen at the
+      // switchover, and its rows will never move again.
+      live: row.table === "jobs" ? block.job_store.shares_flight_recorder_file : true,
+    }));
+  } catch (error) {
+    // Reached the file and could not read it. The health snapshot below is
+    // already `degraded` because every operation records its own failure; this
+    // catch exists so doctor still emits a report rather than throwing.
+    block.warnings.push(
+      `Reading flight-recorder storage statistics FAILED: ${error instanceof Error ? error.message : String(error)}`
+    );
+  }
+
+  const health = flightRecorderHealth(recorder);
+  block.flight_recorder.state = health.state;
+  block.flight_recorder.path = health.path;
+  block.flight_recorder.error = health.error;
+  block.flight_recorder.reads_are_authoritative = flightRecorderReadsAreAuthoritative(health);
+  block.flight_recorder.file_bytes = fileBytes(dbPath);
+  block.flight_recorder.wal_bytes = fileBytes(`${dbPath}-wal`);
+  const recorderMessage = flightRecorderHealthMessage(health);
+  if (recorderMessage) block.warnings.push(recorderMessage);
+
+  // Retention is expressed for the job store only. `requests` and
+  // `validation_runs` grow without limit, which is why a 1.2 GB transcript file
+  // is not a fault and is also nobody's job.
+  block.retention.unbounded = ["requests"];
+  if (block.co_resident.some(row => row.table === "validation_runs")) {
+    block.retention.unbounded.push("validation_runs");
+  }
+  for (const row of block.co_resident) {
+    if (!row.live && row.rows > 0) {
+      block.warnings.push(
+        `The flight recorder's file also holds an ABANDONED '${row.table}' table of ${row.rows} rows (${row.unfinished} never finished). The live job store is '${block.job_store.backend}'. A direct reader of this file cannot tell that table is frozen.`
+      );
+    } else if (row.unfinished > 0 && row.table === "validation_runs") {
+      block.warnings.push(
+        `${row.unfinished} validation run(s) are still 'running' with nothing bounding them; no retention policy covers validation_runs.`
+      );
+    }
+  }
+
+  if (ownsRecorder) {
+    try {
+      await recorder.close();
+    } catch {
+      // best effort
+    }
+  }
+  return block;
+}
+
 export function createDoctorReport(
   envOrOptions: NodeJS.ProcessEnv | CreateDoctorReportOptions = process.env
 ): DoctorReport {
@@ -1476,8 +1704,9 @@ export function createDoctorReport(
     opts.personalConfigReadiness ?? loadPersonalConfigReadinessReport(env);
 
   const report: DoctorReport = {
-    schema_version: "1.0",
+    schema_version: "1.1",
     ok: true,
+    storage: opts.storage ?? unscannedStorageHealth(),
     generated_at: generatedAt,
     system: {
       os: platform(),
@@ -1555,6 +1784,25 @@ export function createDoctorReport(
     report.api_providers = apiProviders;
   }
 
+  // A recorder that could not open, or that is failing operations, is a
+  // FAILURE and not a configuration choice, so it lands on `ok` alongside the
+  // other real faults. `disabled` deliberately does not: the operator asked for
+  // it. Gated on `scanned` because a caller that ran no scan learned nothing.
+  if (
+    report.storage.scanned &&
+    (report.storage.flight_recorder.state === "unavailable" ||
+      report.storage.flight_recorder.state === "degraded")
+  ) {
+    report.ok = false;
+    report.next_actions.push(
+      `Flight recorder storage is ${report.storage.flight_recorder.state}: ${report.storage.flight_recorder.error ?? "no detail"}. Request history reads return empty results that are NOT evidence that no request ran.`
+    );
+  }
+  for (const warning of report.storage.warnings) {
+    if (warning.startsWith("The flight recorder's file also holds an ABANDONED")) {
+      report.next_actions.push(warning);
+    }
+  }
   if (transport === "http" && auth.required && !auth.tokenConfigured) {
     report.ok = false;
     report.next_actions.push("Set LLM_GATEWAY_AUTH_TOKEN before starting HTTP transport.");
@@ -1688,7 +1936,7 @@ export async function printDoctorJson(
   // failures degrade to the zeroed block (buildCacheAwarenessReport
   // handles missing deps).
   let cacheAwareness: CacheAwarenessConfig | undefined;
-  let flightRecorder: FlightRecorder | undefined;
+  let flightRecorder: FlightRecorderLike | undefined;
   let providersConfig: ProvidersConfig | undefined;
   let leastCost: LeastCostConfig | undefined;
   try {
@@ -1701,11 +1949,16 @@ export async function printDoctorJson(
   } catch {
     // ignore
   }
-  try {
-    const dbPath = resolveFlightRecorderDbPath();
-    if (dbPath) flightRecorder = new FlightRecorder(dbPath);
-  } catch {
-    // ignore
+  // The open failure is no longer ignored. It used to leave `flightRecorder`
+  // undefined, which produced the same zeroed cache_awareness block as a
+  // recorder that was never configured, and doctor said nothing either way.
+  const recorderDbPath = resolveFlightRecorderDbPath();
+  if (recorderDbPath) {
+    try {
+      flightRecorder = new FlightRecorder(recorderDbPath);
+    } catch (error) {
+      flightRecorder = flightRecorderOpenFailed(recorderDbPath, error);
+    }
   }
   try {
     providersConfig = loadProvidersConfig();
@@ -1747,8 +2000,12 @@ export async function printDoctorJson(
       // Degrade to an empty calibrationQuality array.
     }
   }
+  // Scanned with the recorder already open above, so the report carries one
+  // recorder's state rather than two independent openings of one file.
+  const storage = await collectStorageHealth(flightRecorder ?? null);
   const report = createDoctorReport({
     env: process.env,
+    storage,
     cacheAwareness,
     cacheStats,
     lcrPriors,

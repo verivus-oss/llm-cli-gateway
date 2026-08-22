@@ -109,7 +109,15 @@ describe("llm_process_health discloses the storage split", () => {
   it("does not cry split when both subsystems are SQLite", async () => {
     const res = await health(mkPersistence({ backend: "sqlite" }));
 
-    expect(res.flightRecorder.warning).toBeNull();
+    // NOT `toBeNull()` any more, and the reason is a finding rather than a
+    // concession: this assertion used to pass because the surface had nothing
+    // else to say. It now reports the recorder's own state, and the state at
+    // this point in a real call is `initialising` often enough to be observed
+    // here, on a recorder built one `await` earlier whose schema DDL has not
+    // finished. Asserting null again would be asserting that a health surface
+    // stays quiet about a recorder it cannot yet vouch for.
+    expect(res.flightRecorder.warning ?? "").not.toContain("SPLIT");
+    expect(["active", "initialising"]).toContain(res.flightRecorder.state);
     // Still discloses the recorder, because "same engine" is not "same file".
     expect(res.flightRecorder.engine).toBe("sqlite");
     expect(res.flightRecorder.path).toBe(join(tmp, "logs.db"));
