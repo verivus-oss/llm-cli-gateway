@@ -23,7 +23,7 @@ import { persistenceRetentionPolicy, unboundedRetentionSubsystems } from "./stor
 const USAGE = [
   "Usage:",
   "  llm-cli-gateway storage status            # bounds, sizes and what a sweep would delete",
-  "  llm-cli-gateway storage compact --yes     # VACUUM the transcript file; STOP the gateway first",
+  "  llm-cli-gateway storage compact --yes     # rewrite the transcript file; STOP the gateway first",
   "",
   "compact takes an exclusive lock for the length of a full rewrite of the",
   "database. Run it with the gateway stopped.",

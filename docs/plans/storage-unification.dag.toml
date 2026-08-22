@@ -2,7 +2,7 @@
 # Evidence: docs/evidence/storage-unification-audit-2026-08-21.md (host-local).
 
 [meta]
-surface = "FlightRecorder, JobStore and ISessionManager: 3 interfaces, 2 engines. RECOUNTED 2026-08-21: 53 members, not the 42 this line carried since before s2 split queryRequests into seven named reads. JobStore 26, ISessionManager 13, FlightRecorder 14. s3sig signs 12 recorder operations and excludes 2 by name, which is where its own figure of 48 comes from; both are above 42 and that is the point."
+surface = "FlightRecorder, JobStore and ISessionManager: 3 interfaces, 2 engines. RECOUNTED 2026-08-21: 53 members, not the 42 this line carried since before s2 split queryRequests into seven named reads. JobStore 26, ISessionManager 13, FlightRecorder 14. s3sig signs 12 recorder operations and excludes 2 by name, which is where its own figure of 48 comes from; both are above 42 and that is the point. s11 added THREE more without a recount: evictExpiredRequests on the recorder, and countWedgedValidationRuns / evictWedgedValidationRuns on ValidationRunStore."
 status = "2026-08-22. Everything but s10 and s12 is DONE: s1, s2, s3 part 1, s4, b1, s5, s3sig, s6, s7, s7pg, s8, s9, s11, s13, rf, dur and obs. s7 is done ONLY as far as decision 0a allows and says where it stopped. s12 has its collect half; s10 stays held for a human-supervised run."
 
 # WHY: `[persistence].backend` selects the job store and nothing else, so one
