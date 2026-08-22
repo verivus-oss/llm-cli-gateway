@@ -54,6 +54,20 @@ function readRow(dbPath: string, jobId: string): { status: string; stdout: strin
   }
 }
 
+/**
+ * Settle a promise without asserting on it, so the DATABASE assertion runs
+ * first. `rejects.toThrow()` aborts the test on a resolve, and the row count is
+ * the evidence, not the throw.
+ */
+async function settle(p: Promise<unknown>): Promise<{ rejectedWith: string }> {
+  try {
+    await p;
+    return { rejectedWith: "" };
+  } catch (err) {
+    return { rejectedWith: err instanceof Error ? err.message : String(err) };
+  }
+}
+
 /** Just enough of the storage driver to wrap `transaction` and count commits. */
 interface StorageDriverLike {
   transaction: <T>(operation: string, body: (connection: never) => Promise<T>) => Promise<T>;
@@ -374,7 +388,7 @@ describe("DEFECT 3: a receipt and its run status land together or not at all", (
     validationId,
     ownerPrincipal: owner,
     mintedAt: new Date().toISOString(),
-    schemaVersion: 1,
+    schemaVersion: "validation-receipt.v1",
     reportJson: JSON.stringify({ validationId }),
     canonicalSha256: "a".repeat(64),
     prevSha256: null,
@@ -447,19 +461,19 @@ describe("DEFECT 3: a receipt and its run status land together or not at all", (
     // As three awaits the INSERT OR IGNORE still landed, the unfenced status
     // UPDATE matched zero rows, and `stored ?? record` returned kind "minted"
     // for a receipt attached to nothing.
-    await expect(store.finalizeValidationReceipt(receipt("v-gone", "alice"))).rejects.toThrow(
-      /missing or owned by another principal/
-    );
+    const outcome = await settle(store.finalizeValidationReceipt(receipt("v-gone", "alice")));
+    // The DATABASE first: this is the assertion that fails on the three-await
+    // mint, where the INSERT OR IGNORE had already committed on its own.
     expect(receiptRows()).toBe(0);
+    expect(outcome.rejectedWith).toMatch(/missing or owned by another principal/);
   });
 
   it("refuses to finalize another principal's run, and rolls the receipt back with it", async () => {
     await store.recordValidationRun(run("v-bob", "bob"));
-    await expect(store.finalizeValidationReceipt(receipt("v-bob", "alice"))).rejects.toThrow(
-      /missing or owned by another principal/
-    );
+    const outcome = await settle(store.finalizeValidationReceipt(receipt("v-bob", "alice")));
     expect(receiptRows()).toBe(0);
     expect(runStatus("v-bob")).toBe("running");
+    expect(outcome.rejectedWith).toMatch(/missing or owned by another principal/);
   });
 
   it("no committed state has the receipt present with the run still running", async () => {

@@ -3435,6 +3435,11 @@ export class AsyncJobManager {
    * terminal state we committed, and nothing may move a terminal row again.
    */
   private ownedOutputStatuses(job: AsyncJobRecord): JobStoreStatus[] {
+    // Read at WRITE time, not at the moment the flush was decided on. Decision
+    // time would additionally reject a queued flush whose own terminal write
+    // landed while it waited, which is a real (and pre-existing) truncation,
+    // but it is not this defect and it cannot be told apart from a foreign
+    // writer without more state than the rejection currently carries.
     if (job.terminalPersisted && job.terminalRowOwned) return [job.status];
     return ["queued", "running"];
   }

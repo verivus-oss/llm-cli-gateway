@@ -1010,6 +1010,14 @@ export interface ValidationRunStore {
     provider: string,
     ownerPrincipal: string
   ): Promise<void>;
+  /**
+   * Unfenced status write. NO production caller: the mint that used to hold the
+   * only one now goes through `finalizeValidationReceipt`, and every other
+   * transition is the owner-scoped `transitionValidationRunStatus`. It survives
+   * as a test fixture setter only. Do not reach for it to advance a real run:
+   * it carries no expected state, no owner, and no row count, which is what
+   * made a receipt and its run status disagree.
+   */
   setValidationRunStatus(
     validationId: string,
     status: ValidationRunRecord["status"]
