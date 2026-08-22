@@ -34,7 +34,7 @@ const TEST_DATABASE_URL =
   process.env.TEST_DATABASE_URL || "postgresql://test:test@localhost:5433/llm_gateway_test";
 
 const ALL_MIGRATION_VERSIONS = [
-  1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21,
+  1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22,
 ] as const;
 const KIT_MIGRATION_VERSIONS = [6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17] as const;
 const MIGRATION_FILENAMES: Readonly<Record<number, string>> = {
@@ -59,6 +59,7 @@ const MIGRATION_FILENAMES: Readonly<Record<number, string>> = {
   19: "019_async_job_progress.sql",
   20: "020_async_job_error_classification.sql",
   21: "021_session_generation_fence.sql",
+  22: "022_flight_recorder_transcripts.sql",
 };
 
 const SESSION_SUMMARY_COMPATIBILITY_MIGRATION_VERSIONS = new Set([2, 3]);
@@ -477,7 +478,7 @@ describe("Session Migration", () => {
       );
       expect(
         [first.stderr, second.stderr].filter(stderr =>
-          stderr.includes("Running 21 pending migration(s)")
+          stderr.includes("Running 22 pending migration(s)")
         )
       ).toHaveLength(1);
 
@@ -641,7 +642,7 @@ describe("Session Migration", () => {
     }
   });
 
-  it("upgrades an isolated legacy schema through 006-021, retires Kit handles, and scrubs Kit jobs", async () => {
+  it("upgrades an isolated legacy schema through 006-022, retires Kit handles, and scrubs Kit jobs", async () => {
     const { pool } = await setupTestDatabase();
     const schema = `migration_legacy_${randomUUID().replaceAll("-", "")}`;
     let client: PoolClient | null = null;
@@ -914,7 +915,7 @@ describe("Session Migration", () => {
              END
          WHERE id IN ('legacy-kit-privacy-job', 'legacy-kit-running-privacy-job')`
       );
-      await applyMigrations(client, [16, 17, 18, 19, 20, 21]);
+      await applyMigrations(client, [16, 17, 18, 19, 20, 21, 22]);
       const sessionGenerations = await client.query<{
         session_count: string;
         generation_count: string;
@@ -1178,7 +1179,7 @@ describe("Session Migration", () => {
         cwd: process.cwd(),
         env: { ...process.env, DATABASE_URL: schemaScopedDsn(schema) },
       });
-      expect(stderr).toContain("Running 20 pending migration(s)");
+      expect(stderr).toContain("Running 21 pending migration(s)");
 
       const columns = await client.query<{ table_name: string; udt_name: string }>(`
         SELECT table_name, udt_name
@@ -1277,7 +1278,7 @@ describe("Session Migration", () => {
       expect(stderr).toContain(
         "Repaired recorded legacy session schema before applying pending migrations"
       );
-      expect(stderr).toContain("Running 16 pending migration(s)");
+      expect(stderr).toContain("Running 17 pending migration(s)");
 
       const columns = await client.query<{ table_name: string; udt_name: string }>(
         [
