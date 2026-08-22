@@ -323,8 +323,11 @@ will be no 3.1.0 stable; the first candidate under the new number is
   a second connection pool.** It had been constructing its own `pg.Pool` from
   `DATABASE_URL`, so a Postgres host ran two independent pools against one
   database with two different configurations. Twelve hand-rolled transactions
-  are the driver's now, and no `pg` import survives outside
-  `src/storage/drivers/`.
+  are the driver's now, and no `pg` import survives anywhere in the gateway
+  runtime outside `src/storage/drivers/`. The one remaining `pg` user is
+  `src/migrate.ts`, which is the standalone `npm run migrate` entry point and is
+  process-separated on purpose: DDL runs under its own credential and never
+  inside a long-running gateway.
 
   A blocker recorded earlier in this line turned out to be wrong and is
   withdrawn: four drifted `CHECK (cli IN ...)` lists in `migrations/001` and
