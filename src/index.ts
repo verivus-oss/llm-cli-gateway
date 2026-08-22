@@ -671,13 +671,16 @@ let asyncJobManager: AsyncJobManager | null = null;
 let approvalManager: ApprovalManager | null = null;
 
 function getFlightRecorder(runtimeLogger: GatewayLogger = logger): FlightRecorderLike {
-  // The recorder is told what `[persistence].backend` asked for. It cannot
-  // honour "postgres" and says so once, out loud, instead of ignoring it: see
+  // The recorder is told what `[persistence].backend` asked for AND which
+  // credentials it may hold. It honours "postgres" when the deployment shape
+  // admits transcript bodies and refuses out loud otherwise: see
   // flightRecorderEngineDecision. Resolved through getPersistenceConfig so the
   // config is loaded once for both subsystems.
+  const persistence = getPersistenceConfig(runtimeLogger);
   flightRecorder ??= createFlightRecorder(
     runtimeLogger,
-    getPersistenceConfig(runtimeLogger).backend
+    persistence.backend,
+    persistence.roleDsns
   );
   return flightRecorder;
 }
@@ -22609,10 +22612,10 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
               ? `Async job persistence is configured (backend = '${persistence.backend}') but the durable job store failed to open, so *_request_async / llm_job_* tools are NOT registered on this gateway. Check gateway startup logs for the store-open error.`
               : "Async job persistence is attached but durable admission is temporarily disabled while its heartbeat lease recovers. Existing async tools fail closed until admission is restored.",
       };
-      // The flight recorder is a SEPARATE subsystem from the job store and does
-      // NOT follow [persistence].backend: it is always SQLite, pathed from
-      // LLM_GATEWAY_LOGS_DB (see config.ts, which calls that variable "a
-      // variable named for the flight recorder, a different subsystem").
+      // The flight recorder is a SEPARATE subsystem from the job store, with its
+      // own on/off switch (LLM_GATEWAY_LOGS_DB). It follows
+      // [persistence].backend only when the deployment shape admits transcript
+      // bodies; `engineDeferredBecause` names the refusal when it does not.
       //
       // Reporting only the job store is what makes the split invisible: on a
       // postgres host this tool answered `backend: "postgres", dbPath: null`
@@ -22630,11 +22633,13 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
       // is TOLD what [persistence].backend asked for. `engineDeferredBecause`
       // is the difference between a setting that is ignored and one that is
       // refused with a reason.
-      const recorderEngine = flightRecorderEngineDecision(persistence.backend);
+      const recorderEngine = flightRecorderEngineDecision(persistence.backend, persistence.dsn);
       const recorderMessage = flightRecorderHealthMessage(recorderHealth);
       const flightRecorderBlock = {
         engine: recorderEnabled ? recorderEngine.engine : null,
-        path: recorderEnabled ? resolveFlightRecorderDbPath() : recorderHealth.path,
+        // The recorder's OWN target, so a postgres host is not shown the SQLite
+        // file it stopped writing to.
+        path: recorderHealth.path ?? (recorderEnabled ? resolveFlightRecorderDbPath() : null),
         enabled: recorderEnabled,
         // The five-way answer. `enabled: false` alone could not tell an
         // operator whether to change a setting or to go and look at a file.
@@ -22646,9 +22651,12 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
         closed: recorderHealth.closed,
         // Stated as a fact rather than implied, because the whole failure mode
         // is a caller assuming one backend setting covers both subsystems.
-        followsPersistenceBackend: false,
+        followsPersistenceBackend: recorderEngine.deferredBecause === undefined,
         engineRequested: recorderEngine.requested ?? null,
         engineDeferredBecause: recorderEngine.deferredBecause ?? null,
+        engineAdmittedBecause: recorderEngine.admission?.admitted
+          ? recorderEngine.admission.evidence
+          : null,
         holds: "requests (llm_request_list, llm_request_result)",
         // Composed from two INDEPENDENT facts rather than a chain of else-ifs:
         // a recorder can be degraded AND split, and the old chain reported at
@@ -22656,8 +22664,13 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
         warning:
           [
             recorderMessage,
-            recorderEnabled && persistence.backend !== "sqlite" && persistence.backend !== "none"
-              ? `Storage is SPLIT: request history is in SQLite at ${resolveFlightRecorderDbPath()}, while the job store is '${persistence.backend}'. No single database holds a whole request. If this gateway previously ran on sqlite, that same file also still contains an abandoned 'jobs' table which is frozen at the switchover and will answer queries as though it were live. Read through llm_request_list / llm_request_result / llm_job_result, which span the split.`
+            recorderEnabled &&
+            recorderEngine.engine !== persistence.backend &&
+            persistence.backend !== "none"
+              ? `Storage is SPLIT: request history is in ${recorderEngine.engine} at ${recorderHealth.path}, while the job store is '${persistence.backend}'. No single database holds a whole request. If this gateway previously ran on sqlite, that same file also still contains an abandoned 'jobs' table which is frozen at the switchover and will answer queries as though it were live. Read through llm_request_list / llm_request_result / llm_job_result, which span the split.`
+              : null,
+            recorderEnabled && recorderEngine.engine === "postgres"
+              ? `Request history moved to PostgreSQL when this gateway started. Rows written BEFORE the switch are still in ${resolveFlightRecorderDbPath()} and were NOT migrated; nothing reads them from here.`
               : null,
           ]
             .filter((line): line is string => line !== null)

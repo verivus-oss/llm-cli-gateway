@@ -33,6 +33,10 @@ import type { FlightRecorderOperations } from "./storage/operations.js";
 import { redactSecrets, isRedactionEnabled } from "./secret-redaction.js";
 import { getRequestContext, principalScopeSql, resolveOwnerPrincipal } from "./request-context.js";
 import { derivePromptSignals } from "./token-estimator.js";
+import { FlightRecorderRuntime, truncateThinkingBlocks } from "./flight-recorder-runtime.js";
+import { transcriptAdmission, type TranscriptAdmission } from "./storage/transcript-admission.js";
+import { PostgresFlightRecorder, redactDsn } from "./flight-recorder-pg.js";
+import type { StorageRoleDsns } from "./storage/roles.js";
 import type { ProviderType } from "./session-manager.js";
 
 export interface FlightLogStart {
@@ -115,12 +119,10 @@ export interface FlightLogResult {
   stopReason?: string;
 }
 
-interface LoggerLike {
+export interface LoggerLike {
   info: (message: string, ...args: any[]) => void;
   error: (message: string, ...args: any[]) => void;
 }
-
-const MAX_THINKING_BYTES = 1_000_000;
 
 /**
  * Column names of one table, read through the port's connection.
@@ -431,6 +433,24 @@ export interface FlightRecorderHealth {
   closed: boolean;
 }
 
+/** True only when an empty read from this recorder means "nothing was recorded". */
+export function flightRecorderReadsAreAuthoritative(health: FlightRecorderHealth): boolean {
+  return health.state === "active" && !health.closed;
+}
+
+export function resolveFlightRecorderDbPath(): string | null {
+  const configured = process.env.LLM_GATEWAY_LOGS_DB;
+  if (configured !== undefined) {
+    const normalized = configured.trim().toLowerCase();
+    if (!normalized || normalized === "none") {
+      return null;
+    }
+    return configured.trim();
+  }
+
+  return path.join(os.homedir(), ".llm-cli-gateway", "logs.db");
+}
+
 /**
  * The ONE place an operator-facing sentence about recorder state is written.
  *
@@ -458,61 +478,6 @@ export function flightRecorderHealthMessage(health: FlightRecorderHealth): strin
   }
 }
 
-/** True only when an empty read from this recorder means "nothing was recorded". */
-export function flightRecorderReadsAreAuthoritative(health: FlightRecorderHealth): boolean {
-  return health.state === "active" && !health.closed;
-}
-
-export function resolveFlightRecorderDbPath(): string | null {
-  const configured = process.env.LLM_GATEWAY_LOGS_DB;
-  if (configured !== undefined) {
-    const normalized = configured.trim().toLowerCase();
-    if (!normalized || normalized === "none") {
-      return null;
-    }
-    return configured.trim();
-  }
-
-  return path.join(os.homedir(), ".llm-cli-gateway", "logs.db");
-}
-
-const TRUNCATION_SUFFIX = "[TRUNCATED]";
-const TRUNCATION_SUFFIX_BYTES = Buffer.byteLength(TRUNCATION_SUFFIX, "utf8");
-
-function truncateThinkingBlocks(blocks: string[]): string[] {
-  const result: string[] = [];
-  let used = 0;
-
-  for (const block of blocks) {
-    const bytes = Buffer.byteLength(block, "utf8");
-    if (used + bytes <= MAX_THINKING_BYTES) {
-      result.push(block);
-      used += bytes;
-      continue;
-    }
-
-    // Reserve space for the suffix so total stays within budget
-    const budget = Math.max(0, MAX_THINKING_BYTES - used - TRUNCATION_SUFFIX_BYTES);
-    if (budget > 0) {
-      // Truncate on code point boundaries by using string iteration
-      let charBytes = 0;
-      let safeEnd = 0;
-      for (const char of block) {
-        const charSize = Buffer.byteLength(char, "utf8");
-        if (charBytes + charSize > budget) break;
-        charBytes += charSize;
-        safeEnd += char.length; // char.length handles surrogate pairs
-      }
-      const sliced = block.slice(0, safeEnd);
-      result.push(sliced ? `${sliced}${TRUNCATION_SUFFIX}` : TRUNCATION_SUFFIX);
-    } else {
-      result.push(TRUNCATION_SUFFIX);
-    }
-    break;
-  }
-
-  return result;
-}
 
 /**
  * Every statement the recorder issues, once, at module scope.
@@ -653,23 +618,6 @@ const SQL_RECORD_MIGRATION = "INSERT OR IGNORE INTO _migrations(version, applied
  */
 type RoutedFlightOperation = Exclude<keyof FlightRecorderOperations, "close">;
 
-/**
- * SQLite implementation of `FlightRecorderOperations`, over the storage port.
- *
- * s7 of docs/plans/storage-unification.dag.toml. The recorder no longer holds a
- * `GatewayDatabase`: it holds a `SqliteStorageDriver`, so its writes share one
- * serialised queue, one bounded drain and one whole-operation deadline with
- * every other subsystem on the port.
- *
- * ASYNC, and three consequences the port's header spells out. Construction no
- * longer implies the schema exists, so every operation awaits `ensureSchema()`.
- * Every write returns `Promise<void>`, so a dropped one is a floating promise a
- * lint rule can see. Every read returns a promise, so it is truthy before it
- * resolves and `npm run promise:conditions:check` is the control for that.
- *
- * What it does NOT do, by operator decision 0a: choose Postgres. See
- * `flightRecorderEngineDecision`.
- */
 export class FlightRecorder implements FlightRecorderOperations {
   private readonly driver: SqliteStorageDriver;
   private readonly dbPath: string;
@@ -678,19 +626,12 @@ export class FlightRecorder implements FlightRecorderOperations {
   private readonly logger: LoggerLike | null;
   /** Memoised schema bootstrap. Cleared on failure so a later call retries. */
   private bootstrapPromise: Promise<void> | null = null;
-  /** Set by close(); every operation refuses from that point on. */
-  private closed = false;
-  /**
-   * Schema-bootstrap state, tracked because `health()` is a SYNCHRONOUS
-   * snapshot and construction stopped implying initialisation ran.
-   */
-  private schemaState: "initialising" | "ready" | "failed" = "initialising";
-  /** The most recent failure, cleared by the next operation that succeeds. */
-  private lastFailure: { error: string; at: string } | null = null;
-  private failureCount = 0;
+  /** State, tracking and the health snapshot, shared with the Postgres recorder. */
+  private readonly runtime: FlightRecorderRuntime;
 
   constructor(dbPath: string, options: { redactSecrets?: boolean; logger?: LoggerLike } = {}) {
     this.dbPath = dbPath;
+    this.runtime = new FlightRecorderRuntime(dbPath);
     this.redactEnabled = options.redactSecrets ?? isRedactionEnabled();
     this.logger = options.logger ?? null;
     // The DRIVER owns the handle. Holding a GatewayDatabase alongside it would
@@ -736,37 +677,15 @@ export class FlightRecorder implements FlightRecorderOperations {
     // Refusing here would abandon exactly the writes the drain exists to save.
     this.bootstrapPromise ??= this.bootstrapSchema().then(
       () => {
-        this.schemaState = "ready";
+        this.runtime.markReady();
       },
       (error: unknown) => {
         this.bootstrapPromise = null;
-        // Recorded HERE and not only at the constructor's swallowing catch:
-        // that catch fires once, and an operation that retries the bootstrap
-        // and fails again must still leave the failure on the health snapshot.
-        this.schemaState = "failed";
-        this.noteFailure(error);
+        this.runtime.markFailed(error);
         throw error;
       }
     );
     return this.bootstrapPromise;
-  }
-
-  /**
-   * Record a failed operation. The recorder reports `degraded` until an
-   * operation SUCCEEDS, which is a live signal rather than a sticky one; the
-   * cumulative `failureCount` is what keeps a recorder that flaps visible after
-   * its last call happened to work.
-   */
-  private noteFailure(error: unknown): void {
-    this.failureCount += 1;
-    this.lastFailure = {
-      error: error instanceof Error ? error.message : String(error),
-      at: new Date().toISOString(),
-    };
-  }
-
-  private noteSuccess(): void {
-    this.lastFailure = null;
   }
 
   /**
@@ -779,20 +698,7 @@ export class FlightRecorder implements FlightRecorderOperations {
    * rather than an optimistic `active`.
    */
   health(): FlightRecorderHealth {
-    const state: FlightRecorderState =
-      this.schemaState === "failed" || this.lastFailure
-        ? "degraded"
-        : this.schemaState === "initialising"
-          ? "initialising"
-          : "active";
-    return {
-      state,
-      path: this.dbPath,
-      error: this.lastFailure?.error ?? null,
-      errorAt: this.lastFailure?.at ?? null,
-      failureCount: this.failureCount,
-      closed: this.closed,
-    };
+    return this.runtime.health();
   }
 
   private async bootstrapSchema(): Promise<void> {
@@ -868,55 +774,18 @@ export class FlightRecorder implements FlightRecorderOperations {
    * await in every public method, so a promise is in this set by the time the
    * caller gets it, and `close()` in the next statement can see it.
    */
-  private readonly inFlight = new Set<Promise<unknown>>();
-
-  private track<T>(operation: Promise<T>): Promise<T> {
-    this.inFlight.add(operation);
-    const forget = (): void => {
-      this.inFlight.delete(operation);
-    };
-    void operation.then(forget, forget);
-    return operation;
-  }
-
   /** One routed read. The class comes from s3sig's declaration, never a literal. */
   private read<T>(
     operation: RoutedFlightOperation,
     sql: string,
     params: readonly unknown[] = []
   ): Promise<T[]> {
-    if (this.closed) return Promise.reject(new Error("flight recorder is closed"));
-    return this.track(
-      this.observe(
-        (async () => {
-          await this.ensureSchema();
-          return this.driver.withConnection(FLIGHT_RECORDER_OPERATION_CLASSES[operation], conn =>
-            conn.query<T>(sql, params)
-          );
-        })()
-      )
-    );
-  }
-
-  /**
-   * Watch one operation's outcome WITHOUT changing it.
-   *
-   * The rejection is re-thrown, not swallowed: a read failure that reached a
-   * caller before must still reach it. All this adds is that the failure is
-   * also on the health snapshot, so "read failed after a successful open" stops
-   * being a state only the stderr log knows about.
-   */
-  private observe<T>(operation: Promise<T>): Promise<T> {
-    return operation.then(
-      value => {
-        this.noteSuccess();
-        return value;
-      },
-      (error: unknown) => {
-        this.noteFailure(error);
-        throw error;
-      }
-    );
+    return this.runtime.run(async () => {
+      await this.ensureSchema();
+      return this.driver.withConnection(FLIGHT_RECORDER_OPERATION_CLASSES[operation], conn =>
+        conn.query<T>(sql, params)
+      );
+    });
   }
 
   /**
@@ -933,15 +802,10 @@ export class FlightRecorder implements FlightRecorderOperations {
     operation: RoutedFlightOperation,
     fn: (connection: StorageConnection) => Promise<void>
   ): Promise<void> {
-    if (this.closed) return Promise.reject(new Error("flight recorder is closed"));
-    return this.track(
-      this.observe(
-        (async () => {
-          await this.ensureSchema();
-          await this.driver.transaction(FLIGHT_RECORDER_OPERATION_CLASSES[operation], fn);
-        })()
-      )
-    );
+    return this.runtime.run(async () => {
+      await this.ensureSchema();
+      await this.driver.transaction(FLIGHT_RECORDER_OPERATION_CLASSES[operation], fn);
+    });
   }
 
   async logStart(entry: FlightLogStart): Promise<void> {
@@ -1104,17 +968,14 @@ export class FlightRecorder implements FlightRecorderOperations {
     // Closed-state guard: without it a post-close query would lazily REOPEN the
     // read-only connection (fd leak, no later close). ensureSchema refuses too;
     // this one gives the recorder's own message rather than the driver's.
-    if (this.closed) return Promise.reject(new Error("flight recorder is closed"));
     // `transcript_read` as a literal, deliberately: queryRequests is not one of
     // the twelve declared operations (see FLIGHT_RECORDER_NON_OPERATIONS), and
     // arbitrary caller SQL may project body columns, so it takes the widest
     // read class rather than borrowing a named operation's.
-    return this.track(
-      (async () => {
-        await this.ensureSchema();
-        return this.driver.withConnection("transcript_read", conn => conn.query<T>(sql, params));
-      })()
-    );
+    return this.runtime.run(async () => {
+      await this.ensureSchema();
+      return this.driver.withConnection("transcript_read", conn => conn.query<T>(sql, params));
+    });
   }
 
   // ---- Typed read surface (FlightRecorderQuery) -------------------------
@@ -1339,16 +1200,9 @@ export class FlightRecorder implements FlightRecorderOperations {
    * and then logs a completed close that has not happened.
    */
   async close(): Promise<void> {
-    // Refuse NEW work first, so the set below cannot be refilled while it drains.
-    this.closed = true;
-    // Then let what is already running reach the driver's queue. The loop is
-    // for an operation that starts another; none do today, and each is bounded
-    // by the driver's own whole-operation deadline, so this cannot wait forever
-    // on anything the driver would not have waited on anyway.
-    while (this.inFlight.size > 0) {
-      await Promise.allSettled([...this.inFlight]);
-    }
-    // Only now: the driver's bounded drain, then the handles.
+    // Refuse new work, then let what is already running reach the driver's
+    // queue. Only then the driver's bounded drain, and the handles.
+    await this.runtime.close();
     await this.driver.close();
   }
 }
@@ -1447,7 +1301,17 @@ export class NoopFlightRecorder implements FlightRecorderOperations {
   async close(): Promise<void> {}
 }
 
-export type FlightRecorderLike = FlightRecorder | NoopFlightRecorder;
+/**
+ * Any recorder, by SHAPE rather than by class.
+ *
+ * It was `FlightRecorder | NoopFlightRecorder`, which is a closed list of
+ * classes and therefore a list a second engine has to be added to, in a file
+ * the second engine already imports. Structural instead: the twelve port
+ * operations plus the health snapshot every surface reads.
+ */
+export type FlightRecorderLike = FlightRecorderOperations & {
+  health(): FlightRecorderHealth;
+};
 
 /** The recorder the operator asked NOT to have. */
 export function flightRecorderDisabled(): NoopFlightRecorder {
@@ -1652,41 +1516,77 @@ export interface RequestSummaryFilter {
  * change smuggled in under a refactor.
  */
 export interface FlightRecorderEngineDecision {
-  /** The engine the recorder will actually use. Always "sqlite" today. */
-  engine: "sqlite";
+  /** The engine the recorder will actually use. */
+  engine: "sqlite" | "postgres";
   /** What `[persistence].backend` asked for, when it asked for something else. */
   requested?: string;
   /** Populated only when `requested` could not be honoured. */
   deferredBecause?: string;
+  /** The deployment-shape verdict, whenever a postgres backend asked for one. */
+  admission?: TranscriptAdmission;
 }
 
+/**
+ * ONE decision point, extended rather than joined by a second.
+ *
+ * A `postgres` backend is honoured when, and only when, the deployment shape
+ * admits transcript bodies: loopback or unix socket, same OS user
+ * (postgres-security-hardening.md 6.1). A refusal is not silent, and it is not
+ * a failure either: the recorder keeps working on SQLite and every surface that
+ * reads this says why. `none` is still NOT "disable the recorder"; that is
+ * `LLM_GATEWAY_LOGS_DB`, which s9 settled.
+ *
+ * NO DATA MIGRATION either way. A host that flips backend starts writing into
+ * the new engine and its existing rows stay where they are, which is precisely
+ * the split `llm_process_health` has to report.
+ */
 export function flightRecorderEngineDecision(
-  backend: string | undefined
+  backend: string | undefined,
+  dsn?: string | null
 ): FlightRecorderEngineDecision {
   if (backend !== "postgres") return { engine: "sqlite" };
+  const admission = transcriptAdmission(dsn);
+  if (admission.admitted) return { engine: "postgres", requested: backend, admission };
   return {
     engine: "sqlite",
     requested: backend,
     deferredBecause:
-      "transcript bodies stay on SQLite until postgres-security-hardening.md section 6 is " +
-      "complete through step 8 (currently step 2 of 10). There is no Postgres transcript " +
-      "schema: `requests` and `gateway_metadata` exist only in SQLite, and authoring them " +
-      "would move 1.2 GB of plaintext prompts into a store one superuser role reads in " +
-      "cleartext, which is a regression over a 0600 file.",
+      admission.reason ??
+      "the deployment shape could not be established, and an unproven shape is treated as remote",
+    admission,
   };
 }
 
 export function createFlightRecorder(
   logger: LoggerLike,
-  persistenceBackend?: string
+  persistenceBackend?: string,
+  roleDsns?: StorageRoleDsns
 ): FlightRecorderLike {
   const dbPath = resolveFlightRecorderDbPath();
+  // Still the recorder's own switch, on either engine. s9 settled that
+  // `backend = "none"` does not silence it and `LLM_GATEWAY_LOGS_DB=none` does;
+  // making that path-shaped switch stop working on Postgres would be a third rule.
   if (!dbPath) {
     logger.info("Flight recorder disabled (LLM_GATEWAY_LOGS_DB=none)");
     return flightRecorderDisabled();
   }
 
-  const decision = flightRecorderEngineDecision(persistenceBackend);
+  const decision = flightRecorderEngineDecision(persistenceBackend, roleDsns?.app ?? null);
+  if (decision.engine === "postgres") {
+    const target = redactDsn(roleDsns?.app ?? "");
+    try {
+      const recorder = new PostgresFlightRecorder(roleDsns ?? {}, { logger });
+      logger.info(
+        `Flight recorder enabled on PostgreSQL at ${target} (${decision.admission?.evidence}). ` +
+          `Rows already in ${dbPath} are NOT migrated and stay there; llm_process_health reports the split.`
+      );
+      return recorder;
+    } catch (error) {
+      logger.error("Flight recorder unavailable; PostgreSQL recorder could not be built", error);
+      return flightRecorderOpenFailed(target, error);
+    }
+  }
+
   try {
     const recorder = new FlightRecorder(dbPath, { logger });
     logger.info(`Flight recorder enabled at ${dbPath} (engine: ${decision.engine})`);

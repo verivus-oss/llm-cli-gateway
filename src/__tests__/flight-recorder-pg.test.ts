@@ -1,0 +1,352 @@
+/**
+ * The Postgres flight recorder against a REAL server.
+ *
+ * Two things a fake cannot establish, and both were found by running this:
+ * `pg` returns int8 and numeric as STRINGS, so an uncast `COUNT(*)` or a
+ * `NUMERIC` money column reaches a `number`-typed field as text; and the
+ * compatibility bootstrap and migrations/022 have to produce the same schema or
+ * a host that ran `npm run migrate` and a host that did not are two databases.
+ *
+ * Isolated in its OWN PostgreSQL schema through the DSN's `options` keyword, so
+ * it neither sees nor leaves anything in `public` where the other -pg suites live.
+ */
+import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
+import { readFileSync } from "node:fs";
+import { join } from "node:path";
+import { Pool } from "pg";
+import { PostgresFlightRecorder, redactDsn } from "../flight-recorder-pg.js";
+import type { FlightLogResult, FlightLogStart } from "../flight-recorder.js";
+
+const BASE_DSN =
+  process.env.TEST_DATABASE_URL || "postgresql://test:test@localhost:5433/llm_gateway_test";
+const SCHEMA = `flight_pg_${process.pid}`;
+const MIRROR = `${SCHEMA}_mirror`;
+
+function scoped(schema: string): string {
+  const url = new URL(BASE_DSN);
+  url.searchParams.set("options", `-csearch_path=${schema}`);
+  return url.toString();
+}
+
+let admin: Pool;
+let recorder: PostgresFlightRecorder;
+
+const ID = "corr-pg-1";
+
+const START: FlightLogStart = {
+  correlationId: ID,
+  cli: "claude",
+  model: "opus-5",
+  prompt: "the prompt body",
+  system: "the system body",
+  sessionId: "gw-session-1",
+  asyncJobId: "job-77",
+  stablePrefixHash: "hash-abc",
+  stablePrefixTokens: 1234,
+  cacheControlBlocks: 3,
+  cacheControlTtlSeconds: 3600,
+  ownerPrincipal: "local",
+};
+
+const RESULT: FlightLogResult = {
+  response: "the response body",
+  inputTokens: 111,
+  outputTokens: 222,
+  cacheReadTokens: 333,
+  cacheCreationTokens: 444,
+  durationMs: 5678,
+  retryCount: 2,
+  circuitBreakerState: "CLOSED",
+  costUsd: 0.000123,
+  costBasis: "provider-reported",
+  approvalDecision: "allow",
+  optimizationApplied: true,
+  thinkingBlocks: ["thought one", "thought two"],
+  exitCode: 0,
+  httpStatus: 200,
+  errorMessage: "none",
+  status: "completed",
+  providerSessionId: "prov-session-9",
+  stopReason: "end_turn",
+};
+
+beforeAll(async () => {
+  admin = new Pool({ connectionString: BASE_DSN });
+  await admin.query(`DROP SCHEMA IF EXISTS ${SCHEMA} CASCADE`);
+  await admin.query(`DROP SCHEMA IF EXISTS ${MIRROR} CASCADE`);
+  await admin.query(`CREATE SCHEMA ${SCHEMA}`);
+  await admin.query(`CREATE SCHEMA ${MIRROR}`);
+});
+
+afterAll(async () => {
+  await recorder?.close();
+  await admin.query(`DROP SCHEMA IF EXISTS ${SCHEMA} CASCADE`);
+  await admin.query(`DROP SCHEMA IF EXISTS ${MIRROR} CASCADE`);
+  await admin.end();
+});
+
+/** Read a column back on a connection this recorder does not own. */
+async function raw<T = Record<string, unknown>>(sql: string): Promise<T[]> {
+  const result = await admin.query(`SET search_path TO ${SCHEMA}; ${sql}`);
+  return (Array.isArray(result) ? result[1].rows : result.rows) as T[];
+}
+
+describe("a whole transcript round trip", () => {
+  beforeEach(async () => {
+    await recorder?.close();
+    recorder = new PostgresFlightRecorder({ app: scoped(SCHEMA) }, { redactSecrets: false });
+    await recorder.readStorageStats();
+    await raw("DELETE FROM gateway_metadata; DELETE FROM requests");
+  });
+
+  it("writes EVERY column and reads all of them back unchanged", async () => {
+    await (async () => {
+      await recorder.logStart(START);
+      await recorder.logComplete(ID, RESULT);
+      await recorder.recordRouting(ID, {
+        estCostUsd: 0.00099,
+        estConfidence: "high",
+        reason: "cheapest-eligible",
+        considered: 4,
+        reroutes: 1,
+      });
+      await recorder.recordCompressionTelemetry(ID, {
+        route: "native",
+        transforms: ["dedupe", "strip"],
+        originalChars: 9000,
+        compressedChars: 4500,
+        estimatedTokensSaved: 1125,
+      });
+    })();
+
+    const row = await recorder.readRequestById(ID);
+    expect(row).not.toBeNull();
+    expect(row).toMatchObject({
+      id: ID,
+      cli: "claude",
+      model: "opus-5",
+      prompt: "the prompt body",
+      response: "the response body",
+      session_id: "gw-session-1",
+      duration_ms: 5678,
+      input_tokens: 111,
+      output_tokens: 222,
+      cache_read_tokens: 333,
+      cache_creation_tokens: 444,
+      owner_principal: "local",
+      retry_count: 2,
+      circuit_breaker_state: "CLOSED",
+      exit_code: 0,
+      error_message: "none",
+      async_job_id: "job-77",
+      provider_session_id: "prov-session-9",
+      status: "completed",
+    });
+    expect(JSON.parse(row?.thinking_blocks ?? "[]")).toEqual(["thought one", "thought two"]);
+
+    // THE MONEY COLUMN. NUMERIC would have made this the string "0.00012300",
+    // which every equality here would still have to be rewritten to accept.
+    expect(row?.cost_usd).toBe(0.000123);
+    expect(typeof row?.cost_usd).toBe("number");
+    // And the counters, which BIGINT would have made strings.
+    expect(typeof row?.input_tokens).toBe("number");
+    expect(typeof row?.duration_ms).toBe("number");
+    // datetime_utc stays an ISO string. TIMESTAMPTZ would return a Date here.
+    expect(typeof row?.datetime_utc).toBe("string");
+    expect(() => new Date(row?.datetime_utc ?? "").toISOString()).not.toThrow();
+  });
+
+  it("stores the two 1/0 columns as real booleans", async () => {
+    await recorder.logStart(START);
+    await recorder.logComplete(ID, RESULT);
+    await recorder.recordRouting(ID, { estCostUsd: 1, reason: "r", considered: 1, reroutes: 0 });
+    const [meta] = await raw<{ optimization_applied: unknown; routed: unknown }>(
+      "SELECT optimization_applied, routed FROM gateway_metadata"
+    );
+    expect(meta.optimization_applied).toBe(true);
+    expect(meta.routed).toBe(true);
+  });
+
+  it("finds the routed row, which needs `routed IS TRUE` and not `routed = 1`", async () => {
+    await recorder.logStart(START);
+    await recorder.logComplete(ID, RESULT);
+    await recorder.recordRouting(ID, {
+      estCostUsd: 0.00099,
+      estConfidence: "high",
+      reason: "cheapest-eligible",
+      considered: 4,
+      reroutes: 1,
+    });
+    const decisions = await recorder.readRoutingDecisions(10);
+    expect(decisions).toHaveLength(1);
+    expect(decisions[0].route_est_cost_usd).toBe(0.00099);
+    expect(typeof decisions[0].route_est_cost_usd).toBe("number");
+    expect(decisions[0].route_considered).toBe(4);
+  });
+
+  it("projects summaries with character counts and no body", async () => {
+    await recorder.logStart(START);
+    await recorder.logComplete(ID, RESULT);
+    const rows = await recorder.listRequestSummaries({ ownerPrincipal: "local", limit: 5 });
+    expect(rows).toHaveLength(1);
+    expect(rows[0].prompt_chars).toBe("the prompt body".length);
+    expect(rows[0].response_chars).toBe("the response body".length);
+    expect(rows[0]).not.toHaveProperty("prompt");
+  });
+
+  it("scopes summaries to the owning principal", async () => {
+    await recorder.logStart(START);
+    expect(
+      await recorder.listRequestSummaries({ ownerPrincipal: "someone-else", limit: 5 })
+    ).toHaveLength(0);
+    expect(await recorder.listRequestSummaries({ ownerPrincipal: "local", limit: 5 })).toHaveLength(
+      1
+    );
+  });
+
+  it("returns the cache aggregates all three ways", async () => {
+    await recorder.logStart(START);
+    await recorder.logComplete(ID, RESULT);
+    const bySession = await recorder.readCacheRowsBySession("gw-session-1");
+    expect(bySession[0]).toMatchObject({
+      cli: "claude",
+      cache_read_tokens: 333,
+      cache_control_blocks: 3,
+      cache_control_ttl_seconds: 3600,
+    });
+    expect(await recorder.readCacheRowsByPrefix("hash-abc")).toHaveLength(1);
+    expect(await recorder.readCacheRowsGlobal()).toHaveLength(1);
+    expect(await recorder.readCacheRowsGlobal("2999-01-01T00:00:00.000Z")).toHaveLength(0);
+  });
+
+  it("carries the LCR prior signals, both money columns included", async () => {
+    await recorder.logStart(START);
+    await recorder.logComplete(ID, RESULT);
+    await recorder.recordRouting(ID, { estCostUsd: 0.00099 });
+    const [prior] = await recorder.readLcrPriorRows();
+    expect(prior.cost_usd).toBe(0.000123);
+    expect(prior.route_est_cost_usd).toBe(0.00099);
+    expect(prior.cost_basis).toBe("provider-reported");
+    expect(prior.derived_prompt_chars).toBe("the prompt body".length);
+  });
+
+  it("counts rows as NUMBERS, which an uncast COUNT(*) would not", async () => {
+    await recorder.logStart(START);
+    const stats = await recorder.readStorageStats("2999-01-01T00:00:00.000Z");
+    expect(stats.requestRows).toBe(1);
+    expect(typeof stats.requestRows).toBe("number");
+    expect(stats.requestsBeyondRetention).toBe(1);
+    expect(typeof stats.requestsBeyondRetention).toBe("number");
+    expect(stats.oldestRequest).toBe(stats.newestRequest);
+  });
+
+  it("fences logComplete on `started`, so a second completion cannot overwrite the first", async () => {
+    await recorder.logStart(START);
+    await recorder.logComplete(ID, RESULT);
+    await recorder.logComplete(ID, { ...RESULT, response: "LATER", status: "failed" });
+    const row = await recorder.readRequestById(ID);
+    // The requests UPDATE is unfenced, exactly as on SQLite; the metadata
+    // status is what stays monotonic. Asserted so the parity is deliberate.
+    expect(row?.status).toBe("completed");
+  });
+
+  it("writes the compression telemetry once and keeps the first write", async () => {
+    await recorder.logStart(START);
+    await recorder.recordCompressionTelemetry(ID, {
+      route: "native",
+      transforms: ["a"],
+      originalChars: 10,
+      compressedChars: 5,
+      estimatedTokensSaved: 1,
+    });
+    await recorder.recordCompressionTelemetry(ID, {
+      route: "SECOND",
+      transforms: ["b"],
+      originalChars: 20,
+      compressedChars: 10,
+      estimatedTokensSaved: 2,
+    });
+    const [meta] = await raw<{ compression_route: string }>(
+      "SELECT compression_route FROM gateway_metadata"
+    );
+    expect(meta.compression_route).toBe("native");
+  });
+
+  it("reports the co-resident job tables, which on this engine are the LIVE ones", async () => {
+    await raw("CREATE TABLE IF NOT EXISTS jobs (status TEXT)");
+    await raw("INSERT INTO jobs (status) VALUES ('running'), ('done')");
+    const stats = await recorder.readStorageStats();
+    expect(stats.coResident).toEqual([{ table: "jobs", rows: 2, unfinished: 1 }]);
+    expect(typeof stats.coResident[0].rows).toBe("number");
+    await raw("DROP TABLE jobs");
+  });
+
+  it("refuses every operation once closed, rather than answering empty", async () => {
+    await recorder.close();
+    await expect(recorder.readRequestById(ID)).rejects.toThrow(/closed/);
+    await expect(recorder.logStart(START)).rejects.toThrow(/closed/);
+    expect(recorder.health().closed).toBe(true);
+  });
+
+  it("does not put a password on a health surface", () => {
+    expect(redactDsn("postgresql://u:sup3rsecret@127.0.0.1:5432/gw")).toBe(
+      "postgresql://127.0.0.1:5432/gw"
+    );
+    expect(recorder.health().path).not.toContain("test:test");
+  });
+});
+
+describe("the bootstrap and the migration are the same schema", () => {
+  it("produces identical columns and indexes either way", async () => {
+    // Migration path: the real file, into the mirror schema.
+    const sql = readFileSync(join(process.cwd(), "migrations/022_flight_recorder_transcripts.sql"), "utf8");
+    await admin.query(
+      `SET search_path TO ${MIRROR};
+       CREATE TABLE IF NOT EXISTS schema_migrations (version INTEGER PRIMARY KEY, name TEXT NOT NULL);
+       ${sql}`
+    );
+    // Bootstrap path: whatever the recorder builds for itself, already run by
+    // the beforeEach above in SCHEMA.
+    const columns = async (schema: string): Promise<unknown[]> =>
+      (
+        await admin.query(
+          `SELECT table_name, column_name, data_type, is_nullable, column_default
+             FROM information_schema.columns
+            WHERE table_schema = $1 AND table_name IN ('requests', 'gateway_metadata')
+            ORDER BY table_name, column_name`,
+          [schema]
+        )
+      ).rows;
+    expect(await columns(SCHEMA)).toEqual(await columns(MIRROR));
+
+    const indexes = async (schema: string): Promise<string[]> =>
+      (
+        await admin.query(
+          `SELECT indexname, indexdef FROM pg_indexes
+            WHERE schemaname = $1 AND tablename IN ('requests', 'gateway_metadata')
+            ORDER BY indexname`,
+          [schema]
+        )
+      ).rows.map(row => `${row.indexname} ${row.indexdef.replace(schema, "S")}`);
+    const built = await indexes(SCHEMA);
+    expect(built).toEqual(await indexes(MIRROR));
+    // The six the SQLite schema carries, plus the two primary keys.
+    expect(built.map(entry => entry.split(" ")[0])).toEqual([
+      "gateway_metadata_pkey",
+      "idx_metadata_status",
+      "idx_requests_cli",
+      "idx_requests_datetime",
+      "idx_requests_model",
+      "idx_requests_session",
+      "idx_requests_stable_hash",
+      "requests_pkey",
+    ]);
+  });
+
+  it("records migration 22 in the ledger the runner reads", async () => {
+    const rows = await admin.query(
+      `SELECT version, name FROM ${MIRROR}.schema_migrations WHERE version = 22`
+    );
+    expect(rows.rows).toEqual([{ version: 22, name: "022_flight_recorder_transcripts" }]);
+  });
+});

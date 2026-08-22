@@ -52,6 +52,7 @@ import {
   FlightRecorder,
   flightRecorderHealth,
   flightRecorderHealthMessage,
+  createFlightRecorder,
   flightRecorderDisabled,
   flightRecorderOpenFailed,
   flightRecorderReadsAreAuthoritative,
@@ -1510,6 +1511,9 @@ export function unscannedStorageHealth(): StorageHealthReport {
   };
 }
 
+/** doctor writes its own report; the factory's progress lines are not part of it. */
+const noopDoctorLogger = { info: (): void => {}, error: (): void => {} };
+
 function fileBytes(path: string): number | null {
   try {
     return statSync(path).size;
@@ -1567,6 +1571,12 @@ export async function collectStorageHealth(
   let recorder: FlightRecorderLike;
   if (existing) {
     recorder = existing;
+  } else if (persistence) {
+    // The FACTORY, not `new FlightRecorder`. Building the SQLite recorder here
+    // unconditionally meant doctor reported a file on a host whose transcripts
+    // had moved to PostgreSQL, which is the same "one subsystem, two engines"
+    // confusion this block exists to expose.
+    recorder = createFlightRecorder(noopDoctorLogger, persistence.backend, persistence.roleDsns);
   } else {
     try {
       recorder = new FlightRecorder(dbPath);
@@ -1575,6 +1585,7 @@ export async function collectStorageHealth(
       recorder = flightRecorderOpenFailed(dbPath, error);
     }
   }
+  const onSqliteFile = recorder instanceof FlightRecorder;
 
   const cutoff =
     block.retention.days !== null
@@ -1594,7 +1605,14 @@ export async function collectStorageHealth(
       // A `jobs` table in this file is LIVE only while the job store is the
       // same SQLite file. Otherwise it is the abandoned copy, frozen at the
       // switchover, and its rows will never move again.
-      live: row.table === "jobs" ? block.job_store.shares_flight_recorder_file : true,
+      // A `jobs` table is LIVE when the job store is the same store. On
+      // PostgreSQL that is the unified case rather than the abandoned one, so
+      // the file-path comparison alone would report a live table as frozen.
+      live:
+        row.table === "jobs"
+          ? block.job_store.shares_flight_recorder_file ||
+            (!onSqliteFile && persistence?.backend === "postgres")
+          : true,
     }));
   } catch (error) {
     // Reached the file and could not read it. The health snapshot below is
@@ -1610,8 +1628,10 @@ export async function collectStorageHealth(
   block.flight_recorder.path = health.path;
   block.flight_recorder.error = health.error;
   block.flight_recorder.reads_are_authoritative = flightRecorderReadsAreAuthoritative(health);
-  block.flight_recorder.file_bytes = fileBytes(dbPath);
-  block.flight_recorder.wal_bytes = fileBytes(`${dbPath}-wal`);
+  // Only when the recorder is actually the file. A byte count of a file nothing
+  // writes to is worse than none: it is a measurement of the wrong thing.
+  block.flight_recorder.file_bytes = onSqliteFile ? fileBytes(dbPath) : null;
+  block.flight_recorder.wal_bytes = onSqliteFile ? fileBytes(`${dbPath}-wal`) : null;
   const recorderMessage = flightRecorderHealthMessage(health);
   if (recorderMessage) block.warnings.push(recorderMessage);
 

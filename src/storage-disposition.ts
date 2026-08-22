@@ -66,14 +66,20 @@ export interface StorageDisposition {
     state: FlightRecorderState | null;
     /** The failure behind `unavailable` / `degraded`, never a guess at one. */
     unavailableBecause: string | null;
-    engine: "sqlite" | null;
+    engine: "sqlite" | "postgres" | null;
     path: string | null;
     /** Which input decided on/off. */
     decidedBy: "LLM_GATEWAY_LOGS_DB" | "default";
-    /** Always false: the recorder does not follow `[persistence].backend`. */
+    /**
+     * True when `[persistence].backend` was honoured. It was hard-coded false,
+     * which was correct while the recorder was SQLite-only and is now the
+     * question an operator is actually asking.
+     */
     followsPersistenceBackend: boolean;
     engineRequested: string | null;
     engineDeferredBecause: string | null;
+    /** What the deployment-shape check PROVED, when it admitted the DSN. */
+    engineAdmittedBecause: string | null;
   };
   roles: {
     configured: StorageRole[];
@@ -122,7 +128,7 @@ export function storageDisposition(
   const enabled = recorder
     ? recorder.state !== "disabled" && recorder.state !== "unavailable"
     : recorderPath !== null;
-  const engine = flightRecorderEngineDecision(persistence.backend);
+  const engine = flightRecorderEngineDecision(persistence.backend, persistence.dsn);
   const databaseUrl = resolveDatabaseUrlPrecedence({
     databaseUrl: process.env.DATABASE_URL,
     persistenceDsn: persistence.backend === "postgres" ? persistence.dsn : null,
@@ -144,11 +150,15 @@ export function storageDisposition(
       // The path is reported for a FAILED open too. "Which file could not be
       // opened" is the first thing an operator needs and the old boolean
       // nulled it out alongside a message blaming the configuration.
-      path: enabled ? recorderPath : (recorder?.path ?? null),
+      // The recorder's OWN path when it has one: on Postgres that is a redacted
+      // DSN, and reporting the SQLite file there would name a file the gateway
+      // is no longer writing to.
+      path: recorder?.path ?? (enabled ? recorderPath : null),
       decidedBy: process.env.LLM_GATEWAY_LOGS_DB !== undefined ? "LLM_GATEWAY_LOGS_DB" : "default",
-      followsPersistenceBackend: false,
+      followsPersistenceBackend: engine.deferredBecause === undefined,
       engineRequested: engine.requested ?? null,
       engineDeferredBecause: engine.deferredBecause ?? null,
+      engineAdmittedBecause: engine.admission?.admitted ? engine.admission.evidence : null,
     },
     roles: roleReport(persistence.roleDsns),
     deprecatedInputs: [
@@ -219,7 +229,10 @@ export function formatStorageDisposition(disposition: StorageDisposition): strin
     `Storage: job store backend="${jobStore.backend}" (async jobs ${jobStore.asyncJobsEnabled ? "enabled" : "DISABLED"})` +
       `${jobStore.path ? ` at ${jobStore.path}` : ""}`,
     requestHistory.enabled && requestHistory.state !== "degraded"
-      ? `Storage: request history is being written to ${requestHistory.path} (engine: ${requestHistory.engine}), which does NOT follow [persistence].backend`
+      ? `Storage: request history is being written to ${requestHistory.path} (engine: ${requestHistory.engine}), which ` +
+        (requestHistory.followsPersistenceBackend
+          ? "DOES follow [persistence].backend"
+          : "does NOT follow [persistence].backend")
       : // Derived, never authored here. The startup line used to name
         // LLM_GATEWAY_LOGS_DB=none whenever the recorder was absent, including
         // when the file was there and unreadable.
@@ -233,6 +246,13 @@ export function formatStorageDisposition(disposition: StorageDisposition): strin
   if (requestHistory.engineDeferredBecause) {
     lines.push(
       `Storage: request history is NOT following [persistence].backend = "${requestHistory.engineRequested}": ${requestHistory.engineDeferredBecause}`
+    );
+  } else if (requestHistory.engineAdmittedBecause) {
+    // The admission is announced, not merely the refusal. An operator who
+    // switched backend must be told that transcripts moved AND that the rows
+    // already on disk did not: there is no backfill, by design (s10).
+    lines.push(
+      `Storage: request history IS following [persistence].backend = "${requestHistory.engineRequested}" (${requestHistory.engineAdmittedBecause}). Rows written before this switch stay in the SQLite file and are NOT migrated.`
     );
   }
   lines.push(

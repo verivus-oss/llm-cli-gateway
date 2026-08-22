@@ -33,6 +33,7 @@ const SRC = join(ROOT, "src");
 /** Modules whose job IS to own SQL for a storage engine. */
 const SQL_OWNERS = new Set([
   "flight-recorder.ts",
+  "flight-recorder-pg.ts",
   "job-store.ts",
   "postgres-job-store-ops.ts",
   "postgres-job-store-schema.ts",
