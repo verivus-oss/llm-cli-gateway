@@ -63,6 +63,26 @@ describe.skipIf(!existsSync(entrypoint))("CLI metadata entrypoint", () => {
     expect(result.status).toBe(0);
   });
 
+  // s9. The formatter is unit-tested, but a formatter nothing calls tells an
+  // operator nothing. This is the only assertion that the block reaches stderr
+  // on a real boot, and registration is not reachability.
+  it("states on startup what happened to request history", () => {
+    const result = spawnSync(process.execPath, [entrypoint], {
+      encoding: "utf8",
+      input: "",
+      timeout: 60_000,
+      env: {
+        ...process.env,
+        LLM_GATEWAY_LOGS_DB: "none",
+        LLM_GATEWAY_JOBS_DB: "none",
+      },
+    });
+    expect(result.error).toBeUndefined();
+    expect(result.stderr).toContain("Storage: job store backend=");
+    expect(result.stderr).toContain("Storage: request history is NOT being written");
+    expect(result.stderr).toContain("role separation is NOT in force");
+  });
+
   it("fails startup when a configured durable store cannot be opened", () => {
     const dir = mkdtempSync(join(tmpdir(), "cli-unavailable-postgres-"));
     const config = join(dir, "config.toml");
@@ -284,7 +304,7 @@ describe.skipIf(!existsSync(entrypoint))("CLI MCP artifact recovery", () => {
     for (const dir of dirs.splice(0)) rmSync(dir, { recursive: true, force: true });
   });
 
-  it("recovers only the exact persisted local artifact and does not print its path or scope", () => {
+  it("recovers only the exact persisted local artifact and does not print its path or scope", async () => {
     const home = mkdtempSync(join(tmpdir(), "cli-mcp-artifact-recovery-"));
     dirs.push(home);
     const dbPath = join(home, "jobs.db");
@@ -296,7 +316,7 @@ describe.skipIf(!existsSync(entrypoint))("CLI MCP artifact recovery", () => {
       const artifact = buildClaudeMcpConfig(["sqry"]);
       const store = new SqliteJobStore(dbPath);
       try {
-        store.recordStart({
+        await store.recordStart({
           id: jobId,
           correlationId: "cli-mcp-artifact-recovery",
           requestKey: "cli-mcp-artifact-recovery",
@@ -310,7 +330,7 @@ describe.skipIf(!existsSync(entrypoint))("CLI MCP artifact recovery", () => {
           mcpArtifactScope: artifact.artifactScope,
           transport: "process",
         });
-        store.recordComplete({
+        await store.recordComplete({
           id: jobId,
           status: "completed",
           exitCode: 0,
@@ -321,7 +341,7 @@ describe.skipIf(!existsSync(entrypoint))("CLI MCP artifact recovery", () => {
           finishedAt: new Date().toISOString(),
         });
       } finally {
-        store.close();
+        await store.close();
       }
       writeFileSync(
         gatewayConfigPath,
@@ -355,9 +375,9 @@ describe.skipIf(!existsSync(entrypoint))("CLI MCP artifact recovery", () => {
       expect(existsSync(artifact.path)).toBe(false);
       const verifiedStore = new SqliteJobStore(dbPath);
       try {
-        expect(verifiedStore.getById(jobId)?.mcpArtifactCleanupPending).toBe(false);
+        expect((await verifiedStore.getById(jobId))?.mcpArtifactCleanupPending).toBe(false);
       } finally {
-        verifiedStore.close();
+        await verifiedStore.close();
       }
     } finally {
       if (originalHome === undefined) {

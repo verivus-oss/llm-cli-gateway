@@ -23,7 +23,7 @@ import {
   type KitSessionBinding,
 } from "../personal-config-types.js";
 import { runWithRequestContext } from "../request-context.js";
-import { setupTestDatabase, cleanTestDatabase } from "./setup.js";
+import { setupTestDatabase, setupTestStorageDriver, cleanTestDatabase } from "./setup.js";
 import { readFileSync, writeFileSync, mkdirSync, rmSync } from "fs";
 import { join } from "path";
 import { tmpdir } from "os";
@@ -34,7 +34,7 @@ const TEST_DATABASE_URL =
   process.env.TEST_DATABASE_URL || "postgresql://test:test@localhost:5433/llm_gateway_test";
 
 const ALL_MIGRATION_VERSIONS = [
-  1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21,
+  1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22,
 ] as const;
 const KIT_MIGRATION_VERSIONS = [6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17] as const;
 const MIGRATION_FILENAMES: Readonly<Record<number, string>> = {
@@ -59,6 +59,7 @@ const MIGRATION_FILENAMES: Readonly<Record<number, string>> = {
   19: "019_async_job_progress.sql",
   20: "020_async_job_error_classification.sql",
   21: "021_session_generation_fence.sql",
+  22: "022_flight_recorder_transcripts.sql",
 };
 
 const SESSION_SUMMARY_COMPATIBILITY_MIGRATION_VERSIONS = new Set([2, 3]);
@@ -258,8 +259,7 @@ describe("Session Migration", () => {
 
   beforeEach(async () => {
     await cleanTestDatabase();
-    const { pool } = await setupTestDatabase();
-    pgManager = new PostgreSQLSessionManager(pool);
+    pgManager = new PostgreSQLSessionManager(await setupTestStorageDriver());
 
     // Create test directory
     testDir = join(
@@ -418,7 +418,7 @@ describe("Session Migration", () => {
           dedupWindowMs: 60_000,
         }
       );
-      runtimeStore.recordStart({
+      await runtimeStore.recordStart({
         id: "migration-dml-only-job",
         correlationId: "migration-dml-only-corr",
         requestKey: "migration-dml-only-key",
@@ -432,7 +432,7 @@ describe("Session Migration", () => {
         mcpArtifactPath: "/tmp/migration-dml-only-mcp.json",
         mcpArtifactScope: "migration-dml-only-scope",
       });
-      expect(runtimeStore.getById("migration-dml-only-job")).toMatchObject({
+      expect(await runtimeStore.getById("migration-dml-only-job")).toMatchObject({
         id: "migration-dml-only-job",
         status: "queued",
         compressResponse: true,
@@ -443,7 +443,7 @@ describe("Session Migration", () => {
         mcpArtifactCleanupPending: true,
       });
     } finally {
-      runtimeStore?.close();
+      await runtimeStore?.close();
       if (client) {
         await client.query("RESET search_path");
         client.release();
@@ -464,6 +464,10 @@ describe("Session Migration", () => {
       await pool.query(`CREATE SCHEMA ${quoteIdentifier(schema)}`);
       schemaCreated = true;
       const env = { ...process.env, DATABASE_URL: schemaScopedDsn(schema) };
+      // Both bare, deliberately. An `await` on the first element would run it
+      // to completion before the second starts, which is the concurrency this
+      // test exists to exercise: the assertions below only mean something if
+      // the two migrate processes actually race for the advisory lock.
       const [first, second] = await Promise.all([
         execFileAsync(process.execPath, ["dist/migrate.js"], { cwd: process.cwd(), env }),
         execFileAsync(process.execPath, ["dist/migrate.js"], { cwd: process.cwd(), env }),
@@ -474,7 +478,7 @@ describe("Session Migration", () => {
       );
       expect(
         [first.stderr, second.stderr].filter(stderr =>
-          stderr.includes("Running 21 pending migration(s)")
+          stderr.includes("Running 22 pending migration(s)")
         )
       ).toHaveLength(1);
 
@@ -638,7 +642,7 @@ describe("Session Migration", () => {
     }
   });
 
-  it("upgrades an isolated legacy schema through 006-021, retires Kit handles, and scrubs Kit jobs", async () => {
+  it("upgrades an isolated legacy schema through 006-022, retires Kit handles, and scrubs Kit jobs", async () => {
     const { pool } = await setupTestDatabase();
     const schema = `migration_legacy_${randomUUID().replaceAll("-", "")}`;
     let client: PoolClient | null = null;
@@ -911,7 +915,7 @@ describe("Session Migration", () => {
              END
          WHERE id IN ('legacy-kit-privacy-job', 'legacy-kit-running-privacy-job')`
       );
-      await applyMigrations(client, [16, 17, 18, 19, 20, 21]);
+      await applyMigrations(client, [16, 17, 18, 19, 20, 21, 22]);
       const sessionGenerations = await client.query<{
         session_count: string;
         generation_count: string;
@@ -1175,7 +1179,7 @@ describe("Session Migration", () => {
         cwd: process.cwd(),
         env: { ...process.env, DATABASE_URL: schemaScopedDsn(schema) },
       });
-      expect(stderr).toContain("Running 20 pending migration(s)");
+      expect(stderr).toContain("Running 21 pending migration(s)");
 
       const columns = await client.query<{ table_name: string; udt_name: string }>(`
         SELECT table_name, udt_name
@@ -1274,7 +1278,7 @@ describe("Session Migration", () => {
       expect(stderr).toContain(
         "Repaired recorded legacy session schema before applying pending migrations"
       );
-      expect(stderr).toContain("Running 16 pending migration(s)");
+      expect(stderr).toContain("Running 17 pending migration(s)");
 
       const columns = await client.query<{ table_name: string; udt_name: string }>(
         [
@@ -2178,5 +2182,118 @@ describe("Session Migration", () => {
     // metadata round-trips as an empty object rather than `undefined` (the file
     // backend's representation). Either way it carries no caller metadata.
     expect(migrated?.metadata).toEqual({});
+  });
+});
+
+/**
+ * The session `cli` domain, asserted against the ENUM rather than against the
+ * migration text.
+ *
+ * Migrations 001 and 003 each spell out a provider list by hand, and both are
+ * wrong in both directions today: they omit `devin` and `cursor`, and they
+ * carry `grok-api`, which is an API provider id. Neither can be corrected in
+ * place, because every migration's SHA-256 is pinned in
+ * POSTGRES_IMMUTABLE_MIGRATION_SHA256 and re-verified against databases that
+ * already applied it, so an edit makes the runner refuse to migrate them.
+ *
+ * They do not need correcting: migration 005 drops both constraints and
+ * replaces them with a format guard, because API provider ids are arbitrary and
+ * a closed enum was the wrong shape. What keeps that honest is this pair of
+ * tests, not the frozen text. The first derives its expectation from
+ * PROVIDER_TYPES, so admitting an eighth provider extends it by itself; the
+ * second runs the same insert against the pre-005 schema and shows it failing,
+ * so a first test that passed for any other reason would be caught here.
+ */
+describe("session provider domain", () => {
+  it("admits every PROVIDER_TYPES value once every migration is applied", async () => {
+    const { pool } = await setupTestDatabase();
+    const schema = `session_cli_domain_${randomUUID().replaceAll("-", "")}`;
+    let client: PoolClient | null = null;
+    let schemaCreated = false;
+
+    try {
+      await pool.query(`CREATE SCHEMA ${quoteIdentifier(schema)}`);
+      schemaCreated = true;
+      client = await pool.connect();
+      await client.query(`SET search_path TO ${quoteIdentifier(schema)}`);
+      await applyMigrations(client, ALL_MIGRATION_VERSIONS);
+
+      for (const provider of PROVIDER_TYPES) {
+        await client.query("INSERT INTO sessions (id, cli) VALUES ($1, $2)", [
+          `session-${provider}`,
+          provider,
+        ]);
+        await client.query("INSERT INTO active_sessions (cli, session_id) VALUES ($1, $2)", [
+          provider,
+          `session-${provider}`,
+        ]);
+      }
+
+      const stored = await client.query<{ cli: string }>("SELECT cli FROM sessions ORDER BY cli");
+      expect(stored.rows.map(row => row.cli)).toEqual([...PROVIDER_TYPES].sort());
+      const pointers = await client.query<{ cli: string }>(
+        "SELECT cli FROM active_sessions ORDER BY cli"
+      );
+      expect(pointers.rows.map(row => row.cli)).toEqual([...PROVIDER_TYPES].sort());
+    } finally {
+      if (client) {
+        await client.query("RESET search_path");
+        client.release();
+      }
+      if (schemaCreated)
+        await pool.query(`DROP SCHEMA IF EXISTS ${quoteIdentifier(schema)} CASCADE`);
+    }
+  });
+
+  it("shows the pre-005 schema rejecting the providers 001 never listed", async () => {
+    const listed = new Set(
+      [...(migrationSql(1).match(/cli IN \(([^)]*)\)/) ?? [])[1].matchAll(/'([^']+)'/g)].map(
+        match => match[1]
+      )
+    );
+    const unlisted = PROVIDER_TYPES.filter(provider => !listed.has(provider));
+    // Without this the test would pass vacuously the moment the two sets agreed
+    // for any reason, including someone editing the frozen migration.
+    expect(unlisted.length).toBeGreaterThan(0);
+
+    const { pool } = await setupTestDatabase();
+    const schema = `session_cli_pre005_${randomUUID().replaceAll("-", "")}`;
+    let client: PoolClient | null = null;
+    let schemaCreated = false;
+
+    try {
+      await pool.query(`CREATE SCHEMA ${quoteIdentifier(schema)}`);
+      schemaCreated = true;
+      client = await pool.connect();
+      await client.query(`SET search_path TO ${quoteIdentifier(schema)}`);
+      await applyMigrations(client, [1, 2, 3, 4]);
+
+      for (const provider of unlisted) {
+        await expect(
+          client.query("INSERT INTO sessions (id, cli) VALUES ($1, $2)", [
+            `pre-005-${provider}`,
+            provider,
+          ])
+        ).rejects.toThrow(/violates check constraint/);
+      }
+
+      await applyMigrations(client, [5]);
+
+      for (const provider of unlisted) {
+        await client.query("INSERT INTO sessions (id, cli) VALUES ($1, $2)", [
+          `post-005-${provider}`,
+          provider,
+        ]);
+      }
+      const stored = await client.query<{ cli: string }>("SELECT cli FROM sessions ORDER BY cli");
+      expect(stored.rows.map(row => row.cli)).toEqual([...unlisted].sort());
+    } finally {
+      if (client) {
+        await client.query("RESET search_path");
+        client.release();
+      }
+      if (schemaCreated)
+        await pool.query(`DROP SCHEMA IF EXISTS ${quoteIdentifier(schema)} CASCADE`);
+    }
   });
 });

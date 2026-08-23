@@ -147,7 +147,7 @@ describe("handleGeminiRequest terminal net: inline (Mode A) + state-4..8 boundar
   let recordRequest: ReturnType<typeof vi.fn>;
   const assertUpstreamCliArgsMock = vi.mocked(assertUpstreamCliArgs);
 
-  beforeEach(() => {
+  beforeEach(async () => {
     tmp = mkdtempSync(join(tmpdir(), "gemini-terminal-net-"));
     flight = new FlightRecorder(join(tmp, "logs.db"));
     manager = new AsyncJobManager(noopLogger);
@@ -159,7 +159,7 @@ describe("handleGeminiRequest terminal net: inline (Mode A) + state-4..8 boundar
 
   afterEach(async () => {
     await manager.dispose();
-    flight.close();
+    await flight.close();
     rmSync(tmp, { recursive: true, force: true });
     vi.restoreAllMocks();
   });
@@ -284,7 +284,7 @@ describe("handleGeminiRequest terminal net: deferred (Mode B) + H-DoubleComplete
   let sessions: FileSessionManager;
   const removeSpy = vi.mocked(removeWorktree);
 
-  beforeEach(() => {
+  beforeEach(async () => {
     originalDeadline = process.env.SYNC_DEADLINE_MS;
     process.env.SYNC_DEADLINE_MS = "25";
     tmp = mkdtempSync(join(tmpdir(), "gemini-terminal-net-defer-"));
@@ -296,10 +296,10 @@ describe("handleGeminiRequest terminal net: deferred (Mode B) + H-DoubleComplete
     vi.resetModules();
   });
 
-  afterEach(() => {
+  afterEach(async () => {
     if (originalDeadline === undefined) delete process.env.SYNC_DEADLINE_MS;
     else process.env.SYNC_DEADLINE_MS = originalDeadline;
-    flight.close();
+    await flight.close();
     rmSync(tmp, { recursive: true, force: true });
     vi.resetModules();
     vi.restoreAllMocks();
@@ -347,7 +347,7 @@ describe("handleGeminiRequest terminal net: deferred (Mode B) + H-DoubleComplete
       // The FlightOwnership fence: completeInline no-ops once the manager owns
       // completion, so the handler does NOT inline-complete on a deferral.
       expect(logComplete).not.toHaveBeenCalled();
-      manager.cancelJob(body.jobId);
+      await manager.cancelJob(body.jobId);
     } finally {
       slot.release();
       await manager.dispose();
@@ -385,8 +385,8 @@ describe("handleGeminiRequest terminal net: deferred (Mode B) + H-DoubleComplete
     const realStart = manager.startJobWithDedup.bind(manager);
     let jobId: string | undefined;
     vi.spyOn(manager, "startJobWithDedup").mockImplementation(
-      (...args: Parameters<typeof realStart>) => {
-        const out = realStart(...args);
+      async (...args: Parameters<typeof realStart>) => {
+        const out = await realStart(...args);
         jobId = out.snapshot.id;
         return out;
       }
@@ -403,7 +403,7 @@ describe("handleGeminiRequest terminal net: deferred (Mode B) + H-DoubleComplete
         )
       );
       await vi.waitFor(() => expect(jobId).toBeDefined());
-      manager.cancelJob(jobId!);
+      await manager.cancelJob(jobId!);
 
       await expect(pending).rejects.toThrow(/worktree removal failed/);
       expect(arm).toHaveBeenCalledTimes(1);

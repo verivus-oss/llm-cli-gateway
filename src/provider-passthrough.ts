@@ -1,0 +1,240 @@
+/**
+ * Generic provider flag pass-through.
+ *
+ * n3 of docs/plans/gateway-passthrough-policy.dag.toml, and the precondition
+ * the rest of the policy was missing.
+ *
+ * WHY THIS EXISTS. Before this module there was no way for a caller to send a
+ * flag the gateway had not hand-declared as a named Zod field. Discovery could
+ * find `--best-of-n` on a customer's grok 0.2.101, report its arity and its
+ * value set, and the caller still could not use it, because the tool schema is
+ * an implicit allowlist. The schema, not the contract, was the thing pinning
+ * capability to what a human had typed. Every other node in the policy is
+ * decorative until this exists.
+ *
+ * WHAT IS ENFORCED, AND WHY EACH ONE IS NOT A CAPABILITY JUDGEMENT.
+ *
+ * Nothing here decides whether a provider supports a flag. That question is
+ * answered by the binary, which is the authority (p1). What is enforced is the
+ * `retained_enforcement` set: argv that is malformed, argv that would hang the
+ * gateway, and argv that would smuggle an option through a value. Those protect
+ * the gateway host and our own output parsing, never the customer from their
+ * own CLI.
+ *
+ * ACCESS MODE SPLITS THE POSTURE. Decided 2026-08-19, following p4/p5:
+ *
+ *   ON-MACHINE (stdio, local caller). Unrestricted. A local caller can already
+ *   run the binary directly in a shell, so a gateway that refuses them a flag
+ *   protects nothing and merely makes itself the worse way to reach their own
+ *   tool.
+ *
+ *   OFF-MACHINE (HTTP/OAuth, remote caller). A small deny list, by CLASS rather
+ *   than by exact spelling. A remote caller cannot reach the host any other way,
+ *   and the gateway already confines them: workspace-confined paths, and the H1
+ *   gate in index.ts that rejects host-path and plugin fields outright. Without
+ *   the deny list this module would be a hole cut around that shipped control,
+ *   since `providerFlags: {"--plugin-dir": "/etc"}` reaches the same CLI
+ *   argument the named field is rejected for.
+ *
+ * THE DENY LIST IS BY PATTERN, DELIBERATELY. An exact list of flag spellings is
+ * the wrong shape for a fail-closed control: it is per-provider data, it goes
+ * stale on every upstream release, and a miss is a silent approval bypass. The
+ * spellings in play today across the installed binaries already include
+ * `--yolo`, `--always-approve`, `--auto-approve`, `--approve-for-me`,
+ * `--dangerously-skip-permissions`, `--allow-dangerously-skip-permissions` and
+ * `--dangerously-bypass-approvals-and-sandbox`, and the next release will
+ * invent another. Matching the class catches the one nobody has written yet.
+ *
+ * Over-refusal off-machine is the intended direction here and costs a remote
+ * caller little: the gateway's own curated parameters (`approvalStrategy`,
+ * `workingDir` against a registered workspace) still work off-machine with their
+ * existing gates. What is refused is the RAW surface, not the capability.
+ */
+import { sanitizeCliArgValue } from "./request-helpers.js";
+import { assertCliArgUtf8Size } from "./cli-input-limits.js";
+import { getRequestContext, isRemotePrincipal } from "./request-context.js";
+
+/** One caller-supplied flag value. `true` emits the flag alone. */
+export type PassthroughValue = string | number | boolean | readonly string[];
+
+/** Caller-supplied flags, keyed by the flag exactly as the binary spells it. */
+export type PassthroughFlags = Readonly<Record<string, PassthroughValue>>;
+
+/**
+ * Flag names the gateway will accept as a key.
+ *
+ * Shape only. A leading dash is required, and `=` and whitespace are excluded so
+ * a caller cannot pack a value into the key and bypass value sanitisation. Both
+ * `--long` and `-s` are permitted because the dialects in play disagree: Go's
+ * flag package accepts `-model` for what its own help prints as `--model`.
+ */
+const FLAG_NAME = /^--?[A-Za-z0-9][A-Za-z0-9-]*$/;
+
+/**
+ * OFF-MACHINE CALLERS GET NO RAW PASS-THROUGH. Decided 2026-08-19.
+ *
+ * This was a deny-list of four pattern classes, on the reasoning that matching a
+ * CLASS survives an upstream release that invents a new spelling. Two reviewers
+ * took it apart in one pass and produced SEVENTEEN admitted flags reaching the
+ * same capabilities the H1 gate blocks as named fields:
+ *
+ *   -c  -s  -C          codex short aliases; the long forms were all denied
+ *   --cd --workspace    a working root and a workspace root, neither named "dir"
+ *   --enable --disable  documented equivalents of `-c features.<name>=...`
+ *   --allow --allowed-tools --force   approval capability, no "approve" in the name
+ *   --prompt-file --system-prompt-file --append-system-prompt-file
+ *   --debug-file --output-last-message --output-schema --image --rules @file
+ *   --agent --leader-socket --file    host paths, none of them spelled "directory"
+ *
+ * A deny-list is the wrong shape for a boundary and this is the evidence. The
+ * gateway cannot know what an arbitrary flag does to its own host, and each miss
+ * is silent. So the rule is now the other way round: a remote caller may not
+ * name a raw flag at all.
+ *
+ * WHAT THIS COSTS: nothing anyone has. `providerFlags` has never shipped, so no
+ * customer loses a capability. Remote callers keep the whole curated parameter
+ * surface, where every host-reaching field already carries its own gate.
+ *
+ * WHY NOT AN ALLOWLIST OF NAMES: it fails closed rather than open, which is
+ * better, but it is the same brittleness and it would have to be maintained per
+ * provider per release, which is the hand-authored provider data the policy
+ * forbids. An operator-gated opt-in belongs behind explicit configuration if
+ * anyone ever needs it, not behind a pattern.
+ */
+export const OFF_MACHINE_PASSTHROUGH_REFUSAL =
+  "providerFlags is refused for remote HTTP/OAuth callers: the gateway cannot tell what an " +
+  "arbitrary provider flag does to its own host. Use the tool's declared parameters, which " +
+  "carry their own host-path and approval gates. Local stdio callers are unaffected.";
+
+/** Why a flag was refused, in a form a caller can act on. */
+export interface PassthroughRejection {
+  readonly flag: string;
+  readonly reason: string;
+}
+
+export interface PassthroughResult {
+  /** argv tokens to append, in the caller's key order. */
+  readonly args: string[];
+  /** Flags refused, with the reason. Empty on full acceptance. */
+  readonly rejected: readonly PassthroughRejection[];
+}
+
+export interface PassthroughOptions {
+  /** True for HTTP/OAuth callers. Drives the deny list and nothing else. */
+  readonly remote: boolean;
+  /** Provider name, for size-limit diagnostics only. */
+  readonly provider: string;
+  /**
+   * argv the gateway has already assembled for this request. A caller may not
+   * pass a flag the gateway is emitting itself.
+   *
+   * This is derived from the request, never from a hand-authored list of
+   * "reserved" flags, which would be provider data and would go stale. It
+   * protects OUR argv construction and OUR output parsing: two `--output-format`
+   * tokens make the response unparseable, and a second `--model` silently wins
+   * or loses depending on the dialect.
+   */
+  readonly alreadyEmitted: readonly string[];
+}
+
+/**
+ * Turn caller-supplied flags into argv tokens.
+ *
+ * Emission, for a flag whose arity the gateway does not know:
+ *   true          -> `--flag`
+ *   string|number -> `--flag`, `value`
+ *   string[]      -> `--flag v` per item, REPEATED
+ *
+ * The repeat form is the honest default for an unknown flag: a CLI that wants a
+ * comma-separated list accepts a string the caller can build itself, whereas a
+ * CLI that wants repetition cannot be reached from a joined string at all. The
+ * gateway does not guess which, because that is a provider fact and no safe
+ * probe recovers it.
+ *
+ * `false` and `undefined` emit nothing, so a caller can pass a flag map with
+ * inactive entries rather than building it conditionally.
+ */
+export function buildPassthroughArgv(
+  flags: PassthroughFlags | undefined,
+  options: PassthroughOptions
+): PassthroughResult {
+  const args: string[] = [];
+  const rejected: PassthroughRejection[] = [];
+  if (!flags) return { args, rejected };
+
+  const emitted = new Set(options.alreadyEmitted);
+  for (const [flag, value] of Object.entries(flags)) {
+    if (value === false || value === undefined || value === null) continue;
+
+    if (!FLAG_NAME.test(flag)) {
+      rejected.push({
+        flag,
+        reason:
+          "not a flag name: expected a leading dash and no '=' or whitespace, e.g. \"--best-of-n\"",
+      });
+      continue;
+    }
+    if (emitted.has(flag)) {
+      rejected.push({
+        flag,
+        reason:
+          "the gateway is already emitting this flag for this request; use the named parameter instead",
+      });
+      continue;
+    }
+    if (options.remote) {
+      rejected.push({ flag, reason: OFF_MACHINE_PASSTHROUGH_REFUSAL });
+      continue;
+    }
+
+    const values = value === true ? [] : Array.isArray(value) ? value.map(String) : [String(value)];
+    let bad = false;
+    for (const v of values) {
+      try {
+        // retained_enforcement.non_option_value_guard: a VALUE must never be
+        // parseable as another option. This applies to every caller, local
+        // included, because it is argument injection and not capability.
+        sanitizeCliArgValue(v, flag);
+        assertCliArgUtf8Size(v, { provider: options.provider, inputName: flag });
+      } catch (error) {
+        rejected.push({ flag, reason: (error as Error).message });
+        bad = true;
+        break;
+      }
+    }
+    if (bad) continue;
+
+    if (values.length === 0) args.push(flag);
+    else for (const v of values) args.push(flag, v);
+    emitted.add(flag);
+  }
+  return { args, rejected };
+}
+
+/**
+ * One call per provider prep function: resolve access mode, build the tokens,
+ * and flatten any refusal into a message the caller can return.
+ *
+ * Callers must place the tokens with `insertCliArgsBeforePrompt` when the prompt
+ * terminator is already in `args`, or the flags land after `--` and become
+ * prompt text. Four of the seven providers append the prompt inside their prep
+ * function, so this is the common case rather than the exception.
+ */
+export function passthroughArgvOrRejection(
+  flags: PassthroughFlags | undefined,
+  provider: string,
+  alreadyEmitted: readonly string[]
+): { args: string[]; rejection: string | null } {
+  const result = buildPassthroughArgv(flags, {
+    remote: isRemotePrincipal(getRequestContext()),
+    provider,
+    alreadyEmitted,
+  });
+  if (result.rejected.length === 0) return { args: result.args, rejection: null };
+  return {
+    args: [],
+    rejection: `providerFlags refused: ${result.rejected
+      .map(r => `${r.flag} (${r.reason})`)
+      .join("; ")}`,
+  };
+}

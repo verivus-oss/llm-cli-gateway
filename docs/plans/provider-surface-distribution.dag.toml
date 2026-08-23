@@ -1,0 +1,157 @@
+# How the primary provider parameter surface is BUILT and SHIPPED.
+# Subordinate to gateway-passthrough-policy.dag.toml; where they disagree, that wins.
+# Premise: the surface is already data (FlagGenerationMeta + CliContract, consumed by
+# deriveZodShapeFromGeneration and buildArgvFromGeneration). Only the DATA is compiled in,
+# and that is the whole reason a surface change costs a product release.
+
+[meta]
+surface = "primary parameter surface: derivation, distribution, refresh"
+status = "d1/d1a/d1b/d2 shipped 2026-08-19; d1c next, then d4, then d3"
+release_gate = "d2 gates the next release only if any other node here ships. On its own this program is additive."
+absorbs = "gateway-passthrough-policy.dag.toml n4.seed-is-generated-not-written"
+
+[policy]
+p1_artefact_not_literal = "The surface is LOADED. A compiled const is a release dependency wearing a data structure's clothes."
+p2_precedence = "seed < pack < discovery < overlay, merged as UNION. A later source may widen or re-describe; none may subtract. Inherits absence-is-never-subtractive."
+p3_no_network = "dist may not fetch. The release audit's fetch allowlist and the recurring Socket networkAccess alert both forbid it. Distribution is an npm install or a file already on disk."
+p4_hand_editing_is_editorial_only = "Humans edit `describe` strings. Flags, arity and value sets are machine-derived, or this program is the no-hand-authored-provider-data trap one layer out."
+p5_three_channels = "Publish a pack (minutes, no gateway release). Customer upgrades their CLI (no action from us). Operator drops a file (today, for one host)."
+
+[decisions]
+pack_is_its_own_package = "yes"
+pack_is_its_own_package_why = "A data-only package with its own semver is the only way `npm update` ships a surface without shipping a runtime. Adding a file to the gateway tarball does not decouple anything."
+schema_swap_is_live = "yes"
+schema_swap_is_live_why = "SDK 1.29 RegisteredTool.update({paramsSchema}) emits notifications/tools/list_changed. A restart-only refresh would make discovery useless on a long-lived stdio process."
+
+[[node]]
+id = "d1.seed-is-generated-not-written"
+status = "sources 1-2 landed 2026-08-19 as seed/provider-seed.json; source 3 open, see d1a"
+critical = true
+depends_on = []
+role = "GROK_FLAG_GENERATION and UPSTREAM_CLI_CONTRACTS become a build-time artefact produced by discovery on a reference host, not a literal a human maintains."
+outcome = "mergeSeed unions, assertSeedIsAdditive throws on a subtractive regeneration, validateSeed closes the provenance keys against a hostname leak. Completions run only when root help advertises the subcommand. Measured on 7 binaries: 362 flags seen against 167 declared."
+constraint = "The artefact names its generator, platform and probe time and NOT its host. Provenance ships in the tarball."
+
+[[node]]
+id = "d1a.probe-needs-a-derived-anchor"
+status = "done 2026-08-19"
+depends_on = ["d1.seed-is-generated-not-written"]
+role = "Source 3 gives arity and real value sets, and is the only source that can retire an invented enum."
+outcome = "Anchor derived from help via two placeholder shapes, square brackets excluded because an optional value lets the probe RUN the CLI. 321 flags probed, 104 with arity, 6 with a value set the binary printed. agy yields no anchor and is recorded unprobeable."
+
+[[node]]
+id = "d1b.probe-the-request-subcommand"
+status = "done 2026-08-19"
+depends_on = ["d1a.probe-needs-a-derived-anchor"]
+role = "Sources 2 and 3 addressed the ROOT command while the gateway builds `codex exec`."
+outcome = "Rescoping flipped 12 codex verdicts in BOTH directions: root probing called real exec flags absent and absent root flags real. A seed entry now describes one command, and a scope change is a correction rather than a subtraction. The result corroborates the codex fixtures instead of refuting them."
+constraint = "Only codex has a request subcommand today. A provider that grows one gets this for free from contract.command; a provider whose REQUEST path varies by parameter does not, and would need scope per request rather than per provider."
+
+[[node]]
+id = "d1c.probe-with-a-guaranteed-unknown-sentinel"
+status = "done 2026-08-19. The anchor is deleted, not deprecated."
+depends_on = ["d1b.probe-the-request-subcommand"]
+role = "The help-derived anchor left agy unprobed and 99 flags unparsed. Every probe now carries a flag no parser knows, and the verdict is WHICH flag the rejection named."
+outcome = "0 providers unasked, arity 108 -> 181, gemini 20 unasked -> 20 present, no present-to-absent flip anywhere. Arity is inferred from the same fact: a parser that did not complain about `=VALUE` takes a value."
+constraint = "COMMANDER STAYS HALF SOLVED ON PURPOSE. claude and cursor report a real BOOLEAN given =value identically to an absent flag, so a named flag there is UNPARSED. Reading it as absent fabricates a removal for every claude boolean."
+
+[[node]]
+id = "d2.gates-pin-the-seed"
+status = "done 2026-08-19, by enforcing the property rather than adding a mode"
+depends_on = ["d1.seed-is-generated-not-written"]
+role = "The gates derive from the LIVE tool surface, so they flap the moment it varies by host."
+outcome = "surface:invariance:check reruns site:generate:check under six hostile environments and requires identical output. The config axis already held; this makes it fail if it stops. A seed-only FLAG was the plan and is worse: a flag is forgotten at the next call site, an environment is not, and varying the host also catches a dependency nobody anticipated."
+constraint = "The seed is deliberately not varied: it is a committed artefact and the surface is meant to follow it. Proof the gate discriminates: with a HOME leak and a regenerated fixture, site:generate:check PASSES and this gate fails only the HOME scenarios."
+
+[[node]]
+id = "d3.bindings-cover-seven-providers"
+status = "REORDERED 2026-08-19 to depend on d4. Attempted first and refused by provider:surfaces:check, correctly."
+depends_on = ["d4.surface-loader-and-precedence"]
+role = "Only grok has a generation table, and it is GRANDFATHERED in the ratchet, not sanctioned. The other six emit flags by hand across their prepare and handle paths."
+action = "A table holds two things. WHICH flags exist, their arity and their values is provider data and must be loaded. The MCP parameter name, the emit rule and the description are gateway data and are ours to write. Only the second half may be hand-authored, which is why this cannot precede the loader. Order and cost in docs/evidence/gateway-passthrough-2026-08-19.md."
+constraint = "Do NOT allowlist a new *_FLAG_GENERATION to get past the gate, and do not rename one to dodge its regex. The gemini attempt was clean, byte-identical fixture and all, and still wrong: it pinned the flag set to what the author typed. gemini is additionally blocked until d1c, because agy yields no arity today."
+
+[[node]]
+id = "d4.surface-loader-and-precedence"
+status = "resolver done 2026-08-19. Wiring it into tool registration is d4a."
+critical = true
+depends_on = ["d2.gates-pin-the-seed", "d1c.probe-with-a-guaranteed-unknown-sentinel"]
+role = "Resolve one merged view per provider from the precedence chain instead of reading a module-level const."
+outcome = "FIVE sources, not four: RETAINED, the bundled contract, is the floor. p2 named seed/pack/discovery/overlay and that does not satisfy discovered-UNION-retained. Measured: the three n1-restored flags all probe absent here, so a seed-only loader takes them again. Acceptance test pins all three plus a companion proving they vanish without the floor."
+constraint = "Merge is union, precedence is a module constant rather than an argument, and a source that throws is skipped rather than fatal."
+
+[[node]]
+id = "d4a.registration-reads-the-loader"
+status = "admission done 2026-08-19, seed-only. Schema derivation is d4c."
+critical = true
+depends_on = ["d4.surface-loader-and-precedence"]
+role = "Argv admission read UPSTREAM_CLI_CONTRACTS directly, so a flag the seed evidenced was still refused."
+outcome = "167 declared flags become 266 admissible. Two corrections the wiring forced: the floor now carries FACTS not just names, or twelve contract-only enums would have been dropped; and a DECLARED refusal outranks evidence, so vibe --auto-approve and claude --background stay refused."
+constraint = "surface:invariance:check is the control for anything beyond seed-only, and will fail the moment discovery or overlay reaches the site capture."
+
+[[node]]
+id = "d4c.schema-derivation-reads-the-loader"
+status = "done 2026-08-19, fixture unchanged"
+depends_on = ["d4a.registration-reads-the-loader"]
+role = "deriveZodShapeFromGeneration read contract.flags for its enum source, so admission could widen from the seed and a tool SCHEMA could not."
+outcome = "The lookup is INJECTED, so provider-codegen still imports no contract and no loader. Contract stays the fallback, so a surface that failed to load costs nothing. Proved live rather than silently falling back: with the surface reporting one extra enum value, site:generate:check fails."
+
+[[node]]
+id = "d4b.seed-records-short-flags"
+depends_on = ["d1c.probe-with-a-guaranteed-unknown-sentinel"]
+role = "The scrape regex collects only --long tokens and the generator drops the completion parser's shortFlags, so -p, -c, -i, -C and -v are in the contract and not the seed."
+constraint = "Harmless only while the retained floor carries them. It is the headless flag on six providers, so the floor is doing real work here rather than being belt and braces."
+
+[[node]]
+id = "d5.pack-is-a-separate-package"
+depends_on = ["d4.surface-loader-and-precedence"]
+role = "A data-only npm package carrying nothing but the tables, semver-ranged, so npm update ships a primary surface with no gateway release."
+action = "Generated by the same d1 pipeline on the reference host. Optional peer: absent means seed plus discovery, which is a supported configuration, not a degraded one."
+
+[[node]]
+id = "d6.pack-trust-boundary"
+critical = true
+depends_on = ["d5.pack-is-a-separate-package"]
+role = "buildArgvFromGeneration emits gen.flag verbatim, so a wrong or hostile pack can map an innocuous-looking parameter onto --dangerously-skip-permissions."
+action = "A pack may only name flags present in the merged contract; values still pass sanitizeCliArgValue; the off-machine class deny-list applies to pack-derived flags exactly as it does to providerFlags; integrity pinned in the shrinkwrap."
+constraint = "FAIL CLOSED HERE, and only here. Everywhere else in this program failing open is correct. A pack is code we did not compile."
+
+[[node]]
+id = "d7.live-schema-update"
+depends_on = ["d4.surface-loader-and-precedence"]
+role = "Background refresh replaces a tool's paramsSchema in-process via RegisteredTool.update and lets the SDK emit tools/list_changed."
+constraint = "Not every client honours list_changed. The swap must never invalidate an in-flight request, and a client on a stale schema must still be served, which p2's union already guarantees."
+
+[[node]]
+id = "d8.local-overlay"
+depends_on = ["d4.surface-loader-and-precedence"]
+role = "~/.llm-cli-gateway/surfaces.d/*.toml, so an operator can unblock one host today without waiting for a pack."
+constraint = "Highest precedence and therefore the same trust boundary as d6. Report its presence in doctor: an invisible overlay is an unexplainable support call."
+
+[[node]]
+id = "d9.n3b-dissolves"
+status = "conclusion, no work"
+depends_on = ["d3.bindings-cover-seven-providers"]
+role = "n3b proposed deleting the 29 named grok parameters because providerFlags reaches them. Under this program they are not deleted, they stop being COMPILED."
+outcome = "No parameter disappears, so there is no breaking change and no 3.1.0-versus-4.0.0 decision. The version question n3b raised is withdrawn, not answered."
+
+[[invariant]]
+id = "loading-never-shrinks-the-surface"
+question = "Can a source that loads later remove a parameter the previous one offered?"
+why = "The union rule is the whole safety property. A pack that fails to mention a flag must be indistinguishable from a pack that has not been updated yet."
+[[invariant]]
+id = "a-pack-cannot-invent-a-flag"
+question = "Does this pack name a flag absent from the merged contract?"
+why = "The one fail-closed rule in an otherwise fail-open program. Data that reaches argv is code."
+[[invariant]]
+id = "every-artefact-names-its-generator"
+question = "Does this file say what produced it, on which host, at what version, and when?"
+why = "Both hand-authored registries in this repo were re-created by someone who could not tell a generated file from a maintained one."
+[[invariant]]
+id = "the-gates-see-the-seed-not-the-host"
+question = "Does this check derive from the live tool surface?"
+why = "If yes it now depends on which CLIs this machine has installed, and npm run check stops meaning anything."
+
+[protocol]
+before_editing_a_generated_surface = "Do not. Change the generator or the describe strings. An edit to the artefact is lost on the next build and looks like a regression to whoever loses it."
+before_adding_a_source = "Answer loading-never-shrinks-the-surface and a-pack-cannot-invent-a-flag. A new source with a new trust level is a new d6, not a new entry in a list."

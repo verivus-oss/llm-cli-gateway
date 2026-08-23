@@ -200,13 +200,13 @@ docker compose -f docker/personal.compose.yml run --rm doctor
 - **Multi-LLM Orchestration**: Unified interface for Claude Code, Codex, Gemini, Grok, Mistral (Vibe), Devin, and Cursor Agent CLIs
 - **Session Management**: Track gateway session metadata and provider-specific continuity with persistent storage
 - **Gateway-owned worktrees**: Run supported sync or async provider requests inside a managed git worktree with the local file-backed session manager. Same-session reuse requires same-host durable ownership plus a matching live Git registration and gateway branch; manager-level named path collisions fail closed. PostgreSQL-backed sessions reject worktrees before creation because a different database-connected host cannot safely own filesystem cleanup. Grok, Devin, and Mistral require an explicit provider-native `sessionId`; fresh, `createNewSession`, and `resumeLatest`-only worktree requests fail closed. A worktree requires a registered workspace selected explicitly, through caller-owned session metadata, or by the configured default; it never inherits process cwd or combines with `workingDir`, `addDir`, or `includeDirs`. Materialization suppresses repository, system, and global Git hooks, configured clean, smudge, and process checkout filters, sparse checkout, and lazy object fetching. Filter-dependent content such as Git LFS remains in its repository representation instead of executing host commands. Session deletion and TTL eviction hide a durably owned worktree session while cleanup runs. If Git removal fails, the file-backed store retains a durable cleanup-pending tombstone, blocks reuse, and retries cleanup when that store is registered on the owning host. The record is finalized only after verified Git removal.
-- **Token Optimization**: Automatic 44% reduction on prompts, 37% on responses (opt-in)
+- **Token Optimization**: opt-in prompt/response compaction via `optimizePrompt` / `optimizeResponse`, both defaulting to **false**. The 44% / 37% figures are v1.0.0 measurements on a specific corpus, not a guarantee: `src/optimizer.ts` is a deterministic phrase-stripper, and nothing measures a ratio at runtime.
 - **Correlation ID Tracking**: Full request tracing across all LLM interactions
 - **Cross-Tool Collaboration**: LLMs can use each other via MCP (validated through dogfooding)
 
 ### Observability
 
-- **SQLite Flight Recorder**: Every request/response logged to `~/.llm-cli-gateway/logs.db` with correlation IDs, token usage, duration, retry counts, and circuit breaker state. Browse with [Datasette](https://datasette.io/): `datasette ~/.llm-cli-gateway/logs.db`
+- **SQLite Flight Recorder**: Provider requests and responses are logged to `~/.llm-cli-gateway/logs.db` with correlation IDs, duration, and token usage where the provider emits it (today: claude on `stream-json`/`json`, codex, and the API providers; grok, gemini, mistral, devin and cursor emit no usage on their CLI wire). Two exclusions are worth knowing: **cross-LLM validation seats write no flight-recorder row at all**, so `llm_request_result` cannot read one back by correlation ID, and repository-review seats are additionally excluded by design so review evidence is not retained in a non-expiring table. The `retry_count` and `circuit_breaker_state` columns are constants on the async path, which is the production path; retry and circuit breaking apply only to the direct-execute fallback. Read it back through the gateway: `llm_request_list` finds recent requests when you have no id, and `llm_request_result` returns the prompt and response for a `correlationId`. Agents should use those tools rather than opening the database: a direct reader bypasses per-principal ownership checks, and on a `postgres` deployment it sees only half of each request, because request rows stay in SQLite while job rows move to PostgreSQL. For human browsing of a local SQLite deployment: `datasette ~/.llm-cli-gateway/logs.db`
 - **Structured Metadata**: Tool responses include machine-readable `structuredContent` (model, cli, correlationId, sessionId, durationMs, token counts)
 - **Cache observability resources**: `cache-state://global`, `cache-state://session/{id}`, and `cache-state://prefix/{hash}` MCP resources return aggregate cache hit/miss/savings — tokens and hashes only, no prompt text. `session_get` includes a `cacheState` block when the session has prior requests.
 - **Provider capability inventory**: `provider_tool_capabilities` and `provider-tools://catalog` expose the gateway request fields, supported/degraded provider controls, local skill/tool discovery, and safe config-surface hints for Claude Code, Codex CLI, Gemini/Antigravity, Grok CLI/API, Mistral Vibe, Cognition Devin, and Cursor Agent. `doctor --json` includes a compact `provider_capabilities` summary for setup assistants.
@@ -295,9 +295,9 @@ Every provider is reachable through the same request, session, job, and validati
 
 | Provider                               | CLI request tools                                                                     | Native ACP                                                                                   | Live model discovery                                                     | Admin surface                                              |
 | -------------------------------------- | ------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------ | ---------------------------------------------------------- |
-| Claude Code (`claude`)                 | `claude_request` / `_async`                                                           | None (CLI-first; no ACP entrypoint at claude 2.1.212)                                        | model aliases, reasoning-effort levels, fallback model                   | read-only via `provider_admin_list` / `provider_admin_run` |
-| OpenAI Codex (`codex`)                 | `codex_request` / `_async`, `codex_fork_session`                                      | None (codex-cli 0.144.5 advertises mcp-server / app-server transports, not native ACP)       | `codex debug models`                                                     | read-only via `provider_admin_list` / `provider_admin_run` |
-| Gemini / Antigravity (`gemini`, `agy`) | `gemini_request` / `_async`                                                           | None (agy 1.1.3 exposes no ACP entrypoint; legacy Gemini CLI ACP evidence does not transfer) | `agy models`                                                             | read-only via `provider_admin_list` / `provider_admin_run` |
+| Claude Code (`claude`)                 | `claude_request` / `_async`                                                           | None (CLI-first; no ACP entrypoint at its tracked version)                                        | model aliases, reasoning-effort levels, fallback model                   | read-only via `provider_admin_list` / `provider_admin_run` |
+| OpenAI Codex (`codex`)                 | `codex_request` / `_async`, `codex_fork_session`                                      | None (codex-cli advertises mcp-server / app-server transports, not native ACP)       | `codex debug models`                                                     | read-only via `provider_admin_list` / `provider_admin_run` |
+| Gemini / Antigravity (`gemini`, `agy`) | `gemini_request` / `_async`                                                           | None (agy exposes no ACP entrypoint; legacy Gemini CLI ACP evidence does not transfer) | `agy models`                                                             | read-only via `provider_admin_list` / `provider_admin_run` |
 | xAI Grok (`grok`)                      | `grok_request` (sync `transport: "acp"`) / `_async`                                   | Native via `grok agent stdio`                                                                | `grok models` + `~/.grok/config.toml`                                    | read-only via `provider_admin_list` / `provider_admin_run` |
 | Mistral Vibe (`mistral`)               | `mistral_request` (sync `transport: "acp"`) / `_async`                                | Native via `vibe-acp`                                                                        | Vibe config plus the `VIBE_ACTIVE_MODEL` active model and agent profiles | read-only via `provider_admin_list` / `provider_admin_run` |
 | Cognition Devin (`devin`)              | `devin_request` (sync `transport: "acp"`, `agentType: summarizer\|review`) / `_async` | Native via `devin acp`                                                                       | `--model` / `DEVIN_MODEL`                                                | read-only via `provider_admin_list` / `provider_admin_run` |
@@ -305,7 +305,7 @@ Every provider is reachable through the same request, session, job, and validati
 
 - **Native ACP** is reported honestly. `grok`, `mistral`, `devin`, and `cursor` expose a native ACP entrypoint, so `provider-acp://<provider>` carries the negotiated `initialize` capability set and the derived session-method availability, and the sync `*_request` accepts `transport: "acp"` (fails closed unless `[acp]` and the provider's `runtime_enabled` gate are set). ACP routing is sync-only: the `*_request_async` variants always run the CLI transport and do not accept `transport: "acp"` (nor Devin's `agentType`); async ACP parity is a later phase. ACP workspace selection is gateway-owned: an explicit ACP `workspace` must be a registered alias. A fresh remote ACP request uses that alias or `[workspaces].default`; a remote resume is fixed to its recorded canonical alias and cwd, and a different or unbound workspace is rejected. Local ACP may omit `workspace`; each unscoped process then gets a fresh private `0o700` neutral directory that is removed after the process exits, never a shared predictable temp path. `claude`, `codex`, and `gemini` have no native ACP entrypoint at their target CLI versions; their `provider-acp://` records report `native: false` with no methods and no adapter-as-native masquerade, and they expose no `transport: "acp"` selector.
 - **Managed approval is Claude-only today.** `approvalStrategy:"mcp_managed"` is executable only by the Claude CLI adapter, which launches Claude with a request-scoped generated MCP configuration and `--strict-mcp-config`. It permits only provisioned, gateway-owned MCP definitions and rejects dynamic `npx`, ambient-PATH, and Codex-config overrides. Codex, Gemini, Grok, Mistral, Devin, and Cursor reject `mcp_managed` before launching a provider because their current adapters cannot isolate ambient MCP configuration. For those adapters, use `approvalStrategy:"legacy"`; `approvalPolicy` has no effect.
-- **ACP has its own permission bridge.** `approvalStrategy:"mcp_managed"` and any `approvalPolicy` are rejected when `transport:"acp"` is selected. Use the Claude CLI transport for managed approval. ACP host services fail closed: reads are unavailable by default, and write or terminal callbacks need `[acp]` host-service configuration plus a one-time ApprovalManager decision. ACP never maps a raw CLI bypass input to a standing permission grant.
+- **ACP has its own permission bridge.** `approvalStrategy:"mcp_managed"` and any `approvalPolicy` are rejected when `transport:"acp"` is selected. Use the Claude CLI transport for managed approval. ACP host services fail closed, gated by the tool-call category the agent declares: `write` is denied unless `allow_write_host_services` is set, `execute` unless `allow_terminal_host_services` is set, and **any other category is denied outright**, including `fetch` and every unrecognised kind, so a new upstream tool kind cannot be auto-approved by default. Approval is expressed only by selecting an agent-offered single-use allow option; an agent that offers only a persistent `allow_always` grant is denied, so ACP never maps a raw CLI bypass input to a standing permission grant. Note the boundary is this category gate: it constrains what the agent may ask the **gateway** to do, not what the agent does in its own process.
 - **Resources** are generated from the provider registry for every CLI provider: `models://<provider>`, `sessions://<provider>`, `provider-acp://<provider>`, `provider-tools://<provider>`, and `provider-subcommands://<provider>`.
 - **Model discovery** is live and account-aware: the discovery listed above reaches `models://<provider>` and `list_models`, degrading to static registry facts when a live probe is unavailable (a resource read never spawns a CLI).
 - **Admin surfaces** are discovery-driven and output-redacted. `provider_admin_list` and `provider_admin_run` are read-only for every provider. State-mutating admin operations are exposed only through `provider_admin_mutate`, gated behind `[admin] allow_mutating_cli_admin_ops`, the remote `cli:admin` scope, an approval gate, and an audit record. Mutating ACP session operations are likewise gated behind `[acp] allow_mutating_session_ops`.
@@ -774,7 +774,7 @@ Execute a Grok CLI (xAI) request with session support.
 **Parameters:**
 
 - `prompt` (string, optional*): The prompt to send (1-100,000 chars). *Exactly one of `prompt` or `promptParts` is required (mutually exclusive)
-- `model` (string, optional): Model name or alias (e.g. `grok-build`, `latest`)
+- `model` (string, optional): Model name or alias (e.g. `grok-4.6`, `grok-4.5`). Prefer live discovery via `list_models` or `models://grok`: the legacy `grok-build` id was removed upstream and now hard-fails with `Invalid params: "unknown model id"`.
 - `transport` (string, optional): `"cli"` (default) runs the Grok CLI; `"acp"` routes through Grok's native `grok agent stdio` transport when `[acp].enabled` and the provider's `runtime_enabled` are set (fails closed otherwise). Both transports reject `approvalStrategy:"mcp_managed"`; `approvalPolicy` has no effect. Sync-only: `grok_request_async` always runs the CLI transport and does not accept `transport`
 - `outputFormat` (string, optional): `"plain"` (default), `"json"`, or `"streaming-json"`
 - `sessionId` (string, optional): Session ID to resume (`--resume <id>`).
@@ -825,7 +825,7 @@ Execute a Grok CLI (xAI) request with session support.
 ```json
 {
   "prompt": "Summarize the latest commit message in 1 sentence",
-  "model": "grok-build",
+  "model": "grok-4.6",
   "effort": "low"
 }
 ```
@@ -848,9 +848,21 @@ The job-store backend is configured by `~/.llm-cli-gateway/config.toml` (overrid
 backend = "sqlite"                          # "sqlite" | "memory" | "postgres" | "none"
 path = "~/.llm-cli-gateway/logs.db"         # for sqlite
 # dsn = "postgresql://user:pw@host/db"      # for postgres
-retentionDays = 30
+retentionDays = 30                          # the JOB store only; see [persistence.retention]
 dedupWindowMs = 3600000
 acknowledgeEphemeral = false                # required to enable async tools with memory backend
+
+# One retention policy, over every subsystem. `jobs` keeps the 30-day default
+# above; the other two are OFF unless you write a number, because deleting
+# prompt and response history is destructive and no upgrade should do it for
+# you. Unknown keys are refused rather than silently applying no bound.
+# `llm-cli-gateway doctor --json` -> .storage.retention reports what each bound
+# would delete BEFORE you set it.
+[persistence.retention]
+# jobs = 30                                 # overrides retentionDays above
+# requests = 90                             # flight-recorder transcripts, incl. bodies
+# wedgedValidationRuns = 30                 # validation runs nothing can ever finalize
+# sweepIntervalMs = 3600000                 # how often the sweeper ticks
 
 # Issue #139 durable orphan-recovery lease (defaults shown). Each instance
 # advances a per-job lease on every heartbeat; the sweep orphans a job only
@@ -863,6 +875,17 @@ httpJobGraceMs = 300000                     # extra grace for no-pid http jobs (
 orphanSweepIntervalMs = 30000               # reaper cadence
 instanceGcMs = 3600000                      # gateway_instances GC horizon
 # ownsOrphanRecovery = false                # DEPRECATED (#139): superseded by the lease; parsed + warned, no longer used
+
+# Optional, postgres only. One credential per class of work, for a deployment
+# that has provisioned the RBAC in docs/plans/postgres-security-hardening.md.
+# `app` is not a key here: the runtime credential is [persistence].dsn above.
+# `migrate` is not a key either, and must not be held by a running gateway.
+# A role left out degrades onto `app`, which llm_process_health reports as
+# `persistence.roles.degraded` rather than implying separation is in force.
+# [persistence.roles]
+# reader = "postgresql://llmgw_reader@host/db"       # transcript read-back
+# analytics = "postgresql://llmgw_analytics@host/db" # aggregates, no body text
+# retention = "postgresql://llmgw_retention@host/db" # job expiry
 ```
 
 Backends:
@@ -871,6 +894,12 @@ Backends:
 - **`postgres`** — durable PostgreSQL-backed async job, dedup, orphan recovery, HTTP job, and validation receipt storage. Use this for multi-instance or service deployments. Requires the optional peer dependency `pg` to be installed alongside the gateway.
 - **`memory`** — in-process Map. Lost on gateway exit. Requires `acknowledgeEphemeral = true` to be loaded. Suitable for tests and ephemeral CI gateways.
 - **`none`** — no store. **`*_request_async`, `llm_job_status`, `llm_job_result`, and `llm_job_cancel` are NOT registered on the gateway.** This is a structural invariant: agents that try to call async tools against a gateway with `backend = "none"` get a clean "tool not found" at connect time instead of silent in-memory loss after the 1-hour TTL. Use `llm_process_health` to inspect the resolved persistence state programmatically.
+
+**This choice governs the job store, not the flight recorder.** Async jobs, dedup, orphan recovery, HTTP jobs and validation receipts follow `[persistence].backend`. Request history (the `requests` table that `llm_request_list` and `llm_request_result` read) is **always SQLite**, at `LLM_GATEWAY_LOGS_DB` or `~/.llm-cli-gateway/logs.db`; there is no PostgreSQL flight recorder, and `LLM_GATEWAY_LOGS_DB` no longer rewrites the job-store backend. Two consequences for a `postgres` deployment. The two halves of one request live in two engines, so no single database holds a complete picture. And because the SQLite default path for both subsystems is the same `logs.db`, a gateway switched from `sqlite` to `postgres` leaves its old `jobs` table behind in that file, where it keeps answering queries with data frozen at the switchover. Both are reasons to read through the tools, which span the split and are unaffected by it.
+
+**`backend = "none"` and `LLM_GATEWAY_LOGS_DB=none` are different switches.** The first disables async job persistence; the second disables request history. Setting the backend to `"none"` leaves the flight recorder writing, and disabling the recorder leaves the job store alone. Both are stated at startup, in a `Storage:` block on stderr that names the job-store backend, where request history is going (or that it is not being written), whether role separation is in force, and what each deprecated input did. `llm_process_health` carries the same determinations as `persistence.roles` and `persistence.deprecatedInputs`.
+
+**`DATABASE_URL` is deprecated and never wins.** It is honoured only when no `[persistence]` backend is written down at all. Against an explicit backend, or against a `dsn` it disagrees with, it is ignored with a reason: the gateway does not abort, because the outcome is fully determined and is the one the config file describes.
 
 For PostgreSQL, apply the schema with a schema-owner or dedicated migration role before starting a DML-only gateway role:
 
@@ -956,11 +985,13 @@ after restart and `llm_process_health.backpressure` should be used to tune
 
 By default, **gateway state is global per user**, not per project. With no overrides, every Claude Code window across every repo spawns its own gateway subprocess but they all read and write the same state:
 
-- `~/.llm-cli-gateway/logs.db` (async jobs + flight recorder)
+- `~/.llm-cli-gateway/logs.db` (async jobs + flight recorder). **Two of the three halves are bounded, and only one of them by default.** `[persistence].retentionDays` prunes `jobs`. `[persistence.retention].requests` prunes the flight recorder's `requests` and `gateway_metadata` tables, which store full prompt and response bodies, and `[persistence.retention].wedgedValidationRuns` prunes validation runs that can never be finalized, with their `validation_run_jobs` links. **Both default to OFF**: an upgrade deletes nothing, and an operator opts in. `validation_receipts` is immutable by design and is never pruned; a finalized run is never pruned either, so no receipt is ever orphaned.
+
+  Deleting rows frees SQLite pages but never bytes, so the file does not shrink. `llm-cli-gateway storage compact --yes` returns the space, with the gateway stopped, because a `VACUUM` holds an exclusive lock for the length of a full rewrite. `doctor --json` -> `.storage.retention` reports the resolved bounds, what a sweep would delete, and how many bytes a compaction would return. See `docs/plans/durable-state-lifecycle.dag.toml`.
 - `~/.llm-cli-gateway/sessions.json` (gateway session metadata when using the default file session backend)
 - `~/.llm-cli-gateway/config.toml` (resolved config)
 
-When `DATABASE_URL` selects the PostgreSQL session manager, the session metadata lives in PostgreSQL instead of `sessions.json`. This is usually what you want: `session_list` from repo A can show sessions from repo B, an async job started in window A can be polled from window B, and the 1-hour dedup window catches re-issues across windows. Gateway-managed worktrees are the exception: they are filesystem-local and therefore fail closed with PostgreSQL session storage. SQLite WAL mode protects the default job/flight-recorder database, while the file session manager uses locked atomic writes.
+When `[persistence].backend = "postgres"` selects the PostgreSQL session manager, the session metadata lives in PostgreSQL instead of `sessions.json`. This is usually what you want: `session_list` from repo A can show sessions from repo B, an async job started in window A can be polled from window B, and the 1-hour dedup window catches re-issues across windows. Gateway-managed worktrees are the exception: they are filesystem-local and therefore fail closed with PostgreSQL session storage. SQLite WAL mode protects the default job/flight-recorder database, while the file session manager uses locked atomic writes.
 
 ##### Per-project durable-job isolation
 
@@ -1337,9 +1368,20 @@ Read back any persisted request — sync or async — by its correlation ID. Eve
 - `maxChars` (number, optional): Max chars of the persisted response to return (1,000-2,000,000)
 - `includePrompt` (boolean, optional): Include the full persisted prompt text, default: false
 
+##### `llm_request_list`
+
+List recent persisted requests newest-first **without** a correlation ID, which is how you find one. Every other flight-recorder read is keyed by an id handed out inline to the caller that made the request, so an agent that did not make the call (or whose context was compacted since) starts here. Returns metadata only: pass a returned `correlationId` to `llm_request_result` for the bodies, or a returned `asyncJobId` to `llm_job_status`. A caller only ever sees its own requests. An empty list is not proof nothing ran: cross-LLM validation seats write no flight-recorder row, and flight recording can be disabled.
+
+**Parameters:**
+
+- `limit` (number, optional): Max rows, 1-200, default: 25
+- `since` (string, optional): ISO-8601 lower bound, e.g. `2026-08-21T00:00:00Z`
+- `cli` (string, optional): Restrict to one provider as recorded
+- `sessionId` (string, optional): Restrict to one gateway session id
+
 ##### `llm_process_health`
 
-Report gateway process health: async-job manager state plus the resolved persistence block (`backend`, `dbPath`, config sources). Use it to confirm which config file and SQLite paths the gateway is actually running under.
+Report gateway process health: async-job manager state, the resolved job-store persistence block (`backend`, `dbPath`, config sources), and a separate `flightRecorder` block naming the recorder's own engine and path. Use it to confirm which config file the gateway is running under and **which storage backend each subsystem is actually on** before assuming they match: they are independent, and on any non-SQLite job store the `flightRecorder.warning` field says so explicitly.
 
 ##### `upstream_contracts`
 
@@ -1621,7 +1663,7 @@ The resolved API key is excluded from `payloadJson`, the dedup key, logs, and th
 ### How It Works
 
 1. **Gateway metadata, not transcripts**: Session records track ownership, timestamps, active pointers, and provider metadata. They do not store a conversation transcript.
-2. **Storage backend**: The default file session manager uses `~/.llm-cli-gateway/sessions.json`; setting `DATABASE_URL` selects the PostgreSQL session manager instead.
+2. **Storage backend**: The session manager follows `[persistence].backend` in `config.toml`: `sqlite`/`none` keep `~/.llm-cli-gateway/sessions.json`, `postgres` selects the PostgreSQL session manager. `DATABASE_URL` is a DEPRECATED override retained for compatibility; it warns once and is refused outright when it disagrees with an explicit `[persistence].dsn`. **Note the PostgreSQL session store has no TTL eviction**, where the file store reaps at 30 days; see the 3.1.0 notes.
 3. **Provider-native continuity**: A gateway session ID is tracking metadata, not automatically a provider-native resume ID. Native behavior remains provider-specific: `claude_request` with `continueSession:true` uses Claude's latest conversation in a stable selected working directory and fails closed without `workingDir` or a registered workspace selected explicitly, through caller-owned session metadata, or by the configured default. That workspace may optionally supply a gateway worktree. `codex_request` needs a real Codex UUID for `sessionId`, or `resumeLatest:true`, which resumes a previous session. Do not rely on which session `--last` selects or on the resumed working directory (under review).
 4. **Caller isolation**: HTTP/OAuth callers can retrieve or reuse only sessions they own. Their session projection hides local paths and native provider identifiers.
 5. **Personal Kit**: With Personal Agent Config Kit enabled, Claude, Codex, and Mistral use a separate, context-bound active-session pointer and retain a native continuation handle only in the current gateway process. See the [Personal Agent Config Kit guide](docs/guides/PERSONAL_AGENT_CONFIG_KIT.md).
@@ -1704,9 +1746,9 @@ await callTool("session_delete", {
 
 Each CLI can be configured through its own configuration files:
 
-- Claude Code: `~/.claude/config.json`
+- Claude Code: `~/.claude/settings.json`
 - Codex: `~/.codex/config.toml`
-- Gemini: `~/.gemini/config.json`
+- Gemini / Antigravity (`agy`): `~/.gemini/settings.json`
 
 ## Development
 
@@ -1830,7 +1872,7 @@ chmod +x $(which agy)
 
 ### Session Storage Issues
 
-These file checks apply only to the default file session manager. When `DATABASE_URL` selects PostgreSQL session storage, `sessions.json` is not authoritative. Do not delete or edit session storage while gateway processes, provider children, or Personal Agent Config Kit attempts are active.
+These file checks apply only to the default file session manager. When `[persistence].backend = "postgres"` selects PostgreSQL session storage, `sessions.json` is not authoritative. Do not delete or edit session storage while gateway processes, provider children, or Personal Agent Config Kit attempts are active.
 
 1. Check file permissions after stopping local gateway processes:
 
@@ -1880,7 +1922,7 @@ The currently flagged surfaces are not new in 2.6.x: the 2.3.0, 2.4.0, 2.5.0, an
 | Alert                        | Where                                                                                                                                                                                                                                                                                     | Why it's bounded                                                                                                                                                                                                                                                                                                                                                                                                                                                                       |
 | ---------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | **Network access**           | `src/http-transport.ts` opens an HTTP MCP transport when started via `npm run start:http`. `src/endpoint-exposure.ts` issues a HEAD probe to verify configured public/tunnel URLs. Socket also flagged `dist/upstream-contracts.js` in v1.17.2 from descriptive text, not a network call. | The transport binds to `127.0.0.1` by default and requires `LLM_GATEWAY_AUTH_TOKEN` to be set. The default stdio MCP entry point (`npm start`) opens no sockets. `src/upstream-contracts.ts` stores provider CLI metadata and imports no HTTP client APIs.                                                                                                                                                                                                                             |
-| **Shell access**             | `src/executor.ts` uses `child_process.spawn(cmd, args, …)` to invoke the underlying LLM CLIs.                                                                                                                                                                                             | `spawn` is called with an argument array and **never** `shell: true`, so there is no shell interpolation path for caller input. The command name is restricted to an allow-list of known CLI binaries (`claude`, `codex`, `agy`, `grok`, `vibe`).                                                                                                                                                                                                                                      |
+| **Shell access**             | `src/executor.ts` uses `child_process.spawn(cmd, args, …)` to invoke the underlying LLM CLIs.                                                                                                                                                                                             | `spawn` is called with an argument array and **never** `shell: true`, so there is no shell interpolation path for caller input. The command name is never taken from caller input either: it is derived from the provider registry via `providerCommandName(cli)` for a `CLI_TYPES` member, or from a gateway-computed upgrade plan in `src/cli-updater.ts` (`npm`/`pip`/`uv`/`brew`). No MCP tool accepts a binary name. Note this is a property of every call site rather than a membership check inside `src/executor.ts`, which takes `command` as a string and does not filter it.                                                                                                                                                                                                                                      |
 | **Published shrinkwrap**     | The npm artifact includes `npm-shrinkwrap.json`; `package.json#files` includes it and `scripts/make-prod-shrinkwrap.mjs` generates it from `package-lock.json`.                                                                                                                           | This is a CLI/application package. npm documents the shrinkwrap use case for applications, daemons, and command-line tools published through the registry. Our shrinkwrap is a prod-only projection, not a committed full dev lockfile: `scripts/release-security-audit.sh` verifies parity with the audited lockfile, and `scripts/verify-registry-install.sh` proves fresh registry consumers receive no `better-sqlite3`/`prebuild-install`/`tar-fs`/`tar-stream` production chain. |
 | **Uses eval**                | None in our source. Transitive: `@modelcontextprotocol/sdk` → `ajv@8` uses `new Function(...)` in `ajv/dist/compile/index.js` to compile JSON Schema validators.                                                                                                                          | This is ajv's standard codegen path. Only known schemas (defined in our source and the MCP SDK) flow into it; no caller-supplied data ever reaches the compiled function body.                                                                                                                                                                                                                                                                                                         |
 | **SQLite adapter isolation** | Persistence uses Node's built-in `node:sqlite` module (no native binding, no install scripts) through a single adapter, `src/sqlite-driver.ts`.                                                                                                                                           | `node:sqlite` is touched by exactly one production module (the adapter); every other module talks to SQLite through its typed surface. We never call any `db.pragma()` helper (it does not exist on `node:sqlite`); SQLite setup uses fixed literal `db.exec("PRAGMA ...")` statements. `npm run security:audit` fails the release if production code references `node:sqlite` outside the adapter or reintroduces a `.pragma()` call.                                                 |

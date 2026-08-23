@@ -21,18 +21,19 @@ import { CLI_TYPES } from "../provider-types.js";
  * test below meaningful.
  */
 const REAL_INSTALLED: Record<string, string> = {
-  claude: "2.1.229 (Claude Code)",
-  codex: "codex-cli 0.147.0",
+  claude: "2.1.239 (Claude Code)",
+  codex: "codex-cli 0.149.0",
   // agy reports a bare version with no product prefix, unlike codex and mistral.
-  gemini: "1.1.13",
-  // grok 1.0.4 appends a release-channel marker AFTER the build hash, which
-  // 1.0.3 did not. Pinned verbatim, `[stable]` included: that trailing suffix
-  // is exactly the spelling this fixture exists to exercise, and it is what
-  // made `npm run providers:rebaseline:apply` write a hash-less target that
-  // could never match, until normalizeProviderVersion stopped requiring the
-  // build id to be last. See the comment on PROVIDER_TARGET_VERSIONS.grok.
-  grok: "grok 1.0.4 (d846eb93d9) [stable]",
-  mistral: "vibe 2.24.1",
+  gemini: "1.1.17",
+  // Verbatim from `grok --version` on this host. 1.0.4 appended a
+  // release-channel marker AFTER the build hash and 1.0.5 does NOT, so this
+  // entry no longer carries the `[stable]` spelling it was pinned for. That
+  // spelling is still exercised directly at the normalizer tests below, which
+  // is why updating this fixture to reality does not delete the coverage: it
+  // was never the only place the marker was tested. See the comment on
+  // PROVIDER_TARGET_VERSIONS.grok for what the hash-less target cost.
+  grok: "grok 1.0.5 (5115b46bc9)",
+  mistral: "vibe 2.24.3",
   devin: "devin 3000.4.25 (7e8e528a)",
   cursor: "2026.08.11-e8db854",
 };

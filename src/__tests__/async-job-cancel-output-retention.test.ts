@@ -8,15 +8,19 @@ import { FlightRecorder } from "../flight-recorder.js";
 import { SqliteJobStore, type JobStore } from "../job-store.js";
 
 /** Poll until predicate returns true, or reject after timeoutMs. */
-function waitFor(fn: () => boolean, timeoutMs: number, intervalMs = 25): Promise<void> {
+function waitFor(
+  fn: () => boolean | Promise<boolean>,
+  timeoutMs: number,
+  intervalMs = 25
+): Promise<void> {
   return new Promise((resolve, reject) => {
     const deadline = Date.now() + timeoutMs;
-    const check = () => {
-      if (fn()) return resolve();
+    const check = async () => {
+      if (await fn()) return resolve();
       if (Date.now() > deadline) return reject(new Error("waitFor timed out"));
-      setTimeout(check, intervalMs);
+      setTimeout(() => void check(), intervalMs);
     };
-    check();
+    void check();
   });
 }
 
@@ -48,23 +52,23 @@ describe("recordComplete reports whether the completion guard admitted the write
   let tempDir: string;
   let store: JobStore;
 
-  beforeEach(() => {
+  beforeEach(async () => {
     tempDir = mkdtempSync(join(tmpdir(), "ajm-record-complete-"));
     store = new SqliteJobStore(join(tempDir, "jobs.db"));
   });
 
-  afterEach(() => {
+  afterEach(async () => {
     try {
-      store.close();
+      await store.close();
     } catch {
       /* ignore */
     }
     rmSync(tempDir, { recursive: true, force: true });
   });
 
-  it("returns true on an open row and false once the row is already terminal", () => {
+  it("returns true on an open row and false once the row is already terminal", async () => {
     const t = new Date().toISOString();
-    store.recordStart({
+    await store.recordStart({
       id: "guard-job",
       correlationId: "guard-corr",
       requestKey: "guard-key",
@@ -86,16 +90,21 @@ describe("recordComplete reports whether the completion guard admitted the write
     };
 
     // First write lands: the row was still open.
-    expect(store.recordComplete(terminal)).toBe(true);
+    expect(await store.recordComplete(terminal)).toBe(true);
     // Second write is rejected by the #139 guard, which is exactly why late
     // output cannot ride along on a replayed recordComplete.
-    expect(store.recordComplete({ ...terminal, stdout: "PARTIAL+LATE" })).toBe(false);
-    expect(store.getById("guard-job")?.stdout).toBe("PARTIAL");
+    expect(await store.recordComplete({ ...terminal, stdout: "PARTIAL+LATE" })).toBe(false);
+    expect((await store.getById("guard-job"))?.stdout).toBe("PARTIAL");
 
-    // ...but the unfenced output write still lands, without disturbing the
-    // committed terminal state. That is the path persistComplete falls back to.
-    store.recordOutput("guard-job", "PARTIAL+LATE", "", false);
-    const row = store.getById("guard-job");
+    // ...but the fenced output write still lands on the terminal state the
+    // winning writer committed, without disturbing it. That is the path
+    // persistComplete falls back to, and the fence is what stops the SAME write
+    // landing on a row some other writer terminalized.
+    expect(await store.recordOutput("guard-job", "PARTIAL+LATE", "", false, ["canceled"])).toBe(
+      true
+    );
+    expect(await store.recordOutput("guard-job", "NOT-OURS", "", false, ["running"])).toBe(false);
+    const row = await store.getById("guard-job");
     expect(row?.stdout).toBe("PARTIAL+LATE");
     expect(row?.status).toBe("canceled");
     expect(row?.error).toBe("canceled by caller");
@@ -107,15 +116,15 @@ describe("late child output survives a terminal-status-before-close transition",
   let store: JobStore;
   let manager: AsyncJobManager;
 
-  beforeEach(() => {
+  beforeEach(async () => {
     tempDir = mkdtempSync(join(tmpdir(), "ajm-late-output-"));
     store = new SqliteJobStore(join(tempDir, "jobs.db"));
     manager = new AsyncJobManager(undefined, undefined, store);
   });
 
-  afterEach(() => {
+  afterEach(async () => {
     try {
-      store.close();
+      await store.close();
     } catch {
       /* ignore */
     }
@@ -123,27 +132,30 @@ describe("late child output survives a terminal-status-before-close transition",
   });
 
   it("persists bytes the child emits between cancel and close", async () => {
-    const job = manager.startJob("node" as LlmCli, FLUSH_ON_SIGTERM, "corr-cancel-flush");
+    const job = await manager.startJob("node" as LlmCli, FLUSH_ON_SIGTERM, "corr-cancel-flush");
 
     // Wait until the child is up and the gateway has seen its first bytes.
-    await waitFor(() => (manager.getJobSnapshot(job.id)?.stdoutBytes ?? 0) >= 11, 25_000);
+    await waitFor(
+      async () => ((await manager.getJobSnapshot(job.id))?.stdoutBytes ?? 0) >= 11,
+      25_000
+    );
 
-    expect(manager.cancelJob(job.id).canceled).toBe(true);
+    expect((await manager.cancelJob(job.id)).canceled).toBe(true);
 
     // `canceled` is set the instant the signal is requested; the child only
     // closes once it has run its SIGTERM handler. Wait for the real death.
-    await waitFor(() => manager.getJobSnapshot(job.id)?.exited === true, 25_000);
+    await waitFor(async () => (await manager.getJobSnapshot(job.id))?.exited === true, 25_000);
     // Let the close handler's terminal persistence run.
-    await waitFor(() => store.getById(job.id)?.status === "canceled", 25_000);
+    await waitFor(async () => (await store.getById(job.id))?.status === "canceled", 25_000);
 
-    const inMemory = manager.getJobResult(job.id);
+    const inMemory = await manager.getJobResult(job.id);
     expect(inMemory?.stdout).toContain("EARLY_BYTES");
     // The gateway DOES receive the late flush: it is in the in-memory buffer.
     expect(inMemory?.stdout).toContain("LATE_FLUSH_MARKER");
 
     // ...and it must also reach the durable store, which is the only copy that
     // survives a gateway restart or is visible to another instance.
-    const row = store.getById(job.id);
+    const row = await store.getById(job.id);
     expect(row?.status).toBe("canceled");
     expect(row?.stdout).toContain("EARLY_BYTES");
     expect(row?.stdout).toContain("LATE_FLUSH_MARKER");
@@ -153,7 +165,7 @@ describe("late child output survives a terminal-status-before-close transition",
     const rec = new FlightRecorder(join(tempDir, "logs.db"));
     const frManager = new AsyncJobManager(undefined, undefined, store, rec);
     try {
-      const outcome = frManager.startJobWithDedup(
+      const outcome = await frManager.startJobWithDedup(
         "node" as LlmCli,
         FLUSH_ON_SIGTERM,
         "corr-fr-flush",
@@ -171,21 +183,25 @@ describe("late child output survives a terminal-status-before-close transition",
       );
       const jobId = outcome.snapshot.id;
 
-      await waitFor(() => (frManager.getJobSnapshot(jobId)?.stdoutBytes ?? 0) >= 11, 25_000);
-      expect(frManager.cancelJob(jobId).canceled).toBe(true);
-      await waitFor(() => frManager.getJobSnapshot(jobId)?.exited === true, 25_000);
+      await waitFor(
+        async () => ((await frManager.getJobSnapshot(jobId))?.stdoutBytes ?? 0) >= 11,
+        25_000
+      );
+      expect((await frManager.cancelJob(jobId)).canceled).toBe(true);
+      await waitFor(async () => (await frManager.getJobSnapshot(jobId))?.exited === true, 25_000);
 
       // llm_request_result reads this row; it is the documented way to read a
       // full response back, so it must not stop at the pre-cancel snapshot.
       await waitFor(
-        () => (readPersistedRequest(rec, "corr-fr-flush")?.response ?? "").includes("LATE"),
+        async () =>
+          ((await readPersistedRequest(rec, "corr-fr-flush"))?.response ?? "").includes("LATE"),
         25_000
       );
-      const persisted = readPersistedRequest(rec, "corr-fr-flush");
+      const persisted = await readPersistedRequest(rec, "corr-fr-flush");
       expect(persisted?.response).toContain("EARLY_BYTES");
       expect(persisted?.response).toContain("LATE_FLUSH_MARKER");
     } finally {
-      rec.close();
+      await rec.close();
     }
   }, 60_000);
 
@@ -198,7 +214,7 @@ describe("late child output survives a terminal-status-before-close transition",
     const rec = new FlightRecorder(join(tempDir, "logs.db"));
     const frManager = new AsyncJobManager(undefined, undefined, store, rec);
     try {
-      const outcome = frManager.startJobWithDedup(
+      const outcome = await frManager.startJobWithDedup(
         "node" as LlmCli,
         FLUSH_ON_SIGTERM,
         "corr-esrch",
@@ -215,11 +231,14 @@ describe("late child output survives a terminal-status-before-close transition",
         }
       );
       const jobId = outcome.snapshot.id;
-      await waitFor(() => (frManager.getJobSnapshot(jobId)?.stdoutBytes ?? 0) >= 11, 25_000);
+      await waitFor(
+        async () => ((await frManager.getJobSnapshot(jobId))?.stdoutBytes ?? 0) >= 11,
+        25_000
+      );
 
       const internals = frManager as unknown as {
         jobs: Map<string, { process: { pid: number } | null }>;
-        evictCompletedJobs: () => void;
+        evictCompletedJobs: () => Promise<void>;
       };
       const record = internals.jobs.get(jobId)!;
       const realPid = record.process!.pid;
@@ -227,21 +246,24 @@ describe("late child output survives a terminal-status-before-close transition",
       // takes the ESRCH branch while the real child keeps running and its
       // close handler stays wired up.
       record.process = { pid: 0x7ffffff0 };
-      internals.evictCompletedJobs();
+      await internals.evictCompletedJobs();
 
       // The sweep wrote the row from the bytes known at that instant.
-      expect(readPersistedRequest(rec, "corr-esrch")?.response).toContain("EARLY_BYTES");
-      expect(readPersistedRequest(rec, "corr-esrch")?.response ?? "").not.toContain("LATE");
+      expect((await readPersistedRequest(rec, "corr-esrch"))?.response).toContain("EARLY_BYTES");
+      expect((await readPersistedRequest(rec, "corr-esrch"))?.response ?? "").not.toContain("LATE");
 
       // Now let the real child flush and close.
       process.kill(realPid, "SIGTERM");
       await waitFor(
-        () => (readPersistedRequest(rec, "corr-esrch")?.response ?? "").includes("LATE"),
+        async () =>
+          ((await readPersistedRequest(rec, "corr-esrch"))?.response ?? "").includes("LATE"),
         25_000
       );
-      expect(readPersistedRequest(rec, "corr-esrch")?.response).toContain("LATE_FLUSH_MARKER");
+      expect((await readPersistedRequest(rec, "corr-esrch"))?.response).toContain(
+        "LATE_FLUSH_MARKER"
+      );
     } finally {
-      rec.close();
+      await rec.close();
     }
   }, 60_000);
 
@@ -262,15 +284,15 @@ describe("late child output survives a terminal-status-before-close transition",
 
     // 11 bytes crosses the 10-byte cap and is dropped; the 1-byte SIGTERM
     // flush that follows still fits under it.
-    const job = capped.startJob(
+    const job = await capped.startJob(
       "node" as LlmCli,
       flushOnSigtermArgs("AAAAAAAAAAA", "X"),
       "corr-overflow-flush"
     );
-    await waitFor(() => capped.getJobSnapshot(job.id)?.exited === true, 15_000);
-    await waitFor(() => store.getById(job.id)?.status === "failed", 25_000);
+    await waitFor(async () => (await capped.getJobSnapshot(job.id))?.exited === true, 15_000);
+    await waitFor(async () => (await store.getById(job.id))?.status === "failed", 25_000);
 
-    const row = store.getById(job.id);
+    const row = await store.getById(job.id);
     expect(row?.outputTruncated).toBe(true);
     expect(row?.exitCode).toBe(126);
     // The post-cap byte reached the durable store.
@@ -284,15 +306,18 @@ describe("late child output survives a terminal-status-before-close transition",
     //   2. our cancel calls recordComplete and the guard REJECTS it;
     //   3. the child then closes, and persistComplete runs a SECOND time.
     // Step 3 is where an ownership-blind implementation writes our stdout over
-    // their result. recordOutput has no owner predicate, so nothing downstream
-    // would catch it.
-    const job = manager.startJob("node" as LlmCli, FLUSH_ON_SIGTERM, "corr-foreign-row");
-    await waitFor(() => (manager.getJobSnapshot(job.id)?.stdoutBytes ?? 0) >= 11, 25_000);
+    // their result. Before the status fence, recordOutput carried no predicate
+    // at all, so nothing downstream would catch it.
+    const job = await manager.startJob("node" as LlmCli, FLUSH_ON_SIGTERM, "corr-foreign-row");
+    await waitFor(
+      async () => ((await manager.getJobSnapshot(job.id))?.stdoutBytes ?? 0) >= 11,
+      25_000
+    );
 
     // Step 1: a genuinely foreign terminal row, written straight to the store.
     const foreignFinishedAt = new Date().toISOString();
     expect(
-      store.recordComplete({
+      await store.recordComplete({
         id: job.id,
         status: "completed",
         exitCode: 0,
@@ -305,11 +330,11 @@ describe("late child output survives a terminal-status-before-close transition",
     ).toBe(true);
 
     // Steps 2 and 3.
-    manager.cancelJob(job.id);
-    await waitFor(() => manager.getJobSnapshot(job.id)?.exited === true, 25_000);
+    await manager.cancelJob(job.id);
+    await waitFor(async () => (await manager.getJobSnapshot(job.id))?.exited === true, 25_000);
     await new Promise(r => setTimeout(r, 500));
 
-    const row = store.getById(job.id);
+    const row = await store.getById(job.id);
     expect(row?.stdout).toBe("FOREIGN_INSTANCE_RESULT");
     expect(row?.status).toBe("completed");
     expect(row?.exitCode).toBe(0);
@@ -319,19 +344,22 @@ describe("late child output survives a terminal-status-before-close transition",
   }, 60_000);
 
   it("never overwrites a foreign row through the routine throttled flush either", async () => {
-    // The ownership rule has to hold for EVERY route that calls the unfenced
-    // recordOutput, not just the post-terminal one. The routine flush in
+    // The ownership rule has to hold for EVERY route that calls recordOutput,
+    // not just the post-terminal one. The routine flush in
     // maybeFlushOutput is throttled by OUTPUT_FLUSH_INTERVAL_MS (1000ms), so a
     // chunk arriving after that window is its own way onto the row. This case
     // deliberately waits past the throttle before the foreign write, which the
     // post-terminal-only guard does not cover.
-    const job = manager.startJob("node" as LlmCli, FLUSH_ON_SIGTERM, "corr-foreign-flush");
-    await waitFor(() => (manager.getJobSnapshot(job.id)?.stdoutBytes ?? 0) >= 11, 25_000);
+    const job = await manager.startJob("node" as LlmCli, FLUSH_ON_SIGTERM, "corr-foreign-flush");
+    await waitFor(
+      async () => ((await manager.getJobSnapshot(job.id))?.stdoutBytes ?? 0) >= 11,
+      25_000
+    );
     // Let the flush throttle lapse so the next chunk can flush immediately.
     await new Promise(r => setTimeout(r, 1300));
 
     expect(
-      store.recordComplete({
+      await store.recordComplete({
         id: job.id,
         status: "completed",
         exitCode: 0,
@@ -343,11 +371,11 @@ describe("late child output survives a terminal-status-before-close transition",
       })
     ).toBe(true);
 
-    manager.cancelJob(job.id);
-    await waitFor(() => manager.getJobSnapshot(job.id)?.exited === true, 25_000);
+    await manager.cancelJob(job.id);
+    await waitFor(async () => (await manager.getJobSnapshot(job.id))?.exited === true, 25_000);
     await new Promise(r => setTimeout(r, 800));
 
-    const row = store.getById(job.id);
+    const row = await store.getById(job.id);
     expect(row?.stdout).toBe("FOREIGN_INSTANCE_RESULT");
     expect(row?.status).toBe("completed");
   }, 60_000);
@@ -355,10 +383,10 @@ describe("late child output survives a terminal-status-before-close transition",
   it("persists bytes the child emits between an idle-timeout kill and close", async () => {
     // idleTimeoutMs fires because the child stays silent after its first bytes.
     // Keep it under OUTPUT_FLUSH_INTERVAL_MS (1000ms) so the late flush lands
-    // while the throttled output write is still closed; otherwise the unfenced
+    // while the throttled output write is still closed; otherwise a late
     // recordOutput would mask the fenced terminal write and this would pass
     // even without the fix.
-    const job = manager.startJob(
+    const job = await manager.startJob(
       "node" as LlmCli,
       FLUSH_ON_SIGTERM,
       "corr-idle-flush",
@@ -366,10 +394,10 @@ describe("late child output survives a terminal-status-before-close transition",
       400
     );
 
-    await waitFor(() => manager.getJobSnapshot(job.id)?.exited === true, 15_000);
-    await waitFor(() => store.getById(job.id)?.status === "failed", 25_000);
+    await waitFor(async () => (await manager.getJobSnapshot(job.id))?.exited === true, 15_000);
+    await waitFor(async () => (await store.getById(job.id))?.status === "failed", 25_000);
 
-    const row = store.getById(job.id);
+    const row = await store.getById(job.id);
     expect(row?.exitCode).toBe(125);
     expect(row?.stdout).toContain("EARLY_BYTES");
     expect(row?.stdout).toContain("LATE_FLUSH_MARKER");

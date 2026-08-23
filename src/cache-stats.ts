@@ -19,6 +19,7 @@
 import type { FlightRecorderQuery } from "./flight-recorder.js";
 import { estimateCacheSavingsUsd } from "./pricing.js";
 import { redactKnownProviderSessionId } from "./provider-output-metadata.js";
+import { principalCanAccess } from "./request-context.js";
 
 export type CacheStatsCli = "claude" | "codex" | "gemini" | "grok" | "mistral";
 
@@ -121,22 +122,6 @@ export interface GlobalCacheStats {
   avgCacheCreationAfterFirstCall: number | null;
 }
 
-interface RawRow {
-  cli: string;
-  model: string;
-  cache_read_tokens: number | null;
-  cache_creation_tokens: number | null;
-  stable_prefix_hash: string | null;
-  datetime_utc: string;
-  /**
-   * Rec #3 (slice κ): number of caller-supplied content blocks the
-   * gateway emitted with an explicit `cache_control` marker. NULL on
-   * pre-v4 rows and on non-Claude / non-κ Claude rows.
-   */
-  cache_control_blocks?: number | null;
-  cache_control_ttl_seconds?: number | null;
-}
-
 function safeNum(n: number | null | undefined): number {
   return typeof n === "number" && Number.isFinite(n) ? n : 0;
 }
@@ -165,23 +150,11 @@ function normalizeCacheStatsCli(s: string): CacheStatsCli | null {
   return isCacheStatsCli(s) ? s : null;
 }
 
-export function computeSessionCacheStats(
+export async function computeSessionCacheStats(
   db: FlightRecorderQuery,
   sessionId: string
-): SessionCacheStats {
-  const rows = db.queryRequests<RawRow>(
-    `SELECT cli, model,
-            COALESCE(cache_read_tokens, 0) AS cache_read_tokens,
-            COALESCE(cache_creation_tokens, 0) AS cache_creation_tokens,
-            stable_prefix_hash,
-            datetime_utc,
-            cache_control_blocks,
-            cache_control_ttl_seconds
-     FROM requests
-     WHERE session_id = ?
-     ORDER BY datetime_utc DESC`,
-    sessionId
-  );
+): Promise<SessionCacheStats> {
+  const rows = await db.readCacheRowsBySession(sessionId);
 
   let totalRead = 0;
   let totalCreation = 0;
@@ -282,21 +255,11 @@ export function computeTtlRemaining(
   return Math.max(0, ttlMs - elapsedMs);
 }
 
-export function computePrefixCacheStats(
+export async function computePrefixCacheStats(
   db: FlightRecorderQuery,
   stablePrefixHash: string
-): PrefixCacheStats {
-  const rows = db.queryRequests<RawRow>(
-    `SELECT cli, model,
-            COALESCE(cache_read_tokens, 0) AS cache_read_tokens,
-            COALESCE(cache_creation_tokens, 0) AS cache_creation_tokens,
-            stable_prefix_hash,
-            datetime_utc
-     FROM requests
-     WHERE stable_prefix_hash = ?
-     ORDER BY datetime_utc ASC`,
-    stablePrefixHash
-  );
+): Promise<PrefixCacheStats> {
+  const rows = await db.readCacheRowsByPrefix(stablePrefixHash);
 
   let totalRead = 0;
   let totalCreation = 0;
@@ -346,35 +309,17 @@ export interface GlobalCacheStatsOpts {
   lastNHours?: number;
 }
 
-export function computeGlobalCacheStats(
+export async function computeGlobalCacheStats(
   db: FlightRecorderQuery,
   opts: GlobalCacheStatsOpts = {}
-): GlobalCacheStats {
+): Promise<GlobalCacheStats> {
   const windowHours = opts.lastNHours ?? null;
   const sinceIso =
     windowHours !== null && windowHours > 0
       ? new Date(Date.now() - windowHours * 3600_000).toISOString()
-      : null;
+      : undefined;
 
-  const sql = sinceIso
-    ? `SELECT cli, model,
-              COALESCE(cache_read_tokens, 0) AS cache_read_tokens,
-              COALESCE(cache_creation_tokens, 0) AS cache_creation_tokens,
-              stable_prefix_hash,
-              datetime_utc,
-              cache_control_blocks,
-              cache_control_ttl_seconds
-       FROM requests
-       WHERE datetime_utc >= ?`
-    : `SELECT cli, model,
-              COALESCE(cache_read_tokens, 0) AS cache_read_tokens,
-              COALESCE(cache_creation_tokens, 0) AS cache_creation_tokens,
-              stable_prefix_hash,
-              datetime_utc,
-              cache_control_blocks,
-              cache_control_ttl_seconds
-       FROM requests`;
-  const rows = sinceIso ? db.queryRequests<RawRow>(sql, sinceIso) : db.queryRequests<RawRow>(sql);
+  const rows = await db.readCacheRowsGlobal(sinceIso);
 
   interface CliAgg {
     requestCount: number;
@@ -558,31 +503,6 @@ export interface ReadPersistedRequestOptions {
   redactProviderSessionId?: boolean;
 }
 
-interface PersistedRequestRawRow {
-  id: string;
-  cli: string;
-  model: string;
-  prompt: string | null;
-  response: string | null;
-  session_id: string | null;
-  datetime_utc: string;
-  duration_ms: number | null;
-  input_tokens: number | null;
-  output_tokens: number | null;
-  cache_read_tokens: number | null;
-  cache_creation_tokens: number | null;
-  retry_count: number | null;
-  circuit_breaker_state: string | null;
-  cost_usd: number | null;
-  exit_code: number | null;
-  error_message: string | null;
-  async_job_id: string | null;
-  provider_session_id: string | null;
-  status: string | null;
-  thinking_blocks: string | null;
-  owner_principal: string | null;
-}
-
 function parseThinkingBlocks(
   raw: string | null,
   providerSessionId: string | null | undefined
@@ -606,27 +526,13 @@ function parseThinkingBlocks(
  * yields no rows — i.e. flight recording disabled). The response is truncated
  * to `maxChars`; the full pre-truncation length is reported via responseChars.
  */
-export function readPersistedRequest(
+export async function readPersistedRequest(
   db: FlightRecorderQuery,
   correlationId: string,
   opts: ReadPersistedRequestOptions = {}
-): PersistedRequestRecord | null {
+): Promise<PersistedRequestRecord | null> {
   const maxChars = opts.maxChars ?? PERSISTED_REQUEST_DEFAULT_MAX_CHARS;
-  const rows = db.queryRequests<PersistedRequestRawRow>(
-    `SELECT r.id, r.cli, r.model, r.prompt, r.response, r.session_id,
-            r.datetime_utc, r.duration_ms, r.input_tokens, r.output_tokens,
-            r.cache_read_tokens, r.cache_creation_tokens, r.owner_principal,
-            m.retry_count, m.circuit_breaker_state, m.cost_usd,
-            m.exit_code, m.error_message, m.async_job_id, m.provider_session_id, m.status,
-            m.thinking_blocks
-     FROM requests r
-     LEFT JOIN gateway_metadata m ON m.request_id = r.id
-     WHERE r.id = ?
-     LIMIT 1`,
-    correlationId
-  );
-
-  const [row] = rows;
+  const row = await db.readRequestById(correlationId);
   if (!row) return null;
 
   // Scrub complete caller-visible text before calculating or applying the
@@ -682,4 +588,103 @@ export function readPersistedRequest(
   }
 
   return record;
+}
+
+/** Hard ceiling on `llm_request_list` page size, independent of the schema default. */
+export const PERSISTED_REQUEST_LIST_MAX_LIMIT = 200;
+/** Default page size when the caller does not ask for one. */
+export const PERSISTED_REQUEST_LIST_DEFAULT_LIMIT = 25;
+
+/**
+ * One row of the unkeyed request listing: enough to identify a request and
+ * bootstrap into `llm_request_result` / `llm_job_status`, and nothing more.
+ * Deliberately carries no prompt or response text; the bodies stay behind the
+ * keyed reader, which owns truncation and provider-session-id redaction.
+ */
+export interface PersistedRequestSummary {
+  correlationId: string;
+  /** NULL for sync requests; the job id to pass to `llm_job_*` for async rows. */
+  asyncJobId: string | null;
+  cli: string;
+  model: string;
+  sessionId: string | null;
+  datetimeUtc: string;
+  durationMs: number | null;
+  status: string | null;
+  exitCode: number | null;
+  /** Character lengths only. The text itself is not in this projection. */
+  promptChars: number;
+  responseChars: number;
+}
+
+export interface ListPersistedRequestsOptions {
+  /** Page size. Clamped to PERSISTED_REQUEST_LIST_MAX_LIMIT. */
+  limit?: number;
+  /** ISO-8601 lower bound on datetime_utc (inclusive). */
+  since?: string;
+  /** Restrict to one provider. */
+  cli?: string;
+  /** Restrict to one gateway session id. */
+  sessionId?: string;
+  /**
+   * Owning principal of the caller, from `resolveOwnerPrincipal`. Required:
+   * an absent principal must not mean "all rows", so this has no default.
+   */
+  callerPrincipal: string;
+  /** Redact provider session ids from caller-visible strings (remote callers). */
+  redactProviderSessionId?: boolean;
+}
+
+/**
+ * List persisted requests newest-first, without needing a correlation id.
+ *
+ * This is the bootstrap surface: every other flight-recorder read is keyed by
+ * an id that only the originating caller ever receives, so an agent that did
+ * not make the call (or whose context was compacted since) had no route in.
+ *
+ * Ownership: the recorder's scope fragment bounds LIMIT to rows the
+ * caller may see, and `principalCanAccess` then re-checks every row as the
+ * actual control. Under a NoopFlightRecorder (flight recording disabled) the
+ * query yields no rows and this returns `[]`.
+ */
+export async function listPersistedRequests(
+  db: FlightRecorderQuery,
+  opts: ListPersistedRequestsOptions
+): Promise<PersistedRequestSummary[]> {
+  const limit = Math.min(
+    Math.max(1, Math.floor(opts.limit ?? PERSISTED_REQUEST_LIST_DEFAULT_LIMIT)),
+    PERSISTED_REQUEST_LIST_MAX_LIMIT
+  );
+
+  const rows = await db.listRequestSummaries({
+    ownerPrincipal: opts.callerPrincipal,
+    limit,
+    sinceIso: opts.since,
+    cli: opts.cli,
+    sessionId: opts.sessionId,
+  });
+
+  return (
+    rows
+      // The SQL scope is a prefilter; this is the control. A row the predicate
+      // rejects is dropped even if the fragment let it through.
+      .filter(row => principalCanAccess(row.owner_principal, opts.callerPrincipal))
+      .map(row => {
+        const redact = opts.redactProviderSessionId ? row.provider_session_id : null;
+        return {
+          correlationId: row.id,
+          asyncJobId: row.async_job_id,
+          cli: row.cli,
+          model: row.model,
+          sessionId:
+            row.session_id === null ? null : redactKnownProviderSessionId(row.session_id, redact),
+          datetimeUtc: row.datetime_utc,
+          durationMs: row.duration_ms,
+          status: row.status,
+          exitCode: row.exit_code,
+          promptChars: row.prompt_chars ?? 0,
+          responseChars: row.response_chars ?? 0,
+        };
+      })
+  );
 }

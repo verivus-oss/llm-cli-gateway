@@ -72,10 +72,10 @@ function requestContext(principal: string) {
 }
 
 function waitForDone(manager: AsyncJobManager, jobId: string): Promise<void> {
-  return new Promise((resolve, reject) => {
+  return new Promise(async (resolve, reject) => {
     const deadline = Date.now() + 5_000;
-    const check = (): void => {
-      const status = manager.getJobSnapshot(jobId)?.status;
+    const check = async (): Promise<void> => {
+      const status = (await manager.getJobSnapshot(jobId))?.status;
       if (status && status !== "queued" && status !== "running") {
         resolve();
         return;
@@ -86,7 +86,7 @@ function waitForDone(manager: AsyncJobManager, jobId: string): Promise<void> {
       }
       setTimeout(check, 10);
     };
-    check();
+    await check();
   });
 }
 
@@ -112,10 +112,10 @@ function persistence(path: string): PersistenceConfig {
 class CompressionCapturingFlightRecorder extends NoopFlightRecorder {
   readonly compression: Array<{ correlationId: string; telemetry: CompressionTelemetry }> = [];
 
-  override recordCompressionTelemetry(
+  override async recordCompressionTelemetry(
     correlationId: string,
     telemetry: CompressionTelemetry
-  ): void {
+  ): Promise<void> {
     this.compression.push({ correlationId, telemetry });
   }
 }
@@ -128,7 +128,7 @@ describe("Personal Agent Config Kit persistence", () => {
     testDir = null;
   });
 
-  it("keeps active Kit sessions scoped by provider and canonical workspace", () => {
+  it("keeps active Kit sessions scoped by provider and canonical workspace", async () => {
     testDir = join(
       tmpdir(),
       `kit-session-test-${Date.now()}-${Math.random().toString(16).slice(2)}`
@@ -158,7 +158,7 @@ describe("Personal Agent Config Kit persistence", () => {
     // A mismatched request does not erase the valid pointer for the original stamp.
     expect(manager.getActiveKitSession("claude", "/workspace/a", one.execution)?.id).toBe(first.id);
     expect(manager.getActiveSession("claude")).toBeNull();
-    expect(manager.getPinnedKitReleaseIds()).toEqual([]);
+    expect(await manager.getPinnedKitReleaseIds()).toEqual([]);
   });
 
   it("rewrites exact historical Kit pointer keys without crossing owners", async () => {
@@ -870,7 +870,7 @@ describe("Personal Agent Config Kit persistence", () => {
     ).toBe(true);
     expect(manager.updateKitSessionBinding(session.id, terminalBinding, heldAttempt.id)).toBe(true);
     expect(manager.getSession(session.id)?.metadata?.kit?.attempt).toBeUndefined();
-    expect(manager.getPinnedKitReleaseIds()).toEqual([]);
+    expect(await manager.getPinnedKitReleaseIds()).toEqual([]);
     expect(
       manager.releaseKitSessionAttempt(
         "claude",
@@ -976,7 +976,7 @@ describe("Personal Agent Config Kit persistence", () => {
     ).toBe(false);
   });
 
-  it("does not replace an expired durable attempt without an explicit release", () => {
+  it("does not replace an expired durable attempt without an explicit release", async () => {
     testDir = join(
       tmpdir(),
       `kit-session-expired-attempt-${Date.now()}-${Math.random().toString(16).slice(2)}`
@@ -1006,7 +1006,7 @@ describe("Personal Agent Config Kit persistence", () => {
         replacement
       )
     ).toBe(false);
-    expect(manager.getPinnedKitReleaseIds()).toEqual(["release-a"]);
+    expect(await manager.getPinnedKitReleaseIds()).toEqual(["release-a"]);
     expect(
       manager.releaseKitSessionAttempt(
         "claude",
@@ -1027,7 +1027,7 @@ describe("Personal Agent Config Kit persistence", () => {
     ).toBe(true);
   });
 
-  it("permanently fences an explicitly recovered unadmitted Kit job id", () => {
+  it("permanently fences an explicitly recovered unadmitted Kit job id", async () => {
     testDir = join(
       tmpdir(),
       `kit-attempt-fence-${Date.now()}-${Math.random().toString(16).slice(2)}`
@@ -1044,14 +1044,14 @@ describe("Personal Agent Config Kit persistence", () => {
       fencedAt: new Date().toISOString(),
     };
     try {
-      expect(store.fenceUnadmittedKitAttempt(fence)).toBe("reserved");
+      expect(await store.fenceUnadmittedKitAttempt(fence)).toBe("reserved");
       // A retry after a crash between fencing and lease release is safe only
       // for the exact same durable identity.
-      expect(store.fenceUnadmittedKitAttempt(fence)).toBe("already_recovered");
-      expect(store.fenceUnadmittedKitAttempt({ ...fence, kitSessionId: "other-kit-session" })).toBe(
-        "conflict"
-      );
-      expect(() =>
+      expect(await store.fenceUnadmittedKitAttempt(fence)).toBe("already_recovered");
+      expect(
+        await store.fenceUnadmittedKitAttempt({ ...fence, kitSessionId: "other-kit-session" })
+      ).toBe("conflict");
+      await expect(
         store.recordStart({
           id: fence.attemptId,
           correlationId: "late-admission",
@@ -1064,20 +1064,20 @@ describe("Personal Agent Config Kit persistence", () => {
           kitSessionId: fence.kitSessionId,
           ownerPrincipal: "local",
         })
-      ).toThrow(/permanently recovered/);
-      expect(store.getById(fence.attemptId)).toBeNull();
+      ).rejects.toThrow(/permanently recovered/);
+      expect(await store.getById(fence.attemptId)).toBeNull();
       // Fences are intentionally outside ordinary job retention.
-      expect(store.evictExpired()).toBe(0);
-      expect(store.fenceUnadmittedKitAttempt(fence)).toBe("already_recovered");
+      expect(await store.evictExpired()).toBe(0);
+      expect(await store.fenceUnadmittedKitAttempt(fence)).toBe("already_recovered");
     } finally {
-      store.close();
+      await store.close();
     }
   });
 
-  it("keeps terminal Kit state pinned without durable native metadata", () => {
+  it("keeps terminal Kit state pinned without durable native metadata", async () => {
     const store = new MemoryJobStore({ retentionMs: 1 });
     const ref = execution();
-    store.recordStart({
+    await store.recordStart({
       id: "kit-job",
       correlationId: "corr",
       requestKey: computeRequestKey("claude", ["-p", "kit"]),
@@ -1089,11 +1089,11 @@ describe("Personal Agent Config Kit persistence", () => {
       kitSessionId: "gateway-kit-session",
     });
 
-    expect(store.getById("kit-job")?.kitExecution).toEqual(ref);
-    expect(store.getById("kit-job")?.requestKey).toBe("kit:kit-job");
-    expect(store.getPinnedKitReleaseIds()).toEqual(["release-a"]);
+    expect((await store.getById("kit-job"))?.kitExecution).toEqual(ref);
+    expect((await store.getById("kit-job"))?.requestKey).toBe("kit:kit-job");
+    expect(await store.getPinnedKitReleaseIds()).toEqual(["release-a"]);
 
-    store.recordComplete({
+    await store.recordComplete({
       id: "kit-job",
       status: "completed",
       exitCode: 0,
@@ -1107,7 +1107,7 @@ describe("Personal Agent Config Kit persistence", () => {
         nativeSessionId: "11111111-1111-4111-8111-111111111111",
       },
     });
-    expect(store.getPendingKitFinalizations()).toMatchObject([
+    expect(await store.getPendingKitFinalizations()).toMatchObject([
       {
         jobId: "kit-job",
         kitSessionId: "gateway-kit-session",
@@ -1115,15 +1115,15 @@ describe("Personal Agent Config Kit persistence", () => {
         terminalMetadata: null,
       },
     ]);
-    expect(store.getPinnedKitReleaseIds()).toEqual(["release-a"]);
-    expect(store.evictExpired()).toBe(0);
-    expect(store.markKitTerminalFinalized("kit-job", "wrong-session")).toBe(false);
-    expect(store.markKitTerminalFinalized("kit-job", "gateway-kit-session")).toBe(true);
-    expect(store.markKitTerminalFinalized("kit-job", "gateway-kit-session")).toBe(true);
-    expect(store.getById("kit-job")?.kitTerminalFinalized).toBe(true);
-    expect(store.getPendingKitFinalizations()).toEqual([]);
-    expect(store.getPinnedKitReleaseIds()).toEqual([]);
-    expect(store.evictExpired()).toBe(1);
+    expect(await store.getPinnedKitReleaseIds()).toEqual(["release-a"]);
+    expect(await store.evictExpired()).toBe(0);
+    expect(await store.markKitTerminalFinalized("kit-job", "wrong-session")).toBe(false);
+    expect(await store.markKitTerminalFinalized("kit-job", "gateway-kit-session")).toBe(true);
+    expect(await store.markKitTerminalFinalized("kit-job", "gateway-kit-session")).toBe(true);
+    expect((await store.getById("kit-job"))?.kitTerminalFinalized).toBe(true);
+    expect(await store.getPendingKitFinalizations()).toEqual([]);
+    expect(await store.getPinnedKitReleaseIds()).toEqual([]);
+    expect(await store.evictExpired()).toBe(1);
   });
 
   it("reconciles a terminal Kit result from a reopened durable job store", async () => {
@@ -1136,7 +1136,7 @@ describe("Personal Agent Config Kit persistence", () => {
     const first = new SqliteJobStore(dbPath);
     const ref = execution({ releaseId: "release-restart", contextIdentity: "context-restart" });
     try {
-      first.recordStart({
+      await first.recordStart({
         id: "restart-kit-job",
         correlationId: "restart-corr",
         requestKey: computeRequestKey("claude", ["-p", "restart"]),
@@ -1148,7 +1148,7 @@ describe("Personal Agent Config Kit persistence", () => {
         kitExecution: ref,
         kitSessionId: "gateway-restart-session",
       });
-      first.recordComplete({
+      await first.recordComplete({
         id: "restart-kit-job",
         status: "completed",
         exitCode: 0,
@@ -1163,13 +1163,13 @@ describe("Personal Agent Config Kit persistence", () => {
         },
       });
     } finally {
-      first.close();
+      await first.close();
     }
 
     const reopened = new SqliteJobStore(dbPath);
     const manager = new AsyncJobManager(undefined, undefined, reopened);
     try {
-      expect(manager.getPendingKitFinalizations()).toMatchObject([
+      expect(await manager.getPendingKitFinalizations()).toMatchObject([
         {
           jobId: "restart-kit-job",
           kitSessionId: "gateway-restart-session",
@@ -1177,18 +1177,18 @@ describe("Personal Agent Config Kit persistence", () => {
           terminalMetadata: null,
         },
       ]);
-      expect(manager.getPinnedKitReleaseIds()).toEqual(["release-restart"]);
-      expect(manager.markKitTerminalFinalized("restart-kit-job", "gateway-restart-session")).toBe(
-        true
-      );
-      expect(manager.getPendingKitFinalizations()).toEqual([]);
-      expect(manager.getPinnedKitReleaseIds()).toEqual([]);
-      expect(reopened.getById("restart-kit-job")?.kitTerminalFinalizedAt).toEqual(
+      expect(await manager.getPinnedKitReleaseIds()).toEqual(["release-restart"]);
+      expect(
+        await manager.markKitTerminalFinalized("restart-kit-job", "gateway-restart-session")
+      ).toBe(true);
+      expect(await manager.getPendingKitFinalizations()).toEqual([]);
+      expect(await manager.getPinnedKitReleaseIds()).toEqual([]);
+      expect((await reopened.getById("restart-kit-job"))?.kitTerminalFinalizedAt).toEqual(
         expect.any(String)
       );
     } finally {
       await manager.dispose();
-      reopened.close();
+      await reopened.close();
     }
   });
 
@@ -1204,7 +1204,7 @@ describe("Personal Agent Config Kit persistence", () => {
     let terminalOwner: string | null = null;
     let terminalMetadata: { version: 1; nativeSessionId: string | null } | null = null;
     const cleanup: string[] = [];
-    const first = manager.startJobWithDedup(
+    const first = await manager.startJobWithDedup(
       "sh" as LlmCli,
       ["-c", "printf out; printf err >&2"],
       "kit-a",
@@ -1222,7 +1222,7 @@ describe("Personal Agent Config Kit persistence", () => {
         artifactCleanup: () => cleanup.push("cleanup"),
       }
     );
-    const second = manager.startJobWithDedup("sh" as LlmCli, ["-c", "sleep 0.05"], "kit-b", {
+    const second = await manager.startJobWithDedup("sh" as LlmCli, ["-c", "sleep 0.05"], "kit-b", {
       kitExecution: execution(),
       kitSessionId: "gateway-session-b",
       jobId: randomUUID(),
@@ -1238,15 +1238,15 @@ describe("Personal Agent Config Kit persistence", () => {
     expect(terminalOwner).toBe("local");
     expect(terminalMetadata).toEqual({ version: 1, nativeSessionId: null });
     expect(cleanup).toEqual(["cleanup"]);
-    expect(manager.getJobKitExecution(first.snapshot.id)?.releaseId).toBe("release-a");
-    expect(store.getPendingKitFinalizations()).toMatchObject([
+    expect((await manager.getJobKitExecution(first.snapshot.id))?.releaseId).toBe("release-a");
+    expect(await store.getPendingKitFinalizations()).toMatchObject([
       {
         jobId: second.snapshot.id,
         kitSessionId: "gateway-session-b",
       },
     ]);
     await manager.dispose();
-    store.close();
+    await store.close();
   });
 
   it("keeps echoed Kit context out of streaming, terminal, and flight persistence", async () => {
@@ -1259,21 +1259,27 @@ describe("Personal Agent Config Kit persistence", () => {
     let flightComplete: FlightLogResult | null = null;
     let flightStart: FlightLogStart | null = null;
     const flightRecorder = {
-      logStart: (entry: FlightLogStart) => {
+      logStart: async (entry: FlightLogStart) => {
         flightStart = entry;
       },
-      logComplete: (_correlationId: string, result: FlightLogResult) => {
+      logComplete: async (_correlationId: string, result: FlightLogResult) => {
         flightComplete = result;
       },
-      queryRequests: () => [],
-      flush: () => {},
-      close: () => {},
+      readCacheRowsBySession: async () => [],
+      readCacheRowsByPrefix: async () => [],
+      readCacheRowsGlobal: async () => [],
+      readRequestById: async () => null,
+      listRequestSummaries: async () => [],
+      readLcrPriorRows: async () => [],
+      readRoutingDecisions: async () => [],
+      flush: async () => {},
+      close: async () => {},
     } as unknown as FlightRecorderLike;
     const manager = new AsyncJobManager(undefined, undefined, store, flightRecorder);
     const privateContext = "PRIVATE_KIT_STDIN_SENTINEL";
 
     try {
-      const started = manager.startJobWithDedup(
+      const started = await manager.startJobWithDedup(
         "sh" as LlmCli,
         ["-c", "cat; sleep 1.1; printf .; sleep 0.5"],
         "kit-output-privacy",
@@ -1311,17 +1317,17 @@ describe("Personal Agent Config Kit persistence", () => {
       expect(JSON.stringify(flightStart)).not.toContain(privateContext);
 
       await new Promise(resolve => setTimeout(resolve, 1_250));
-      const streamed = store.getById(started.snapshot.id);
+      const streamed = await store.getById(started.snapshot.id);
       expect(streamed?.status).toBe("running");
       expect(`${streamed?.stdout}${streamed?.stderr}${streamed?.error}`).not.toContain(
         privateContext
       );
 
       await waitForDone(manager, started.snapshot.id);
-      const liveResult = manager.getJobResult(started.snapshot.id);
+      const liveResult = await manager.getJobResult(started.snapshot.id);
       expect(liveResult?.stdout).toContain(privateContext);
 
-      const durable = store.getById(started.snapshot.id);
+      const durable = await store.getById(started.snapshot.id);
       expect(`${durable?.stdout}${durable?.stderr}${durable?.error}`).not.toContain(privateContext);
       expect(durable?.stdout).toBe("");
       expect(durable?.stderr).toBe("");
@@ -1339,7 +1345,7 @@ describe("Personal Agent Config Kit persistence", () => {
       await manager.dispose();
       const restarted = new AsyncJobManager(undefined, undefined, store);
       try {
-        const recovered = restarted.getJobResult(started.snapshot.id);
+        const recovered = await restarted.getJobResult(started.snapshot.id);
         expect(recovered?.stdout).toContain("output is withheld");
         expect(recovered?.stdout).not.toContain(privateContext);
       } finally {
@@ -1347,7 +1353,7 @@ describe("Personal Agent Config Kit persistence", () => {
       }
     } finally {
       await manager.dispose();
-      store.close();
+      await store.close();
     }
   });
 
@@ -1370,7 +1376,7 @@ describe("Personal Agent Config Kit persistence", () => {
     const jobId = randomUUID();
 
     try {
-      manager.startJobWithDedup(
+      await manager.startJobWithDedup(
         "sh" as LlmCli,
         [
           "-c",
@@ -1401,7 +1407,7 @@ describe("Personal Agent Config Kit persistence", () => {
       expect(flightRecorder.compression).toEqual([]);
     } finally {
       await manager.dispose();
-      store.close();
+      await store.close();
     }
   });
 
@@ -1416,7 +1422,7 @@ describe("Personal Agent Config Kit persistence", () => {
     const privateContext = "personal-config-private-token-must-not-persist";
 
     try {
-      const started = manager.startJobWithDedup(
+      const started = await manager.startJobWithDedup(
         "sh" as LlmCli,
         ["-c", "true", privateContext],
         "kit-redacted-argv",
@@ -1428,17 +1434,17 @@ describe("Personal Agent Config Kit persistence", () => {
         }
       );
 
-      const durable = store.getById(started.snapshot.id);
+      const durable = await store.getById(started.snapshot.id);
       expect(durable?.argsJson).toBe(JSON.stringify(["[personal-config-kit arguments redacted]"]));
       expect(durable?.argsJson).not.toContain(privateContext);
       await waitForDone(manager, started.snapshot.id);
     } finally {
       await manager.dispose();
-      store.close();
+      await store.close();
     }
   });
 
-  it("scrubs active and terminal legacy Kit rows whenever SQLite reopens", () => {
+  it("scrubs active and terminal legacy Kit rows whenever SQLite reopens", async () => {
     testDir = join(
       tmpdir(),
       `kit-sqlite-upgrade-privacy-${Date.now()}-${Math.random().toString(16).slice(2)}`
@@ -1456,7 +1462,7 @@ describe("Personal Agent Config Kit persistence", () => {
     const initial = new SqliteJobStore(dbPath);
     try {
       for (const { id } of legacyJobs) {
-        initial.recordStart({
+        await initial.recordStart({
           id,
           correlationId: `${id}-corr`,
           requestKey: `${id}-key`,
@@ -1467,10 +1473,10 @@ describe("Personal Agent Config Kit persistence", () => {
           kitExecution: execution({ contextIdentity: `${id}-context` }),
           kitSessionId: `${id}-session`,
         });
-        expect(initial.getById(id)?.requestKey).toBe(`kit:${id}`);
+        expect((await initial.getById(id))?.requestKey).toBe(`kit:${id}`);
       }
     } finally {
-      initial.close();
+      await initial.close();
     }
 
     const legacyWriter = openDatabase(dbPath);
@@ -1503,19 +1509,19 @@ describe("Personal Agent Config Kit persistence", () => {
       const rows = legacyJobs.map(({ id }) => reopened.getById(id));
       for (const [index, row] of rows.entries()) {
         const { id } = legacyJobs[index];
-        expect(row).toMatchObject({
+        expect(await row).toMatchObject({
           requestKey: `kit:${id}`,
           argsJson: JSON.stringify(["[personal-config-kit arguments redacted]"]),
           stdout: "",
           stderr: "",
           payloadJson: null,
         });
-        expect(row?.requestKey).not.toContain(legacyRequestKeyFingerprint);
-        expect(row?.kitTerminalMetadata).toBeNull();
+        expect((await row)?.requestKey).not.toContain(legacyRequestKeyFingerprint);
+        expect((await row)?.kitTerminalMetadata).toBeNull();
       }
-      expect(rows[0]?.error).toBeNull();
-      expect(rows[1]?.error).toBeNull();
-      expect(rows[2]?.error).toBe(
+      expect((await rows[0])?.error).toBeNull();
+      expect((await rows[1])?.error).toBeNull();
+      expect((await rows[2])?.error).toBe(
         "Personal Agent Config Kit provider execution failed; detailed output is withheld"
       );
       expect(JSON.stringify(rows)).not.toContain(privateContext);
@@ -1548,10 +1554,10 @@ describe("Personal Agent Config Kit persistence", () => {
         `);
         const cleanReopened = new SqliteJobStore(dbPath);
         try {
-          expect(cleanReopened.getById(legacyJobs[0].id)?.status).toBe("queued");
-          expect(cleanReopened.getById(legacyJobs[1].id)?.status).toBe("running");
+          expect((await cleanReopened.getById(legacyJobs[0].id))?.status).toBe("queued");
+          expect((await cleanReopened.getById(legacyJobs[1].id))?.status).toBe("running");
         } finally {
-          cleanReopened.close();
+          await cleanReopened.close();
         }
         const audit = auditWriter
           .prepare("SELECT COUNT(*) AS count FROM kit_scrub_update_audit")
@@ -1561,18 +1567,18 @@ describe("Personal Agent Config Kit persistence", () => {
         auditWriter.close();
       }
     } finally {
-      reopened.close();
+      await reopened.close();
     }
   });
 
-  it("fails closed when a Kit execution has no gateway session binding", () => {
+  it("fails closed when a Kit execution has no gateway session binding", async () => {
     const manager = new AsyncJobManager(undefined, undefined, new MemoryJobStore());
     try {
-      expect(() =>
+      await expect(
         manager.startJobWithDedup("sh" as LlmCli, ["-c", "true"], "missing-kit-session", {
           kitExecution: execution(),
         })
-      ).toThrow(/kitSessionId/);
+      ).rejects.toThrow(/kitSessionId/);
     } finally {
       void manager.dispose();
     }

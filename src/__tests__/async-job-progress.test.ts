@@ -6,7 +6,7 @@ import { noopLogger } from "../logger.js";
 async function waitForTerminal(manager: AsyncJobManager, jobId: string): Promise<void> {
   const deadline = Date.now() + 5_000;
   while (Date.now() < deadline) {
-    const job = manager.getJobSnapshot(jobId);
+    const job = await manager.getJobSnapshot(jobId);
     if (job && job.status !== "queued" && job.status !== "running") return;
     await new Promise(resolve => setTimeout(resolve, 20));
   }
@@ -18,15 +18,15 @@ describe("AsyncJobManager normalized progress", () => {
     const store = new MemoryJobStore();
     const manager = new AsyncJobManager(noopLogger, undefined, store);
     const secret = "raw-output-must-not-enter-progress";
-    const started = manager.startJob(
+    const started = await manager.startJob(
       "sh" as LlmCli,
       ["-c", `printf '${secret}'`],
       "progress-persist"
     );
 
     await waitForTerminal(manager, started.id);
-    const snapshot = manager.getJobSnapshot(started.id)!;
-    const persisted = store.getById(started.id)!;
+    const snapshot = (await manager.getJobSnapshot(started.id))!;
+    const persisted = (await store.getById(started.id))!;
 
     expect(snapshot.status).toBe("completed");
     expect(snapshot.progress.capability).toBe("activity_only");
@@ -42,14 +42,14 @@ describe("AsyncJobManager normalized progress", () => {
     expect(persisted.progressJson).not.toContain(secret);
 
     const hydrated = new AsyncJobManager(noopLogger, undefined, store);
-    const restored = hydrated.getJobSnapshot(started.id)!;
+    const restored = (await hydrated.getJobSnapshot(started.id))!;
     expect(restored.progress.lastSeq).toBe(snapshot.progress.lastSeq);
     expect(restored.progress.events).toEqual(snapshot.progress.events);
 
-    const afterFirst = hydrated.getJobSnapshot(started.id, {
+    const afterFirst = (await hydrated.getJobSnapshot(started.id, {
       afterProgressSeq: restored.progress.events[0]!.seq,
       progressLimit: 2,
-    })!;
+    }))!;
     expect(afterFirst.progress.events.length).toBeLessThanOrEqual(2);
     expect(
       afterFirst.progress.events.every(event => event.seq > restored.progress.events[0]!.seq)
@@ -59,10 +59,10 @@ describe("AsyncJobManager normalized progress", () => {
   it("records failed and canceled terminal events exactly once", async () => {
     const store = new MemoryJobStore();
     const manager = new AsyncJobManager(noopLogger, undefined, store);
-    const failed = manager.startJob("sh" as LlmCli, ["-c", "exit 7"], "progress-failed");
+    const failed = await manager.startJob("sh" as LlmCli, ["-c", "exit 7"], "progress-failed");
     await waitForTerminal(manager, failed.id);
 
-    const failedSnapshot = manager.getJobSnapshot(failed.id)!;
+    const failedSnapshot = (await manager.getJobSnapshot(failed.id))!;
     expect(failedSnapshot.progress.events.filter(event => event.kind === "terminal")).toHaveLength(
       1
     );
@@ -72,10 +72,10 @@ describe("AsyncJobManager normalized progress", () => {
       message: "Job failed",
     });
 
-    const canceled = manager.startJob("sleep" as LlmCli, ["30"], "progress-canceled");
-    expect(manager.cancelJob(canceled.id)).toEqual({ canceled: true });
+    const canceled = await manager.startJob("sleep" as LlmCli, ["30"], "progress-canceled");
+    expect(await manager.cancelJob(canceled.id)).toEqual({ canceled: true });
     await waitForTerminal(manager, canceled.id);
-    const canceledSnapshot = manager.getJobSnapshot(canceled.id)!;
+    const canceledSnapshot = (await manager.getJobSnapshot(canceled.id))!;
     expect(
       canceledSnapshot.progress.events.filter(event => event.kind === "terminal")
     ).toHaveLength(1);

@@ -1,0 +1,171 @@
+# Gateway pass-through policy: the installed binary is the authority.
+# Governing rule for the provider surface; where another plan disagrees, this wins.
+# Evidence: docs/evidence/gateway-passthrough-2026-08-19.md (internal, not mirrored)
+
+[meta]
+surface = "provider capability exposure, discovery and enforcement"
+status = "agreed 2026-08-18. n1, n3a, n3c shipped; n2 partial; n3b withdrawn, n4 absorbed; n8a and n5-n9 open"
+release_gate = "This program gates the next release. Scope and version decision are tracked internally."
+supersedes = "provider-contract-removal-autoapply.dag.toml [decision].removal_policy"
+see_also = "provider-surface-distribution.dag.toml: how the primary surface ships without a product release"
+
+# Everything below derives from these seven.
+[policy]
+p1_authority = "The customer's INSTALLED BINARY decides what it accepts. We ask it rather than guessing from ours, and we are never the thing that refuses what it would take."
+p2_all_versions = "Every supported CLI at ANY version the customer has. No pinned baseline. Our dev host's version has no bearing."
+p3_cross_provider = "Any CLI alongside any other, SINGLE LEVEL ONLY. Nested MCP fails with -32000; multi-level is out of scope, not unimplemented."
+p4_access_modes = "Two modes: on-machine (stdio, full local path access) and off-machine (HTTP + OAuth)."
+p5_off_machine_limits = "Remote callers select a registered workspace and use relative paths. DISCOVERY DESCRIBES THE GATEWAY HOST, NOT THEIRS, and every surface must say so or they will read it as their own laptop."
+p6_discovery_is_mechanical = "Enumeration is app-driven, at start and restart. No human transcribes --help into a source file."
+p7_persist_and_tier = "Persisted in PostgreSQL, presented HIERARCHICALLY. The full surface is never dumped into a caller's context by default."
+
+[decisions]
+startup_behaviour = "serve_last_persisted_then_refresh_in_background"
+startup_behaviour_why = "Readiness must not wait on probing seven CLIs. First-ever start falls back to the generated seed, which is the only job the static contract keeps."
+unparseable_capability = "fail_open"
+unparseable_capability_why = "When parsing cannot tell, ALLOW and let the binary decide. Failing closed is how we ended up refusing input grok parses. Does NOT relax retained_enforcement."
+rediscovery_trigger = "gateway_restart_only"
+rediscovery_trigger_why = "No watching, no polling. Cost paid once per process lifetime, documented rather than inferred."
+
+# Invalidated, named so it cannot be quietly re-adopted.
+[[invalidates]]
+what = "provider-contract-removal-autoapply.dag.toml removal_policy = auto_apply"
+why = "Replaced wholesale. A flag our host stopped advertising is a version boundary to record, never a capability to delete. ENFORCED 2026-08-19: removal writers deleted from the rebaseliner, capability:floor:check catches any other route. Prose in three places lost to code for a day; run that day it still nominated all three n1 flags."
+[[invalidates]]
+what = "UPSTREAM_CLI_CONTRACTS as the enforced authority"
+why = "assertUpstreamCliArgs throws against a const built from our dev host. Demotes to a SEED: first-start only, and fallback when discovery fails."
+[[invalidates]]
+what = "`values` as a rejection list"
+why = "It is what refused grok effort levels the binary parses. `values` becomes description and autocomplete data. It never rejects."
+[[invalidates]]
+what = "deleting a request parameter when upstream drops a flag"
+why = "Three instances shipped in 3.1.0 as drafted: grok bestOfN, grok check, devin agentConfig. Reverted by n1."
+
+# Protection, not curation. Do not delete these while deleting the rest.
+[retained_enforcement]
+headless_flag_required = "A request must carry -p / --single / --print or the CLI opens a TUI and hangs forever. Protects the gateway from a wedged child."
+non_option_value_guard = "A caller value must not itself look like an option. The argument-injection guard, and the most important check in the file. Unrelated to capability."
+argv_shape_bounds = "Positional counts, required first argument, end-of-options boundary. Constrains OUR argv construction, not the customer's choices."
+
+# TRAP 2026-08-18: a hand-authored table per provider is hand-coding one layer down; there is no "generalise the codegen" node.
+
+[[node]]
+id = "n1.revert-the-three-removals"
+status = "done"
+depends_on = []
+role = "Restore grok bestOfN and check, and devin agentConfig, as pass-through parameters."
+outcome = "Verified against v3.0.0: zero flags, tools or parameters removed; two enum constraints correctly widened."
+
+[[node]]
+id = "n2.discovery-produces-the-data"
+status = "sources 1-3 landed; per-provider merge and command attribution remain"
+critical = true
+depends_on = []
+role = "Mechanical per-install enumeration emitting the structure the generic builder already consumes."
+action = "Three layered sources: shell completions (best, includes hidden flags), help-text scrape (one regex, over-collects on purpose), invalid-value probe (existence, arity, real enums)."
+constraint = "EVERY PROBE MUST BE STRUCTURALLY INCAPABLE OF EXECUTING: no probe argv token may lack a leading dash. Record UNPARSED distinctly from ABSENT; fail_open depends on telling them apart."
+
+[[node]]
+id = "n3a.passthrough-surface"
+status = "done 2026-08-19, all seven providers, sync and async"
+critical = true
+depends_on = []
+role = "Let a caller name a flag the gateway has not declared, so discovery is reachable at all."
+outcome = "`providerFlags` on all 14 request tools. Local callers unrestricted; remote refused four classes by pattern. Argv safety enforced for all; a refused flag errors rather than dropping silently."
+
+[[node]]
+id = "n3.builder-consumes-discovery"
+status = "REFUTED as written 2026-08-19. Do not execute; see n3b and d9."
+depends_on = ["n2.discovery-produces-the-data", "n3a.passthrough-surface"]
+role = "WAS: point the generic builder at discovery output and delete the seven prepare functions."
+refuted_by = "Its own pilot. The grok cutover removed 73 lines from prepareGrokRequest and added 476 in provider-codegen.ts, and prepareGrokRequest has since grown to 373, larger than the 317 it started at. Marginal cost per further provider is about +319 table lines to remove -73 push lines. The `~1400 lines of argv functions` premise is also wrong: the seven total 1,853 non-blank lines of which 76 mention a flag literal, 4%. The rest is admission, isolation, session, MCP and prompt assembly, none of it generatable."
+
+[[node]]
+id = "n3c.passthrough-reaches-the-cli"
+status = "done 2026-08-19"
+depends_on = ["n3a.passthrough-surface"]
+role = "n3a built argv and assertUpstreamCliArgs then refused it, so nothing it shipped could execute. Caller-named flags are now exempt; the third parameter is required so the compiler names every site. Live-verified against grok --minimal."
+constraint = "TESTING A BUILDER IS NOT TESTING A PATH. Test the admission, not the argv."
+
+[[node]]
+id = "n8a.absence-derived-refusals-still-stand"
+critical = true
+depends_on = []
+role = "12 assertions in 4 files refuse input purely because OUR host stopped advertising it, which absence-is-never-subtractive forbids. Enumerated in the evidence file; acknowledgedUpstreamFlags cannot serve as the refusal list, its own docstring says so."
+constraint = "Widening these is customer-visible and a version decision, NOT a drive-by. n8's job, with live-binary evidence per case."
+
+[[node]]
+id = "n3b.delete-the-table-not-the-prep"
+status = "WITHDRAWN 2026-08-19. Do not execute; its version question is void, not open."
+depends_on = ["n3a.passthrough-surface"]
+role = "WAS: delete GROK_FLAG_GENERATION and the 29 named grok parameters, since providerFlags reaches them."
+superseded_by = "provider-surface-distribution.dag.toml d9. Pass-through is a FLOOR for what the schema does not name, never a replacement for what it does. Under d1-d4 those parameters stop being compiled rather than being deleted, so nothing is removed and no version decision is needed."
+
+[[node]]
+id = "n4.seed-is-generated-not-written"
+status = "ABSORBED by provider-surface-distribution.dag.toml d1. Track it there."
+depends_on = ["n3a.passthrough-surface"]
+role = "UPSTREAM_CLI_CONTRACTS becomes a build-time snapshot of discovery on the reference host, used only as first-start seed and fallback."
+
+[[node]]
+id = "n5.persist-discovery"
+depends_on = ["n3a.passthrough-surface"]
+role = "Persist discovered capability to PostgreSQL."
+constraint = "Keyed by (owner_hostname, cli, binary_version). NEVER a blanket read or write: a global latest-discovery row is the orphan-sweep bug in a new table. MUST name its reaper before it ships."
+
+[[node]]
+id = "n6.serve-persisted-refresh-background"
+depends_on = ["n5.persist-discovery"]
+role = "Startup serves last persisted discovery for THIS host, else the generated seed; a background pass refreshes and replaces atomically, never fatally."
+
+[[node]]
+id = "n7.hierarchical-presentation"
+depends_on = ["n5.persist-discovery"]
+role = "Present discovered capability in tiers with a documented drill-down path."
+action = "64 tools already serialise to ~45,000 tokens and the 14 *_request* tools are 77% of it. Per-install detail without tiering makes the gateway unusable in a normal context window."
+
+[[node]]
+id = "n8.stop-rejecting"
+depends_on = ["n6.serve-persisted-refresh-background"]
+role = "Remove value-based rejection; keep only the retained_enforcement guards."
+
+[[node]]
+id = "n9.user-guidance"
+depends_on = ["n6.serve-persisted-refresh-background"]
+role = "Report the discovered set, its host, the binary version and probe time; tell remote callers whose machine it describes."
+
+[[invariant]]
+id = "absence-is-never-subtractive"
+question = "Does an `absent` discovery verdict REMOVE a capability the gateway previously offered?"
+why = "The trap discovery walks into if nobody stops it, wearing better clothes than the rebaseliner. All three n1-restored flags probe ABSENT on our host by the strongest signal available. THE RULE: the merged set is `discovered UNION retained`. An absent verdict may lower confidence or shape guidance; it may never remove a parameter or a contract entry."
+enforced_by = "n2 merge rules, n3 schema derivation, and an acceptance test pinning the three n1 flags"
+[[invariant]]
+id = "no-hand-authored-provider-data"
+question = "Is a human typing a provider's flags, values, or argv rules into a file?"
+why = "Written twice and lost twice, both times to whatever mechanism was nearest, because a mechanism tells you what to type and a principle does not. So it had to BECOME a mechanism. Corollary: any deliberate intermediate state must carry its own expiry in the tree or it will be read as the destination."
+enforced_by = "scripts/provider-surfaces-check.mjs census ratchet (shipped 2026-08-18), inside npm run check. Fails in both directions; three mutation probes verified."
+[[invariant]]
+id = "gateway-never-refuses-what-the-binary-accepts"
+question = "Can this rejection fire on input the customer's installed binary would have accepted?"
+why = "If yes it is a defect regardless of how well reasoned the rule is. The whole policy in one question."
+[[invariant]]
+id = "no-capability-removal-without-a-customer-changing-anything"
+question = "Does a gateway upgrade alone take a capability away from a customer who did not touch their CLI?"
+why = "3.1.0 as drafted fails this three times. The specific harm that produced this file."
+[[invariant]]
+id = "discovery-is-per-host-never-global"
+question = "Does this read or write a discovery row another instance with a different CLI version is serving?"
+why = "Seven instances already share one store. A blanket write repeats the orphan-sweep bug in a new table."
+[[invariant]]
+id = "remote-callers-are-told-whose-machine"
+question = "Does this surface make clear that discovery describes the gateway host, not the caller's?"
+why = "Off-machine callers will otherwise read a capability list as describing their own laptop."
+[[invariant]]
+id = "every-durable-table-names-its-reaper"
+question = "What deletes a superseded discovery row, and on what timer?"
+why = "Inherited from durable-state-lifecycle.dag.toml. Five of six existing stores have no answer because nobody was made to give one."
+
+[protocol]
+before_removing_anything_from_the_provider_surface = "Do not. A flag our host stopped advertising is a version boundary to record. If a handler test goes red because the rebaseliner stripped a contract entry, restore the entry and mark the boundary; do NOT delete the parameter to make it green."
+before_adding_a_rejection = "Answer gateway-never-refuses-what-the-binary-accepts. Malformed argv, hang risk and argument injection belong in retained_enforcement. Whether a provider supports something does not belong in the gateway at all."
+before_trusting_a_rebaseline = "It describes ONE machine. It may update the seed. It may never change what a customer is permitted to send."

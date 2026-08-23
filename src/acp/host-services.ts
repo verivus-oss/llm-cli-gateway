@@ -12,8 +12,12 @@
  *     until a later phase wires a workspace-scoped reader),
  *   - `fs/write_text_file` → denied (`write_host_services_disabled_by_default`),
  *   - `session/request_permission` → denied by returning a VALID `cancelled`
- *     ACP outcome (there is no ApprovalManager bridge yet — that is the next
- *     slice; until then a side effect must never be granted),
+ *     ACP outcome. NOTE this class is the deny-by-default FALLBACK, not the
+ *     whole story: `runAcpRequest` supplies a real decider built by
+ *     `createAcpPermissionDecider` (src/acp/permission-bridge.ts:169), so the
+ *     live request path gates on the tool-call category instead of refusing
+ *     everything. This implementation is what answers when no decider is wired,
+ *     and refusing unconditionally is the correct behaviour there,
  *   - terminal and MCP host methods are not part of the {@link HostServices}
  *     dispatch surface at all, so the client already answers them with a
  *     JSON-RPC method-not-found. They remain denied by construction.
@@ -117,9 +121,11 @@ export class GatewayHostServices implements HostServices {
 
   /**
    * Deny `session/request_permission` by returning a structured `cancelled`
-   * outcome. There is no ApprovalManager bridge yet (next slice), so no side
-   * effect may be approved; cancelling the turn is the valid ACP denial. The
-   * permission options / tool call are never inspected or logged.
+   * outcome. This is the fallback used when no permission decider is supplied;
+   * the live path installs one via `createAcpPermissionDecider`. With no decider
+   * there is nothing to consult, so no side effect may be approved and
+   * cancelling the turn is the valid ACP denial. The permission options and tool
+   * call are never inspected or logged.
    */
   async requestPermission(
     request: RequestPermissionRequest,

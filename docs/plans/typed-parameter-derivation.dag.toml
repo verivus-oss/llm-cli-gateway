@@ -1,0 +1,92 @@
+# Typed request parameters derived from the loaded surface, for all seven providers.
+# Subordinate to gateway-passthrough-policy.dag.toml and provider-surface-distribution.dag.toml.
+
+[meta]
+surface = "the 263 typed request parameters across the seven *_request tools"
+status = "planned 2026-08-19, nothing implemented"
+supersedes = "provider-surface-distribution.dag.toml d3.bindings-cover-seven-providers"
+
+# WHY THIS EXISTS, AND WHY IT LOOKS LIKE WORK ALREADY DONE
+#
+# On 2026-08-18 a CURSOR_FLAG_GENERATION table was written and its parity gate
+# went green before anyone noticed it contradicted the pass-through policy. It
+# was reverted; only the comment in provider-codegen.ts and the ratchet survive.
+# On 2026-08-19 the same trap caught a GEMINI_FLAG_GENERATION attempt, one
+# provider over, about eight hours later.
+#
+# BOTH ATTEMPTS WERE THE WRONG VERSION. They hand-authored the provider facts.
+# The right version derives facts from the loaded surface, which did not exist
+# until d4/d4a/d4c landed on 2026-08-19. This is the first time it is possible.
+
+[facts]
+measured = "claude 53 params / 5 enums, codex 43/7, cursor 24/6, devin 26/5, gemini 32/4, grok 56/7, mistral 29/4"
+derived_today = "ONE: GROK_GENERATED_SHAPE at index.ts:988. Every other provider's parameters are hand-written Zod."
+enums_already_loaded = "d4c made deriveZodShapeFromGeneration read enums from resolvedFlagFacts, so grok's enums already follow the binary."
+the_table_cannot_lie = "FlagGenerationMeta has no `values` field by construction: provider-codegen.ts:61 says the enum is read from the contract and NEVER duplicated in a row."
+
+[non_goals]
+no_parameter_per_discovered_flag = "grok surfaces 75 flags. A parameter each, across 14 tools, worsens a tool surface that already serialises to ~45,000 tokens with these tools at 77% of it. The CURATED set stays a product decision; providerFlags reaches the rest."
+no_deleting_named_parameters = "n3b is withdrawn and stays withdrawn. Nothing here removes a parameter; the interface floor would fail it anyway."
+
+[[node]]
+id = "t1.ratchet-forbids-the-sin-not-the-shape"
+critical = true
+depends_on = []
+role = "provider-surfaces-check refuses any `*_FLAG_GENERATION` by NAME. But a generation row cannot carry a provider fact: it has no `values` field, and since d4c its enums come from the resolver. The gate forbids a shape that is already incapable of the thing the policy forbids, which is why the only way forward looked like defeating the gate."
+action = "Forbid the SIN: a literal enum inside a binding row, a hand-written provider flag-name array, a hand-written arity map. Permit a binding row that names only gateway data (parameter name, emit rule, description, gateway-side constraints)."
+constraint = "DO NOT simply allowlist six new names. If the new check would pass a row carrying a literal `values`, it is the old gate with a bigger allowlist. Mutation-probe both directions before touching a provider."
+
+[[node]]
+id = "t2.name-the-thing-it-actually-is"
+depends_on = ["t1.ratchet-forbids-the-sin-not-the-shape"]
+role = "`FLAG_GENERATION` reads as `the generated set of flags`, which is what it was misread as twice."
+action = "Rename to `*_PARAMETER_BINDINGS` / `ParameterBinding`. A binding says: this MCP parameter emits this flag this way, and it says nothing about what the binary accepts."
+constraint = "Rename only. A rename that also changes behaviour hides the behaviour change in the diff."
+
+[[node]]
+id = "t3.gemini"
+critical = true
+depends_on = ["t2.name-the-thing-it-actually-is"]
+role = "First by measurement, not by order: 9 churn events and the only provider whose churn is dominated by REMOVALS, 13 of them, which is the class that took capability from customers."
+action = "Extract gemini's 32 parameters into bindings; derive the shape; enums come from resolvedFlagFacts. Leave prepareGeminiRequest's admission, session, isolation and prompt logic untouched."
+verify = "site/tools.fixture.json BYTE-IDENTICAL, interface:floor:check green, gemini-argv-golden red under a binding mutation. A fixture that moves means the derivation is not equivalent and the binding is wrong."
+
+[[node]]
+id = "t4.mistral-then-devin"
+depends_on = ["t3.gemini"]
+role = "Next by churn: mistral 6 events, devin 3 but one on 2026-08-18. Small paths, 29 and 26 parameters."
+verify = "Same three checks per provider. Stop and report if any fixture moves."
+
+[[node]]
+id = "t5.cursor-codex-claude"
+depends_on = ["t4.mistral-then-devin"]
+role = "The deferred three: claude 22 additions and ZERO removals, codex no churn since 2026-05-31, cursor a single same-day correction. Cheapest value, highest cost (claude 53 params, codex 43)."
+constraint = "Do these only if t3/t4 land clean. Their churn does not justify the risk on its own; uniformity does, and uniformity is worth less than a working release."
+
+[[node]]
+id = "t6.grok-reads-the-surface-for-its-flag-set-too"
+depends_on = ["t5.cursor-codex-claude"]
+role = "grok's enums already load; its BINDING LIST is still the hand-typed allowlist, so a new grok flag still needs a human to add a row."
+action = "Decide, with the numbers in front of us, whether a surfaced flag should auto-acquire a parameter. See non_goals: the answer is probably no, and that is a decision to record rather than assume."
+
+[[invariant]]
+id = "a-binding-declares-no-provider-fact"
+question = "Does this row state what the BINARY accepts: a value set, an arity, a flag's existence as fact?"
+why = "That is the hand-authored provider data the policy forbids, and it is what both reverted attempts got wrong. A binding says what the GATEWAY does with a flag the surface already vouched for."
+[[invariant]]
+id = "the-fixture-is-the-equivalence-proof"
+question = "Did site/tools.fixture.json move?"
+why = "A conversion that changes the published schema is not a conversion. The fixture is byte-comparable, host-invariant (d2), and cheaper than any argument about whether two Zod expressions agree."
+[[invariant]]
+id = "no-parameter-disappears"
+question = "Does interface:floor:check still pass?"
+why = "1,808 promises are recorded. The floor exists because a typed enum was deleted on 2026-08-19 and every other gate stayed green."
+[[invariant]]
+id = "the-prepare-function-keeps-its-job"
+question = "Did this move anything other than flag emission?"
+why = "n3 was refuted for proposing to delete the prepare functions. 106 of 6,000 lines mention a flag literal; the other 98% is admission, isolation, session, MCP and prompt assembly and is not generatable."
+
+[protocol]
+before_writing_a_binding_row = "Confirm the flag is on the resolved surface. If it is not, the parameter is unreachable and the binding is fiction."
+before_converting_the_next_provider = "The previous one must have a byte-identical fixture and a red argv golden under mutation. Two providers converted on an unproven pattern is two providers to unpick."
+when_the_ratchet_refuses = "It is right until proven otherwise. Both attempts that defeated it were wrong. Fix t1 first or stop."

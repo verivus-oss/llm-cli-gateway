@@ -59,7 +59,14 @@ function parsePolicy(policy?: ApprovalPolicy): ApprovalPolicy {
 // F15: under MCP-managed approval, a full permission / sandbox bypass or an
 // unverified execution posture is a deny-by-default escalation. The heuristic
 // score must not be able to approve it until the operator opts in explicitly.
-// `decide()` is only ever reached on the `approvalStrategy:"mcp_managed"` path.
+// `decide()` is reached on the `approvalStrategy:"mcp_managed"` path, and also
+// from the ACP permission bridge, which is a second caller this comment used to
+// deny. That second caller gets no useful verdict: it passes a content-free
+// request (static prompt, bypassRequested/fullAuto false, no MCP servers, no
+// tools), so every scoring branch below is inert and the result is always
+// `approved` at score 0. The real ACP boundary is the category gate in
+// src/acp/permission-bridge.ts. See docs/plans/acp-permission-decision.md for
+// why this scorer is the wrong instrument for ACP rather than a broken one.
 export function bypassAllowedByOperator(env: NodeJS.ProcessEnv = process.env): boolean {
   const raw = (env.LLM_GATEWAY_APPROVAL_ALLOW_BYPASS || "").trim().toLowerCase();
   return raw === "1" || raw === "true" || raw === "yes" || raw === "on";

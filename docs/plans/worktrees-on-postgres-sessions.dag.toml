@@ -1,3 +1,10 @@
+# ============================================================================
+# SHIPPED. Per-node `status` in this file was never maintained: 5 node(s)
+# below still read `planned` for code that is live. Do not read a `planned`
+# node here as evidence that something is unimplemented; check the code.
+# PostgreSQL worktree tombstones are live in src/session-manager-pg.ts and README documents the fail-closed behaviour.
+# Classified 2026-08-18 at HEAD 801950d. Index: docs/plans/README.md
+# ============================================================================
 # Implementation plan: restore gateway-managed worktrees under Postgres-backed
 # sessions, scoped by instance ownership rather than by storage engine.
 #

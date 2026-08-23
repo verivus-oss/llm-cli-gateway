@@ -647,4 +647,5 @@ async function importOptionalPg(): Promise<typeof import("pg")> {
   }
 }
 
-main();
+// `void`: module entry point. Nothing can await it, and it ends the process.
+void main();

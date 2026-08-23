@@ -54,6 +54,33 @@ export function principalCanAccess(rowOwner: string | null | undefined, caller: 
   return false;
 }
 
+/**
+ * The same ownership rule as `principalCanAccess`, expressed as a SQL fragment
+ * so an enumerating reader can bound `LIMIT` to rows the caller may see.
+ *
+ * It lives here, one screen from the predicate, because a security rule with
+ * two spellings in two files drifts silently. Callers MUST still pass every
+ * returned row through `principalCanAccess`: this fragment is a prefilter, and
+ * the predicate is the control. If the two ever disagree, the predicate drops
+ * the extra rows, so the failure direction is "fewer rows", never "another
+ * principal's rows".
+ *
+ * `column` names the owner column (e.g. `"r.owner_principal"`) and is
+ * caller-supplied SQL, never user input. The caller principal binds as a
+ * parameter, returned in `params`.
+ */
+export function principalScopeSql(
+  column: string,
+  caller: string
+): { sql: string; params: string[] } {
+  // Legacy-unowned (NULL) rows are visible to the local principal only, which
+  // is the `rowOwner == null && caller === "local"` arm of the predicate.
+  if (caller === "local") {
+    return { sql: `(${column} = ? OR ${column} IS NULL)`, params: [caller] };
+  }
+  return { sql: `${column} = ?`, params: [caller] };
+}
+
 export function runWithRequestContext<T>(
   context: GatewayRequestContext,
   callback: () => T | Promise<T>
@@ -63,4 +90,21 @@ export function runWithRequestContext<T>(
 
 export function getRequestContext(): GatewayRequestContext | undefined {
   return requestContext.getStore();
+}
+
+/**
+ * Is the current request off-machine (HTTP/OAuth) rather than on-machine
+ * (stdio)?
+ *
+ * One spelling, because this predicate gates security controls and was written
+ * out longhand at eight separate call sites across four modules. A predicate
+ * that must be retyped to be applied is a predicate that will eventually be
+ * retyped wrong, and the failure is silent: the control simply stops firing for
+ * the caller it was written for.
+ *
+ * `authKind === "oauth"` is checked alongside the transport because an OAuth
+ * caller is remote regardless of how the context was stamped.
+ */
+export function isRemotePrincipal(ctx: GatewayRequestContext | undefined): boolean {
+  return ctx?.transport === "http" || ctx?.authKind === "oauth";
 }

@@ -133,11 +133,11 @@ function safeCount(
 describe("cross-engine WAL crash-recovery (plan B3/B8)", () => {
   let tmpDir: string;
 
-  beforeEach(() => {
+  beforeEach(async () => {
     tmpDir = mkdtempSync(path.join(os.tmpdir(), "cross-engine-wal-"));
   });
 
-  afterEach(() => {
+  afterEach(async () => {
     rmSync(tmpDir, { recursive: true, force: true });
   });
 
@@ -147,7 +147,7 @@ describe("cross-engine WAL crash-recovery (plan B3/B8)", () => {
   // (FlightRecorder + SqliteJobStore on node:sqlite) open and exercise it.
   // ───────────────────────────────────────────────────────────────────────
   describe("Direction 1 — upgrade: better-sqlite3 writer → node:sqlite production reader/writer", () => {
-    it("recovers WAL-only rows for logs.db AND jobs.db, then operates normally", () => {
+    it("recovers WAL-only rows for logs.db AND jobs.db, then operates normally", async () => {
       // ── Arrange: write logs.db + jobs.db with better-sqlite3 in WAL mode,
       //    autocheckpoint OFF, using the SAME schema the production modules
       //    create (so the production reader opens an identical layout — the
@@ -281,7 +281,7 @@ describe("cross-engine WAL crash-recovery (plan B3/B8)", () => {
       try {
         // (a) All seeded rows visible — WAL recovery happened through the
         //     production read-only connection (queryRequests → openReadOnly).
-        const recoveredReqs = recorder.queryRequests<{ c: number }>(
+        const recoveredReqs = await recorder.queryRequests<{ c: number }>(
           "SELECT COUNT(*) AS c FROM requests"
         );
         expect(Number(recoveredReqs[0].c)).toBe(LOG_ROWS);
@@ -291,20 +291,20 @@ describe("cross-engine WAL crash-recovery (plan B3/B8)", () => {
 
         // Every seeded job is visible through the production getById path.
         for (let i = 0; i < JOB_ROWS; i++) {
-          const rec = store.getById(`legacy-job-${i}`);
+          const rec = await store.getById(`legacy-job-${i}`);
           expect(rec).not.toBeNull();
           expect(rec?.cli).toBe("codex");
         }
 
         // (b) Normal operations work on the recovered file: log a new
         //     request start/complete and read it back via queryRequests.
-        recorder.logStart({
+        await recorder.logStart({
           correlationId: "post-recovery-1",
           cli: "gemini",
           model: "flash",
           prompt: "after recovery",
         });
-        recorder.logComplete("post-recovery-1", {
+        await recorder.logComplete("post-recovery-1", {
           response: "ok",
           durationMs: 12,
           retryCount: 0,
@@ -313,7 +313,7 @@ describe("cross-engine WAL crash-recovery (plan B3/B8)", () => {
           exitCode: 0,
           status: "completed",
         });
-        const readBack = recorder.queryRequests<{ id: string; response: string }>(
+        const readBack = await recorder.queryRequests<{ id: string; response: string }>(
           "SELECT id, response FROM requests WHERE id = ?",
           "post-recovery-1"
         );
@@ -321,7 +321,7 @@ describe("cross-engine WAL crash-recovery (plan B3/B8)", () => {
         expect(readBack[0].response).toBe("ok");
 
         // create/update/get a job through the production store.
-        store.recordStart({
+        await store.recordStart({
           id: "post-recovery-job",
           correlationId: "corr-pr",
           requestKey: "rk-pr",
@@ -330,7 +330,7 @@ describe("cross-engine WAL crash-recovery (plan B3/B8)", () => {
           startedAt: new Date().toISOString(),
           pid: 999,
         });
-        store.recordComplete({
+        await store.recordComplete({
           id: "post-recovery-job",
           status: "completed",
           exitCode: 0,
@@ -340,24 +340,24 @@ describe("cross-engine WAL crash-recovery (plan B3/B8)", () => {
           error: null,
           finishedAt: new Date().toISOString(),
         });
-        const prJob = store.getById("post-recovery-job");
+        const prJob = await store.getById("post-recovery-job");
         expect(prJob?.status).toBe("completed");
         expect(prJob?.stdout).toBe("done");
 
         // Total rows now = seeded + the one we just added.
-        const finalReqs = recorder.queryRequests<{ c: number }>(
+        const finalReqs = await recorder.queryRequests<{ c: number }>(
           "SELECT COUNT(*) AS c FROM requests"
         );
         expect(Number(finalReqs[0].c)).toBe(LOG_ROWS + 1);
 
         // (c) integrity_check returns ok through the production read path.
-        const logsIntegrity = recorder.queryRequests<{ integrity_check: string }>(
+        const logsIntegrity = await recorder.queryRequests<{ integrity_check: string }>(
           "PRAGMA integrity_check"
         );
         expect(logsIntegrity[0].integrity_check).toBe("ok");
       } finally {
-        recorder.close();
-        store.close();
+        await recorder.close();
+        await store.close();
       }
 
       // Independent integrity_check on jobs.db via a raw node:sqlite reader
@@ -382,7 +382,7 @@ describe("cross-engine WAL crash-recovery (plan B3/B8)", () => {
   // left behind, including WAL-only rows.
   // ───────────────────────────────────────────────────────────────────────
   describe("Direction 2 — rollback: node:sqlite production writer → better-sqlite3 reader", () => {
-    it("better-sqlite3 recovers WAL-only rows that node:sqlite production modules wrote", () => {
+    it("better-sqlite3 recovers WAL-only rows that node:sqlite production modules wrote", async () => {
       // ── Arrange: write through the production FlightRecorder + SqliteJobStore
       //    (both run PRAGMA journal_mode = WAL in their constructors). Turn
       //    autocheckpoint OFF on each connection so rows stay in the WAL. ──
@@ -403,13 +403,13 @@ describe("cross-engine WAL crash-recovery (plan B3/B8)", () => {
       // main-db-only delta guard below proves rows are genuinely WAL-resident.
       const LOG_ROWS = 50;
       for (let i = 0; i < LOG_ROWS; i++) {
-        recorder.logStart({
+        await recorder.logStart({
           correlationId: `prod-req-${i}`,
           cli: "claude",
           model: "sonnet",
           prompt: `p ${i}`,
         });
-        recorder.logComplete(`prod-req-${i}`, {
+        await recorder.logComplete(`prod-req-${i}`, {
           response: `r ${i}`,
           durationMs: i,
           retryCount: 0,
@@ -422,7 +422,7 @@ describe("cross-engine WAL crash-recovery (plan B3/B8)", () => {
 
       const JOB_ROWS = 35;
       for (let i = 0; i < JOB_ROWS; i++) {
-        store.recordStart({
+        await store.recordStart({
           id: `prod-job-${i}`,
           correlationId: `c-${i}`,
           requestKey: `k-${i}`,
@@ -431,7 +431,7 @@ describe("cross-engine WAL crash-recovery (plan B3/B8)", () => {
           startedAt: new Date().toISOString(),
           pid: i,
         });
-        store.recordComplete({
+        await store.recordComplete({
           id: `prod-job-${i}`,
           status: "completed",
           exitCode: 0,
@@ -466,8 +466,8 @@ describe("cross-engine WAL crash-recovery (plan B3/B8)", () => {
       const jobsMainOnly = mainDbOnlyCopy(jobsPath, mainOnlyDir);
 
       // Close production connections (snapshot already captured = crash).
-      recorder.close();
-      store.close();
+      await recorder.close();
+      await store.close();
 
       // Snapshots carry a non-empty WAL.
       expect(statSync(logsSnap + "-wal").size).toBeGreaterThan(0);

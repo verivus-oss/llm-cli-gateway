@@ -63,12 +63,31 @@ const MIN1_STRINGS = [
   "promptFile",
   "leaderSocket",
 ];
+// Only flags the BINARY constrains belong here. `values` is a rejection list, so
+// an entry that grok does not actually enforce refuses input it would parse.
+//
+// `effort` was removed from this list in 3.1.0. grok 1.0.4 declares
+// `--reasoning-effort <EFFORT>` with `[aliases: --effort]` and no possible-values
+// set, and accepts any value at parse. Verified with a control that proves the
+// probe can see an enum: `grok --output-format xml` is rejected with
+// `[possible values: plain, json, streaming-json, streaming-messages-json]`,
+// while `grok --effort bogus` falls through to the missing-prompt error.
+// See src/__tests__/grok-effort-passthrough.test.ts.
 const ENUMS: Array<[string, string, string]> = [
   ["outputFormat", "xml", "json"],
-  ["effort", "bogus", "high"],
+  // VERIFIED CORRECT, not invented. grok's clap does not reject an out-of-list
+  // value at parse (`--compaction-mode nope` is accepted), which initially looked
+  // like the --effort defect. It is not: both flags are `hiddenFromHelp`, so
+  // their documentation never reaches rendered `--help`, but the binary carries
+  // it and `strings` on the executable recovers it verbatim:
+  //   "Compaction mode [summary|transcript|segments] ... Sets GROK_COMPACTION_MODE"
+  //   "Segments verbatim detail [none|minimal|balanced|verbose] (default verbose)"
+  // The contract's lists match those exactly, so enforcing them refuses nothing
+  // the binary documents as supported.
   ["compactionMode", "nope", "summary"],
   ["compactionDetail", "loud", "verbose"],
 ];
+const FREE_STRINGS_NOT_ENUMS = ["effort", "reasoningEffort"];
 
 describe("grok schema fidelity (pre/post cutover)", () => {
   // Both request tools, because they diverged. `grok_request` spreads the
@@ -136,6 +155,19 @@ describe("grok schema fidelity (pre/post cutover)", () => {
       expect(schema.safeParse({ prompt: "x", [f]: good }).success, `${f} must accept ${good}`).toBe(
         true
       );
+    }
+  });
+
+  it("does NOT constrain fields the binary leaves unconstrained", () => {
+    // The other half of the control. Without this, deleting an entry from ENUMS
+    // silently reduces coverage and nothing notices; with it, a future change
+    // that re-adds an invented enum fails here.
+    const schema = grokSchema();
+    for (const f of FREE_STRINGS_NOT_ENUMS) {
+      expect(
+        schema.safeParse({ prompt: "x", [f]: "ludicrous" }).success,
+        `${f} must accept an undeclared value`
+      ).toBe(true);
     }
   });
 

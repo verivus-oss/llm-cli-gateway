@@ -52,7 +52,7 @@ describe("Personal Agent Config Kit durable request keys", () => {
     };
 
     try {
-      const first = firstManager.startJobWithDedup(
+      const first = await firstManager.startJobWithDedup(
         "sh" as LlmCli,
         ["-c", "sleep 0.2", "kit-private-argv", firstPrivate.arg],
         "kit-request-key-first",
@@ -65,7 +65,7 @@ describe("Personal Agent Config Kit durable request keys", () => {
           onTerminal: () => {},
         }
       );
-      const second = secondManager.startJobWithDedup(
+      const second = await secondManager.startJobWithDedup(
         "sh" as LlmCli,
         ["-c", "sleep 0.2", "kit-private-argv", secondPrivate.arg],
         "kit-request-key-second",
@@ -82,8 +82,8 @@ describe("Personal Agent Config Kit durable request keys", () => {
       expect(first.deduped).toBe(false);
       expect(second.deduped).toBe(false);
 
-      const firstRecord = firstStore.getById(jobId);
-      const secondRecord = secondStore.getById(jobId);
+      const firstRecord = await firstStore.getById(jobId);
+      const secondRecord = await secondStore.getById(jobId);
       const expectedRequestKey = `kit:${jobId}`;
 
       expect(firstRecord?.requestKey).toBe(expectedRequestKey);
@@ -100,8 +100,8 @@ describe("Personal Agent Config Kit durable request keys", () => {
         firstManager.dispose({ timeoutMs: 1_000 }),
         secondManager.dispose({ timeoutMs: 1_000 }),
       ]);
-      firstStore.close();
-      secondStore.close();
+      await firstStore.close();
+      await secondStore.close();
     }
   });
 });

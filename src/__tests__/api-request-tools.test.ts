@@ -225,7 +225,7 @@ describe("Slice 2 — api provider request handlers (loopback)", () => {
       defaultModel: "qwen2.5",
       apiKey: "",
     };
-    const res = handleApiProviderRequestAsync(runtime, providerRuntime, { prompt: "go" });
+    const res = await handleApiProviderRequestAsync(runtime, providerRuntime, { prompt: "go" });
     const parsed = JSON.parse(res.content[0].text);
     expect(parsed.status).toBe("deferred");
     expect(parsed.jobId).toBeTruthy();
@@ -299,10 +299,10 @@ describe("Slice 2 — registration gating", () => {
 class CapturingFlightRecorder extends NoopFlightRecorder {
   starts: FlightLogStart[] = [];
   completes: Array<{ correlationId: string; result: FlightLogResult }> = [];
-  logStart(entry: FlightLogStart): void {
+  async logStart(entry: FlightLogStart): Promise<void> {
     this.starts.push(entry);
   }
-  logComplete(correlationId: string, result: FlightLogResult): void {
+  async logComplete(correlationId: string, result: FlightLogResult): Promise<void> {
     this.completes.push({ correlationId, result });
   }
 }

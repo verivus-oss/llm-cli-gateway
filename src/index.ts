@@ -144,7 +144,7 @@ import {
   type KitSessionAttempt,
   type KitSessionBinding,
 } from "./personal-config-types.js";
-import { buildRouterEnv, toRouterConfig } from "./lcr-router-env.js";
+import { buildRouterEnv, resolveRouterPriors, toRouterConfig } from "./lcr-router-env.js";
 import { getModelCost, composeCost, modelIdToFamily } from "./pricing.js";
 import { telemetryTierFor } from "./lcr-telemetry.js";
 import type { TokenCounts, CostBasis } from "./least-cost-types.js";
@@ -157,7 +157,7 @@ import {
   type RequiredCapabilities as RouterRequiredCapabilities,
 } from "./least-cost-router.js";
 import { loadGatewaySkills, type SkillEntry } from "./skill-loader.js";
-import { runAcpRequest, type AcpFlightSink } from "./acp/runtime.js";
+import { runAcpRequest } from "./acp/runtime.js";
 import { isAcpError } from "./acp/errors.js";
 import { redactSecrets } from "./secret-redaction.js";
 import {
@@ -214,8 +214,9 @@ import {
   type AsyncJobUsageExtractor,
   type AsyncJobErrorCategory,
   type AsyncJobSnapshot,
+  type StartJobOutcome,
 } from "./async-job-manager.js";
-import { createJobStore, type JobStore } from "./job-store.js";
+import { createJobStore, isValidationRunStore, type JobStore } from "./job-store.js";
 import {
   MCP_ARTIFACT_RECOVERY_ACKNOWLEDGEMENT,
   recoverMcpArtifactCleanupPin,
@@ -278,7 +279,18 @@ import {
   normalizeCliInputAdmissionError,
   planCodexStdinPrompt,
 } from "./cli-input-limits.js";
-import { createFlightRecorder, FlightRecorderLike } from "./flight-recorder.js";
+import {
+  createFlightRecorder,
+  flightRecorderEngineDecision,
+  flightRecorderHealth,
+  flightRecorderHealthMessage,
+  flightRecorderReadsAreAuthoritative,
+  type FlightRecorderState,
+  resolveFlightRecorderDbPath,
+  FlightRecorderLike,
+} from "./flight-recorder.js";
+import { FlightOwnership } from "./flight-ownership.js";
+import { formatStorageDisposition, storageDisposition } from "./storage-disposition.js";
 import {
   resolvePromptInput,
   PromptPartsSchema,
@@ -289,7 +301,10 @@ import {
   computeSessionCacheStats,
   computeTtlRemaining,
   readPersistedRequest,
+  listPersistedRequests,
   PERSISTED_REQUEST_DEFAULT_MAX_CHARS,
+  PERSISTED_REQUEST_LIST_DEFAULT_LIMIT,
+  PERSISTED_REQUEST_LIST_MAX_LIMIT,
 } from "./cache-stats.js";
 import { getCliVersions, buildCliUpgradePlan, runCliUpgrade } from "./cli-updater.js";
 import { compareInstalledToTargets, summarizeVersionGuard } from "./provider-version-guard.js";
@@ -298,11 +313,21 @@ import { checkUpgradeAvailability, upgradableProviders } from "./provider-upgrad
 import { startHttpGateway, type HttpGatewayHandle } from "./http-transport.js";
 import {
   getRequestContext,
+  isRemotePrincipal,
   resolveOwnerPrincipal,
   principalCanAccess,
   runWithRequestContext,
 } from "./request-context.js";
+import { passthroughArgvOrRejection, type PassthroughFlags } from "./provider-passthrough.js";
 import { printDoctorJson } from "./doctor.js";
+import { runStorageCommand } from "./storage-cli.js";
+import { RetentionSweeper } from "./storage/retention-sweeper.js";
+import {
+  DEFAULT_RETENTION_SWEEP_INTERVAL_MS,
+  persistenceRetentionPolicy,
+  resolveRetentionPolicy,
+  unboundedRetentionSubsystems,
+} from "./storage/retention.js";
 import { redactDiagnosticUrl } from "./endpoint-exposure.js";
 import { PrepPhase, PrepPipeline, type PrepStage } from "./prep-pipeline.js";
 import { applyProviderDisplayText } from "./provider-display.js";
@@ -331,6 +356,7 @@ import { resolveLocalReviewRepositoryRoot } from "./review-scope.js";
 import { currentCaller, resolveValidationReceipt } from "./validation-receipt.js";
 import {
   assertUpstreamCliArgs,
+  resolvedFlagFacts,
   assertUpstreamCliSubcommandArgs,
   assertUpstreamCliEnv,
   buildProviderSubcommandsCompactCatalog,
@@ -591,7 +617,7 @@ export function buildServerInstructions(
 
 Tools: ${syncRequestToolList}${apiToolsNote} (sync)${asyncToolsNote} | codex_fork_session (UNAVAILABLE: codex fork needs a terminal; use codex_request with a session UUID or resumeLatest instead)
 ${validationLine}${jobsLine}Sessions: session_create, session_list, session_set_active, session_get, session_delete, session_clear_all
-Other: list_models, provider_tool_capabilities, cli_versions, upstream_contracts, provider_subcommands_* (read-only subcommand contract/drift introspection), cli_upgrade, approval_list, llm_process_health, llm_request_result (read back any persisted request, sync or async, by correlationId)
+Other: list_models, provider_tool_capabilities, cli_versions, upstream_contracts, provider_subcommands_* (read-only subcommand contract/drift introspection), cli_upgrade, approval_list, llm_process_health, llm_request_result (read back any persisted request, sync or async, by correlationId), llm_request_list (find a request when you have NO correlationId; returns ids to pass to the two above)
 Workspaces: workspace_create, workspace_list, workspace_get, workspace_register_existing_repo (remote HTTP/OAuth workspace registry only; do not use workspace_* to fix stdio/local provider path access)
 
 Key behaviors:
@@ -653,7 +679,13 @@ let asyncJobManager: AsyncJobManager | null = null;
 let approvalManager: ApprovalManager | null = null;
 
 function getFlightRecorder(runtimeLogger: GatewayLogger = logger): FlightRecorderLike {
-  flightRecorder ??= createFlightRecorder(runtimeLogger);
+  // The recorder is told what `[persistence].backend` asked for AND which
+  // credentials it may hold. It honours "postgres" when the deployment shape
+  // admits transcript bodies and refuses out loud otherwise: see
+  // flightRecorderEngineDecision. Resolved through getPersistenceConfig so the
+  // config is loaded once for both subsystems.
+  const persistence = getPersistenceConfig(runtimeLogger);
+  flightRecorder ??= createFlightRecorder(runtimeLogger, persistence.backend, persistence.roleDsns);
   return flightRecorder;
 }
 
@@ -698,6 +730,16 @@ function getProvidersConfig(runtimeLogger: GatewayLogger = logger): ProvidersCon
   providersConfig ??= loadProvidersConfig(runtimeLogger);
   return providersConfig;
 }
+
+/**
+ * The retention sweeper, or null when this process never built one.
+ *
+ * Module-level rather than a `GatewayServerDeps` member: a test that builds a
+ * server would then have to build a sweeper, and `llm_process_health` reporting
+ * `null` for a process that has none is the truthful answer rather than a
+ * constructed one. It is only ever built by `main()`.
+ */
+let retentionSweeper: RetentionSweeper | null = null;
 
 function getJobStore(runtimeLogger: GatewayLogger = logger): JobStore | null {
   if (jobStoreInitialized) return jobStore;
@@ -935,7 +977,23 @@ const CODEX_PART_A_FIELDS = {
  * The remaining grok_request fields (prompt, model, session, approval, agents,
  * promptJson, nativeWorktree, …) stay hand-written — they need bespoke schemas.
  */
+//
+// HAND-MAINTAINED DUPLICATE of the generation table's `requestParameter`
+// values, and therefore an instance of the exact class this repo keeps being
+// bitten by: one fact spelled in two places. Restoring `bestOfN` and `check`
+// needed an edit here as well as the table row, and a future addition will too.
+//
+// The fix is to derive it:
+//   export const GROK_FLAG_GENERATION = [ ... ] as const satisfies readonly FlagGenerationMeta[];
+//   type GrokGeneratedField = (typeof GROK_FLAG_GENERATION)[number]["requestParameter"];
+// which needs the table to carry literal types rather than the current
+// `readonly FlagGenerationMeta[]` annotation that widens them to `string`.
+// Deliberately NOT done here: this change landed as a release-blocking
+// capability revert and a type-system refactor does not belong in it. Tracked
+// as n2 work in docs/plans/gateway-passthrough-policy.dag.toml.
 type GrokGeneratedField =
+  | "bestOfN"
+  | "check"
   | "outputFormat"
   | "effort"
   | "reasoningEffort"
@@ -968,8 +1026,41 @@ type GrokGeneratedField =
 // come from the contract-derived shape (proven equivalent by the schema golden).
 const GROK_GENERATED_SHAPE = deriveZodShapeFromGeneration(
   UPSTREAM_CLI_CONTRACTS.grok,
-  GROK_FLAG_GENERATION
+  GROK_FLAG_GENERATION,
+  // d4c: enums come from the merged surface, so a seed or a pack can correct one
+  // without a release. Today it resolves identically to the contract, which is
+  // the point: the fixture must not move on a change that only relocates a
+  // source of truth.
+  flag => resolvedFlagFacts("grok", flag)
 ) as unknown as Record<GrokGeneratedField, z.ZodTypeAny>;
+
+/**
+ * n3: the generic pass-through field, declared ONCE and shared by every request
+ * tool that offers it.
+ *
+ * This is the field that makes per-install discovery mean anything. Every other
+ * field in these schemas is an implicit allowlist entry, so before this existed
+ * a customer whose binary had a flag we had not typed could not use it, however
+ * well the gateway had discovered it.
+ *
+ * Declared once because the sync and async grok schemas have already diverged
+ * twice on hand-copied fields (outputFormat, then effort), each time producing a
+ * request that succeeded or failed depending only on which tool was called.
+ */
+const PROVIDER_FLAGS_SHAPE = z
+  .record(z.string(), z.union([z.string(), z.number(), z.boolean(), z.array(z.string())]))
+  .optional()
+  .describe(
+    "Flags passed to the provider binary verbatim, keyed exactly as the binary spells them " +
+      '(e.g. {"--best-of-n": "3", "--verbatim": true, "--rules": ["a", "b"]}). Use this for any ' +
+      "flag your installed CLI accepts that this schema does not name: the binary decides what " +
+      "it supports, not the gateway. true emits the flag alone; a list REPEATS the flag once per " +
+      "item (pass a joined string if your CLI wants a comma-separated value). Values may not " +
+      "start with '-', and a flag the gateway is already emitting for this request is refused " +
+      "rather than duplicated. LOCAL stdio callers only: remote HTTP/OAuth callers are refused " +
+      "every flag here and should use this tool's declared parameters, which carry their own " +
+      "host-path and approval gates."
+  );
 // Token budgets can legitimately exceed the agent-turn cap by orders of
 // magnitude. Keep a finite operational guardrail while avoiding the 10k turn
 // ceiling that would make large-context Vibe sessions unusable.
@@ -1111,6 +1202,16 @@ function providerWorkspaceAliasSchema(): z.ZodOptional<typeof WORKSPACE_ALIAS_SC
 
 // Session-provider enum includes spawnable CLIs plus API-backed providers.
 // Keep CLI-only surfaces (contracts, status, updater) on CLI_TYPES.
+/**
+ * Every CLI provider name, pipe-joined, for use inside tool `describe` prose.
+ *
+ * Prose is a published provider surface: these strings reach
+ * site/tools.fixture.json and every MCP client. Twelve of them were maintained
+ * by hand, and the `session_*` set had drifted to six names while the enum in
+ * the same schema accepted eight. Derive, never spell.
+ */
+const CLI_PROVIDER_LABEL = CLI_TYPES.join("|");
+
 export const SESSION_PROVIDER_VALUES = PROVIDER_TYPES;
 export const SESSION_PROVIDER_ENUM = z.enum(SESSION_PROVIDER_VALUES);
 
@@ -1496,7 +1597,10 @@ export async function runAcpTransport(
         config: runtime.acpConfig,
         sessionManager: runtime.sessionManager,
         approvalManager: runtime.approvalManager,
-        flightRecorder: runtime.flightRecorder as AcpFlightSink,
+        // No `as AcpFlightSink` cast. The cast was what let the sink's `void`
+        // return types absorb the recorder's promises; a structural match is
+        // now a compile error the moment the two diverge again.
+        flightRecorder: runtime.flightRecorder,
         logger: runtime.logger,
       },
       {
@@ -1651,7 +1755,13 @@ async function awaitJobOrDefer(
    * session capture on the deferred path. Process-local, never persisted. Set only
    * for mistral Kit jobs; undefined for every other request.
    */
-  kitNativeCaptureSessionDir?: string
+  kitNativeCaptureSessionDir?: string,
+  /**
+   * The caller's `providerFlags`, needed because this function re-runs the argv
+   * contract assertion on the deferred path. Omitting it re-refuses every
+   * pass-through flag the sync handler already admitted.
+   */
+  passthroughFlags?: Readonly<Record<string, unknown>>
 ): Promise<InlineJobResponse | DeferredJobResponse> {
   // U26 fix: ownership of onComplete is a contract. Once this function returns
   // OR throws, the caller MUST consider onComplete consumed — i.e. it has
@@ -1677,7 +1787,7 @@ async function awaitJobOrDefer(
       }
       assertUpstreamCliSubcommandArgs(cli, subcommandPath, args.slice(subcommandPath.length));
     } else {
-      assertUpstreamCliArgs(cli, args);
+      assertUpstreamCliArgs(cli, args, passthroughFlags);
     }
     assertUpstreamCliEnv(cli, env);
     assertFinalCliProcessAdmission(providerCommandName(cli), args, cli, env);
@@ -1692,6 +1802,14 @@ async function awaitJobOrDefer(
   // jobId would be a dead end — run to completion instead. A null-store
   // manager would otherwise still accept in-memory jobs (safeStoreCall
   // tolerates store === null), making the mismatch reachable.
+  // Cross the manager's startup barrier before reading its admission snapshot.
+  // canAdmitDurableJobs() is SYNCHRONOUS by design and cannot wait for
+  // anything, so inside the startup window it answers false and this request
+  // silently takes a different path: no deferral, and for a Kit attempt a
+  // kit_busy refusal. main() awaits the same barrier before connecting a
+  // transport, but createGatewayServer is an exported entry point that any
+  // embedder can drive without going through main().
+  await runtime.asyncJobManager.whenStartupSettled();
   const deferralAvailable =
     runtime.persistence.backend !== "none" &&
     runtime.persistence.asyncJobsEnabled &&
@@ -1744,9 +1862,19 @@ async function awaitJobOrDefer(
     }
   }
 
-  let outcome;
+  // AWAITED INSIDE THE TRY, and that is the whole point. While
+  // startJobWithDedup was synchronous a pre-spawn failure threw here and this
+  // catch reclaimed onComplete. C3 made it async, so the failure became a
+  // rejection that surfaced at the `await` on the next line, OUTSIDE the try:
+  // the catch was dead, `onCompleteOwnedByCaller = false` ran unconditionally,
+  // and the contract documented above told the caller not to reclaim either.
+  // Three real rejection paths land here (throws before `this.jobs.set`, the
+  // JobSaturationError after `this.jobs.delete`, and recordStartOrFailClosed),
+  // so a fail-closed durable start leaked the outputSchema temp file, the
+  // Claude MCP artifact or the worktree that onComplete was to clean up.
+  let outcome: StartJobOutcome;
   try {
-    outcome = runtime.asyncJobManager.startJobWithDedup(cli, args, corrId, {
+    outcome = await runtime.asyncJobManager.startJobWithDedup(cli, args, corrId, {
       cwd,
       idleTimeoutMs,
       outputFormat,
@@ -1790,7 +1918,7 @@ async function awaitJobOrDefer(
   const deadline = Date.now() + SYNC_DEADLINE_MS;
 
   while (Date.now() < deadline) {
-    const snapshot = runtime.asyncJobManager.getJobSnapshot(job.id);
+    const snapshot = await runtime.asyncJobManager.getJobSnapshot(job.id);
     if (snapshot && !isAsyncJobInProgress(snapshot.status)) {
       // Terminal hooks own every durable Kit update. A terminal process can be
       // observed before its async hook finishes, so never expose an inline
@@ -1800,7 +1928,7 @@ async function awaitJobOrDefer(
         if (!finalized) throw new KitTerminalFinalizationError(job.id);
       }
       // Job finished within deadline — extract result
-      const result = runtime.asyncJobManager.getJobResult(job.id);
+      const result = await runtime.asyncJobManager.getJobResult(job.id);
       if (!result) {
         return { stdout: "", stderr: "Job result unavailable", code: 1, jobId: job.id };
       }
@@ -1889,6 +2017,14 @@ async function awaitApiJobOrDefer(
     }
   };
 
+  // Cross the manager's startup barrier before reading its admission snapshot.
+  // canAdmitDurableJobs() is SYNCHRONOUS by design and cannot wait for
+  // anything, so inside the startup window it answers false and this request
+  // silently takes a different path: no deferral, and for a Kit attempt a
+  // kit_busy refusal. main() awaits the same barrier before connecting a
+  // transport, but createGatewayServer is an exported entry point that any
+  // embedder can drive without going through main().
+  await runtime.asyncJobManager.whenStartupSettled();
   const deferralAvailable =
     runtime.persistence.backend !== "none" &&
     runtime.persistence.asyncJobsEnabled &&
@@ -1936,9 +2072,12 @@ async function awaitApiJobOrDefer(
     }
   }
 
-  let outcome;
+  // Awaited inside the try for the reason given at the CLI sibling above: an
+  // async startHttpJob delivers its failure as a rejection, which an unawaited
+  // assignment carries straight past this catch and out of the function.
+  let outcome: StartJobOutcome;
   try {
-    outcome = runtime.asyncJobManager.startHttpJob({
+    outcome = await runtime.asyncJobManager.startHttpJob({
       provider,
       apiRequest,
       correlationId: corrId,
@@ -1961,9 +2100,9 @@ async function awaitApiJobOrDefer(
   }
   const deadline = Date.now() + SYNC_DEADLINE_MS;
   while (Date.now() < deadline) {
-    const snapshot = runtime.asyncJobManager.getJobSnapshot(job.id);
+    const snapshot = await runtime.asyncJobManager.getJobSnapshot(job.id);
     if (snapshot && !isAsyncJobInProgress(snapshot.status)) {
-      const result = runtime.asyncJobManager.getJobResult(job.id);
+      const result = await runtime.asyncJobManager.getJobResult(job.id);
       if (!result) return { stdout: "", stderr: "Job result unavailable", code: 1 };
       return {
         stdout: result.stdout,
@@ -2267,6 +2406,79 @@ function sessionBoundDedupArgs(args: readonly string[], sessionId?: string): str
   return sessionId ? ["gateway-session-binding", sessionId, ...args] : [...args];
 }
 
+/**
+ * Perform a session write and refuse to lose it in silence.
+ *
+ * Every caller here goes on to report the session id in a successful response.
+ * A discarded `false` therefore hands the caller a handle that resolves to
+ * nothing, and the next resume starts a fresh conversation without saying so.
+ * The write itself no longer deletes an expiring session (see
+ * FileSessionManager.updateSessionUsage), so a `false` now means the row is
+ * genuinely gone or the store is unwritable.
+ */
+async function recordSessionWrite(
+  runtime: GatewayServerRuntime,
+  corrId: string,
+  sessionId: string,
+  write: () => boolean | Promise<boolean>
+): Promise<boolean> {
+  const persisted = await Promise.resolve(write());
+  if (!persisted) {
+    runtime.logger.warn(
+      `[${corrId}] session ${sessionId} write did not land; the session is not resumable`
+    );
+  }
+  return persisted;
+}
+
+/**
+ * Write a continuation handle onto the exact session state it was derived from.
+ *
+ * An unfenced JSON merge lands whenever it arrives, and two turns of one session
+ * do not arrive in the order they were decided. MEASURED against a real
+ * PostgreSQL server through this very request path: with two concurrent turns
+ * on one session, the EARLIER turn's handle was the one left in the row 3 times
+ * in 200 pairs, and both callers were told the write succeeded. The compare
+ * half is the metadata the turn read at resolution, so a turn whose basis has
+ * moved on refuses instead of restoring an older thread, and the refusal is
+ * reported rather than swallowed.
+ */
+async function persistSessionContinuation(
+  runtime: GatewayServerRuntime,
+  corrId: string,
+  session: Session,
+  expectedMetadata: Record<string, any>,
+  patch: Record<string, any>
+): Promise<{ persisted: boolean; metadata: Record<string, any> }> {
+  const next = { ...expectedMetadata, ...patch };
+  if (typeof session.generation !== "string" || session.generation.length === 0) {
+    // Both stores mint a generation at creation and backfill it on load, so
+    // this is unreachable today. Degrade LOUDLY rather than silently dropping
+    // the fence if a store ever hands back a row without one.
+    runtime.logger.warn(
+      `[${corrId}] session ${session.id} has no generation fence; continuation write is unfenced`
+    );
+    const merged = await recordSessionWrite(runtime, corrId, session.id, () =>
+      runtime.sessionManager.updateSessionMetadata(session.id, patch)
+    );
+    return { persisted: merged, metadata: merged ? next : expectedMetadata };
+  }
+  const persisted = await Promise.resolve(
+    runtime.sessionManager.compareAndSetSession(sessionGenerationIdentity(session), {
+      kind: "replace_metadata",
+      expectedMetadata,
+      metadata: next,
+    })
+  );
+  if (!persisted) {
+    runtime.logger.warn(
+      `[${corrId}] session ${session.id} continuation write lost to a concurrent turn; this turn is not resumable`
+    );
+    return { persisted: false, metadata: expectedMetadata };
+  }
+  return { persisted: true, metadata: next };
+}
+
 async function safeUpdateSessionUsageAfterJobAdmission(
   sessionManager: ISessionManager,
   sessionId: string | undefined,
@@ -2274,7 +2486,9 @@ async function safeUpdateSessionUsageAfterJobAdmission(
 ): Promise<void> {
   if (!sessionId) return;
   try {
-    await Promise.resolve(sessionManager.updateSessionUsage(sessionId));
+    if (!(await Promise.resolve(sessionManager.updateSessionUsage(sessionId)))) {
+      runtime.logger.warn(`Job admitted but session ${sessionId} no longer exists`);
+    }
   } catch (error) {
     runtime.logger.warn(
       `Job admitted but session usage update failed for ${sessionId}: ${error instanceof Error ? error.message : String(error)}`
@@ -2479,71 +2693,12 @@ class RequestTerminalLedger {
 }
 
 /**
- * Tier-B T3: FlightOwnership.
- *
- * Names the flight-recorder completion-ownership contract for a sync request so
- * the terminal branches stop open-coding "did we hand completion to the manager?".
- * The three modes (spec section 3):
- *  - Mode A (handler-owned inline): the handler writes BOTH flight ends - `start()`
- *    for `logStart`, `completeInline(...)` for `logComplete`.
- *  - Mode B (handler-start / manager-complete): the handler wrote `logStart`, then
- *    at the sync deadline `awaitJobOrDefer` arms the async manager
- *    (`armFlightCompleteForDeferral`, index.ts:1719) and returns a deferral. From
- *    that instant the manager owns `logComplete`, so the handler must NOT inline-
- *    complete. Enforcing that on the exceptional catch path is what fences the
- *    pre-existing H-DoubleComplete hazard (spec section 4): a rejecting
- *    post-handoff `finishHandler()` used to still reach the unconditional inline
- *    `safePersonalKitFlightComplete`, writing a SECOND completion after the manager
- *    was armed to own it.
- *  - Mode C (manager-owned): the pure `*_request_async` path; these sync handlers
- *    never construct a Mode C FlightOwnership.
- *
- * The two sync Kit-sibling handlers (claude, codex-sync) begin in Mode A and
- * transition to Mode B the instant they observe a deferral (`isDeferredResponse`),
- * signalled by `transferCompletionToManager()`. `completeInline()` is the single
- * gate: a no-op once completion belongs to the manager, so the handler can never
- * double-complete a flight the manager was armed to finish.
- *
- * Generic machinery (spec section 5): the actual `logStart` / `logComplete` writes
- * carry Kit redaction and per-provider metadata, so they are injected as closures;
- * this unit owns only WHO completes the flight, never WHAT is written.
+ * Tier-B T3 FlightOwnership now lives in src/flight-ownership.ts, with its two
+ * `() => void` slots converted to the port's FlightStartSink/FlightCompleteSink
+ * (s6). The three modes and the H-DoubleComplete fence are documented there;
+ * what changed here is that `start()` and `completeInline()` return promises,
+ * and every terminal branch awaits them.
  */
-class FlightOwnership {
-  private started = false;
-  private managerOwnsCompletion = false;
-  private readonly startFn: () => void;
-  private readonly completeFn: (result: Parameters<FlightRecorderLike["logComplete"]>[1]) => void;
-
-  constructor(
-    startFn: () => void,
-    completeFn: (result: Parameters<FlightRecorderLike["logComplete"]>[1]) => void
-  ) {
-    this.startFn = startFn;
-    this.completeFn = completeFn;
-  }
-
-  /** Write the flight `logStart` (Mode A/B, handler-start). Idempotent. */
-  start(): void {
-    if (this.started) return;
-    this.startFn();
-    this.started = true;
-  }
-
-  /** Mode A -> B transition: the sync deadline handed `logComplete` to the async
-   *  manager (armed in `awaitJobOrDefer`), so every subsequent inline completion -
-   *  including on the exceptional catch path - becomes a no-op. This is the
-   *  H-DoubleComplete fence (spec section 4). */
-  transferCompletionToManager(): void {
-    this.managerOwnsCompletion = true;
-  }
-
-  /** Write an inline `logComplete` (Mode A). A no-op once the manager owns
-   *  completion (Mode B/C). */
-  completeInline(result: Parameters<FlightRecorderLike["logComplete"]>[1]): void {
-    if (this.managerOwnsCompletion) return;
-    this.completeFn(result);
-  }
-}
 
 /**
  * Tier-B T4: the terminal-envelope driver.
@@ -2705,7 +2860,7 @@ interface KitTerminalHooks<TFacts = undefined> {
     stdout: string;
     durationMs: number;
     facts: TFacts;
-  }): ExtendedToolResponse;
+  }): Promise<ExtendedToolResponse> | ExtendedToolResponse;
 }
 
 async function runKitTerminalEnvelope<TFacts>(
@@ -2762,7 +2917,7 @@ async function runKitTerminalEnvelope<TFacts>(
         await hooks.finalizeKit({ completed: false, stdout, result });
       }
       logger.info(`[${corrId}] ${provider}_request failed in ${durationMs}ms`);
-      flight.completeInline({
+      await flight.completeInline({
         ...terminalFailure,
         durationMs,
         retryCount: 0,
@@ -2793,7 +2948,7 @@ async function runKitTerminalEnvelope<TFacts>(
     if (kit && kitSession && !result.jobId) {
       await hooks.finalizeKit({ completed: true, stdout, result });
     }
-    return hooks.buildSuccessResponse({ worktreeResolution, stdout, durationMs, facts });
+    return await hooks.buildSuccessResponse({ worktreeResolution, stdout, durationMs, facts });
   } catch (error) {
     await ledger.rollbackOnException(kitSession, env.exceptionRollbackManager);
     await ledger.cleanupOnException(
@@ -2807,7 +2962,7 @@ async function runKitTerminalEnvelope<TFacts>(
     // A no-op once the request deferred (Mode B): the manager owns completion,
     // so a rejecting post-handoff finishHandler() reaching here no longer writes
     // a second flight completion (H-DoubleComplete fence, T3).
-    flight.completeInline({
+    await flight.completeInline({
       response: "",
       durationMs: elapsedMs,
       retryCount: 0,
@@ -3333,8 +3488,7 @@ async function resolveWorkspaceAndWorktreeForRequest(args: {
   // session's metadata.
   const session = await getCallerOwnedSession(args.runtime.sessionManager, args.sessionId);
   const requestContext = getRequestContext();
-  const isRemoteTransport =
-    requestContext?.transport === "http" || requestContext?.authKind === "oauth";
+  const isRemoteTransport = isRemotePrincipal(requestContext);
   // An explicit local workingDir selects the provider's primary checkout. Do
   // not let an implicit default or a previous session's workspace replace or
   // constrain it. Auxiliary addDir/includeDirs flags do not select a cwd, so
@@ -3501,7 +3655,7 @@ function workspaceAdminEnabled(): boolean {
 
 function assertWorkspaceToolCaller(toolName: string): void {
   const context = getRequestContext();
-  if (context?.transport === "http" || context?.authKind === "oauth") return;
+  if (isRemotePrincipal(context)) return;
   throw new Error(
     `${toolName} is only for remote HTTP/OAuth workspace clients. Stdio/local provider calls must not use workspace_* tools for path access; pass workingDir/addDir/includeDirs directly on the provider request instead.`
   );
@@ -4113,24 +4267,30 @@ function personalKitFlightRecorderEntry(
   };
 }
 
-function safeFlightStart(
+/**
+ * s6: the two flight sinks are `FlightStartSink` / `FlightCompleteSink`, so
+ * they return promises and the `await` is INSIDE the try. Without that await
+ * the catch stops firing the moment s7 makes the recorder reject rather than
+ * throw, which is the dead-catch class this programme has already shipped once.
+ */
+async function safeFlightStart(
   entry: Parameters<FlightRecorderLike["logStart"]>[0],
   runtime: GatewayServerRuntime = resolveGatewayServerRuntime()
-): void {
+): Promise<void> {
   try {
-    runtime.flightRecorder.logStart(entry);
+    await runtime.flightRecorder.logStart(entry);
   } catch (error) {
     runtime.logger.error("Flight recorder logStart failed", error);
   }
 }
 
-function safeFlightComplete(
+async function safeFlightComplete(
   correlationId: string,
   result: Parameters<FlightRecorderLike["logComplete"]>[1],
   runtime: GatewayServerRuntime = resolveGatewayServerRuntime()
-): void {
+): Promise<void> {
   try {
-    runtime.flightRecorder.logComplete(correlationId, result);
+    await runtime.flightRecorder.logComplete(correlationId, result);
   } catch (error) {
     runtime.logger.error("Flight recorder logComplete failed", error);
   }
@@ -4171,17 +4331,17 @@ const PERSONAL_KIT_FLIGHT_OUTPUT_WITHHELD =
 const PERSONAL_KIT_FLIGHT_FAILURE_WITHHELD =
   "Personal Agent Config Kit provider execution failed; detailed output is withheld";
 
-function safePersonalKitFlightComplete(
+async function safePersonalKitFlightComplete(
   correlationId: string,
   result: Parameters<FlightRecorderLike["logComplete"]>[1],
   kit: PersonalKitRequestContext | null,
   runtime: GatewayServerRuntime
-): void {
+): Promise<void> {
   if (!kit) {
-    safeFlightComplete(correlationId, result, runtime);
+    await safeFlightComplete(correlationId, result, runtime);
     return;
   }
-  safeFlightComplete(
+  await safeFlightComplete(
     correlationId,
     {
       response: PERSONAL_KIT_FLIGHT_OUTPUT_WITHHELD,
@@ -4226,15 +4386,18 @@ export function resolveEffectiveCompression(
  * compression_* columns only, write-once, never through logComplete. No-op
  * when compression did not change the response.
  */
-function safeRecordCompression(
+async function safeRecordCompression(
   correlationId: string,
   compression: CompressResult | undefined,
   runtime: GatewayServerRuntime,
   suppressForPersonalKit = false
-): void {
+): Promise<void> {
   if (!compression || suppressForPersonalKit) return;
   try {
-    runtime.flightRecorder.recordCompressionTelemetry(correlationId, {
+    // AWAIT INSIDE THE TRY. s6 left this operation off FlightOwnership's chain
+    // deliberately, as one s7 moves; moving it without the await would leave a
+    // catch that can no longer fire.
+    await runtime.flightRecorder.recordCompressionTelemetry(correlationId, {
       route: compression.route,
       transforms: compression.transforms,
       originalChars: compression.originalChars,
@@ -4253,13 +4416,13 @@ function safeRecordCompression(
  * routed request whose row has been written (an inline completion); a deferred
  * route still returns the block in its response.
  */
-function safeRecordRouting(
+async function safeRecordRouting(
   correlationId: string,
   routing: Parameters<FlightRecorderLike["recordRouting"]>[1],
   runtime: GatewayServerRuntime
-): void {
+): Promise<void> {
   try {
-    runtime.flightRecorder.recordRouting(correlationId, routing);
+    await runtime.flightRecorder.recordRouting(correlationId, routing);
   } catch (error) {
     runtime.logger.error("Flight recorder recordRouting failed", error);
   }
@@ -4730,7 +4893,7 @@ export function registerBaseResources(server: McpServer, runtime: GatewayServerR
           ? variables.validationId[0]
           : variables.validationId;
         runtime.logger.debug(`Reading validation-receipt://${validationId}`);
-        const result = resolveValidationReceipt(
+        const result = await resolveValidationReceipt(
           { asyncJobManager: runtime.asyncJobManager, validationRunStore: validationReceiptStore },
           String(validationId),
           { caller: currentCaller() }
@@ -5066,7 +5229,7 @@ function remoteHostPathFieldError(
   fields: Record<string, unknown>
 ): ExtendedToolResponse | null {
   const ctx = getRequestContext();
-  const isRemote = ctx?.transport === "http" || ctx?.authKind === "oauth";
+  const isRemote = isRemotePrincipal(ctx);
   if (!isRemote) return null;
   const present = Object.entries(fields)
     .filter(([, v]) => (Array.isArray(v) ? v.length > 0 : v !== undefined && v !== null))
@@ -5416,6 +5579,8 @@ const claudePrepPipeline = new PrepPipeline<
 
 export function prepareClaudeRequest(
   params: {
+    /** Flags the caller names itself; see src/provider-passthrough.ts. */
+    providerFlags?: PassthroughFlags;
     prompt?: string;
     promptParts?: PromptParts;
     model?: string;
@@ -5818,6 +5983,20 @@ export function prepareClaudeRequest(
       }
     }
 
+    // Pass-through, before the MCP materialisation fence so both admission
+    // checks see the final argv. The prompt terminator is already in args.
+    const pt = passthroughArgvOrRejection(params.providerFlags, "claude", args);
+    if (pt.rejection) {
+      return createErrorResponse(
+        params.operation,
+        1,
+        "",
+        corrId,
+        new Error(pt.rejection)
+      ) as ExtendedToolResponse;
+    }
+    insertCliArgsBeforePrompt(args, pt.args);
+
     // All caller-controlled argv values, including final serialized JSON and
     // the argv-bound prompt, have now passed pure admission. Only now may MCP
     // resolution create its request-scoped config artifact.
@@ -6039,6 +6218,8 @@ function assertCodexKitPreparationControls(
 
 function prepareCodexRequestInternal(
   params: {
+    /** Flags the caller names itself; see src/provider-passthrough.ts. */
+    providerFlags?: PassthroughFlags;
     prompt?: string;
     promptParts?: PromptParts;
     model?: string;
@@ -6429,6 +6610,18 @@ function prepareCodexRequestInternal(
   const promptPlan = planCodexStdinPrompt(effectivePrompt);
   const stdinPayload = promptPlan.stdin;
   appendCliPrompt(args, promptPlan.argument);
+  // Pass-through. The prompt terminator is already in args.
+  const pt = passthroughArgvOrRejection(params.providerFlags, "codex", args);
+  if (pt.rejection) {
+    return createErrorResponse(
+      params.operation,
+      1,
+      "",
+      corrId,
+      new Error(pt.rejection)
+    ) as ExtendedToolResponse;
+  }
+  insertCliArgsBeforePrompt(args, pt.args);
 
   try {
     assertCliArgvUtf8Size("codex", args, { provider: "codex" });
@@ -6573,6 +6766,8 @@ function preAdmitCodexKitRequest(
 
 export function prepareGeminiRequest(
   params: {
+    /** Flags the caller names itself; see src/provider-passthrough.ts. */
+    providerFlags?: PassthroughFlags;
     prompt?: string;
     promptParts?: PromptParts;
     model?: string;
@@ -6797,6 +6992,18 @@ export function prepareGeminiRequest(
     args.push("--print-timeout", params.printTimeout);
   }
 
+  // Pass-through. effectivePrompt is returned separately, so no terminator in args yet.
+  const pt = passthroughArgvOrRejection(params.providerFlags, "gemini", args);
+  if (pt.rejection) {
+    return createErrorResponse(
+      params.operation,
+      1,
+      "",
+      corrId,
+      new Error(pt.rejection)
+    ) as ExtendedToolResponse;
+  }
+  args.push(...pt.args);
   try {
     assertCliArgvUtf8Size("agy", args, { provider: "gemini" });
   } catch (error) {
@@ -6834,6 +7041,13 @@ export function prepareGrokRequest(
     correlationId?: string;
     optimizePrompt: boolean;
     operation: string;
+    /**
+     * n3: flags the gateway has never heard of, passed to the binary verbatim.
+     * The binary is the authority on whether it accepts them; see
+     * src/provider-passthrough.ts for what the gateway still enforces and why
+     * each of those is argv safety rather than a capability judgement.
+     */
+    providerFlags?: PassthroughFlags;
     /**
      * Phase 4 slice δ: emit `--max-turns N` so callers can cap agent-loop
      * iterations for cost / latency control. Mirrors Claude's wiring.
@@ -6879,6 +7093,10 @@ export function prepareGrokRequest(
     /** Grok 0.2.x: `--disable-web-search` disable web search and remote retrieval tools. */
     disableWebSearch?: boolean;
     /** Grok 0.2.x: `--todo-gate` enable runtime turn-end TodoGate for this session. */
+    /** Grok 0.2.x `--best-of-n <N>`: parallel headless attempts. Not advertised by grok 1.0.4+ and passed through anyway: older grok installs still accept it and the binary is the authority. See docs/plans/gateway-passthrough-policy.dag.toml. */
+    bestOfN?: number;
+    /** Grok 0.2.x `--check`: append a self-verification loop. Not advertised by grok 1.0.4+ and passed through anyway: older grok installs still accept it and the binary is the authority. See docs/plans/gateway-passthrough-policy.dag.toml. */
+    check?: boolean;
     todoGate?: boolean;
     /** Grok 0.2.x: `--verbatim` send prompt exactly as given (skips gateway optimization). */
     verbatim?: boolean;
@@ -7144,6 +7362,20 @@ export function prepareGrokRequest(
       assertCliArgUtf8Size(schemaArg, { provider: "grok", inputName: "jsonSchema" });
       args.push("--json-schema", schemaArg);
     }
+    // Pass-through goes LAST, so `alreadyEmitted` is the real assembled argv and
+    // a caller can never displace a gateway token by ordering. No prompt
+    // terminator in `args` here: grok returns effectivePrompt separately.
+    const pt = passthroughArgvOrRejection(params.providerFlags, "grok", args);
+    if (pt.rejection) {
+      return createErrorResponse(
+        params.operation,
+        1,
+        "",
+        corrId,
+        new Error(pt.rejection)
+      ) as ExtendedToolResponse;
+    }
+    args.push(...pt.args);
     assertCliArgvUtf8Size("grok", args, { provider: "grok" });
     return {
       corrId,
@@ -7199,6 +7431,8 @@ export function resolveMistralKitAgentMode(): MistralAgentMode {
 
 export function prepareMistralRequest(
   params: {
+    /** Flags the caller names itself; see src/provider-passthrough.ts. */
+    providerFlags?: PassthroughFlags;
     prompt?: string;
     promptParts?: PromptParts;
     model?: string;
@@ -7324,6 +7558,16 @@ export function prepareMistralRequest(
   } catch (error) {
     return createErrorResponse(params.operation, 1, "", corrId, error as Error);
   }
+
+  // Pass-through. Applied here rather than inside buildMistralCliInvocation
+  // because that lives in request-helpers.ts, which provider-passthrough.ts
+  // already imports; wiring it there would close an import cycle. vibe returns
+  // effectivePrompt separately, so there is no terminator in args.
+  const pt = passthroughArgvOrRejection(params.providerFlags, "mistral", prep.args);
+  if (pt.rejection) {
+    return createErrorResponse(params.operation, 1, "", corrId, new Error(pt.rejection));
+  }
+  prep.args.push(...pt.args);
 
   return {
     corrId,
@@ -7885,7 +8129,7 @@ function materializeClaudeKitArtifact(
 
 function isRemoteGatewayRequest(): boolean {
   const requestContext = getRequestContext();
-  return requestContext?.transport === "http" || requestContext?.authKind === "oauth";
+  return isRemotePrincipal(requestContext);
 }
 
 function personalKitErrorResponse(
@@ -8114,11 +8358,19 @@ function resolvePersonalKitContext(
   return { context };
 }
 
-function resolvePersonalKitRequest(
+/**
+ * Execution-mode Kit context. ASYNC solely to cross the job manager's startup
+ * barrier: `assertKitDurableAdmission` inside reads the deliberately
+ * SYNCHRONOUS `canAdmitDurableJobs()` snapshot, which answers false until
+ * startup settles, so a valid Kit request arriving early is refused `kit_busy`.
+ * The inspection wrapper stays synchronous because it never reaches that gate.
+ */
+async function resolvePersonalKitRequest(
   runtime: GatewayServerRuntime,
   provider: "claude" | "codex" | "mistral",
   params: Record<string, unknown>
-): PersonalKitRequestContext | null {
+): Promise<PersonalKitRequestContext | null> {
+  await runtime.asyncJobManager.whenStartupSettled();
   return resolvePersonalKitContext(runtime, provider, params, "execution");
 }
 
@@ -8441,7 +8693,7 @@ async function recoverOrRejectKitAttempt(input: {
     );
   }
 
-  const lookup = input.runtime.asyncJobManager.lookupJobSnapshot(activeAttempt.id);
+  const lookup = await input.runtime.asyncJobManager.lookupJobSnapshot(activeAttempt.id);
   if (lookup.state === "unavailable") {
     throw new PersonalConfigError(
       "kit_busy",
@@ -8944,7 +9196,7 @@ async function finalizeAndAcknowledgePersonalKitTerminal(input: {
   initialNativeSessionId?: string;
 }): Promise<void> {
   await finalizePersonalKitSessionOrThrow({ ...input, retainAttempt: true });
-  const marked = input.runtime.asyncJobManager.markKitTerminalFinalized(
+  const marked = await input.runtime.asyncJobManager.markKitTerminalFinalized(
     input.attemptId,
     input.gatewaySessionId
   );
@@ -9059,9 +9311,9 @@ async function releaseAcknowledgedPersonalKitAttempt(input: {
 const pendingKitFinalizationRuns = new WeakMap<GatewayServerRuntime, Promise<void>>();
 const personalKitMaintenanceTimers = new WeakMap<GatewayServerRuntime, NodeJS.Timeout>();
 
-function reapTerminalClaudeKitArtifacts(runtime: GatewayServerRuntime): void {
-  const removed = reapClaudeContextArtifacts(runtime.personalConfig.layout, jobId => {
-    const lookup = runtime.asyncJobManager.lookupJobSnapshot(jobId);
+async function reapTerminalClaudeKitArtifacts(runtime: GatewayServerRuntime): Promise<void> {
+  const removed = await reapClaudeContextArtifacts(runtime.personalConfig.layout, async jobId => {
+    const lookup = await runtime.asyncJobManager.lookupJobSnapshot(jobId);
     if (lookup.state === "unavailable") return "unavailable";
     if (lookup.state === "not_found") return "not_found";
     if (isAsyncJobInProgress(lookup.snapshot.status) || lookup.snapshot.status === "orphaned") {
@@ -9080,9 +9332,11 @@ function startPersonalKitMaintenance(runtime: GatewayServerRuntime): void {
       .catch(error =>
         runtime.logger.error("Personal Agent Config maintenance reconciliation failed", error)
       )
-      .finally(() => {
+      .finally(async () => {
         try {
-          reapTerminalClaudeKitArtifacts(runtime);
+          // AWAITED inside a callback the caller already fires and forgets:
+          // the outer `void` is the deliberate part, this catch is not.
+          await reapTerminalClaudeKitArtifacts(runtime);
         } catch (error) {
           runtime.logger.error("Personal Agent Config artifact maintenance failed", error);
         }
@@ -9162,8 +9416,11 @@ async function reconcilePendingPersonalKitFinalizations(
   if (!runtime.personalConfig.settings.enabled) return;
   const existing = pendingKitFinalizationRuns.get(runtime);
   if (existing) return existing;
+  // NOT awaited here: the WeakMap below stores this promise so a concurrent
+  // caller joins the in-flight reconciliation instead of starting a second one.
+  // Awaiting it into the map would store a resolved value and dedupe nothing.
   const run = (async () => {
-    for (const pending of runtime.asyncJobManager.getPendingKitFinalizations()) {
+    for (const pending of await runtime.asyncJobManager.getPendingKitFinalizations()) {
       if (pending.status === "orphaned") {
         // A stale lease is not proof that a remote or paused process died. Do
         // not release this native-session attempt until an operator or a later
@@ -9202,7 +9459,7 @@ async function reconcilePendingPersonalKitFinalizations(
         );
       }
     }
-    for (const acknowledged of runtime.asyncJobManager.getAcknowledgedKitAttemptReleases()) {
+    for (const acknowledged of await runtime.asyncJobManager.getAcknowledgedKitAttemptReleases()) {
       if (
         acknowledged.cli !== "claude" &&
         acknowledged.cli !== "codex" &&
@@ -9235,6 +9492,9 @@ async function reconcilePendingPersonalKitFinalizations(
       }
     }
   })();
+  // `run` stays a PROMISE in the map: concurrent callers join the in-flight
+  // reconciliation rather than starting a second one. Awaiting it into the map
+  // would store a resolved value and deduplicate nothing.
   pendingKitFinalizationRuns.set(runtime, run);
   try {
     await run;
@@ -9302,6 +9562,12 @@ function buildGrokApiToolResponse(args: {
   sessionId?: string;
   previousResponseId?: string;
   stalePreviousResponseCleared: boolean;
+  /**
+   * False when the continuation handle could not be persisted, so the reported
+   * session id will not resume. Reported rather than swallowed: the write used
+   * to be able to DELETE the session and the response still claimed success.
+   */
+  sessionContinuityPersisted?: boolean;
   optimizeResponse: boolean;
 }): ExtendedToolResponse {
   let text = args.result.text;
@@ -9324,6 +9590,9 @@ function buildGrokApiToolResponse(args: {
       responseId: args.result.responseId,
       previousResponseId: args.previousResponseId || null,
       stalePreviousResponseCleared: args.stalePreviousResponseCleared,
+      sessionContinuityPersisted: args.sessionId
+        ? (args.sessionContinuityPersisted ?? true)
+        : undefined,
       status: args.result.status,
       httpStatus: args.result.httpStatus,
       durationMs: args.durationMs,
@@ -9339,7 +9608,7 @@ function buildGrokApiToolResponse(args: {
 async function resolveGrokApiSession(
   params: Pick<GrokApiRequestParams, "sessionId" | "createNewSession">,
   runtime: GatewayServerRuntime
-): Promise<{ sessionId: string; previousResponseId?: string }> {
+): Promise<{ sessionId: string; previousResponseId?: string; session: Session }> {
   if (params.sessionId) {
     const existing = await getExistingSessionForProvider(
       runtime.sessionManager,
@@ -9357,7 +9626,7 @@ async function resolveGrokApiSession(
       !params.createNewSession && typeof session.metadata?.xaiPreviousResponseId === "string"
         ? session.metadata.xaiPreviousResponseId
         : undefined;
-    return { sessionId: session.id, previousResponseId: previous };
+    return { sessionId: session.id, previousResponseId: previous, session };
   }
 
   if (!params.createNewSession) {
@@ -9367,7 +9636,7 @@ async function resolveGrokApiSession(
         typeof active.metadata?.xaiPreviousResponseId === "string"
           ? active.metadata.xaiPreviousResponseId
           : undefined;
-      return { sessionId: active.id, previousResponseId: previous };
+      return { sessionId: active.id, previousResponseId: previous, session: active };
     }
   }
 
@@ -9376,7 +9645,7 @@ async function resolveGrokApiSession(
     "Grok API Session",
     `${GATEWAY_SESSION_PREFIX}${randomUUID()}`
   );
-  return { sessionId: session.id };
+  return { sessionId: session.id, session };
 }
 
 export async function handleGrokApiRequest(
@@ -9426,7 +9695,7 @@ export async function handleGrokApiRequest(
     );
   }
 
-  safeFlightStart(
+  await safeFlightStart(
     {
       correlationId: corrId,
       cli: "grok-api",
@@ -9446,6 +9715,11 @@ export async function handleGrokApiRequest(
   try {
     const session = await resolveGrokApiSession(params, runtime);
     sessionId = session.sessionId;
+    const resolvedSession = session.session;
+    const resolvedSessionId = session.sessionId;
+    // The metadata this turn's handle is derived from. Carried, not re-read:
+    // it is the compare half of every continuation write below.
+    let sessionBasis: Record<string, any> = { ...(resolvedSession.metadata ?? {}) };
     previousResponseId = session.previousResponseId;
 
     // Slice 4b: route through the shared XaiResponsesProvider adapter +
@@ -9479,10 +9753,14 @@ export async function handleGrokApiRequest(
         runtime.logger.warn(
           `[${corrId}] xAI previous_response_id was rejected; clearing stale session metadata and retrying fresh`
         );
-        await runtime.sessionManager.updateSessionMetadata(sessionId, {
-          xaiPreviousResponseId: null,
-          xaiResponseCreatedAt: null,
-        });
+        const cleared = await persistSessionContinuation(
+          runtime,
+          corrId,
+          resolvedSession,
+          sessionBasis,
+          { xaiPreviousResponseId: null, xaiResponseCreatedAt: null }
+        );
+        sessionBasis = cleared.metadata;
         stalePreviousResponseCleared = true;
         previousResponseId = undefined;
         result = await call(undefined);
@@ -9494,14 +9772,19 @@ export async function handleGrokApiRequest(
     durationMs = Math.max(0, Date.now() - startTime);
     wasSuccessful = true;
 
-    await runtime.sessionManager.updateSessionMetadata(sessionId, {
-      xaiPreviousResponseId: result.responseId,
-      xaiResponseCreatedAt: new Date().toISOString(),
-      xaiModel: result.model || prep.resolvedModel,
-    });
-    await runtime.sessionManager.updateSessionUsage(sessionId);
+    const handlePersisted = (
+      await persistSessionContinuation(runtime, corrId, resolvedSession, sessionBasis, {
+        xaiPreviousResponseId: result.responseId,
+        xaiResponseCreatedAt: new Date().toISOString(),
+        xaiModel: result.model || prep.resolvedModel,
+      })
+    ).persisted;
+    const usagePersisted = await recordSessionWrite(runtime, corrId, resolvedSessionId, () =>
+      runtime.sessionManager.updateSessionUsage(resolvedSessionId)
+    );
+    const continuityPersisted = handlePersisted && usagePersisted;
 
-    safeFlightComplete(
+    await safeFlightComplete(
       corrId,
       {
         response: result.text,
@@ -9524,13 +9807,14 @@ export async function handleGrokApiRequest(
       sessionId,
       previousResponseId,
       stalePreviousResponseCleared,
+      sessionContinuityPersisted: continuityPersisted,
       optimizeResponse: params.optimizeResponse ?? false,
     });
   } catch (error) {
     durationMs = Math.max(0, Date.now() - startTime);
     const err = error as Error;
     runtime.logger.error(`[${corrId}] grok_api_request failed`, err.message);
-    safeFlightComplete(
+    await safeFlightComplete(
       corrId,
       {
         response: extractApiErrorBody(error) ?? "",
@@ -9653,7 +9937,7 @@ async function resolveApiSession(
   continuity: ApiContinuity,
   params: { sessionId?: string; createNewSession?: boolean },
   runtime: GatewayServerRuntime
-): Promise<{ sessionId: string; previousResponseId?: string }> {
+): Promise<{ sessionId: string; previousResponseId?: string; session: Session }> {
   const label = `${providerName} API Session`;
   // Slice 4: only server-side-id providers carry a continuation handle; stateless
   // sessions are pure bookkeeping and never read/store one.
@@ -9675,7 +9959,7 @@ async function resolveApiSession(
     const session =
       existing ??
       (await runtime.sessionManager.createSession(providerName, label, params.sessionId));
-    return { sessionId: session.id, previousResponseId: readPrev(session) };
+    return { sessionId: session.id, previousResponseId: readPrev(session), session };
   }
 
   // Server-side-id (no sessionId) reuses the caller's active session so the
@@ -9684,7 +9968,8 @@ async function resolveApiSession(
   // so there is no implicit-reuse surprise for stateless callers.
   if (continuity === "server-side-id" && !params.createNewSession) {
     const active = await getCallerOwnedActiveSession(runtime.sessionManager, providerName);
-    if (active) return { sessionId: active.id, previousResponseId: readPrev(active) };
+    if (active)
+      return { sessionId: active.id, previousResponseId: readPrev(active), session: active };
   }
 
   const session = await runtime.sessionManager.createSession(
@@ -9692,7 +9977,7 @@ async function resolveApiSession(
     label,
     `${GATEWAY_SESSION_PREFIX}${randomUUID()}`
   );
-  return { sessionId: session.id };
+  return { sessionId: session.id, session };
 }
 
 /** Build the canonical ApiRequest + provider adapter from resolved input. */
@@ -9730,6 +10015,8 @@ function buildApiSuccessResponse(
     /** Slice 4: server-side-id continuation surface (parity with grok_api). */
     previousResponseId?: string;
     stalePreviousResponseCleared?: boolean;
+    /** See buildGrokApiToolResponse: a lost continuation write is reported. */
+    sessionContinuityPersisted?: boolean;
     status?: string | null;
   }
 ): ExtendedToolResponse {
@@ -9746,6 +10033,9 @@ function buildApiSuccessResponse(
       responseId: telemetry?.responseId ?? null,
       previousResponseId: telemetry?.previousResponseId ?? null,
       stalePreviousResponseCleared: telemetry?.stalePreviousResponseCleared ?? false,
+      sessionContinuityPersisted: telemetry?.sessionId
+        ? (telemetry.sessionContinuityPersisted ?? true)
+        : undefined,
       status: telemetry?.status ?? undefined,
       httpStatus: telemetry?.httpStatus ?? undefined,
       inputTokens: usage?.inputTokens,
@@ -9792,6 +10082,9 @@ export async function handleApiProviderRequest(
       serverSide || params.sessionId !== undefined || params.createNewSession === true;
     let sessionId: string | undefined;
     let previousResponseId: string | undefined;
+    let resolvedSession: Session | undefined;
+    let sessionBasis: Record<string, any> = {};
+    let sessionContinuityPersisted = true;
     if (wantsSession) {
       const session = await resolveApiSession(
         providerRuntime.name,
@@ -9800,8 +10093,13 @@ export async function handleApiProviderRequest(
         runtimeArg
       );
       sessionId = session.sessionId;
+      resolvedSession = session.session;
+      sessionBasis = { ...(session.session.metadata ?? {}) };
       previousResponseId = session.previousResponseId;
-      await runtimeArg.sessionManager.updateSessionUsage(sessionId);
+      const touchedId = sessionId;
+      sessionContinuityPersisted = await recordSessionWrite(runtimeArg, corrId, touchedId, () =>
+        runtimeArg.sessionManager.updateSessionUsage(touchedId)
+      );
       // server-side-id only: thread the stored handle so the provider continues.
       if (previousResponseId) apiRequest.previousResponseId = previousResponseId;
     }
@@ -9818,7 +10116,7 @@ export async function handleApiProviderRequest(
       stablePrefixHash: resolved.stablePrefixHash ?? undefined,
       stablePrefixTokens: resolved.stablePrefixTokens ?? undefined,
     };
-    safeFlightStart(
+    await safeFlightStart(
       {
         correlationId: corrId,
         cli: providerRuntime.name,
@@ -9857,10 +10155,16 @@ export async function handleApiProviderRequest(
       sessionId &&
       previousResponseId
     ) {
-      await runtimeArg.sessionManager.updateSessionMetadata(sessionId, {
-        apiPreviousResponseId: null,
-        apiResponseCreatedAt: null,
-      });
+      if (resolvedSession) {
+        const cleared = await persistSessionContinuation(
+          runtimeArg,
+          corrId,
+          resolvedSession,
+          sessionBasis,
+          { apiPreviousResponseId: null, apiResponseCreatedAt: null }
+        );
+        sessionBasis = cleared.metadata;
+      }
       apiRequest.previousResponseId = undefined;
       previousResponseId = undefined;
       stalePreviousResponseCleared = true;
@@ -9882,7 +10186,7 @@ export async function handleApiProviderRequest(
 
     const durationMs = Math.max(0, Date.now() - startTime);
     if (result.code !== 0) {
-      safeFlightComplete(
+      await safeFlightComplete(
         corrId,
         {
           response: result.errorBody ?? "",
@@ -9905,11 +10209,25 @@ export async function handleApiProviderRequest(
     wasSuccessful = true;
     // Slice 4: persist the new continuation handle for server-side-id providers so
     // the next turn in this session continues server-side.
-    if (serverSide && sessionId && result.responseId) {
-      await runtimeArg.sessionManager.updateSessionMetadata(sessionId, {
-        apiPreviousResponseId: result.responseId,
-        apiResponseCreatedAt: new Date().toISOString(),
-      });
+    if (serverSide && sessionId && result.responseId && resolvedSession) {
+      const handlePersisted = (
+        await persistSessionContinuation(runtimeArg, corrId, resolvedSession, sessionBasis, {
+          apiPreviousResponseId: result.responseId,
+          apiResponseCreatedAt: new Date().toISOString(),
+        })
+      ).persisted;
+      sessionContinuityPersisted = sessionContinuityPersisted && handlePersisted;
+    }
+    if (sessionId) {
+      // The turn USED this session, and the fenced write above does not touch
+      // last_used_at. Without this a session that crossed its TTL while the
+      // provider ran survives the write and is reaped on the next read, which
+      // is the same lost handle one step later.
+      const usedId = sessionId;
+      const touched = await recordSessionWrite(runtimeArg, corrId, usedId, () =>
+        runtimeArg.sessionManager.updateSessionUsage(usedId)
+      );
+      sessionContinuityPersisted = sessionContinuityPersisted && touched;
     }
     let text = result.stdout;
     if (params.optimizeResponse) {
@@ -9917,7 +10235,7 @@ export async function handleApiProviderRequest(
       logOptimizationTokens("response", corrId, text, optimized);
       text = optimized;
     }
-    safeFlightComplete(
+    await safeFlightComplete(
       corrId,
       {
         response: text,
@@ -9947,6 +10265,7 @@ export async function handleApiProviderRequest(
       sessionId,
       previousResponseId,
       stalePreviousResponseCleared,
+      sessionContinuityPersisted,
       status: result.status,
     });
   } catch (err) {
@@ -9964,11 +10283,11 @@ export async function handleApiProviderRequest(
 }
 
 /** Async `api_<name>_request_async`: start the http job, return its jobId. */
-export function handleApiProviderRequestAsync(
+export async function handleApiProviderRequestAsync(
   runtimeArg: GatewayServerRuntime,
   providerRuntime: ApiProviderRuntime,
   params: ApiProviderToolParams
-): ExtendedToolResponse {
+): Promise<ExtendedToolResponse> {
   const toolName = `api_${providerRuntime.name}_request_async`;
   const corrId = params.correlationId ?? randomUUID();
   const kitError = rejectUnsupportedKitProvider(runtimeArg, providerRuntime.name, toolName, corrId);
@@ -9986,7 +10305,7 @@ export function handleApiProviderRequestAsync(
     // and the terminal logComplete (armed by writeFlightStart), populating usage
     // from the captured apiUsage. (optimizeResponse is N/A on the async path: the
     // response is collected later via llm_job_result.)
-    const outcome = runtimeArg.asyncJobManager.startHttpJob({
+    const outcome = await runtimeArg.asyncJobManager.startHttpJob({
       provider,
       apiRequest,
       correlationId: corrId,
@@ -10132,16 +10451,16 @@ export function registerApiProviderTools(
  * writes, and ttlRemainingMs is below the threshold (30s by default).
  * Returns null when no warning applies.
  */
-function maybeBuildCacheTtlWarning(args: {
+async function maybeBuildCacheTtlWarning(args: {
   runtime: GatewayServerRuntime;
   sessionId: string | undefined;
   cli: "claude" | "codex" | "gemini" | "grok" | "mistral";
   thresholdMs?: number;
-}): WarningEntry | null {
+}): Promise<WarningEntry | null> {
   if (args.cli !== "claude") return null;
   if (!args.sessionId) return null;
   if (!args.runtime.cacheAwareness?.warnOnTtlExpiry) return null;
-  const stats = computeSessionCacheStats(args.runtime.flightRecorder, args.sessionId);
+  const stats = await computeSessionCacheStats(args.runtime.flightRecorder, args.sessionId);
   if (stats.requestCount === 0 || !stats.lastRequestAt) return null;
   const ttl = computeTtlRemaining(stats, args.cli, {
     anthropicTtlSeconds: args.runtime.cacheAwareness.anthropicTtlSeconds,
@@ -10161,6 +10480,8 @@ function maybeBuildCacheTtlWarning(args: {
 //──────────────────────────────────────────────────────────────────────────────
 
 export interface GeminiRequestParams {
+  /** Flags the caller names itself; see src/provider-passthrough.ts. */
+  providerFlags?: PassthroughFlags;
   prompt?: string;
   promptParts?: PromptParts;
   model?: string;
@@ -10255,6 +10576,8 @@ function resolveHandlerRuntime(deps: HandlerDeps): GatewayServerRuntime {
 }
 
 export interface ClaudeRequestParams {
+  /** Flags the caller names itself; see src/provider-passthrough.ts. */
+  providerFlags?: PassthroughFlags;
   prompt?: string;
   promptParts?: PromptParts;
   model?: string;
@@ -10398,7 +10721,7 @@ export async function handleClaudeRequest(
     // session allocation, and all provider preparation. Their only safe
     // execution path is durable async admission.
     if (runtime.personalConfig.settings.enabled) assertKitSyncDeferralEnabled();
-    kit = resolvePersonalKitRequest(runtime, "claude", {
+    kit = await resolvePersonalKitRequest(runtime, "claude", {
       prompt,
       promptParts,
       systemPrompt,
@@ -10521,6 +10844,7 @@ export async function handleClaudeRequest(
   }
   const prep = prepareClaudeRequest(
     {
+      providerFlags: params.providerFlags,
       prompt,
       promptParts,
       model: kitPreferences.model as string | undefined,
@@ -10653,7 +10977,7 @@ export async function handleClaudeRequest(
   // cache breakpoint, attach a structured warning (NOT a hard error)
   // to the response. Computed BEFORE safeFlightStart so the current
   // row does not skew lastRequestAt.
-  const ttlWarning = maybeBuildCacheTtlWarning({
+  const ttlWarning = await maybeBuildCacheTtlWarning({
     runtime,
     sessionId: effectiveSessionId,
     cli: "claude",
@@ -10750,7 +11074,7 @@ export async function handleClaudeRequest(
         "--add-dir",
         worktreeResolution.effectiveAddDirs
       );
-      assertUpstreamCliArgs("claude", args);
+      assertUpstreamCliArgs("claude", args, params.providerFlags);
       assertUpstreamCliEnv("claude", undefined);
       assertFinalCliProcessAdmission("claude", args, "claude");
       let admittedSession = existingSession;
@@ -10806,7 +11130,7 @@ export async function handleClaudeRequest(
       // State 8 (flight start): after session resolution so the flight row reads
       // the prior session's lastWriteAt, not the row about to be written (spec
       // section 8).
-      flight.start();
+      await flight.start();
       logger.info(
         `[${corrId}] claude_request invoked with model=${prep.resolvedModel || "default"}, outputFormat=${outputFormat}, prompt length=${prep.effectivePrompt.length}, sessionId=${effectiveSessionId}, cacheControlBlocks=${prep.cacheControlBlocks ?? 0}`
       );
@@ -10874,7 +11198,9 @@ export async function handleClaudeRequest(
             sessionBoundDedupArgs(buildClaudeMcpDedupArgs(args, mcpConfig), effectiveSessionId),
             undefined,
             mcpConfig?.cleanup ? mcpConfig.path : undefined,
-            mcpConfig?.cleanup ? mcpConfig.artifactScope : undefined
+            mcpConfig?.cleanup ? mcpConfig.artifactScope : undefined,
+            undefined,
+            params.providerFlags
           ),
       });
     },
@@ -10921,7 +11247,7 @@ export async function handleClaudeRequest(
       }
       return errResp;
     },
-    buildSuccessResponse: ({ worktreeResolution, stdout, durationMs }) => {
+    buildSuccessResponse: async ({ worktreeResolution, stdout, durationMs }) => {
       // Parse stream-json NDJSON output to extract result text
       if (outputFormat === "stream-json") {
         const parsed = parseStreamJson(stdout);
@@ -10943,7 +11269,7 @@ export async function handleClaudeRequest(
             costUsd: parsed.costUsd ?? undefined,
           }
         );
-        flight.completeInline({
+        await flight.completeInline({
           response: parsed.text,
           inputTokens: parsed.usage?.inputTokens,
           outputTokens: parsed.usage?.outputTokens,
@@ -10975,7 +11301,7 @@ export async function handleClaudeRequest(
           warnings,
           effectiveCompress
         );
-        safeRecordCompression(corrId, streamResponse.compression, runtime, kit !== null);
+        await safeRecordCompression(corrId, streamResponse.compression, runtime, kit !== null);
         if (worktreeResolution.worktreePath) {
           const first = streamResponse.content[0];
           if (first && first.type === "text") {
@@ -10987,7 +11313,7 @@ export async function handleClaudeRequest(
       // Phase 7: non-stream claude (json/text). parseStreamJson also scans a
       // single json result object; plain text yields no fields (capability fact).
       const claudeMeta = extractProviderOutputMetadata("claude", stdout, outputFormat);
-      flight.completeInline({
+      await flight.completeInline({
         response: stdout,
         durationMs,
         retryCount: 0,
@@ -11011,7 +11337,7 @@ export async function handleClaudeRequest(
         warnings,
         effectiveCompress
       );
-      safeRecordCompression(corrId, nonStreamResponse.compression, runtime, kit !== null);
+      await safeRecordCompression(corrId, nonStreamResponse.compression, runtime, kit !== null);
       if (worktreeResolution.worktreePath) {
         const first = nonStreamResponse.content[0];
         if (first && first.type === "text") {
@@ -11026,6 +11352,8 @@ export async function handleClaudeRequest(
 }
 
 export interface CodexRequestParams {
+  /** Flags the caller names itself; see src/provider-passthrough.ts. */
+  providerFlags?: PassthroughFlags;
   prompt?: string;
   promptParts?: PromptParts;
   model?: string;
@@ -11129,7 +11457,7 @@ export async function handleCodexRequest(
     // even Codex isolation probes are provider work and must not run for a
     // request that will fail closed before durable deferral.
     if (runtime.personalConfig.settings.enabled) assertKitSyncDeferralEnabled();
-    kit = resolvePersonalKitRequest(runtime, "codex", {
+    kit = await resolvePersonalKitRequest(runtime, "codex", {
       prompt,
       promptParts,
       fullAuto,
@@ -11179,6 +11507,7 @@ export async function handleCodexRequest(
       : (kitPreferences.outputFormat ?? "text")
   ) as "text" | "json";
   const codexPreparationParams: Parameters<typeof prepareCodexRequest>[0] = {
+    providerFlags: params.providerFlags,
     prompt,
     promptParts,
     model: kitPreferences.model as string | undefined,
@@ -11327,7 +11656,7 @@ export async function handleCodexRequest(
       "--add-dir",
       worktreeResolution.effectiveAddDirs
     );
-    assertUpstreamCliArgs("codex", args);
+    assertUpstreamCliArgs("codex", args, params.providerFlags);
     assertUpstreamCliEnv("codex", kit?.codexIsolation?.env);
     assertFinalCliProcessAdmission("codex", args, "codex", kit?.codexIsolation?.env);
   } catch (error) {
@@ -11417,7 +11746,7 @@ export async function handleCodexRequest(
       ),
     metadata => safePersonalKitFlightComplete(corrId, metadata, kit, runtime)
   );
-  flight.start();
+  await flight.start();
   logger.info(
     `[${corrId}] codex_request invoked with model=${prep.resolvedModel || "default"}, fullAuto=${fullAuto}, prompt length=${prep.effectivePrompt.length}`
   );
@@ -11509,7 +11838,12 @@ export async function handleCodexRequest(
               : undefined,
             kitSession?.gatewaySessionId,
             kitSession?.attemptKind === "durable" ? kitSession.attemptId : undefined,
-            sessionBoundDedupArgs(args, effectiveSessionId)
+            sessionBoundDedupArgs(args, effectiveSessionId),
+            undefined,
+            undefined,
+            undefined,
+            undefined,
+            params.providerFlags
           ),
       });
     },
@@ -11572,7 +11906,7 @@ export async function handleCodexRequest(
         result
       );
     },
-    buildSuccessResponse: ({ worktreeResolution, stdout, durationMs, facts }) => {
+    buildSuccessResponse: async ({ worktreeResolution, stdout, durationMs, facts }) => {
       // #44: usage is parsed from the raw JSONL `stdout`, but the FR response
       // column stores the reconstructed reply (== text-mode stdout) so
       // read-back surfaces (llm_request_result, cache-stats) get plain text,
@@ -11580,7 +11914,7 @@ export async function handleCodexRequest(
       // This is the sync-in-time / deferral-disabled writer; the deferred and
       // pure-async writer is AsyncJobManager.logComplete; both use the same
       // codexFrResponse() helper so the persisted value agrees byte-for-byte.
-      flight.completeInline({
+      await flight.completeInline({
         response: codexFrResponse(effectiveOutputFormat, stdout),
         durationMs,
         retryCount: 0,
@@ -11610,7 +11944,7 @@ export async function handleCodexRequest(
         undefined,
         effectiveCompress
       );
-      safeRecordCompression(corrId, codexResponse.compression, runtime, kit !== null);
+      await safeRecordCompression(corrId, codexResponse.compression, runtime, kit !== null);
       if (worktreeResolution.worktreePath) {
         const first = codexResponse.content[0];
         if (first && first.type === "text") {
@@ -11642,6 +11976,7 @@ export async function handleGeminiRequest(
   }
   const prep = prepareGeminiRequest(
     {
+      providerFlags: params.providerFlags,
       prompt: params.prompt,
       promptParts: params.promptParts,
       model: params.model,
@@ -11777,7 +12112,7 @@ export async function handleGeminiRequest(
         "--add-dir",
         worktreeResolution.effectiveAddDirs
       );
-      assertUpstreamCliArgs("gemini", args);
+      assertUpstreamCliArgs("gemini", args, params.providerFlags);
       assertUpstreamCliEnv("gemini", undefined);
       assertFinalCliProcessAdmission("agy", args, "gemini");
       if (effectiveSessionIdHint) {
@@ -11822,7 +12157,7 @@ export async function handleGeminiRequest(
       ledger.installWorktree(
         createRequestOwnedWorktreeLifecycle(worktreeResolution, runtime, true)
       );
-      flight.start();
+      await flight.start();
       deps.logger.info(
         `[${corrId}] gemini_request invoked with model=${prep.resolvedModel || "default"}, approvalMode=${params.approvalMode}, prompt length=${prep.effectivePrompt.length}`
       );
@@ -11860,7 +12195,12 @@ export async function handleGeminiRequest(
         undefined,
         undefined,
         undefined,
-        sessionBoundDedupArgs(args, effectiveSessionIdHint)
+        sessionBoundDedupArgs(args, effectiveSessionIdHint),
+        undefined,
+        undefined,
+        undefined,
+        undefined,
+        params.providerFlags
       );
     },
     computeSuccessFacts: stdout => {
@@ -11887,7 +12227,7 @@ export async function handleGeminiRequest(
         },
         result
       ),
-    buildSuccessResponse: ({ worktreeResolution, stdout, durationMs, facts }) => {
+    buildSuccessResponse: async ({ worktreeResolution, stdout, durationMs, facts }) => {
       const response = buildCliResponse(
         "gemini",
         stdout,
@@ -11901,14 +12241,14 @@ export async function handleGeminiRequest(
         undefined,
         effectiveCompress
       );
-      safeRecordCompression(corrId, response.compression, runtime);
+      await safeRecordCompression(corrId, response.compression, runtime);
       if (worktreeResolution.worktreePath) {
         const first = response.content[0];
         if (first && first.type === "text") {
           first.text = formatWorktreePrefix(worktreeResolution.worktreePath) + first.text;
         }
       }
-      flight.completeInline({
+      await flight.completeInline({
         response: stdout,
         durationMs,
         retryCount: 0,
@@ -11950,6 +12290,7 @@ export async function handleGeminiRequestAsync(
   }
   const prep = prepareGeminiRequest(
     {
+      providerFlags: params.providerFlags,
       prompt: params.prompt,
       promptParts: params.promptParts,
       model: params.model,
@@ -12051,7 +12392,7 @@ export async function handleGeminiRequestAsync(
       // Start job only after all session I/O succeeds. U23: forward outputFormat
       // so AsyncJobManager records it in the durable store (the manager also
       // surfaces it in the snapshot).
-      assertUpstreamCliArgs("gemini", args);
+      assertUpstreamCliArgs("gemini", args, params.providerFlags);
       assertUpstreamCliEnv("gemini", undefined);
       assertFinalCliProcessAdmission("agy", args, "gemini");
       if (effectiveSessionId) {
@@ -12165,6 +12506,12 @@ export async function handleGeminiRequestAsync(
 }
 
 export interface GrokRequestParams {
+  /**
+   * n3: flags the caller names itself, passed to the binary verbatim. This is
+   * what makes discovery reachable: without it, a flag the customer's binary
+   * has and our schema does not name is unusable no matter what discovery finds.
+   */
+  providerFlags?: PassthroughFlags;
   prompt?: string;
   promptParts?: PromptParts;
   model?: string;
@@ -12211,6 +12558,10 @@ export interface GrokRequestParams {
   /** Grok 0.2.x: `--disable-web-search`. */
   disableWebSearch?: boolean;
   /** Grok 0.2.x: `--todo-gate` runtime turn-end TodoGate. */
+  /** Grok 0.2.x `--best-of-n <N>`: parallel headless attempts. Not advertised by grok 1.0.4+ and passed through anyway: older grok installs still accept it and the binary is the authority. See docs/plans/gateway-passthrough-policy.dag.toml. */
+  bestOfN?: number;
+  /** Grok 0.2.x `--check`: append a self-verification loop. Not advertised by grok 1.0.4+ and passed through anyway: older grok installs still accept it and the binary is the authority. See docs/plans/gateway-passthrough-policy.dag.toml. */
+  check?: boolean;
   todoGate?: boolean;
   /** Grok 0.2.x: `--verbatim` (also skips gateway prompt optimization). */
   verbatim?: boolean;
@@ -12292,6 +12643,8 @@ function rejectUnsupportedGrokAcpParams(
     ["compactionDetail", hasNonEmptyString(params.compactionDetail)],
     ["agent", hasNonEmptyString(params.agent)],
     ["disableWebSearch", params.disableWebSearch === true],
+    ["bestOfN", params.bestOfN !== undefined],
+    ["check", params.check === true],
     ["todoGate", params.todoGate === true],
     ["verbatim", params.verbatim === true],
     ["agents", hasNonEmptyAgentInput(params.agents)],
@@ -12365,6 +12718,7 @@ export async function handleGrokRequest(
       correlationId: params.correlationId,
       optimizePrompt: params.optimizePrompt,
       operation: "grok_request",
+      providerFlags: params.providerFlags,
       maxTurns: params.maxTurns,
       workingDir: params.workingDir,
       sandbox: params.sandbox,
@@ -12498,7 +12852,7 @@ export async function handleGrokRequest(
         worktreeResolution.effectiveWorkingDir,
         "grok"
       );
-      assertUpstreamCliArgs("grok", args);
+      assertUpstreamCliArgs("grok", args, params.providerFlags);
       assertUpstreamCliEnv("grok", undefined);
       assertFinalCliProcessAdmission("grok", args, "grok");
       if (effectiveSessionId) {
@@ -12542,7 +12896,7 @@ export async function handleGrokRequest(
       ledger.installWorktree(
         createRequestOwnedWorktreeLifecycle(worktreeResolution, runtime, true)
       );
-      flight.start();
+      await flight.start();
       deps.logger.info(
         `[${corrId}] grok_request invoked with model=${prep.resolvedModel || "default"}, permissionMode=${params.permissionMode}, prompt length=${prep.effectivePrompt.length}`
       );
@@ -12580,7 +12934,12 @@ export async function handleGrokRequest(
         undefined,
         undefined,
         undefined,
-        sessionBoundDedupArgs(args, effectiveSessionId)
+        sessionBoundDedupArgs(args, effectiveSessionId),
+        undefined,
+        undefined,
+        undefined,
+        undefined,
+        params.providerFlags
       );
     },
     // Grok json/streaming-json carries a provider-native session id and stop
@@ -12604,7 +12963,7 @@ export async function handleGrokRequest(
         },
         result
       ),
-    buildSuccessResponse: ({ worktreeResolution, stdout, durationMs, facts }) => {
+    buildSuccessResponse: async ({ worktreeResolution, stdout, durationMs, facts }) => {
       const response = buildCliResponse(
         "grok",
         stdout,
@@ -12618,14 +12977,14 @@ export async function handleGrokRequest(
         undefined,
         effectiveCompress
       );
-      safeRecordCompression(corrId, response.compression, runtime);
+      await safeRecordCompression(corrId, response.compression, runtime);
       if (worktreeResolution.worktreePath) {
         const first = response.content[0];
         if (first && first.type === "text") {
           first.text = formatWorktreePrefix(worktreeResolution.worktreePath) + first.text;
         }
       }
-      flight.completeInline({
+      await flight.completeInline({
         response: stdout,
         durationMs,
         retryCount: 0,
@@ -12684,6 +13043,7 @@ export async function handleGrokRequestAsync(
       correlationId: params.correlationId,
       optimizePrompt: params.optimizePrompt,
       operation: "grok_request_async",
+      providerFlags: params.providerFlags,
       maxTurns: params.maxTurns,
       workingDir: params.workingDir,
       sandbox: params.sandbox,
@@ -12789,7 +13149,7 @@ export async function handleGrokRequestAsync(
       );
 
       // Start job only after all session I/O succeeds
-      assertUpstreamCliArgs("grok", args);
+      assertUpstreamCliArgs("grok", args, params.providerFlags);
       assertUpstreamCliEnv("grok", undefined);
       assertFinalCliProcessAdmission("grok", args, "grok");
       if (sessionResult.userProvidedSession && effectiveSessionId) {
@@ -12921,6 +13281,8 @@ export async function handleGrokRequestAsync(
 //──────────────────────────────────────────────────────────────────────────────
 
 export interface DevinRequestParams {
+  /** Flags the caller names itself; see src/provider-passthrough.ts. */
+  providerFlags?: PassthroughFlags;
   prompt?: string;
   model?: string;
   permissionMode?: "auto" | "accept-edits" | "smart" | "dangerous";
@@ -12943,6 +13305,12 @@ export interface DevinRequestParams {
    * interactive mode and false for print (non-interactive) mode.
    */
   respectWorkspaceTrust?: boolean;
+  /**
+   * Devin `--agent-config <FILE>`. Not advertised by devin 3000.4.16+, and
+   * passed through anyway: older devin still accepts it, and the binary is the
+   * authority on its own flags. See docs/plans/gateway-passthrough-policy.dag.toml.
+   */
+  agentConfig?: string;
   /**
    * Devin ACP `--agent-type <type>` (summarizer|review). Only applies when
    * transport=acp; threaded into the `devin acp` spawn argv. Ignored for the CLI
@@ -12967,6 +13335,8 @@ export interface DevinRequestParams {
 /** Build the headless Devin CLI argv (print mode). Pure, no I/O. */
 export function prepareDevinRequest(
   params: {
+    /** Flags the caller names itself; see src/provider-passthrough.ts. */
+    providerFlags?: PassthroughFlags;
     prompt?: string;
     model?: string;
     permissionMode?: DevinRequestParams["permissionMode"];
@@ -12977,6 +13347,7 @@ export function prepareDevinRequest(
     sandbox?: boolean;
     exportSession?: boolean | string;
     respectWorkspaceTrust?: boolean;
+    agentConfig?: string;
     correlationId?: string;
     optimizePrompt: boolean;
     operation: string;
@@ -13050,6 +13421,7 @@ export function prepareDevinRequest(
   if (params.respectWorkspaceTrust !== undefined) {
     args.push("--respect-workspace-trust", params.respectWorkspaceTrust ? "true" : "false");
   }
+  if (params.agentConfig) args.push("--agent-config", params.agentConfig);
   try {
     if (resolvedModel) {
       assertCliArgUtf8Size(resolvedModel, { provider: "devin", inputName: "model" });
@@ -13068,6 +13440,18 @@ export function prepareDevinRequest(
     }
     assertCliArgUtf8Size(prompt, { provider: "devin", inputName: "prompt argv element" });
     appendCliPrompt(args, prompt);
+    // Pass-through. The prompt terminator is ALREADY in args, so these must go before it or they become prompt text.
+    const pt = passthroughArgvOrRejection(params.providerFlags, "devin", args);
+    if (pt.rejection) {
+      return createErrorResponse(
+        params.operation,
+        1,
+        "",
+        corrId,
+        new Error(pt.rejection)
+      ) as ExtendedToolResponse;
+    }
+    insertCliArgsBeforePrompt(args, pt.args);
     assertCliArgvUtf8Size("devin", args, { provider: "devin" });
   } catch (error) {
     return createErrorResponse(params.operation, 1, "", corrId, error as Error);
@@ -13096,6 +13480,7 @@ function rejectUnsupportedDevinAcpParams(
     ["sandbox", params.sandbox === true],
     ["exportSession", params.exportSession !== undefined],
     ["respectWorkspaceTrust", params.respectWorkspaceTrust !== undefined],
+    ["agentConfig", params.agentConfig !== undefined],
     ["resumeLatest", params.resumeLatest === true],
     ["createNewSession", params.createNewSession === true],
     ["optimizePrompt", params.optimizePrompt],
@@ -13145,6 +13530,7 @@ export async function handleDevinRequest(
   }
   const prep = prepareDevinRequest(
     {
+      providerFlags: params.providerFlags,
       prompt: params.prompt,
       model: params.model,
       permissionMode: params.permissionMode,
@@ -13155,6 +13541,7 @@ export async function handleDevinRequest(
       sandbox: params.sandbox,
       exportSession: params.exportSession,
       respectWorkspaceTrust: params.respectWorkspaceTrust,
+      agentConfig: params.agentConfig,
       correlationId: params.correlationId,
       optimizePrompt: params.optimizePrompt,
       operation: "devin_request",
@@ -13239,7 +13626,7 @@ export async function handleDevinRequest(
         requireStableCwd: sessionResult.resumeArgs.includes("--continue"),
         deferWorktree: true,
       });
-      assertUpstreamCliArgs("devin", args);
+      assertUpstreamCliArgs("devin", args, params.providerFlags);
       assertUpstreamCliEnv("devin", undefined);
       assertFinalCliProcessAdmission("devin", args, "devin");
       if (effectiveSessionId) {
@@ -13283,7 +13670,7 @@ export async function handleDevinRequest(
       ledger.installWorktree(
         createRequestOwnedWorktreeLifecycle(worktreeResolution, runtime, true)
       );
-      flight.start();
+      await flight.start();
       return { ok: true, value: { worktreeResolution } };
     },
     execute: async worktreeResolution => {
@@ -13318,7 +13705,12 @@ export async function handleDevinRequest(
         undefined,
         undefined,
         undefined,
-        sessionBoundDedupArgs(args, effectiveSessionId)
+        sessionBoundDedupArgs(args, effectiveSessionId),
+        undefined,
+        undefined,
+        undefined,
+        undefined,
+        params.providerFlags
       );
     },
     decorateDeferred: deferred => {
@@ -13343,7 +13735,7 @@ export async function handleDevinRequest(
         },
         result
       ),
-    buildSuccessResponse: ({ stdout, durationMs }) => {
+    buildSuccessResponse: async ({ stdout, durationMs }) => {
       const response = buildCliResponse(
         "devin",
         stdout,
@@ -13357,8 +13749,8 @@ export async function handleDevinRequest(
         undefined,
         effectiveCompress
       );
-      safeRecordCompression(corrId, response.compression, runtime);
-      flight.completeInline({
+      await safeRecordCompression(corrId, response.compression, runtime);
+      await flight.completeInline({
         response: stdout,
         durationMs,
         retryCount: 0,
@@ -13399,6 +13791,7 @@ export async function handleDevinRequestAsync(
   }
   const prep = prepareDevinRequest(
     {
+      providerFlags: params.providerFlags,
       prompt: params.prompt,
       model: params.model,
       permissionMode: params.permissionMode,
@@ -13409,6 +13802,7 @@ export async function handleDevinRequestAsync(
       sandbox: params.sandbox,
       exportSession: params.exportSession,
       respectWorkspaceTrust: params.respectWorkspaceTrust,
+      agentConfig: params.agentConfig,
       correlationId: params.correlationId,
       optimizePrompt: params.optimizePrompt,
       operation: "devin_request_async",
@@ -13473,7 +13867,7 @@ export async function handleDevinRequestAsync(
         deferWorktree: true,
       });
 
-      assertUpstreamCliArgs("devin", args);
+      assertUpstreamCliArgs("devin", args, params.providerFlags);
       assertUpstreamCliEnv("devin", undefined);
       assertFinalCliProcessAdmission("devin", args, "devin");
       if (sessionResult.userProvidedSession && effectiveSessionId) {
@@ -13605,6 +13999,8 @@ export async function handleDevinRequestAsync(
 //──────────────────────────────────────────────────────────────────────────────
 
 export interface CursorRequestParams {
+  /** Flags the caller names itself; see src/provider-passthrough.ts. */
+  providerFlags?: PassthroughFlags;
   prompt?: string;
   model?: string;
   mode?: "plan" | "ask";
@@ -13634,6 +14030,8 @@ export interface CursorRequestParams {
 /** Build the headless Cursor Agent argv (print mode). Pure, no I/O. */
 export function prepareCursorRequest(
   params: {
+    /** Flags the caller names itself; see src/provider-passthrough.ts. */
+    providerFlags?: PassthroughFlags;
     prompt?: string;
     model?: string;
     mode?: CursorRequestParams["mode"];
@@ -13713,6 +14111,18 @@ export function prepareCursorRequest(
     }
     assertCliArgUtf8Size(prompt, { provider: "cursor", inputName: "prompt argv element" });
     appendCliPrompt(args, prompt);
+    // Pass-through. The prompt terminator is ALREADY in args, so these must go before it or they become prompt text.
+    const pt = passthroughArgvOrRejection(params.providerFlags, "cursor", args);
+    if (pt.rejection) {
+      return createErrorResponse(
+        params.operation,
+        1,
+        "",
+        corrId,
+        new Error(pt.rejection)
+      ) as ExtendedToolResponse;
+    }
+    insertCliArgsBeforePrompt(args, pt.args);
     assertCliArgvUtf8Size("cursor-agent", args, { provider: "cursor" });
   } catch (error) {
     return createErrorResponse(params.operation, 1, "", corrId, error as Error);
@@ -13910,6 +14320,7 @@ export async function handleCursorRequest(
   }
   const prep = prepareCursorRequest(
     {
+      providerFlags: params.providerFlags,
       prompt: params.prompt,
       model: params.model,
       mode: params.mode,
@@ -14028,7 +14439,7 @@ export async function handleCursorRequest(
         "--add-dir",
         worktreeResolution.effectiveAddDirs
       );
-      assertUpstreamCliArgs("cursor", args);
+      assertUpstreamCliArgs("cursor", args, params.providerFlags);
       assertUpstreamCliEnv("cursor", undefined);
       assertFinalCliProcessAdmission("cursor-agent", args, "cursor");
       if (effectiveSessionId) {
@@ -14056,7 +14467,7 @@ export async function handleCursorRequest(
           };
         }
       }
-      flight.start();
+      await flight.start();
       return { ok: true, value: { worktreeResolution } };
     },
     execute: async worktreeResolution => {
@@ -14091,7 +14502,12 @@ export async function handleCursorRequest(
         undefined,
         undefined,
         undefined,
-        sessionBoundDedupArgs(args, effectiveSessionId)
+        sessionBoundDedupArgs(args, effectiveSessionId),
+        undefined,
+        undefined,
+        undefined,
+        undefined,
+        params.providerFlags
       );
     },
     computeSuccessFacts: () => undefined,
@@ -14109,7 +14525,7 @@ export async function handleCursorRequest(
         },
         result
       ),
-    buildSuccessResponse: ({ stdout, durationMs }) => {
+    buildSuccessResponse: async ({ stdout, durationMs }) => {
       const response = buildCliResponse(
         "cursor",
         stdout,
@@ -14123,8 +14539,8 @@ export async function handleCursorRequest(
         undefined,
         effectiveCompress
       );
-      safeRecordCompression(corrId, response.compression, runtime);
-      flight.completeInline({
+      await safeRecordCompression(corrId, response.compression, runtime);
+      await flight.completeInline({
         response: stdout,
         durationMs,
         retryCount: 0,
@@ -14172,6 +14588,7 @@ export async function handleCursorRequestAsync(
   }
   const prep = prepareCursorRequest(
     {
+      providerFlags: params.providerFlags,
       prompt: params.prompt,
       model: params.model,
       mode: params.mode,
@@ -14261,7 +14678,7 @@ export async function handleCursorRequestAsync(
         worktreeResolution.effectiveAddDirs
       );
 
-      assertUpstreamCliArgs("cursor", args);
+      assertUpstreamCliArgs("cursor", args, params.providerFlags);
       assertUpstreamCliEnv("cursor", undefined);
       assertFinalCliProcessAdmission("cursor-agent", args, "cursor");
       if (sessionResult.userProvidedSession && effectiveSessionId) {
@@ -14366,6 +14783,8 @@ export async function handleCursorRequestAsync(
 }
 
 export interface MistralRequestParams {
+  /** Flags the caller names itself; see src/provider-passthrough.ts. */
+  providerFlags?: PassthroughFlags;
   prompt?: string;
   promptParts?: PromptParts;
   model?: string;
@@ -14485,7 +14904,7 @@ export async function handleMistralRequest(
   let kitEnvFragment: NodeJS.ProcessEnv | undefined;
   try {
     if (runtime.personalConfig.settings.enabled) assertKitSyncDeferralEnabled();
-    kit = resolvePersonalKitRequest(runtime, "mistral", {
+    kit = await resolvePersonalKitRequest(runtime, "mistral", {
       prompt: params.prompt,
       promptParts: params.promptParts,
       model: params.model,
@@ -14566,6 +14985,7 @@ export async function handleMistralRequest(
     : { model: params.model, maxTurns: params.maxTurns };
   const prep = prepareMistralRequest(
     {
+      providerFlags: params.providerFlags,
       prompt: params.prompt,
       promptParts: params.promptParts,
       model: kitPreferences.model as string | undefined,
@@ -14731,12 +15151,12 @@ export async function handleMistralRequest(
           "--add-dir",
           []
         );
-        assertUpstreamCliArgs("mistral", args);
+        assertUpstreamCliArgs("mistral", args, params.providerFlags);
         assertUpstreamCliEnv("mistral", kitEnvFragment!);
         assertFinalCliProcessAdmission("vibe", args, "mistral", kitEnvFragment!);
         // Fail closed if the compiled context drifted from what the plan admitted.
         assertMistralKitContextPrefix(isolation, kitPrefix!);
-        flight.start();
+        await flight.start();
         deps.logger.info(
           `[${corrId}] mistral_request (Kit) invoked with model=${prep.resolvedModel || "default"}, agent=${resolveMistralKitAgentMode()}, prompt length=${prep.effectivePrompt.length}`
         );
@@ -14778,7 +15198,7 @@ export async function handleMistralRequest(
         "--add-dir",
         worktreeResolution.effectiveAddDirs
       );
-      assertUpstreamCliArgs("mistral", args);
+      assertUpstreamCliArgs("mistral", args, params.providerFlags);
       assertUpstreamCliEnv("mistral", mistralEnv);
       assertFinalCliProcessAdmission("vibe", args, "mistral", mistralEnv);
       if (effectiveSessionId) {
@@ -14823,7 +15243,7 @@ export async function handleMistralRequest(
       ledger.installWorktree(
         createRequestOwnedWorktreeLifecycle(worktreeResolution, runtime, true)
       );
-      flight.start();
+      await flight.start();
       deps.logger.info(
         `[${corrId}] mistral_request invoked with model=${prep.resolvedModel || "default"}, permissionMode=${resolveMistralAgentMode(params.approvalStrategy, params.permissionMode)}, prompt length=${prep.effectivePrompt.length}`
       );
@@ -14884,7 +15304,8 @@ export async function handleMistralRequest(
           undefined,
           undefined,
           undefined,
-          kit?.mistralIsolation?.sessionDir
+          kit?.mistralIsolation?.sessionDir,
+          params.providerFlags
         );
       // The Kit heartbeat keeps the attempt lease alive until deferral or terminal
       // state; a null kitSession runs the dispatch directly.
@@ -14944,7 +15365,12 @@ export async function handleMistralRequest(
             undefined,
             undefined,
             undefined,
-            sessionBoundDedupArgs(retryArgs, effectiveSessionId)
+            sessionBoundDedupArgs(retryArgs, effectiveSessionId),
+            undefined,
+            undefined,
+            undefined,
+            undefined,
+            params.providerFlags
           );
           if (isDeferredResponse(result)) return result;
           prep.resolvedModel = recoveryModel;
@@ -14983,7 +15409,7 @@ export async function handleMistralRequest(
         },
         result
       ),
-    buildSuccessResponse: ({ worktreeResolution, stdout, durationMs }) => {
+    buildSuccessResponse: async ({ worktreeResolution, stdout, durationMs }) => {
       const response = buildCliResponse(
         "mistral",
         stdout,
@@ -14997,14 +15423,14 @@ export async function handleMistralRequest(
         undefined,
         effectiveCompress
       );
-      safeRecordCompression(corrId, response.compression, runtime, kit !== null);
+      await safeRecordCompression(corrId, response.compression, runtime, kit !== null);
       if (worktreeResolution.worktreePath) {
         const first = response.content[0];
         if (first && first.type === "text") {
           first.text = formatWorktreePrefix(worktreeResolution.worktreePath) + first.text;
         }
       }
-      flight.completeInline({
+      await flight.completeInline({
         response: stdout,
         durationMs,
         retryCount: 0,
@@ -15050,6 +15476,7 @@ export async function handleMistralRequestAsync(
   }
   const prep = prepareMistralRequest(
     {
+      providerFlags: params.providerFlags,
       prompt: params.prompt,
       promptParts: params.promptParts,
       model: params.model,
@@ -15121,7 +15548,7 @@ export async function handleMistralRequestAsync(
       worktreeResolution.effectiveAddDirs
     );
 
-    assertUpstreamCliArgs("mistral", args);
+    assertUpstreamCliArgs("mistral", args, params.providerFlags);
     assertUpstreamCliEnv("mistral", mistralEnv);
     assertFinalCliProcessAdmission("vibe", args, "mistral", mistralEnv);
     if (sessionResult.userProvidedSession && effectiveSessionId) {
@@ -15188,7 +15615,7 @@ export async function handleMistralRequestAsync(
       params.outputFormat,
       params.optimizePrompt
     );
-    const job = deps.asyncJobManager.startJob(
+    const job = await deps.asyncJobManager.startJob(
       "mistral",
       args,
       corrId,
@@ -15260,6 +15687,8 @@ export async function handleMistralRequestAsync(
 export async function handleCodexRequestAsync(
   deps: AsyncHandlerDeps,
   params: {
+    /** Flags the caller names itself; see src/provider-passthrough.ts. */
+    providerFlags?: PassthroughFlags;
     prompt?: string;
     promptParts?: PromptParts;
     model?: string;
@@ -15312,7 +15741,7 @@ export async function handleCodexRequestAsync(
   let kitSession: PersonalKitSessionResolution | null = null;
   let kitPrefix: string | undefined;
   try {
-    kit = resolvePersonalKitRequest(runtime, "codex", params as Record<string, unknown>);
+    kit = await resolvePersonalKitRequest(runtime, "codex", params as Record<string, unknown>);
   } catch (err) {
     kit?.artifact?.cleanup();
     return runtime.personalConfig.settings.enabled
@@ -15331,6 +15760,7 @@ export async function handleCodexRequestAsync(
       : (kitPreferences.outputFormat ?? "text")
   ) as "text" | "json";
   const codexPreparationParams: Parameters<typeof prepareCodexRequest>[0] = {
+    providerFlags: params.providerFlags,
     prompt: params.prompt,
     promptParts: params.promptParts,
     model: kitPreferences.model as string | undefined,
@@ -15508,7 +15938,7 @@ export async function handleCodexRequestAsync(
 
     // Start job only after all session I/O succeeds. If startJob throws before
     // registering the record, ownership stays here and we run it in the catch.
-    assertUpstreamCliArgs("codex", args);
+    assertUpstreamCliArgs("codex", args, params.providerFlags);
     assertUpstreamCliEnv("codex", undefined);
     assertFinalCliProcessAdmission("codex", args, "codex");
     if (!kitSession && createLegacySessionAfterAdmission && effectiveSessionId) {
@@ -15814,7 +16244,7 @@ async function dispatchRoutedCli(
   const cliEnv = routedCliEnv(cli, prep);
   let cleanupHandedOff = false;
 
-  safeFlightStart(
+  await safeFlightStart(
     {
       correlationId: corrId,
       cli,
@@ -15832,7 +16262,8 @@ async function dispatchRoutedCli(
       workspace: params.workspace,
       runtime,
     });
-    assertUpstreamCliArgs(cli, args);
+    // route_request exposes no providerFlags; this argv is entirely gateway-built.
+    assertUpstreamCliArgs(cli, args, undefined);
     assertUpstreamCliEnv(cli, cliEnv);
     assertFinalCliProcessAdmission(providerCommandName(cli), args, cli, cliEnv);
     const effectiveCompress = resolveEffectiveCompression(runtime.compression, {
@@ -15862,7 +16293,17 @@ async function dispatchRoutedCli(
       frHandoff.extractUsage,
       prep.stdinPayload,
       workspaceResolution.cwd,
-      effectiveCompress
+      effectiveCompress,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      undefined
     );
 
     if (isDeferredResponse(result)) {
@@ -15874,7 +16315,7 @@ async function dispatchRoutedCli(
 
     if (code !== 0) {
       const terminalFailure = buildTerminalCliFailure(cli, stdout, stderr, code, outputFormat);
-      safeFlightComplete(
+      await safeFlightComplete(
         corrId,
         {
           ...terminalFailure,
@@ -15924,7 +16365,7 @@ async function dispatchRoutedCli(
       prep.resolvedModel || "default",
       usage
     );
-    safeFlightComplete(
+    await safeFlightComplete(
       corrId,
       {
         response: cli === "codex" ? codexFrResponse(outputFormat, stdout) : responseText,
@@ -15958,12 +16399,12 @@ async function dispatchRoutedCli(
       undefined,
       effectiveCompress
     );
-    safeRecordCompression(corrId, response.compression, runtime);
+    await safeRecordCompression(corrId, response.compression, runtime);
     return response;
   } catch (error) {
     if (!cleanupHandedOff) prepCleanup?.();
     const elapsedMs = Math.max(0, Date.now() - startTime);
-    safeFlightComplete(
+    await safeFlightComplete(
       corrId,
       {
         response: "",
@@ -16133,16 +16574,16 @@ export function deriveCostBasis(
 }
 
 /** Persist the routing decision columns for a routed request that dispatched. */
-function recordRoutingDecision(
+async function recordRoutingDecision(
   runtime: GatewayServerRuntime,
   correlationId: string,
   decision: RouteDecision,
   reroutes: number
-): void {
+): Promise<void> {
   const reason = decision.chosen
     ? `cheapest${decision.nearTie ? ":near-tie" : ""}`
     : (decision.error ?? "no-eligible");
-  safeRecordRouting(
+  await safeRecordRouting(
     correlationId,
     {
       estCostUsd: decision.estCostUsd ?? null,
@@ -16300,7 +16741,7 @@ async function runRouteRequest(
     );
   }
   const cfg = runtime.leastCost;
-  const { env, routerConfig, req } = buildRouteContext(runtime, params);
+  const { env, routerConfig, req } = await buildRouteContext(runtime, params);
 
   const excluded = new Set<string>();
   // Candidates that failed AT DISPATCH (not at selection), with why. Merged into
@@ -16352,7 +16793,7 @@ async function runRouteRequest(
     const result = await dispatchRoutedRequest(runtime, chosen, dispatchParams);
 
     if (!result.isError) {
-      recordRoutingDecision(runtime, attemptCorrId, decision, reroutes);
+      await recordRoutingDecision(runtime, attemptCorrId, decision, reroutes);
       return attachRouting(result, buildRoutingBlock(decision, reroutes));
     }
 
@@ -16390,25 +16831,30 @@ async function runRouteRequest(
 }
 
 /** Shared selection context for the sync and async route tools. */
-function buildRouteContext(
+async function buildRouteContext(
   runtime: GatewayServerRuntime,
   params: RouteToolParams
-): {
+): Promise<{
   env: ReturnType<typeof buildRouterEnv>;
   routerConfig: ReturnType<typeof toRouterConfig>;
   req: RouteRequestInput;
-} {
+}> {
+  // Calibration priors (token-estimator layer 3): read from the flight
+  // recorder, scoped per config; principal scope uses the caller's principal.
+  // Resolved BEFORE buildRouterEnv, which is synchronous and does no I/O since
+  // the recorder became asynchronous (s7).
+  const priors = await resolveRouterPriors({
+    flightRecorder: runtime.flightRecorder,
+    priorsScope: runtime.leastCost.priorsScope,
+    ownerPrincipal: resolveOwnerPrincipal(getRequestContext()),
+  });
   return {
     env: buildRouterEnv({
       performanceMetrics: runtime.performanceMetrics,
       limiterSnapshot: runtime.asyncJobManager.getLimiterSnapshot(),
       apiProviders: enabledApiProviders(runtime.providers),
       preferCatalogPrice: runtime.leastCost.preferCatalogPrice,
-      // Calibration priors (token-estimator layer 3): read from the flight
-      // recorder, scoped per config; principal scope uses the caller's principal.
-      flightRecorder: runtime.flightRecorder,
-      priorsScope: runtime.leastCost.priorsScope,
-      ownerPrincipal: resolveOwnerPrincipal(getRequestContext()),
+      priors,
     }),
     routerConfig: toRouterConfig(runtime.leastCost),
     req: {
@@ -16454,7 +16900,8 @@ async function dispatchRoutedCliAsync(
       workspace: params.workspace,
       runtime,
     });
-    assertUpstreamCliArgs(cli, args);
+    // route_request exposes no providerFlags; this argv is entirely gateway-built.
+    assertUpstreamCliArgs(cli, args, undefined);
     assertUpstreamCliEnv(cli, cliEnv);
     assertFinalCliProcessAdmission(providerCommandName(cli), args, cli, cliEnv);
     const effectiveCompress = resolveEffectiveCompression(runtime.compression, {
@@ -16469,7 +16916,7 @@ async function dispatchRoutedCliAsync(
       outputFormat,
       params.optimizePrompt
     );
-    const job = runtime.asyncJobManager.startJob(
+    const job = await runtime.asyncJobManager.startJob(
       cli,
       args,
       corrId,
@@ -16520,7 +16967,7 @@ async function runRouteRequestAsync(
       )
     );
   }
-  const { env, routerConfig, req } = buildRouteContext(runtime, params);
+  const { env, routerConfig, req } = await buildRouteContext(runtime, params);
   const decision = selectCandidate(req, env, routerConfig);
   if (!decision.chosen) {
     return routeErrorResponse(decision, 0, corrId);
@@ -16559,7 +17006,7 @@ async function runRouteRequestAsync(
       optimizeResponse: params.optimizeResponse ?? false,
     });
   }
-  recordRoutingDecision(runtime, corrId, decision, 0);
+  await recordRoutingDecision(runtime, corrId, decision, 0);
   return attachRouting(result, buildRoutingBlock(decision, 0));
 }
 
@@ -16613,6 +17060,13 @@ async function recoverUnadmittedPersonalKitAttempt(input: {
   attemptId: string;
   execution: KitExecutionRef;
 }): Promise<{ fence: "reserved" | "already_recovered" }> {
+  // Cross the startup barrier BEFORE the admission gate, for the same reason
+  // resolvePersonalKitRequest does. assertKitDurableAdmission reads the
+  // synchronous canAdmitDurableJobs() snapshot, so inside the startup window a
+  // valid recovery attempt is refused kit_busy. The barrier at
+  // lookupJobSnapshot further down cannot help: a later await does not protect
+  // an earlier read.
+  await input.runtime.asyncJobManager.whenStartupSettled();
   assertKitDurableAdmission(input.runtime);
   const manager = requireKitSessionManager(input.runtime);
   const session = await Promise.resolve(manager.getSession(input.sessionId));
@@ -16638,7 +17092,7 @@ async function recoverUnadmittedPersonalKitAttempt(input: {
       "A legacy non-durable Kit attempt has no durable fence and must remain retained"
     );
   }
-  const lookup = input.runtime.asyncJobManager.lookupJobSnapshot(attempt.id);
+  const lookup = await input.runtime.asyncJobManager.lookupJobSnapshot(attempt.id);
   if (lookup.state === "unavailable") {
     throw new PersonalConfigError(
       "kit_busy",
@@ -16653,7 +17107,7 @@ async function recoverUnadmittedPersonalKitAttempt(input: {
   }
   let fence: "reserved" | "already_recovered" | "conflict";
   try {
-    fence = input.runtime.asyncJobManager.fenceUnadmittedKitAttempt({
+    fence = await input.runtime.asyncJobManager.fenceUnadmittedKitAttempt({
       attemptId: attempt.id,
       cli: input.provider,
       kitExecution: input.execution,
@@ -16905,6 +17359,28 @@ function registerPersonalConfigTools(server: McpServer, runtime: GatewayServerRu
   );
 }
 
+/**
+ * What the request-history READ surfaces say about their own storage.
+ *
+ * `llm_request_list` answers `success: true, count: 0` and `llm_request_result`
+ * answers "not found" for a recorder that could not open its database, which is
+ * byte-identical to the answer for a database that is simply empty. That is the
+ * silent empty-success this node exists to remove, and the hint each of them
+ * already carried named LLM_GATEWAY_LOGS_DB as the only possible cause.
+ */
+function requestStorageNote(recorder: FlightRecorderLike | null): {
+  state: FlightRecorderState;
+  readsAreAuthoritative: boolean;
+  warning: string | null;
+} {
+  const health = flightRecorderHealth(recorder);
+  return {
+    state: health.state,
+    readsAreAuthoritative: flightRecorderReadsAreAuthoritative(health),
+    warning: flightRecorderHealthMessage(health),
+  };
+}
+
 export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
   const runtime = resolveGatewayServerRuntime(deps, { isolateState: true });
   ensureLiveKitSessionCleanup(runtime);
@@ -16981,7 +17457,7 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
       validationRunStore: asyncJobManager.getValidationRunStore(),
       resolveProviderCwd: provider => {
         const context = getRequestContext();
-        const remote = context?.transport === "http" || context?.authKind === "oauth";
+        const remote = isRemotePrincipal(context);
         if (!remote && !runtime.workspaces.defaultAlias) return undefined;
         return resolveWorkspaceForProvider(runtime.workspaces, provider).cwd;
       },
@@ -16998,7 +17474,7 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
         allowApiUpload,
       }) => {
         const context = getRequestContext();
-        const remote = context?.transport === "http" || context?.authKind === "oauth";
+        const remote = isRemotePrincipal(context);
         const apiReviewers = reviewers.filter(
           reviewer => !(CLI_TYPES as readonly string[]).includes(reviewer)
         );
@@ -17473,6 +17949,7 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
         .describe(
           "Restrict Claude to provided MCP config only. mcp_managed always enforces this isolation, even when false is supplied."
         ),
+      providerFlags: PROVIDER_FLAGS_SHAPE,
       correlationId: z.string().optional().describe("Request trace ID (auto if omitted)"),
       optimizePrompt: z.boolean().default(false).describe("Optimize prompt before execution"),
       optimizeResponse: z.boolean().default(false).describe("Optimize response output"),
@@ -17565,10 +18042,12 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
       idleTimeoutMs,
       forceRefresh,
       requestInstructions,
+      providerFlags,
     }) =>
       handleClaudeRequest(
         { sessionManager, logger, runtime },
         {
+          providerFlags,
           prompt,
           promptParts,
           model,
@@ -17693,6 +18172,7 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
           "Resume a previous Codex session via `codex exec resume --last`. UNDER REVIEW: do not rely on which session this selects or on the resumed working directory. `--last` is filtered by cwd upstream unless `--all` is passed, which the gateway does not emit, and the child is still spawned with the gateway-resolved cwd even though `-C`/`--add-dir` are dropped from the resume argv. Verify the target, or start a fresh session when it must be certain. Ignored if sessionId is set; an explicit real Codex UUID targets that session. A brand-new session returns no resumable sessionId; continue with resumeLatest:true or a real Codex UUID."
         ),
       createNewSession: z.boolean().default(false).describe("Force a fresh session (no resume)"),
+      providerFlags: PROVIDER_FLAGS_SHAPE,
       correlationId: z.string().optional().describe("Request trace ID (auto if omitted)"),
       optimizePrompt: z.boolean().default(false).describe("Optimize prompt before execution"),
       optimizeResponse: z.boolean().default(false).describe("Optimize response output"),
@@ -17841,10 +18321,12 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
       workspace,
       worktree,
       requestInstructions,
+      providerFlags,
     }) =>
       handleCodexRequest(
         { sessionManager, logger, runtime },
         {
+          providerFlags,
           prompt,
           promptParts,
           model,
@@ -18134,7 +18616,11 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
           undefined,
           undefined,
           undefined,
-          ["fork"]
+          ["fork"],
+          undefined,
+          undefined,
+          undefined,
+          undefined
         );
 
         if (isDeferredResponse(result)) {
@@ -18254,6 +18740,7 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
         .describe(
           "Additional workspace directories passed as --add-dir." + LOCAL_INCLUDE_DIRS_FIELD_SUFFIX
         ),
+      providerFlags: PROVIDER_FLAGS_SHAPE,
       correlationId: z.string().optional().describe("Request trace ID (auto if omitted)"),
       optimizePrompt: z.boolean().default(false).describe("Optimize prompt before execution"),
       optimizeResponse: z.boolean().default(false).describe("Optimize response output"),
@@ -18380,10 +18867,12 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
       workingDir,
       workspace,
       worktree,
+      providerFlags,
     }) => {
       return handleGeminiRequest(
         { sessionManager, logger, runtime },
         {
+          providerFlags,
           prompt,
           promptParts,
           model,
@@ -18449,6 +18938,7 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
       // table — see GROK_GENERATED_SHAPE / src/provider-codegen.ts. They are
       // spread in here once instead of hand-listed; order is irrelevant to Zod.
       ...GROK_GENERATED_SHAPE,
+      providerFlags: PROVIDER_FLAGS_SHAPE,
       sessionId: z
         .string()
         .optional()
@@ -18622,10 +19112,12 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
       jsonSchema,
       workspace,
       worktree,
+      providerFlags,
     }) => {
       return handleGrokRequest(
         { sessionManager, logger, runtime },
         {
+          providerFlags,
           prompt,
           promptParts,
           model,
@@ -18747,6 +19239,12 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
         .describe(
           "Respect workspace trust (Devin --respect-workspace-trust <bool>). Devin defaults true for interactive and false for print mode; set explicitly to override."
         ),
+      agentConfig: z
+        .string()
+        .optional()
+        .describe(
+          "Agent config file path (Devin --agent-config <FILE>). devin 3000.4.16 and newer no longer advertise this flag and will reject it; the gateway passes it through rather than refusing it, because older devin installs still accept it and the binary is the authority on its own flags."
+        ),
       agentType: z
         .enum(DEVIN_ACP_AGENT_TYPES)
         .optional()
@@ -18769,6 +19267,7 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
         .boolean()
         .default(false)
         .describe("Force a new session on transport=cli. true is rejected on transport=acp."),
+      providerFlags: PROVIDER_FLAGS_SHAPE,
       correlationId: z.string().optional().describe("Request trace ID (auto if omitted)"),
       optimizePrompt: z.boolean().default(false).describe("Optimize prompt before execution"),
       optimizeResponse: z.boolean().default(false).describe("Optimize response output"),
@@ -18833,10 +19332,12 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
       workingDir,
       workspace,
       worktree,
+      providerFlags,
     }) => {
       return handleDevinRequest(
         { sessionManager, logger, runtime },
         {
+          providerFlags,
           prompt,
           model,
           transport,
@@ -18949,6 +19450,7 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
         .describe(
           "On transport=cli, approvalPolicy has no effect because mcp_managed is unavailable. On transport=acp, supplying approvalPolicy is rejected because ACP has its own permission bridge."
         ),
+      providerFlags: PROVIDER_FLAGS_SHAPE,
       correlationId: z.string().optional().describe("Request trace ID (auto if omitted)"),
       optimizePrompt: z.boolean().default(false).describe("Optimize prompt before execution"),
       optimizeResponse: z.boolean().default(false).describe("Optimize response output"),
@@ -19005,10 +19507,12 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
       compressResponse,
       idleTimeoutMs,
       forceRefresh,
+      providerFlags,
     }) => {
       return handleCursorRequest(
         { sessionManager, logger, runtime },
         {
+          providerFlags,
           prompt,
           model,
           mode,
@@ -19115,6 +19619,7 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
         .describe(
           "Denylist of built-in tools, each emitted as a separate --disabled-tools <tool> flag"
         ),
+      providerFlags: PROVIDER_FLAGS_SHAPE,
       correlationId: z.string().optional().describe("Request trace ID (auto if omitted)"),
       optimizePrompt: z.boolean().default(false).describe("Optimize prompt before execution"),
       optimizeResponse: z.boolean().default(false).describe("Optimize response output"),
@@ -19209,10 +19714,12 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
       addDir,
       workspace,
       worktree,
+      providerFlags,
     }) => {
       return handleMistralRequest(
         { sessionManager, logger, runtime },
         {
+          providerFlags,
           prompt,
           promptParts,
           model,
@@ -19436,6 +19943,7 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
           .describe(
             "Restrict Claude to provided MCP config only. mcp_managed always enforces this isolation, even when false is supplied."
           ),
+        providerFlags: PROVIDER_FLAGS_SHAPE,
         correlationId: z.string().optional().describe("Request trace ID (auto if omitted)"),
         optimizePrompt: z.boolean().default(false).describe("Optimize prompt before execution"),
         compressResponse: z
@@ -19526,6 +20034,7 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
         idleTimeoutMs,
         forceRefresh,
         requestInstructions,
+        providerFlags,
       }) => {
         // Prompt XOR is a pure admission check. Run it before Kit/session
         // resolution so raw invalid requests retain the public validation
@@ -19560,7 +20069,7 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
         let kit: PersonalKitRequestContext | null = null;
         let kitSession: PersonalKitSessionResolution | null = null;
         try {
-          kit = resolvePersonalKitRequest(runtime, "claude", {
+          kit = await resolvePersonalKitRequest(runtime, "claude", {
             prompt,
             promptParts,
             systemPrompt,
@@ -19701,6 +20210,7 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
         }
         const prep = prepareClaudeRequest(
           {
+            providerFlags,
             prompt,
             promptParts,
             model: kitPreferences.model as string | undefined,
@@ -19824,7 +20334,7 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
               });
 
           // Slice 3: TTL warning on resume (async path too).
-          const ttlWarning = maybeBuildCacheTtlWarning({
+          const ttlWarning = await maybeBuildCacheTtlWarning({
             runtime,
             sessionId: effectiveSessionId,
             cli: "claude",
@@ -19865,7 +20375,7 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
             effectiveOutputFormat === "stream-json"
               ? resolveIdleTimeout("claude", idleTimeoutMs)
               : undefined;
-          assertUpstreamCliArgs("claude", args);
+          assertUpstreamCliArgs("claude", args, providerFlags);
           assertUpstreamCliEnv("claude", undefined);
           assertFinalCliProcessAdmission("claude", args, "claude");
           if (!kitSession && effectiveSessionId && !existingSession) {
@@ -20104,6 +20614,7 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
             "Resume a previous Codex session via `codex exec resume --last`. UNDER REVIEW: do not rely on which session this selects or on the resumed working directory. `--last` is filtered by cwd upstream unless `--all` is passed, which the gateway does not emit, and the child is still spawned with the gateway-resolved cwd even though `-C`/`--add-dir` are dropped from the resume argv. Verify the target, or start a fresh session when it must be certain. Ignored if sessionId is set; an explicit real Codex UUID targets that session. A brand-new session returns no resumable sessionId; continue with resumeLatest:true or a real Codex UUID."
           ),
         createNewSession: z.boolean().default(false).describe("Force a fresh session (no resume)"),
+        providerFlags: PROVIDER_FLAGS_SHAPE,
         correlationId: z.string().optional().describe("Request trace ID (auto if omitted)"),
         optimizePrompt: z.boolean().default(false).describe("Optimize prompt before execution"),
         compressResponse: z
@@ -20228,10 +20739,12 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
         workspace,
         worktree,
         requestInstructions,
+        providerFlags,
       }) => {
         return handleCodexRequestAsync(
           { sessionManager, asyncJobManager, logger, runtime },
           {
+            providerFlags,
             prompt,
             promptParts,
             model,
@@ -20336,6 +20849,7 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
             "Additional workspace directories passed as --add-dir." +
               LOCAL_INCLUDE_DIRS_FIELD_SUFFIX
           ),
+        providerFlags: PROVIDER_FLAGS_SHAPE,
         correlationId: z.string().optional().describe("Request trace ID (auto if omitted)"),
         optimizePrompt: z.boolean().default(false).describe("Optimize prompt before execution"),
         compressResponse: z
@@ -20460,10 +20974,12 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
         workingDir,
         workspace,
         worktree,
+        providerFlags,
       }) => {
         return handleGeminiRequestAsync(
           { sessionManager, asyncJobManager, logger, runtime },
           {
+            providerFlags,
             prompt,
             promptParts,
             model,
@@ -20543,6 +21059,7 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
         // and grok-schema-golden.test.ts now covers both tools for exactly
         // that, driven off the contract rather than a literal list.
         outputFormat: GROK_GENERATED_SHAPE.outputFormat,
+        providerFlags: PROVIDER_FLAGS_SHAPE,
         sessionId: z
           .string()
           .optional()
@@ -20566,11 +21083,13 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
           .describe(
             "Grok permission mode: default|acceptEdits|auto|dontAsk|bypassPermissions|plan."
           ),
-        effort: z
-          .enum(["low", "medium", "high", "xhigh", "max"])
-          .optional()
-          .describe("Grok effort level"),
-        reasoningEffort: z.string().optional().describe("Reasoning effort for reasoning models"),
+        // Derived, not hand-declared. grok 1.0.4 sets no possible-values on this
+        // flag, so a hand-written enum here refuses input the binary parses AND
+        // diverges from the sync tool, which spreads GROK_GENERATED_SHAPE. That
+        // sync/async divergence is a repeat: the same shape shipped for
+        // outputFormat and had to be fixed at :20545.
+        effort: GROK_GENERATED_SHAPE.effort,
+        reasoningEffort: GROK_GENERATED_SHAPE.reasoningEffort,
         approvalStrategy: z
           .enum(["legacy", "mcp_managed"])
           .default("legacy")
@@ -20681,6 +21200,8 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
           .boolean()
           .optional()
           .describe("Grok --disable-web-search: disable web search and remote retrieval tools."),
+        bestOfN: GROK_GENERATED_SHAPE.bestOfN,
+        check: GROK_GENERATED_SHAPE.check,
         todoGate: z
           .boolean()
           .optional()
@@ -20834,10 +21355,12 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
         jsonSchema,
         workspace,
         worktree,
+        providerFlags,
       }) => {
         return handleGrokRequestAsync(
           { sessionManager, asyncJobManager, logger, runtime },
           {
+            providerFlags,
             prompt,
             promptParts,
             model,
@@ -20944,6 +21467,12 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
           .describe(
             "Respect workspace trust (Devin --respect-workspace-trust <bool>). Devin defaults true for interactive and false for print mode; set explicitly to override."
           ),
+        agentConfig: z
+          .string()
+          .optional()
+          .describe(
+            "Agent config file path (Devin --agent-config <FILE>). devin 3000.4.16 and newer no longer advertise this flag and will reject it; the gateway passes it through rather than refusing it, because older devin installs still accept it and the binary is the authority on its own flags."
+          ),
         sessionId: z
           .string()
           .optional()
@@ -20957,6 +21486,7 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
             "Resume the most recent Devin session in cwd (--continue). Note: the gw-* id minted for a brand-new session is not resumable via sessionId; continue with resumeLatest:true."
           ),
         createNewSession: z.boolean().default(false).describe("Force a new session"),
+        providerFlags: PROVIDER_FLAGS_SHAPE,
         correlationId: z.string().optional().describe("Request trace ID (auto if omitted)"),
         optimizePrompt: z.boolean().default(false).describe("Optimize prompt before execution"),
         compressResponse: z
@@ -21017,10 +21547,12 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
         workingDir,
         workspace,
         worktree,
+        providerFlags,
       }) => {
         return handleDevinRequestAsync(
           { sessionManager, asyncJobManager, logger, runtime },
           {
+            providerFlags,
             prompt,
             model,
             permissionMode,
@@ -21119,6 +21651,7 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
           .enum(["strict", "balanced", "permissive"])
           .optional()
           .describe(NON_CLAUDE_MANAGED_APPROVAL_POLICY_UNAVAILABLE),
+        providerFlags: PROVIDER_FLAGS_SHAPE,
         correlationId: z.string().optional().describe("Request trace ID (auto if omitted)"),
         optimizePrompt: z.boolean().default(false).describe("Optimize prompt before execution"),
         compressResponse: z
@@ -21172,10 +21705,12 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
         compressResponse,
         idleTimeoutMs,
         forceRefresh,
+        providerFlags,
       }) => {
         return handleCursorRequestAsync(
           { sessionManager, asyncJobManager, logger, runtime },
           {
+            providerFlags,
             prompt,
             model,
             mode,
@@ -21270,6 +21805,7 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
           .describe(
             "Denylist of built-in tools, each emitted as a separate --disabled-tools <tool> flag"
           ),
+        providerFlags: PROVIDER_FLAGS_SHAPE,
         correlationId: z.string().optional().describe("Request trace ID (auto if omitted)"),
         optimizePrompt: z.boolean().default(false).describe("Optimize prompt before execution"),
         compressResponse: z
@@ -21361,10 +21897,12 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
         addDir,
         workspace,
         worktree,
+        providerFlags,
       }) => {
         return handleMistralRequestAsync(
           { sessionManager, asyncJobManager, logger, runtime },
           {
+            providerFlags,
             prompt,
             promptParts,
             model,
@@ -21423,14 +21961,14 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
         openWorldHint: false,
       },
       async ({ jobId, afterProgressSeq, progressLimit }) => {
-        const job = asyncJobManager.getJobSnapshot(jobId, {
+        const job = await asyncJobManager.getJobSnapshot(jobId, {
           afterProgressSeq,
           progressLimit,
         });
         // F3b: own-or-not-found. A job owned by another principal is reported as
         // "not found" — identical to an unknown jobId (no existence oracle).
         const caller = resolveOwnerPrincipal(getRequestContext());
-        if (!job || !principalCanAccess(asyncJobManager.getJobOwner(jobId), caller)) {
+        if (!job || !principalCanAccess(await asyncJobManager.getJobOwner(jobId), caller)) {
           return {
             content: [
               {
@@ -21486,10 +22024,10 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
       },
       async ({ jobId, afterProgressSeq, progressLimit, waitMs }, extra) => {
         const caller = resolveOwnerPrincipal(getRequestContext());
-        const accessible = (): boolean =>
-          principalCanAccess(asyncJobManager.getJobOwner(jobId), caller);
-        let job = accessible()
-          ? asyncJobManager.getJobSnapshot(jobId, { afterProgressSeq, progressLimit })
+        const accessible = async (): Promise<boolean> =>
+          principalCanAccess(await asyncJobManager.getJobOwner(jobId), caller);
+        let job = (await accessible())
+          ? await asyncJobManager.getJobSnapshot(jobId, { afterProgressSeq, progressLimit })
           : null;
         if (!job) {
           return {
@@ -21523,13 +22061,13 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
             };
             extra.signal.addEventListener("abort", abort, { once: true });
           });
-          job = accessible()
-            ? asyncJobManager.getJobSnapshot(jobId, { afterProgressSeq, progressLimit })
+          job = (await accessible())
+            ? await asyncJobManager.getJobSnapshot(jobId, { afterProgressSeq, progressLimit })
             : null;
           if (!job) break;
         }
 
-        if (!job || !accessible()) {
+        if (!job || !(await accessible())) {
           return {
             content: [
               {
@@ -21611,14 +22149,14 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
       },
       async ({ jobId, maxChars, stdoutOffsetChars, stderrOffsetChars, rawOutput }) => {
         const remoteCaller = callerIsRemote();
-        const result = asyncJobManager.getJobResult(jobId, maxChars, {
+        const result = await asyncJobManager.getJobResult(jobId, maxChars, {
           stdoutOffsetChars,
           stderrOffsetChars,
           redactProviderSessionIds: remoteCaller,
         });
         // F3b: own-or-not-found (no cross-principal readback of job output).
         const caller = resolveOwnerPrincipal(getRequestContext());
-        if (!result || !principalCanAccess(asyncJobManager.getJobOwner(jobId), caller)) {
+        if (!result || !principalCanAccess(await asyncJobManager.getJobOwner(jobId), caller)) {
           return {
             content: [
               {
@@ -21707,7 +22245,13 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
         // in the caller-facing (compressed) text.
         const compressJob =
           !rawOutput && asyncJobManager.getJobCompressResponse(jobId) && outputFormat !== "json";
-        const personalKitJob = Boolean(asyncJobManager.getJobKitExecution(jobId));
+        // AWAITED. getJobKitExecution became async with the store, and
+        // `Boolean(promise)` is always true, so this read silently claimed
+        // every job was a Kit job and suppressed compression telemetry for all
+        // of them. Boolean() is a coercion, not a condition, which is why
+        // check-promise-in-condition.mjs did not see it; the gate now visits
+        // coercion callees too.
+        const personalKitJob = Boolean(await asyncJobManager.getJobKitExecution(jobId));
         if (compressJob && result.stdout) {
           if (outputFormat === "stream-json" && parsed) {
             result.stdout = parsed.text;
@@ -21721,7 +22265,7 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
           });
           if (compressed.text !== result.stdout) {
             result.stdout = compressed.text;
-            safeRecordCompression(result.correlationId, compressed, runtime, personalKitJob);
+            await safeRecordCompression(result.correlationId, compressed, runtime, personalKitJob);
           }
         }
 
@@ -21808,8 +22352,8 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
         // is reported as "not found" rather than cancelled.
         const caller = resolveOwnerPrincipal(getRequestContext());
         if (
-          asyncJobManager.getJobSnapshot(jobId) &&
-          !principalCanAccess(asyncJobManager.getJobOwner(jobId), caller)
+          (await asyncJobManager.getJobSnapshot(jobId)) &&
+          !principalCanAccess(await asyncJobManager.getJobOwner(jobId), caller)
         ) {
           return {
             content: [
@@ -21829,7 +22373,7 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
             isError: true,
           };
         }
-        const cancel = asyncJobManager.cancelJob(jobId);
+        const cancel = await asyncJobManager.cancelJob(jobId);
         if (!cancel.canceled) {
           return {
             content: [
@@ -21907,7 +22451,7 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
     },
     async ({ correlationId, maxChars, includePrompt }) => {
       const remoteCaller = callerIsRemote();
-      const record = readPersistedRequest(flightRecorder, correlationId, {
+      const record = await readPersistedRequest(flightRecorder, correlationId, {
         maxChars,
         includePrompt,
         redactProviderSessionId: remoteCaller,
@@ -21926,6 +22470,9 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
                   error: "No persisted request found for this correlation id",
                   correlationId,
                   hint: "The id may be wrong, the row may have aged out of the flight recorder, or flight recording is disabled (LLM_GATEWAY_LOGS_DB=none).",
+                  // As on llm_request_list: "not found" and "could not look"
+                  // returned the same shape and the same hint.
+                  storage: requestStorageNote(flightRecorder),
                 },
                 null,
                 2
@@ -21947,9 +22494,85 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
     }
   );
 
+  // Find a persisted request WITHOUT already knowing its correlation id.
+  //
+  // Every other flight-recorder read (llm_request_result, llm_job_*,
+  // validation_receipt) is keyed by an id handed out inline to the originating
+  // caller, so an agent that did not make the call, or whose context was
+  // compacted since, had no route in and went looking for the database file
+  // instead. This is that route. It projects metadata only; the bodies stay
+  // behind llm_request_result, which owns truncation and redaction.
+  server.tool(
+    "llm_request_list",
+    "List recent persisted requests (sync and async) newest-first WITHOUT a correlation id, to find one. Returns metadata only; pass a returned correlationId to llm_request_result for the prompt/response, or a returned asyncJobId to llm_job_status.",
+    {
+      limit: z
+        .number()
+        .int()
+        .min(1)
+        .max(PERSISTED_REQUEST_LIST_MAX_LIMIT)
+        .default(PERSISTED_REQUEST_LIST_DEFAULT_LIMIT)
+        .describe(`Max rows to return (1-${PERSISTED_REQUEST_LIST_MAX_LIMIT})`),
+      since: z
+        .string()
+        .min(1)
+        .optional()
+        .describe("ISO-8601 timestamp lower bound, e.g. 2026-08-21T00:00:00Z"),
+      cli: z
+        .string()
+        .min(1)
+        .optional()
+        .describe(
+          "Restrict to one provider as recorded (claude, codex, gemini, grok, mistral, devin, cursor, or an API provider id)"
+        ),
+      sessionId: z.string().min(1).optional().describe("Restrict to one gateway session id"),
+    },
+    {
+      title: "Persisted request listing",
+      readOnlyHint: true,
+      destructiveHint: false,
+      idempotentHint: true,
+      openWorldHint: false,
+    },
+    async ({ limit, since, cli, sessionId }) => {
+      const caller = resolveOwnerPrincipal(getRequestContext());
+      const requests = await listPersistedRequests(flightRecorder, {
+        limit,
+        since,
+        cli,
+        sessionId,
+        callerPrincipal: caller,
+        redactProviderSessionId: callerIsRemote(),
+      });
+
+      return {
+        content: [
+          {
+            type: "text",
+            text: JSON.stringify(
+              {
+                success: true,
+                count: requests.length,
+                requests,
+                hint: "Pass correlationId to llm_request_result for prompt/response, or asyncJobId to llm_job_status. An empty list is not proof nothing ran: cross-LLM validation seats write no flight-recorder row, and flight recording can be disabled (LLM_GATEWAY_LOGS_DB=none).",
+                // obs: the hint above lists ONE reason a list can be empty and
+                // there are five. This says which one is true right now, so an
+                // empty result from an unreadable database stops looking the
+                // same as an empty result from an empty one.
+                storage: requestStorageNote(flightRecorder),
+              },
+              null,
+              2
+            ),
+          },
+        ],
+      };
+    }
+  );
+
   server.tool(
     "llm_process_health",
-    "Report gateway process health: async-job manager state plus the resolved persistence configuration and paths.",
+    "Report gateway process health: async-job manager state, the resolved job-store persistence configuration, and the flight recorder's separate engine and path (the two do NOT share a backend setting).",
     {},
     {
       title: "Gateway process health",
@@ -21959,6 +22582,10 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
       openWorldHint: false,
     },
     async () => {
+      // Same barrier as the request paths: getDurableAdmissionHealth() reads the
+      // synchronous admission snapshot, and reporting "async jobs disabled"
+      // because startup has not settled is a false health answer, not a slow one.
+      await asyncJobManager.whenStartupSettled();
       const health = asyncJobManager.getJobHealth();
       // Report configured, attached, and currently admissible state separately.
       // A store can remain attached while its heartbeat circuit is fail-closed;
@@ -21967,11 +22594,44 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
       const durableAdmission = asyncJobManager.getDurableAdmissionHealth();
       const asyncJobsConfigured = persistence.backend !== "none" && persistence.asyncJobsEnabled;
       const asyncJobsEffective = asyncJobsConfigured && storeAttached && durableAdmission.admitting;
+      // One snapshot, read by everything below. Taken ONCE so the recorder
+      // block and the disposition cannot disagree about the same recorder.
+      const recorderHealth = flightRecorderHealth(flightRecorder);
+      const disposition = storageDisposition(persistence, recorderHealth);
+      // s11: the resolved policy, what the last sweep did, and what a bound
+      // WOULD delete on the subsystems that have none. The hypothetical is the
+      // useful number on an unchanged host: every destructive bound is off by
+      // default, so the configured preview correctly counts nothing.
+      const retentionPolicy = persistenceRetentionPolicy(persistence);
+      const unboundedNow = unboundedRetentionSubsystems(retentionPolicy);
+      const hypothetical =
+        retentionSweeper && unboundedNow.length > 0
+          ? await retentionSweeper.preview(
+              resolveRetentionPolicy({
+                jobRetentionDays: persistence.retentionDays,
+                overrides: { requests: 30, wedgedValidationRuns: 30 },
+              })
+            )
+          : null;
+      const retentionBlock = {
+        days: retentionPolicy.days,
+        unbounded: unboundedNow,
+        sweepIntervalMs:
+          persistence.retentionSweepIntervalMs ?? DEFAULT_RETENTION_SWEEP_INTERVAL_MS,
+        sweeperArmed: retentionSweeper?.armed ?? false,
+        // The count the sweep produced, carried out to a reader. Null means no
+        // sweep has completed in this process, which is NOT the same as a sweep
+        // that found nothing.
+        lastSweep: retentionSweeper?.lastSweep() ?? null,
+        // Deletes nothing. "If you set 30 days, this is what goes."
+        ifBoundedAt30Days: hypothetical ? hypothetical.subsystems : null,
+      };
       const persistenceBlock = {
         backend: persistence.backend,
         dbPath: persistence.path,
-        dsn: persistence.dsn ? "[redacted]" : null,
         retentionDays: persistence.retentionDays,
+        retention: retentionBlock,
+        dsn: persistence.dsn ? "[redacted]" : null,
         dedupWindowMs: persistence.dedupWindowMs,
         asyncJobsConfigured,
         storeAttached,
@@ -21979,6 +22639,14 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
         durableAdmission,
         acknowledgeEphemeral: persistence.acknowledgeEphemeral,
         sources: persistence.sources,
+        // Reachable per-role credentials, and which operation classes are
+        // running wider than they asked for. Without this, "role separation is
+        // configured" and "role separation is in force" are indistinguishable
+        // from outside the process.
+        roles: disposition.roles,
+        // What each deprecated input DID, rather than a warning emitted once at
+        // boot into a stderr stream nobody kept.
+        deprecatedInputs: disposition.deprecatedInputs,
         warning: asyncJobsEffective
           ? null
           : persistence.backend === "none"
@@ -21986,6 +22654,70 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
             : !storeAttached
               ? `Async job persistence is configured (backend = '${persistence.backend}') but the durable job store failed to open, so *_request_async / llm_job_* tools are NOT registered on this gateway. Check gateway startup logs for the store-open error.`
               : "Async job persistence is attached but durable admission is temporarily disabled while its heartbeat lease recovers. Existing async tools fail closed until admission is restored.",
+      };
+      // The flight recorder is a SEPARATE subsystem from the job store, with its
+      // own on/off switch (LLM_GATEWAY_LOGS_DB). It follows
+      // [persistence].backend only when the deployment shape admits transcript
+      // bodies; `engineDeferredBecause` names the refusal when it does not.
+      //
+      // Reporting only the job store is what makes the split invisible: on a
+      // postgres host this tool answered `backend: "postgres", dbPath: null`
+      // while every request body sat in a SQLite file it never mentioned, so a
+      // caller looking for request history went to Postgres and found none.
+      // docs/plans/storage-unification.md is the fix; until it lands, the split
+      // is at least stated rather than hidden.
+      // obs: `enabled` is DERIVED from the recorder's own state, and the state
+      // is reported beside it. `!(x instanceof NoopFlightRecorder)` was the
+      // whole defect: it answered `false` for a recorder the operator turned
+      // off and for one that failed to open, and the warning below then named
+      // LLM_GATEWAY_LOGS_DB in both cases.
+      const recorderEnabled = disposition.requestHistory.enabled;
+      // s7: the recorder now runs through the storage port's SQLite driver and
+      // is TOLD what [persistence].backend asked for. `engineDeferredBecause`
+      // is the difference between a setting that is ignored and one that is
+      // refused with a reason.
+      const recorderEngine = flightRecorderEngineDecision(persistence.backend, persistence.dsn);
+      const recorderMessage = flightRecorderHealthMessage(recorderHealth);
+      const flightRecorderBlock = {
+        engine: recorderEnabled ? recorderEngine.engine : null,
+        // The recorder's OWN target, so a postgres host is not shown the SQLite
+        // file it stopped writing to.
+        path: recorderHealth.path ?? (recorderEnabled ? resolveFlightRecorderDbPath() : null),
+        enabled: recorderEnabled,
+        // The five-way answer. `enabled: false` alone could not tell an
+        // operator whether to change a setting or to go and look at a file.
+        state: recorderHealth.state,
+        readsAreAuthoritative: flightRecorderReadsAreAuthoritative(recorderHealth),
+        lastError: recorderHealth.error,
+        lastErrorAt: recorderHealth.errorAt,
+        failureCount: recorderHealth.failureCount,
+        closed: recorderHealth.closed,
+        // Stated as a fact rather than implied, because the whole failure mode
+        // is a caller assuming one backend setting covers both subsystems.
+        followsPersistenceBackend: recorderEngine.deferredBecause === undefined,
+        engineRequested: recorderEngine.requested ?? null,
+        engineDeferredBecause: recorderEngine.deferredBecause ?? null,
+        engineAdmittedBecause: recorderEngine.admission?.admitted
+          ? recorderEngine.admission.evidence
+          : null,
+        holds: "requests (llm_request_list, llm_request_result)",
+        // Composed from two INDEPENDENT facts rather than a chain of else-ifs:
+        // a recorder can be degraded AND split, and the old chain reported at
+        // most one of them because "not enabled" short-circuited everything.
+        warning:
+          [
+            recorderMessage,
+            recorderEnabled &&
+            recorderEngine.engine !== persistence.backend &&
+            persistence.backend !== "none"
+              ? `Storage is SPLIT: request history is in ${recorderEngine.engine} at ${recorderHealth.path}, while the job store is '${persistence.backend}'. No single database holds a whole request. If this gateway previously ran on sqlite, that same file also still contains an abandoned 'jobs' table which is frozen at the switchover and will answer queries as though it were live. Read through llm_request_list / llm_request_result / llm_job_result, which span the split.`
+              : null,
+            recorderEnabled && recorderEngine.engine === "postgres"
+              ? `Request history moved to PostgreSQL when this gateway started. Rows written BEFORE the switch are still in ${resolveFlightRecorderDbPath()} and were NOT migrated; nothing reads them from here.`
+              : null,
+          ]
+            .filter((line): line is string => line !== null)
+            .join(" ") || null,
       };
       const outboundProviders = {
         xai: providers.xai
@@ -22112,6 +22844,7 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
                 ...health,
                 backpressure,
                 persistence: persistenceBlock,
+                flightRecorder: flightRecorderBlock,
                 outboundProviders,
                 leastCost: leastCostBlock,
               },
@@ -22185,16 +22918,14 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
   ] as [string, ...string[]];
   server.tool(
     "list_models",
-    "List models, aliases, and defaults for one provider (claude|codex|gemini|grok|mistral|devin|cursor, or an enabled API provider name), or omit cli to list all providers. API providers are returned under an `apiProviders` array.",
+    `List models, aliases, and defaults for one provider (${CLI_PROVIDER_LABEL}, or an enabled API provider name), or omit cli to list all providers. API providers are returned under an \`apiProviders\` array.`,
     {
       cli: z
         .preprocess(
           value => (value === "" || value === null ? undefined : value),
           z.enum(listModelsFilterValues).optional()
         )
-        .describe(
-          "Provider filter (claude|codex|gemini|grok|mistral|devin|cursor, or an enabled API provider name)"
-        ),
+        .describe(`Provider filter (${CLI_PROVIDER_LABEL}, or an enabled API provider name)`),
     },
     {
       title: "Provider models",
@@ -22265,7 +22996,7 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
   ] as [string, ...string[]];
   server.tool(
     "provider_tool_capabilities",
-    "Report provider tool/feature capabilities and discovered local skill/tool integrations for claude|codex|gemini|grok|mistral|devin|cursor|grok_api, or an enabled API provider name.",
+    `Report provider tool/feature capabilities and discovered local skill/tool integrations for ${CLI_PROVIDER_LABEL}|grok_api, or an enabled API provider name.`,
     {
       cli: z
         .preprocess(
@@ -22273,7 +23004,7 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
           z.enum(providerToolCapabilitiesFilterValues).optional()
         )
         .describe(
-          "Provider filter (claude|codex|gemini|grok|mistral|devin|cursor|grok_api, or an enabled API provider name)"
+          `Provider filter (${CLI_PROVIDER_LABEL}|grok_api, or an enabled API provider name)`
         ),
       includeSkills: z
         .boolean()
@@ -22324,14 +23055,14 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
 
   server.tool(
     "cli_versions",
-    "Report installed provider CLI versions, availability, and login status for all registered CLI providers (claude|codex|gemini|grok|mistral|devin|cursor) or one.",
+    `Report installed provider CLI versions, availability, and login status for all registered CLI providers (${CLI_PROVIDER_LABEL}) or one.`,
     {
       cli: z
         .preprocess(
           value => (value === "" || value === null ? undefined : value),
           CLI_TYPE_ENUM.optional()
         )
-        .describe("CLI filter (claude|codex|gemini|grok|mistral|devin|cursor)"),
+        .describe(`CLI filter (${CLI_PROVIDER_LABEL})`),
     },
     {
       title: "Provider CLI versions",
@@ -22355,7 +23086,7 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
           value => (value === "" || value === null ? undefined : value),
           CLI_TYPE_ENUM.optional()
         )
-        .describe("CLI filter (claude|codex|gemini|grok|mistral|devin|cursor)"),
+        .describe(`CLI filter (${CLI_PROVIDER_LABEL})`),
       checkUpgrades: z
         .boolean()
         .default(false)
@@ -22461,7 +23192,7 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
           value => (value === "" || value === null ? undefined : value),
           CLI_TYPE_ENUM.optional()
         )
-        .describe("CLI filter (claude|codex|gemini|grok|mistral|devin|cursor)"),
+        .describe(`CLI filter (${CLI_PROVIDER_LABEL})`),
       probeInstalled: z
         .boolean()
         .default(false)
@@ -22491,7 +23222,7 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
           value => (value === "" || value === null ? undefined : value),
           CLI_TYPE_ENUM.optional()
         )
-        .describe("Optional provider filter (claude|codex|gemini|grok|mistral|devin|cursor)"),
+        .describe(`Optional provider filter (${CLI_PROVIDER_LABEL})`),
       tier: z
         .enum(["catalog", "inspect", "execute_candidate", "diagnostic"])
         .optional()
@@ -22548,7 +23279,7 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
     "provider_subcommand_contract",
     "Return the detailed read-only contract for exactly one declared provider CLI subcommand.",
     {
-      provider: CLI_TYPE_ENUM.describe("Provider (claude|codex|gemini|grok|mistral|devin|cursor)"),
+      provider: CLI_TYPE_ENUM.describe(`Provider (${CLI_PROVIDER_LABEL})`),
       commandPath: z.array(z.string().min(1)).min(1).describe("Command path segments"),
     },
     {
@@ -22582,7 +23313,7 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
           value => (value === "" || value === null ? undefined : value),
           CLI_TYPE_ENUM.optional()
         )
-        .describe("Optional provider filter (claude|codex|gemini|grok|mistral|devin|cursor)"),
+        .describe(`Optional provider filter (${CLI_PROVIDER_LABEL})`),
       includeClean: z
         .boolean()
         .default(false)
@@ -22646,7 +23377,7 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
     "cli_upgrade",
     "Plan (dryRun, default true) or execute an upgrade for one provider CLI using its native update mechanism.",
     {
-      cli: CLI_TYPE_ENUM.describe("CLI to upgrade (claude|codex|gemini|grok|mistral|devin|cursor)"),
+      cli: CLI_TYPE_ENUM.describe(`CLI to upgrade (${CLI_PROVIDER_LABEL})`),
       target: z
         .string()
         .min(1)
@@ -22727,14 +23458,20 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
     sessionProviderValues.length > SESSION_PROVIDER_VALUES.length
       ? z.enum(sessionProviderValues as [string, ...string[]])
       : SESSION_PROVIDER_ENUM;
+  // Derived, never hand-spelled. The four describe strings below used to list
+  // only six provider names, omitting devin and cursor, even
+  // though the enum in the SAME schema object accepted them and both expose a
+  // sessions resource. Those strings are published verbatim to
+  // site/tools.fixture.json and shown to every MCP client.
+  // `provider:surfaces:check` did not catch it: it scans for hand-maintained
+  // provider ARRAYS, not provider names inside `.describe()` prose.
+  const sessionProviderLabel = sessionProviderValues.join("|");
 
   server.tool(
     "session_create",
     "Create a gateway session record for a provider. NOTE: this is gateway bookkeeping (a plain UUID), not a provider-native session; Codex resume needs a real Codex UUID.",
     {
-      cli: sessionProviderEnum.describe(
-        "Provider type (claude|codex|gemini|grok|mistral|grok-api)"
-      ),
+      cli: sessionProviderEnum.describe(`Provider type (${sessionProviderLabel})`),
       description: z.string().optional().describe("Session description"),
       setAsActive: z.boolean().default(true).describe("Set as active session"),
     },
@@ -22786,9 +23523,7 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
     "session_list",
     "List gateway session records and the active session per provider, optionally filtered by provider.",
     {
-      cli: sessionProviderEnum
-        .optional()
-        .describe("Provider filter (claude|codex|gemini|grok|mistral|grok-api)"),
+      cli: sessionProviderEnum.optional().describe(`Provider filter (${sessionProviderLabel})`),
     },
     {
       title: "List sessions",
@@ -22857,9 +23592,7 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
     "session_set_active",
     "Set or clear the active session for a provider; the active session is used when a request omits sessionId.",
     {
-      cli: sessionProviderEnum.describe(
-        "Provider type (claude|codex|gemini|grok|mistral|grok-api)"
-      ),
+      cli: sessionProviderEnum.describe(`Provider type (${sessionProviderLabel})`),
       sessionId: z.string().nullable().describe("Session ID (null to clear)"),
     },
     {
@@ -23068,7 +23801,7 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
             }
           | undefined;
         try {
-          const stats = computeSessionCacheStats(flightRecorder, session.id);
+          const stats = await computeSessionCacheStats(flightRecorder, session.id);
           if (stats.requestCount > 0) {
             const ttlRemainingMs = computeTtlRemaining(stats, stats.cli, {
               anthropicTtlSeconds: cacheAwareness?.anthropicTtlSeconds ?? 300,
@@ -23120,9 +23853,7 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
     "session_clear_all",
     "Delete all gateway session records, optionally scoped to one provider.",
     {
-      cli: sessionProviderEnum
-        .optional()
-        .describe("Provider filter (claude|codex|gemini|grok|mistral|grok-api)"),
+      cli: sessionProviderEnum.optional().describe(`Provider filter (${sessionProviderLabel})`),
     },
     {
       title: "Clear sessions",
@@ -23242,11 +23973,30 @@ function registerHealthResource(server: McpServer): void {
       },
       async () => {
         const health = await checkHealth(db!);
+        // The recorder rides along because this resource exists only on a
+        // PostgreSQL host, which is precisely the host where request history
+        // is in a DIFFERENT engine that this block never mentioned. A green
+        // Postgres answer here said nothing about whether the transcript file
+        // was readable.
+        const recorder = flightRecorderHealth(flightRecorder);
         return {
           contents: [
             {
               uri: "health://status",
-              text: JSON.stringify(health, null, 2),
+              text: JSON.stringify(
+                {
+                  ...health,
+                  flightRecorder: {
+                    state: recorder.state,
+                    path: recorder.path,
+                    readsAreAuthoritative: flightRecorderReadsAreAuthoritative(recorder),
+                    lastError: recorder.error,
+                    warning: flightRecorderHealthMessage(recorder),
+                  },
+                },
+                null,
+                2
+              ),
               mimeType: "application/json",
             },
           ],
@@ -23267,14 +24017,29 @@ function registerHealthResource(server: McpServer): void {
     },
     async uri => {
       const manager = getAsyncJobManager();
+      await manager.whenStartupSettled();
       const health = manager.getJobHealth();
+      const recorder = flightRecorderHealth(flightRecorder);
       return {
         contents: [
           {
             uri: uri.href,
             mimeType: "application/json",
             text: JSON.stringify(
-              { ...health, durableAdmission: manager.getDurableAdmissionHealth() },
+              {
+                ...health,
+                durableAdmission: manager.getDurableAdmissionHealth(),
+                // Same snapshot as llm_process_health. A resource and a tool
+                // reporting "process health" from different facts is how one
+                // of them ends up trusted and stale.
+                flightRecorder: {
+                  state: recorder.state,
+                  path: recorder.path,
+                  readsAreAuthoritative: flightRecorderReadsAreAuthoritative(recorder),
+                  lastError: recorder.error,
+                  warning: flightRecorderHealthMessage(recorder),
+                },
+              },
               null,
               2
             ),
@@ -23315,6 +24080,15 @@ async function performShutdown(signal: string, exitCode: number): Promise<void> 
       }
     }
 
+    if (retentionSweeper) {
+      // Disarmed before the handles close, so a tick cannot start against a
+      // recorder that is already draining and fail with a closed-driver error
+      // that reads like a retention fault.
+      retentionSweeper.stop();
+      retentionSweeper = null;
+      logger.info("Retention sweeper stopped");
+    }
+
     // Kill all active process groups (SIGTERM → wait 3s → SIGKILL)
     await killAllProcessGroups();
     logger.info("All process groups terminated");
@@ -23332,7 +24106,16 @@ async function performShutdown(signal: string, exitCode: number): Promise<void> 
     }
 
     if (jobStore) {
-      jobStore.close();
+      // AWAITED, unlike every sibling close in this block, which were already
+      // awaited. Once the store became async an unawaited close let
+      // `process.exit()` below fire while the handle was still closing, and the
+      // log line on the next line asserted a completed close that had not
+      // happened: the system making an untrue statement about itself.
+      //
+      // It also matters ahead of s5's C5. When SqliteJobStore moves onto
+      // SqliteStorageDriver, that driver's bounded drain runs inside close(),
+      // and an unawaited call here would discard the drain entirely.
+      await jobStore.close();
       logger.info("Durable job store closed");
       jobStore = null;
       jobStoreInitialized = false;
@@ -23344,7 +24127,12 @@ async function performShutdown(signal: string, exitCode: number): Promise<void> 
     }
 
     if (flightRecorder) {
-      flightRecorder.close();
+      // AWAITED. This line was the one close() in performShutdown that was not,
+      // which was harmless only while the recorder was synchronous. It is now
+      // exactly jobStore's old defect: process.exit() below would fire while
+      // the driver's bounded drain was still running, and the log line on the
+      // next line would assert a close that had not finished.
+      await flightRecorder.close();
       logger.info("Flight recorder closed");
     }
 
@@ -23355,8 +24143,10 @@ async function performShutdown(signal: string, exitCode: number): Promise<void> 
   }
 }
 
-process.on("SIGTERM", () => shutdown("SIGTERM"));
-process.on("SIGINT", () => shutdown("SIGINT"));
+// `void`: a signal handler cannot be awaited, and shutdown() ends in
+// process.exit(), so nothing after it could observe the promise.
+process.on("SIGTERM", () => void shutdown("SIGTERM"));
+process.on("SIGINT", () => void shutdown("SIGINT"));
 
 //──────────────────────────────────────────────────────────────────────────────
 // Server Startup
@@ -23737,7 +24527,7 @@ function runWorkspaceCommand(args: string[]): void {
  * deliberately reloaded from the configured durable store instead of becoming
  * command-line authority.
  */
-function runMcpArtifactCommand(args: string[]): void {
+async function runMcpArtifactCommand(args: string[]): Promise<void> {
   const [action, jobId, acknowledgement] = args;
   if (
     action !== "recover" ||
@@ -23761,7 +24551,7 @@ function runMcpArtifactCommand(args: string[]): void {
     throw new Error("MCP artifact recovery could not open the configured durable job store");
   }
   try {
-    const result = recoverMcpArtifactCleanupPin({
+    const result = await recoverMcpArtifactCleanupPin({
       store,
       jobId,
       acknowledgement: MCP_ARTIFACT_RECOVERY_ACKNOWLEDGEMENT,
@@ -23769,7 +24559,7 @@ function runMcpArtifactCommand(args: string[]): void {
     printJsonLine(result);
     if (!result.ok) process.exitCode = 2;
   } finally {
-    store.close();
+    await store.close();
   }
 }
 
@@ -23791,6 +24581,7 @@ async function main() {
         "  llm-cli-gateway oauth client add <id> --redirect-uri <uri> [--print-once]",
         "  llm-cli-gateway connector setup [--client-id <id>] [--include-legacy-no-auth]",
         "  llm-cli-gateway workspace list|add|create",
+        "  llm-cli-gateway storage status|compact --yes",
         `  llm-cli-gateway mcp-artifact recover <job-id> --${MCP_ARTIFACT_RECOVERY_ACKNOWLEDGEMENT}`,
         "",
         "Remote connector (recommended OAuth path):",
@@ -23834,8 +24625,16 @@ async function main() {
     runWorkspaceCommand(args.slice(1));
     return;
   }
+  if (args[0] === "storage") {
+    // Awaited for runMcpArtifactCommand's reason: the command sets
+    // process.exitCode and a floating promise lets main() return first.
+    await runStorageCommand(args.slice(1));
+    return;
+  }
   if (args[0] === "mcp-artifact") {
-    runMcpArtifactCommand(args.slice(1));
+    // Awaited: the command sets process.exitCode, and a floating promise lets
+    // main() return before that assignment happens.
+    await runMcpArtifactCommand(args.slice(1));
     return;
   }
   if (args[0] === "contracts") {
@@ -23854,7 +24653,7 @@ async function main() {
     }
     process.stderr.write(
       [
-        "Usage: llm-cli-gateway contracts --json [--cli=claude|codex|gemini|grok|mistral] [--probe-installed]",
+        `Usage: llm-cli-gateway contracts --json [--cli=${CLI_PROVIDER_LABEL}] [--probe-installed]`,
         "",
         "After upgrading any provider CLI, use --probe-installed to detect drift between",
         "the installed binary's advertised flags and the gateway's declared contract.",
@@ -23883,6 +24682,14 @@ async function main() {
   void warmProviderCapabilities({ logger }).catch(() => undefined);
 
   const persistence = getPersistenceConfig(logger);
+  // Built before the disposition is reported, so "request history is being
+  // written" is the recorder's real state and not the configured intent.
+  const startupRecorder = getFlightRecorder(logger);
+  for (const line of formatStorageDisposition(
+    storageDisposition(persistence, flightRecorderHealth(startupRecorder))
+  )) {
+    logger.info(line);
+  }
   const runtimeAsyncJobManager = getAsyncJobManager(logger);
   // A configured durable backend that cannot open must not leave a long-lived
   // process falsely alive but permanently unable to recover (there is no store
@@ -23895,6 +24702,53 @@ async function main() {
   ) {
     throw new Error(
       `Configured ${persistence.backend} job store could not be opened; refusing to start without durable async persistence`
+    );
+  }
+
+  // Serve nothing until the manager's startup attempt has settled.
+  //
+  // While the job store was synchronous the constructor finished registering
+  // this instance and running the startup orphan sweep before it returned, so
+  // the first request always met a settled `durableAdmission`. An asynchronous
+  // store cannot be awaited in a constructor, and several fail-closed gates
+  // read that flag through the deliberately SYNCHRONOUS `canAdmitDurableJobs()`
+  // snapshot (`assertKitDurableAdmission`, the sync-deferral gate, the health
+  // surface). Without this line the first requests after boot are refused with
+  // `kit_busy` or told async jobs are disabled, purely because startup had not
+  // caught up. Awaiting here is cheap and once: it never rejects, and it runs
+  // before any transport is connected, so no caller can observe the window.
+  //
+  // This restores the PRE-CONVERSION behaviour exactly, including its failure
+  // mode: while the store was synchronous the same work ran in the constructor
+  // and blocked startup the same way. A durable store that cannot be reached
+  // therefore delays readiness rather than producing a server that connects and
+  // refuses everything, which is what the branch had accidentally introduced.
+  await runtimeAsyncJobManager.whenStartupSettled();
+
+  // s11: retention over every subsystem, from the ONE policy. Built after the
+  // store has settled so `validationRuns` is the store that actually opened,
+  // not the one that was configured.
+  const retentionStore = getJobStore(logger);
+  retentionSweeper = new RetentionSweeper({
+    recorder: getFlightRecorder(logger),
+    validationRuns: retentionStore && isValidationRunStore(retentionStore) ? retentionStore : null,
+    policy: persistenceRetentionPolicy(persistence),
+    logger,
+  });
+  const sweepInterval = persistence.retentionSweepIntervalMs ?? DEFAULT_RETENTION_SWEEP_INTERVAL_MS;
+  // The return value is READ. `start()` declines when every destructive bound
+  // is off, and a caller that logged "retention armed" unconditionally would be
+  // making the claim this node exists to stop being made.
+  if (retentionSweeper.start(sweepInterval)) {
+    logger.info(
+      `Retention sweeper armed every ${Math.round(sweepInterval / 1000)}s: ` +
+        JSON.stringify(persistenceRetentionPolicy(persistence).days)
+    );
+  } else {
+    logger.info(
+      "Retention: jobs only. `requests` and `wedgedValidationRuns` are UNBOUNDED; " +
+        "set [persistence.retention].requests / .wedgedValidationRuns (days) to bound them. " +
+        "`llm-cli-gateway doctor --json` reports what a bound would delete."
     );
   }
 

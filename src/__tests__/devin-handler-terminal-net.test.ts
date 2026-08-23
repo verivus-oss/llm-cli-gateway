@@ -141,7 +141,7 @@ describe("handleDevinRequest terminal net: inline (Mode A) + envelope catch + D5
   };
   const assertUpstreamCliArgsMock = vi.mocked(assertUpstreamCliArgs);
 
-  beforeEach(() => {
+  beforeEach(async () => {
     tmp = mkdtempSync(join(tmpdir(), "devin-terminal-net-"));
     flight = new FlightRecorder(join(tmp, "logs.db"));
     manager = new AsyncJobManager(noopLogger);
@@ -154,7 +154,7 @@ describe("handleDevinRequest terminal net: inline (Mode A) + envelope catch + D5
 
   afterEach(async () => {
     await manager.dispose();
-    flight.close();
+    await flight.close();
     rmSync(tmp, { recursive: true, force: true });
     vi.restoreAllMocks();
   });
@@ -274,7 +274,7 @@ describe("handleDevinRequest terminal net: deferred (Mode B) + D4 split + decora
   let flight: FlightRecorder;
   let sessions: FileSessionManager;
 
-  beforeEach(() => {
+  beforeEach(async () => {
     originalDeadline = process.env.SYNC_DEADLINE_MS;
     process.env.SYNC_DEADLINE_MS = "25";
     tmp = mkdtempSync(join(tmpdir(), "devin-terminal-net-defer-"));
@@ -284,10 +284,10 @@ describe("handleDevinRequest terminal net: deferred (Mode B) + D4 split + decora
     vi.resetModules();
   });
 
-  afterEach(() => {
+  afterEach(async () => {
     if (originalDeadline === undefined) delete process.env.SYNC_DEADLINE_MS;
     else process.env.SYNC_DEADLINE_MS = originalDeadline;
-    flight.close();
+    await flight.close();
     rmSync(tmp, { recursive: true, force: true });
     vi.resetModules();
     vi.restoreAllMocks();
@@ -334,7 +334,7 @@ describe("handleDevinRequest terminal net: deferred (Mode B) + D4 split + decora
       expect(logComplete).not.toHaveBeenCalled();
       // decorateDeferred attaches the approval decision (envelope hook).
       expect("approval" in result).toBe(true);
-      manager.cancelJob(body.jobId);
+      await manager.cancelJob(body.jobId);
     } finally {
       slot.release();
       await manager.dispose();
@@ -377,7 +377,7 @@ describe("handleDevinRequest terminal net: deferred (Mode B) + D4 split + decora
       expect(typeof body.sessionId).toBe("string");
       expect(body.sessionId).toMatch(/^gw-/);
       expect(updateUsage).not.toHaveBeenCalled();
-      manager.cancelJob(body.jobId);
+      await manager.cancelJob(body.jobId);
     } finally {
       slot.release();
       await manager.dispose();
@@ -424,7 +424,7 @@ describe("handleDevinRequest terminal net: deferred (Mode B) + D4 split + decora
       expect(body.status).toBe("deferred");
       expect(body.sessionId).toBe(providedId);
       expect(updateUsage).toHaveBeenCalledWith(providedId);
-      manager.cancelJob(body.jobId);
+      await manager.cancelJob(body.jobId);
     } finally {
       slot.release();
       await manager.dispose();

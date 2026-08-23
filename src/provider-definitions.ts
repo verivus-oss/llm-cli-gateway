@@ -448,9 +448,9 @@ const KIT_UNSUPPORTED: ProviderPersonalConfigKit = {
  * all follow automatically.
  */
 export const PROVIDER_TARGET_VERSIONS: Record<CliType, string> = {
-  claude: "claude 2.1.229",
-  codex: "codex-cli 0.147.0",
-  gemini: "1.1.13",
+  claude: "claude 2.1.239",
+  codex: "codex-cli 0.149.0",
+  gemini: "1.1.17",
   // The build hash here is load-bearing. grok 1.0.4 reports
   // `grok 1.0.4 (d846eb93d9) [stable]`, putting a release-channel marker after
   // the hash, and `comparableVersion` in scripts/upstream-scan.mjs reads the
@@ -461,8 +461,8 @@ export const PROVIDER_TARGET_VERSIONS: Record<CliType, string> = {
   // at end-of-string; the tool and the scan read one banner two ways and the
   // result was a baseline that reported drift forever. The normalizer is fixed
   // (see its comment) and the tool now writes this spelling itself.
-  grok: "grok 1.0.4 (d846eb93d9)",
-  mistral: "vibe 2.24.1",
+  grok: "grok 1.0.5 (5115b46bc9)",
+  mistral: "vibe 2.24.3",
   devin: "devin 3000.4.25 (7e8e528a)",
   cursor: "cursor-agent 2026.08.11-e8db854",
 };
@@ -544,7 +544,7 @@ const PROVIDER_DEFINITIONS = {
         family: "import",
         safety: "mutating-gated",
         evidence:
-          "2.1.229 (Claude Code) root help advertises `import`. Auto-declared by `npm run providers:rebaseline`. safety is the conservative default: a read-only misclassification would remove a control, a gated one only adds an approval, so generated families are never `read-only`. UNVERIFIED pending maintainer review.",
+          "2.1.233 (Claude Code) root help advertises `import` (re-probed 2026-08-18: `claude import --help` returns `Import config from another AI coding agent into Claude Code`). Auto-declared by `npm run providers:rebaseline`. safety is the conservative default: a read-only misclassification would remove a control, a gated one only adds an approval, so generated families are never `read-only`. UNVERIFIED pending maintainer review.",
       },
       { family: "auth", safety: "mutating-gated", evidence: "claude auth login/logout/status" },
       { family: "agents", safety: "mutating-gated", evidence: "claude agents" },
@@ -679,6 +679,24 @@ const PROVIDER_DEFINITIONS = {
       },
     },
     adminSubcommands: [
+      {
+        family: "agents",
+        safety: "mutating-gated",
+        evidence:
+          "codex-cli 0.149.0 root help advertises `agents`. Auto-declared by `npm run providers:rebaseline`. safety is the conservative default: a read-only misclassification would remove a control, a gated one only adds an approval, so generated families are never `read-only`. UNVERIFIED pending maintainer review.",
+      },
+      {
+        family: "migrate-rollouts",
+        safety: "mutating-gated",
+        evidence:
+          "codex-cli 0.149.0 root help advertises `migrate-rollouts`. Auto-declared by `npm run providers:rebaseline`. safety is the conservative default: a read-only misclassification would remove a control, a gated one only adds an approval, so generated families are never `read-only`. UNVERIFIED pending maintainer review.",
+      },
+      {
+        family: "queue",
+        safety: "mutating-gated",
+        evidence:
+          "codex-cli 0.149.0 root help advertises `queue`. Auto-declared by `npm run providers:rebaseline`. safety is the conservative default: a read-only misclassification would remove a control, a gated one only adds an approval, so generated families are never `read-only`. UNVERIFIED pending maintainer review.",
+      },
       { family: "login", safety: "mutating-gated", evidence: "codex login/logout/status" },
       {
         family: "mcp",
@@ -844,6 +862,12 @@ const PROVIDER_DEFINITIONS = {
       },
     },
     adminSubcommands: [
+      {
+        family: "mcp",
+        safety: "mutating-gated",
+        evidence:
+          "1.1.17 root help advertises `mcp`. Auto-declared by `npm run providers:rebaseline`. safety is the conservative default: a read-only misclassification would remove a control, a gated one only adds an approval, so generated families are never `read-only`. UNVERIFIED pending maintainer review.",
+      },
       { family: "models", safety: "read-only", evidence: "agy models" },
       {
         family: "plugin",
@@ -939,7 +963,14 @@ const PROVIDER_DEFINITIONS = {
           },
         ],
         facts: {
-          // grok --help: `--effort <LEVEL>` [possible values: low, medium, high, xhigh, max].
+          // grok 1.0.4 --help declares `--reasoning-effort <EFFORT>` with
+          // `[aliases: --effort]` and NO possible-values line. An earlier
+          // comment here cited a `[possible values: low, medium, high, xhigh,
+          // max]` line that the binary has never printed; it was a fabricated
+          // citation, not an observation. These five are the levels the gateway
+          // ADVERTISES for discovery, not a set the binary enforces: the
+          // contract deliberately carries no `values` for either spelling, so
+          // any level the caller passes reaches grok. Re-probed 2026-08-18.
           effortLevels: ["low", "medium", "high", "xhigh", "max"],
           supportsFallbackModelChain: false,
           aliases: [],

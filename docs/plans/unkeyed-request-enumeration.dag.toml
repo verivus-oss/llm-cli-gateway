@@ -1,0 +1,68 @@
+# An agent that did not make the call can find the call.
+# Subordinate to durable-state-lifecycle.dag.toml (it reads the same tables).
+
+[meta]
+surface = "the read path into logs.db: llm_request_result, llm_job_*, validation_receipt"
+status = "planned 2026-08-21, nothing implemented"
+
+# WHY THIS EXISTS
+#
+# Traced 2026-08-21 from a problem report: an agent wanting a prior response
+# went hunting for SQLite, then Postgres, then psql, then the podman container.
+# It was not being lazy. Every read tool demands an id handed out inline to the
+# ORIGINATING caller only, so a fresh or compacted agent is structurally locked
+# out, and three docs name the database file as the way in.
+
+[facts]
+keyed = "llm_request_result:correlationId, llm_job_{status,watch,result,cancel}:jobId, job_{status,result}:jobId, validation_receipt:validationId"
+only_unkeyed_read = "approval_list, and ApprovalRecord (approval-manager.ts:30-46) carries no correlationId or jobId, so it bootstraps nothing"
+no_list_exists = "no listJobs/listRuns/listRequests anywhere; queryRequests (flight-recorder.ts:820) has three callers and none projects an id"
+docs_point_at_the_file = "README.md:209 datasette one-liner, CLAUDE.md:114 names the path and never names the tool, cache-awareness.implementation-prompt.md:80-82 hands over a literal better-sqlite3 readback"
+backend_ambiguity = "config.ts:218 defaults sqlite so every doc is sqlite-dialect; doctor.ts:491-556 has no persistence block and is CLI-only; llm_process_health does report backend but README.md:1342 calls it 'SQLite paths'"
+
+[non_goals]
+no_second_tool = "one enumeration tool, not two. The request row already carries async_job_id, so listing requests bootstraps into llm_job_* as well."
+no_bodies_in_the_list = "the list projects metadata only. Prompt and response stay behind llm_request_result, which already has the truncation and redaction controls."
+no_new_table = "reads the existing requests + gateway_metadata join. No migration, no new column, no new retention obligation."
+no_relaxed_isolation = "F3b own-or-not-found holds. A list is a broader surface than a lookup, so this is where cross-principal leakage would first appear."
+
+[[node]]
+id = "e1.one-authority-for-ownership"
+critical = true
+depends_on = []
+role = "principalCanAccess (request-context.ts:51) is the sole ownership authority. A list needs the same rule inside SQL, to bound LIMIT; a second hand-written spelling of a security rule is how the rule drifts."
+action = "Add the SQL scope fragment to request-context.ts, immediately beside the predicate, so both spellings are one screen apart and change together."
+constraint = "The SQL is a PREFILTER, never the control. Every returned row is still passed through principalCanAccess. If the two disagree the JS filter must win, which means the failure direction is 'fewer rows', not 'someone else's rows'."
+affects = ["e2.list-reads-metadata-only"]
+
+[[node]]
+id = "e2.list-reads-metadata-only"
+critical = true
+depends_on = ["e1.one-authority-for-ownership"]
+role = "readPersistedRequest (cache-stats.ts:601) is the keyed reader. The list is its unkeyed sibling and belongs beside it, over the same join."
+action = "listPersistedRequests(db, {limit, since, cli, sessionId, callerPrincipal}) -> newest-first rows of correlationId, asyncJobId, cli, model, sessionId, datetimeUtc, durationMs, status, exitCode, promptChars, responseChars."
+constraint = "Filters bind as parameters. Ordering is datetime_utc DESC (idx_requests_datetime exists); cli and session_id are indexed too. limit is capped, not merely defaulted."
+affects = ["e3.register-llm-request-list"]
+
+[[node]]
+id = "e3.register-llm-request-list"
+critical = true
+depends_on = ["e2.list-reads-metadata-only"]
+role = "The tool is the whole point: without registration this is an unreachable function, which is the shape of the bug being fixed."
+action = "Register llm_request_list next to llm_request_result, unconditionally (it reads the flight recorder, not the job store). readOnlyHint. The result hint must name llm_request_result and llm_job_status as the next call."
+constraint = "Registered unconditionally means NoopFlightRecorder must return the empty shape, not an error. Say in the description that validation seats write no row, so an empty list is not proof nothing ran."
+affects = ["e5.gates-and-generated-surface"]
+
+[[node]]
+id = "e4.docs-stop-naming-the-file"
+depends_on = []
+role = "The tool existing does not help an agent whose guide names a path. Three docs teach DB-first retrieval; one hands over executable SQL."
+action = "cache-awareness.implementation-prompt.md:80-82 loses the better-sqlite3 line entirely. README.md:209 leads with the tools and keeps datasette as a human aside. CLAUDE.md flight-recorder bullet names the read tools. README.md:1342 stops saying 'SQLite paths'."
+constraint = "Delete the one-liner, do not annotate it. A documented workaround that still parses is still copy-pasteable."
+
+[[node]]
+id = "e5.gates-and-generated-surface"
+depends_on = ["e3.register-llm-request-list"]
+role = "A new tool changes the generated discovery artifacts and the interface floor's promise count."
+action = "npm run site:generate after a build (site:generate reads dist/), then interface:floor:update, then npm run check."
+constraint = "The interface floor must ACCEPT additions and still refuse withdrawals. Confirm by probe: remove one existing parameter and see it fail."

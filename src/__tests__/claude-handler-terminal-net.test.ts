@@ -160,7 +160,7 @@ describe("handleClaudeRequest terminal net: inline non-kit (Mode A)", () => {
   let manager: AsyncJobManager;
   let sessions: FileSessionManager;
 
-  beforeEach(() => {
+  beforeEach(async () => {
     tmp = mkdtempSync(join(tmpdir(), "claude-terminal-net-"));
     flight = new FlightRecorder(join(tmp, "logs.db"));
     manager = new AsyncJobManager(noopLogger);
@@ -170,7 +170,7 @@ describe("handleClaudeRequest terminal net: inline non-kit (Mode A)", () => {
 
   afterEach(async () => {
     await manager.dispose();
-    flight.close();
+    await flight.close();
     rmSync(tmp, { recursive: true, force: true });
     vi.restoreAllMocks();
   });
@@ -277,7 +277,7 @@ describe("handleClaudeRequest terminal net: deferred (Mode B)", () => {
   let flight: FlightRecorder;
   let sessions: FileSessionManager;
 
-  beforeEach(() => {
+  beforeEach(async () => {
     originalDeadline = process.env.SYNC_DEADLINE_MS;
     process.env.SYNC_DEADLINE_MS = "25";
     tmp = mkdtempSync(join(tmpdir(), "claude-terminal-net-defer-"));
@@ -287,10 +287,10 @@ describe("handleClaudeRequest terminal net: deferred (Mode B)", () => {
     vi.resetModules();
   });
 
-  afterEach(() => {
+  afterEach(async () => {
     if (originalDeadline === undefined) delete process.env.SYNC_DEADLINE_MS;
     else process.env.SYNC_DEADLINE_MS = originalDeadline;
-    flight.close();
+    await flight.close();
     rmSync(tmp, { recursive: true, force: true });
     vi.resetModules();
     vi.restoreAllMocks();
@@ -339,7 +339,7 @@ describe("handleClaudeRequest terminal net: deferred (Mode B)", () => {
       expect(logStart).toHaveBeenCalledTimes(1);
       // Mode B: the manager owns completion; the handler must not inline-complete.
       expect(logComplete).not.toHaveBeenCalled();
-      manager.cancelJob(body.jobId);
+      await manager.cancelJob(body.jobId);
     } finally {
       slot.release();
       await manager.dispose();
@@ -392,7 +392,7 @@ describe("handleClaudeRequest terminal net: worktree latch", () => {
   let sessions: FileSessionManager;
   const removeSpy = vi.mocked(removeWorktree);
 
-  beforeEach(() => {
+  beforeEach(async () => {
     tmp = mkdtempSync(join(tmpdir(), "claude-terminal-net-wt-"));
     seedRepo(tmp);
     flight = new FlightRecorder(join(tmp, "logs.db"));
@@ -404,7 +404,7 @@ describe("handleClaudeRequest terminal net: worktree latch", () => {
 
   afterEach(async () => {
     await manager.dispose();
-    flight.close();
+    await flight.close();
     rmSync(tmp, { recursive: true, force: true });
     vi.restoreAllMocks();
   });
@@ -597,7 +597,7 @@ describe("handleClaudeRequest terminal net: Kit deferred (Mode B, kitJobHandedOf
   let jobs: AsyncJobManager;
   let sessions: FileSessionManager;
 
-  beforeEach(() => {
+  beforeEach(async () => {
     originalDeadline = process.env.SYNC_DEADLINE_MS;
     process.env.SYNC_DEADLINE_MS = "25";
     root = mkdtempSync(join(tmpdir(), "claude-terminal-net-kit-"));
@@ -613,8 +613,8 @@ describe("handleClaudeRequest terminal net: Kit deferred (Mode B, kitJobHandedOf
     if (originalDeadline === undefined) delete process.env.SYNC_DEADLINE_MS;
     else process.env.SYNC_DEADLINE_MS = originalDeadline;
     await jobs.dispose();
-    store.close();
-    flight.close();
+    await store.close();
+    await flight.close();
     rmSync(root, { recursive: true, force: true });
     vi.resetModules();
     vi.restoreAllMocks();
@@ -665,7 +665,7 @@ describe("handleClaudeRequest terminal net: Kit deferred (Mode B, kitJobHandedOf
       // kitJobHandedOff: the claimed kit session attempt is handed to the job,
       // not discarded, so the pending attempt survives for the async terminal.
       expect(release).not.toHaveBeenCalled();
-      jobs.cancelJob(body.jobId);
+      await jobs.cancelJob(body.jobId);
     } finally {
       slot.release();
     }
@@ -705,7 +705,7 @@ describe("handleClaudeRequest terminal net: H-DoubleComplete (fenced by T3 Fligh
   let jobs: AsyncJobManager;
   const removeSpy = vi.mocked(removeWorktree);
 
-  beforeEach(() => {
+  beforeEach(async () => {
     originalDeadline = process.env.SYNC_DEADLINE_MS;
     process.env.SYNC_DEADLINE_MS = "25";
     tmp = mkdtempSync(join(tmpdir(), "claude-terminal-net-hdc-"));
@@ -727,7 +727,7 @@ describe("handleClaudeRequest terminal net: H-DoubleComplete (fenced by T3 Fligh
     if (originalDeadline === undefined) delete process.env.SYNC_DEADLINE_MS;
     else process.env.SYNC_DEADLINE_MS = originalDeadline;
     await jobs.dispose();
-    flight.close();
+    await flight.close();
     rmSync(tmp, { recursive: true, force: true });
     vi.resetModules();
     vi.restoreAllMocks();
@@ -766,8 +766,8 @@ describe("handleClaudeRequest terminal net: H-DoubleComplete (fenced by T3 Fligh
     const realStart = jobs.startJobWithDedup.bind(jobs);
     let jobId: string | undefined;
     vi.spyOn(jobs, "startJobWithDedup").mockImplementation(
-      (...args: Parameters<typeof realStart>) => {
-        const out = realStart(...args);
+      async (...args: Parameters<typeof realStart>) => {
+        const out = await realStart(...args);
         jobId = out.snapshot.id;
         return out;
       }
@@ -783,7 +783,7 @@ describe("handleClaudeRequest terminal net: H-DoubleComplete (fenced by T3 Fligh
       // Cancel the queued job mid-sleep so it terminalizes (fires onTerminal ->
       // sets the worktree terminal latch) before the loop wakes and arms.
       await vi.waitFor(() => expect(jobId).toBeDefined());
-      jobs.cancelJob(jobId!);
+      await jobs.cancelJob(jobId!);
 
       // The deferred branch's settle -> finishHandler() rejects; the catch runs
       // flight.completeInline() (a no-op once armed), then the unconditional

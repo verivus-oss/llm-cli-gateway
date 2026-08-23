@@ -199,8 +199,13 @@ function grokKitchenSinkArgv(): string[] {
     model: "grok-4",
     outputFormat: "json",
     permissionMode: "acceptEdits",
+    // Exactly ONE effort spelling. `--effort` is grok's own alias for
+    // `--reasoning-effort`, so a kitchen sink that sets both emits the same
+    // upstream option twice and grok silently last-wins. 3.1.0 made that pair
+    // mutually exclusive in the contract, so setting both is now a rejected
+    // request rather than a valid maximal one, and this fixture exists to
+    // describe a VALID maximal request.
     effort: "high",
-    reasoningEffort: "medium",
     allowedTools: ["Read", "Edit"],
     disallowedTools: ["Bash"],
     maxTurns: 9,

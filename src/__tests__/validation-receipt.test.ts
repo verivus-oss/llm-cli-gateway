@@ -57,16 +57,22 @@ describe("validation receipt mint + resolve", () => {
     deps = { asyncJobManager: manager, validationRunStore: store };
   });
 
-  afterEach(() => {
+  afterEach(async () => {
     try {
-      store.close();
+      // Dispose BEFORE closing the store. The manager owns heartbeat, sweep and
+      // eviction timers, and those writes are asynchronous now, so a tick still
+      // in flight lands on a closed database ("database is not open"). While
+      // the store was synchronous the timer body finished inside its own tick
+      // and could never overlap teardown.
+      await manager.dispose({ timeoutMs: 500 });
+      await store.close();
     } catch {
       /* ignore */
     }
     rmSync(tempDir, { recursive: true, force: true });
   });
 
-  function seedJob(
+  async function seedJob(
     id: string,
     opts: {
       owner?: string;
@@ -76,9 +82,9 @@ describe("validation receipt mint + resolve", () => {
       correlationId?: string;
       outputTruncated?: boolean;
     } = {}
-  ): void {
+  ): Promise<void> {
     const now = new Date().toISOString();
-    store.recordStart({
+    await store.recordStart({
       id,
       correlationId: opts.correlationId ?? `corr-${id}`,
       requestKey: "k",
@@ -90,9 +96,9 @@ describe("validation receipt mint + resolve", () => {
     });
     // #139: recordStart now persists 'queued'; flip to 'running' for a running
     // seed so the durable status matches the real launch flow.
-    store.markRunning(id, { pid: null });
+    await store.markRunning(id, { pid: null });
     if (opts.status && opts.status !== "running") {
-      store.recordComplete({
+      await store.recordComplete({
         id,
         status: opts.status,
         exitCode: opts.status === "completed" ? 0 : 1,
@@ -119,10 +125,10 @@ describe("validation receipt mint + resolve", () => {
     status?: "admitting" | "running" | "judge_skipped" | "admission_failed" | "finalized";
   }
 
-  function seedRun(validationId: string, opts: SeedRunOptions = {}): void {
+  async function seedRun(validationId: string, opts: SeedRunOptions = {}): Promise<void> {
     const judgeLink = opts.judgeLink ?? null;
     const requestedStatus = opts.status ?? "running";
-    store.recordValidationRun({
+    await store.recordValidationRun({
       validationId,
       ownerPrincipal: opts.owner ?? "local",
       intent: opts.intent ?? "validate",
@@ -141,26 +147,29 @@ describe("validation receipt mint + resolve", () => {
       judgeLink: null,
       status: judgeLink && requestedStatus !== "running" ? "running" : requestedStatus,
     });
-    if (judgeLink) store.setValidationJudgeLink(validationId, judgeLink);
+    if (judgeLink) await store.setValidationJudgeLink(validationId, judgeLink);
     if (judgeLink && requestedStatus !== "running") {
-      store.setValidationRunStatus(validationId, requestedStatus);
+      await store.setValidationRunStatus(validationId, requestedStatus);
     }
   }
 
-  function requireStoredReceipt(validationId: string): ValidationReceiptRecord {
-    const receipt = store.getValidationReceipt(validationId);
+  async function requireStoredReceipt(validationId: string): Promise<ValidationReceiptRecord> {
+    // Awaited at the source. Unawaited, `!receipt` tested a promise and was
+    // always false, so the guard never fired and this returned the PROMISE
+    // typed as a record: every caller then read undefined off it.
+    const receipt = await store.getValidationReceipt(validationId);
     expect(receipt).not.toBeNull();
     if (!receipt) throw new Error(`Expected stored receipt ${validationId}`);
     return receipt;
   }
 
-  function recordCoherentReceiptClone(
+  async function recordCoherentReceiptClone(
     source: ValidationReceiptRecord,
     validationId: string,
     mutateReport: (report: any) => void = () => undefined,
     runOverrides: SeedRunOptions = {},
     mutateRecord: (record: ValidationReceiptRecord) => void = () => undefined
-  ): void {
+  ): Promise<void> {
     const report = JSON.parse(source.reportJson);
     report.validationId = validationId;
     const providerLinks = report.perModelOutputs
@@ -195,7 +204,7 @@ describe("validation receipt mint + resolve", () => {
       };
     }
 
-    seedRun(validationId, {
+    await seedRun(validationId, {
       intent: report.intent,
       createdAt: report.startedAt,
       question: report.originalRequest.question,
@@ -223,23 +232,27 @@ describe("validation receipt mint + resolve", () => {
       signature: null,
     };
     mutateRecord(record);
-    store.recordValidationReceipt(record);
+    await store.recordValidationReceipt(record);
   }
 
-  function mintDefaultSourceReceipt(validationId = "v-binding-source"): ValidationReceiptRecord {
-    seedJob("j-claude", { status: "completed" });
-    seedJob("j-codex", { status: "completed" });
-    seedRun(validationId);
-    expect(resolveValidationReceipt(deps, validationId, { caller: "local" }).status).toBe("minted");
+  async function mintDefaultSourceReceipt(
+    validationId = "v-binding-source"
+  ): Promise<ValidationReceiptRecord> {
+    await seedJob("j-claude", { status: "completed" });
+    await seedJob("j-codex", { status: "completed" });
+    await seedRun(validationId);
+    expect((await resolveValidationReceipt(deps, validationId, { caller: "local" })).status).toBe(
+      "minted"
+    );
     return requireStoredReceipt(validationId);
   }
 
-  it("mints a receipt on read when the run is terminal", () => {
-    seedJob("j-claude", { status: "completed", stdout: "Verdict: approve" });
-    seedJob("j-codex", { status: "completed", stdout: "Verdict: approve" });
-    seedRun("v1");
+  it("mints a receipt on read when the run is terminal", async () => {
+    await seedJob("j-claude", { status: "completed", stdout: "Verdict: approve" });
+    await seedJob("j-codex", { status: "completed", stdout: "Verdict: approve" });
+    await seedRun("v1");
 
-    const res = resolveValidationReceipt(deps, "v1", { caller: "local" });
+    const res = await resolveValidationReceipt(deps, "v1", { caller: "local" });
     expect(res.status).toBe("minted");
     if (res.status !== "minted") return;
     expect(res.receipt.validationId).toBe("v1");
@@ -254,26 +267,26 @@ describe("validation receipt mint + resolve", () => {
     expect(res.receipt.signature).toBeNull();
   });
 
-  it("is immutable: re-resolving returns the identical stored row", () => {
-    seedJob("j-claude", { status: "completed" });
-    seedJob("j-codex", { status: "completed" });
-    seedRun("v1");
+  it("is immutable: re-resolving returns the identical stored row", async () => {
+    await seedJob("j-claude", { status: "completed" });
+    await seedJob("j-codex", { status: "completed" });
+    await seedRun("v1");
 
-    const first = resolveValidationReceipt(deps, "v1", { caller: "local" });
-    const second = resolveValidationReceipt(deps, "v1", { caller: "local" });
+    const first = await resolveValidationReceipt(deps, "v1", { caller: "local" });
+    const second = await resolveValidationReceipt(deps, "v1", { caller: "local" });
     expect(first.status).toBe("minted");
     expect(second.status).toBe("minted");
     if (first.status !== "minted" || second.status !== "minted") return;
     expect(second.mintedAt).toBe(first.mintedAt);
     expect(second.receipt.canonicalSha256).toBe(first.receipt.canonicalSha256);
-    expect(() =>
+    await expect(
       store.setValidationJudgeLink("v1", {
         provider: "codex",
         jobId: "late-judge",
         correlationId: "late-judge-correlation",
       })
-    ).toThrow(/one-shot claim/);
-    const afterLateJudgeAttempt = resolveValidationReceipt(deps, "v1", { caller: "local" });
+    ).rejects.toThrow(/one-shot claim/);
+    const afterLateJudgeAttempt = await resolveValidationReceipt(deps, "v1", { caller: "local" });
     expect(afterLateJudgeAttempt.status).toBe("minted");
     if (afterLateJudgeAttempt.status === "minted") {
       expect(afterLateJudgeAttempt.receipt.canonicalSha256).toBe(first.receipt.canonicalSha256);
@@ -283,10 +296,10 @@ describe("validation receipt mint + resolve", () => {
 
   it.each(["stored report", "stored hash"])(
     "fails closed when an existing receipt has a corrupted %s",
-    corruption => {
-      const source = mintDefaultSourceReceipt();
+    async corruption => {
+      const source = await mintDefaultSourceReceipt();
       const validationId = `v-corrupt-${corruption.replace(" ", "-")}`;
-      recordCoherentReceiptClone(
+      await recordCoherentReceiptClone(
         source,
         validationId,
         () => undefined,
@@ -302,34 +315,36 @@ describe("validation receipt mint + resolve", () => {
         }
       );
 
-      expect(resolveValidationReceipt(deps, validationId, { caller: "local" })).toEqual({
+      expect(await resolveValidationReceipt(deps, validationId, { caller: "local" })).toEqual({
         status: "verification_failed",
         validationId,
       });
     }
   );
 
-  it("accepts an unmodified coherent receipt clone", () => {
-    const source = mintDefaultSourceReceipt();
+  it("accepts an unmodified coherent receipt clone", async () => {
+    const source = await mintDefaultSourceReceipt();
     const validationId = "v-coherent-clone-control";
-    recordCoherentReceiptClone(source, validationId);
+    await recordCoherentReceiptClone(source, validationId);
 
-    expect(resolveValidationReceipt(deps, validationId, { caller: "local" }).status).toBe("minted");
-  });
-
-  it("authorizes an existing receipt from its run owner and rejects a forged receipt owner", () => {
-    seedJob("j-claude", { status: "completed", owner: "alice" });
-    seedJob("j-codex", { status: "completed", owner: "alice" });
-    seedRun("v-owner-source", { owner: "alice" });
-    expect(resolveValidationReceipt(deps, "v-owner-source", { caller: "alice" }).status).toBe(
+    expect((await resolveValidationReceipt(deps, validationId, { caller: "local" })).status).toBe(
       "minted"
     );
-    const source = store.getValidationReceipt("v-owner-source");
+  });
+
+  it("authorizes an existing receipt from its run owner and rejects a forged receipt owner", async () => {
+    await seedJob("j-claude", { status: "completed", owner: "alice" });
+    await seedJob("j-codex", { status: "completed", owner: "alice" });
+    await seedRun("v-owner-source", { owner: "alice" });
+    expect(
+      (await resolveValidationReceipt(deps, "v-owner-source", { caller: "alice" })).status
+    ).toBe("minted");
+    const source = await store.getValidationReceipt("v-owner-source");
     expect(source).not.toBeNull();
     if (!source) return;
 
     const validationId = "v-forged-owner";
-    recordCoherentReceiptClone(
+    await recordCoherentReceiptClone(
       source,
       validationId,
       () => undefined,
@@ -339,27 +354,31 @@ describe("validation receipt mint + resolve", () => {
       }
     );
 
-    expect(resolveValidationReceipt(deps, validationId, { caller: "mallory" })).toEqual({
+    expect(await resolveValidationReceipt(deps, validationId, { caller: "mallory" })).toEqual({
       status: "not_found",
       validationId,
     });
-    expect(resolveValidationReceipt(deps, validationId, { caller: "alice" })).toEqual({
+    expect(await resolveValidationReceipt(deps, validationId, { caller: "alice" })).toEqual({
       status: "verification_failed",
       validationId,
     });
   });
 
-  it("fails closed when storage returns a receipt for a different validation id", () => {
-    seedJob("j-claude", { status: "completed" });
-    seedJob("j-codex", { status: "completed" });
-    seedRun("v1");
-    expect(resolveValidationReceipt(deps, "v1", { caller: "local" }).status).toBe("minted");
+  it("fails closed when storage returns a receipt for a different validation id", async () => {
+    await seedJob("j-claude", { status: "completed" });
+    await seedJob("j-codex", { status: "completed" });
+    await seedRun("v1");
+    expect((await resolveValidationReceipt(deps, "v1", { caller: "local" })).status).toBe("minted");
 
     const mismatchedStore = new Proxy(store, {
       get(target, property, receiver) {
         if (property === "getValidationReceipt") {
-          return (validationId: string) => {
-            const receipt = target.getValidationReceipt(validationId);
+          // async + await: unawaited, `receipt` is a promise, which is truthy,
+          // and spreading it yields `{ validationId: "v-other" }` with none of
+          // the receipt's fields. The forgery this proxy exists to simulate
+          // became an empty object.
+          return async (validationId: string) => {
+            const receipt = await target.getValidationReceipt(validationId);
             return receipt ? { ...receipt, validationId: "v-other" } : null;
           };
         }
@@ -369,7 +388,7 @@ describe("validation receipt mint + resolve", () => {
     });
 
     expect(
-      resolveValidationReceipt(
+      await resolveValidationReceipt(
         { asyncJobManager: manager, validationRunStore: mismatchedStore },
         "v1",
         { caller: "local" }
@@ -381,17 +400,17 @@ describe("validation receipt mint + resolve", () => {
     ["prevSha256", { prevSha256: "f".repeat(64) }],
     ["seq", { seq: 1 }],
     ["signature", { signature: "forged-signature" }],
-  ])("rejects a persisted v1 receipt with non-null %s", (field, metadata) => {
-    seedJob("j-claude", { status: "completed" });
-    seedJob("j-codex", { status: "completed" });
-    seedRun("v1");
-    expect(resolveValidationReceipt(deps, "v1", { caller: "local" }).status).toBe("minted");
-    const source = store.getValidationReceipt("v1");
+  ])("rejects a persisted v1 receipt with non-null %s", async (field, metadata) => {
+    await seedJob("j-claude", { status: "completed" });
+    await seedJob("j-codex", { status: "completed" });
+    await seedRun("v1");
+    expect((await resolveValidationReceipt(deps, "v1", { caller: "local" })).status).toBe("minted");
+    const source = await store.getValidationReceipt("v1");
     expect(source).not.toBeNull();
     if (!source) return;
 
     const validationId = `v-corrupt-${field}`;
-    recordCoherentReceiptClone(
+    await recordCoherentReceiptClone(
       source,
       validationId,
       () => undefined,
@@ -399,7 +418,7 @@ describe("validation receipt mint + resolve", () => {
       record => Object.assign(record, metadata)
     );
 
-    expect(resolveValidationReceipt(deps, validationId, { caller: "local" })).toEqual({
+    expect(await resolveValidationReceipt(deps, validationId, { caller: "local" })).toEqual({
       status: "verification_failed",
       validationId,
     });
@@ -412,12 +431,12 @@ describe("validation receipt mint + resolve", () => {
     ["content", (report: any) => (report.originalRequest.content = "Forged content")],
     ["focus", (report: any) => (report.originalRequest.focus = "Forged focus")],
     ["modelList", (report: any) => (report.modelList = [...report.modelList].reverse())],
-  ])("rejects a coherently rehashed receipt with mismatched run %s", (field, mutate) => {
-    const source = mintDefaultSourceReceipt();
+  ])("rejects a coherently rehashed receipt with mismatched run %s", async (field, mutate) => {
+    const source = await mintDefaultSourceReceipt();
     const validationId = `v-binding-${field}`;
-    recordCoherentReceiptClone(source, validationId, mutate);
+    await recordCoherentReceiptClone(source, validationId, mutate);
 
-    expect(resolveValidationReceipt(deps, validationId, { caller: "local" })).toEqual({
+    expect(await resolveValidationReceipt(deps, validationId, { caller: "local" })).toEqual({
       status: "verification_failed",
       validationId,
     });
@@ -433,12 +452,12 @@ describe("validation receipt mint + resolve", () => {
     ["output order", (report: any) => report.perModelOutputs.reverse()],
     ["top-level job roster", (report: any) => report.jobIds.reverse()],
     ["linked status", (report: any) => (report.perModelOutputs[0].status = "running")],
-  ])("rejects a coherently rehashed receipt with mismatched provider %s", (field, mutate) => {
-    const source = mintDefaultSourceReceipt();
+  ])("rejects a coherently rehashed receipt with mismatched provider %s", async (field, mutate) => {
+    const source = await mintDefaultSourceReceipt();
     const validationId = `v-provider-binding-${field.replaceAll(" ", "-")}`;
-    recordCoherentReceiptClone(source, validationId, mutate);
+    await recordCoherentReceiptClone(source, validationId, mutate);
 
-    expect(resolveValidationReceipt(deps, validationId, { caller: "local" })).toEqual({
+    expect(await resolveValidationReceipt(deps, validationId, { caller: "local" })).toEqual({
       status: "verification_failed",
       validationId,
     });
@@ -454,29 +473,29 @@ describe("validation receipt mint + resolve", () => {
         skipped.correlationId = "forged-skipped-correlation";
       },
     ],
-  ])("rejects a coherently rehashed receipt with a %s", (field, mutate) => {
-    seedJob("j-claude", { status: "completed" });
-    seedRun("v-skipped-source", {
+  ])("rejects a coherently rehashed receipt with a %s", async (field, mutate) => {
+    await seedJob("j-claude", { status: "completed" });
+    await seedRun("v-skipped-source", {
       providerLinks: [{ provider: "claude", jobId: "j-claude", correlationId: "corr-j-claude" }],
       modelList: ["claude", "codex"],
     });
-    expect(resolveValidationReceipt(deps, "v-skipped-source", { caller: "local" }).status).toBe(
-      "minted"
-    );
-    const source = requireStoredReceipt("v-skipped-source");
+    expect(
+      (await resolveValidationReceipt(deps, "v-skipped-source", { caller: "local" })).status
+    ).toBe("minted");
+    const source = await requireStoredReceipt("v-skipped-source");
     const validationId = `v-skipped-binding-${field.replaceAll(" ", "-")}`;
-    recordCoherentReceiptClone(source, validationId, mutate);
+    await recordCoherentReceiptClone(source, validationId, mutate);
 
-    expect(resolveValidationReceipt(deps, validationId, { caller: "local" })).toEqual({
+    expect(await resolveValidationReceipt(deps, validationId, { caller: "local" })).toEqual({
       status: "verification_failed",
       validationId,
     });
   });
 
-  it("rejects a coherently rehashed unplanned judge synthesis", () => {
-    const source = mintDefaultSourceReceipt();
+  it("rejects a coherently rehashed unplanned judge synthesis", async () => {
+    const source = await mintDefaultSourceReceipt();
     const validationId = "v-unplanned-judge-binding";
-    recordCoherentReceiptClone(source, validationId, report => {
+    await recordCoherentReceiptClone(source, validationId, async report => {
       report.synthesis = {
         status: "completed",
         judgeModel: "codex",
@@ -490,16 +509,16 @@ describe("validation receipt mint + resolve", () => {
       };
     });
 
-    expect(resolveValidationReceipt(deps, validationId, { caller: "local" })).toEqual({
+    expect(await resolveValidationReceipt(deps, validationId, { caller: "local" })).toEqual({
       status: "verification_failed",
       validationId,
     });
   });
 
-  it("mints a receipt bound to an ad-hoc judge selected after kickoff", () => {
-    seedJob("j-claude", { status: "completed" });
-    seedJob("j-judge", { status: "completed" });
-    seedRun("v-ad-hoc-judge", {
+  it("mints a receipt bound to an ad-hoc judge selected after kickoff", async () => {
+    await seedJob("j-claude", { status: "completed" });
+    await seedJob("j-judge", { status: "completed" });
+    await seedRun("v-ad-hoc-judge", {
       providerLinks: [{ provider: "claude", jobId: "j-claude", correlationId: "corr-j-claude" }],
       modelList: ["claude"],
       judgeProvider: null,
@@ -510,7 +529,7 @@ describe("validation receipt mint + resolve", () => {
       },
     });
 
-    const receipt = resolveValidationReceipt(deps, "v-ad-hoc-judge", { caller: "local" });
+    const receipt = await resolveValidationReceipt(deps, "v-ad-hoc-judge", { caller: "local" });
     expect(receipt.status).toBe("minted");
     if (receipt.status !== "minted") return;
     expect(receipt.receipt.report.synthesis).toMatchObject({
@@ -523,14 +542,14 @@ describe("validation receipt mint + resolve", () => {
     });
   });
 
-  it("keeps kickoff, ad-hoc judge synthesis, and immutable receipt binding coherent", () => {
-    seedJob("j-claude", { status: "completed" });
-    seedRun("v-ad-hoc-flow", {
+  it("keeps kickoff, ad-hoc judge synthesis, and immutable receipt binding coherent", async () => {
+    await seedJob("j-claude", { status: "completed" });
+    await seedRun("v-ad-hoc-flow", {
       providerLinks: [{ provider: "claude", jobId: "j-claude", correlationId: "corr-j-claude" }],
       modelList: ["claude"],
       judgeProvider: null,
     });
-    const synthesis = startJudgeSynthesis(
+    const synthesis = await startJudgeSynthesis(
       {
         asyncJobManager: {
           startJobWithDedup(cli: string, _args: string[], correlationId: string) {
@@ -592,12 +611,12 @@ describe("validation receipt mint + resolve", () => {
       judgeModel: "codex",
       rawJobReference: { jobId: "j-ad-hoc-judge" },
     });
-    seedJob("j-ad-hoc-judge", {
+    await seedJob("j-ad-hoc-judge", {
       status: "completed",
       cli: "codex",
       correlationId: synthesis.rawJobReference!.correlationId,
     });
-    const receipt = resolveValidationReceipt(deps, "v-ad-hoc-flow", { caller: "local" });
+    const receipt = await resolveValidationReceipt(deps, "v-ad-hoc-flow", { caller: "local" });
     expect(receipt.status).toBe("minted");
     if (receipt.status === "minted") {
       expect(receipt.receipt.report.synthesis).toMatchObject({
@@ -624,58 +643,60 @@ describe("validation receipt mint + resolve", () => {
         report.synthesis.rawJobReference = null;
       },
     ],
-  ])("rejects a coherently rehashed linked-judge %s mismatch", (field, mutate) => {
-    seedJob("j-claude", { status: "completed" });
-    seedJob("j-codex", { status: "completed" });
-    seedJob("j-judge", { status: "completed" });
-    seedRun("v-linked-judge-source", {
+  ])("rejects a coherently rehashed linked-judge %s mismatch", async (field, mutate) => {
+    await seedJob("j-claude", { status: "completed" });
+    await seedJob("j-codex", { status: "completed" });
+    await seedJob("j-judge", { status: "completed" });
+    await seedRun("v-linked-judge-source", {
       judgeLink: { provider: "codex", jobId: "j-judge", correlationId: "corr-j-judge" },
     });
     expect(
-      resolveValidationReceipt(deps, "v-linked-judge-source", { caller: "local" }).status
+      (await resolveValidationReceipt(deps, "v-linked-judge-source", { caller: "local" })).status
     ).toBe("minted");
-    const source = requireStoredReceipt("v-linked-judge-source");
+    const source = await requireStoredReceipt("v-linked-judge-source");
     const validationId = `v-linked-judge-binding-${field.replaceAll(" ", "-")}`;
-    recordCoherentReceiptClone(source, validationId, mutate);
+    await recordCoherentReceiptClone(source, validationId, mutate);
 
-    expect(resolveValidationReceipt(deps, validationId, { caller: "local" })).toEqual({
+    expect(await resolveValidationReceipt(deps, validationId, { caller: "local" })).toEqual({
       status: "verification_failed",
       validationId,
     });
   });
 
-  it("accepts a finalized existing receipt for a durably skipped planned judge", () => {
-    seedJob("j-claude", { status: "completed" });
-    seedJob("j-codex", { status: "completed" });
-    seedRun("v-skipped-judge-source", { judgeProvider: "codex" });
-    store.setValidationRunStatus("v-skipped-judge-source", "judge_skipped");
+  it("accepts a finalized existing receipt for a durably skipped planned judge", async () => {
+    await seedJob("j-claude", { status: "completed" });
+    await seedJob("j-codex", { status: "completed" });
+    await seedRun("v-skipped-judge-source", { judgeProvider: "codex" });
+    await store.setValidationRunStatus("v-skipped-judge-source", "judge_skipped");
     expect(
-      resolveValidationReceipt(deps, "v-skipped-judge-source", { caller: "local" }).status
+      (await resolveValidationReceipt(deps, "v-skipped-judge-source", { caller: "local" })).status
     ).toBe("minted");
-    const source = requireStoredReceipt("v-skipped-judge-source");
+    const source = await requireStoredReceipt("v-skipped-judge-source");
     const validationId = "v-finalized-skipped-judge";
-    recordCoherentReceiptClone(source, validationId);
+    await recordCoherentReceiptClone(source, validationId);
 
-    expect(resolveValidationReceipt(deps, validationId, { caller: "local" }).status).toBe("minted");
+    expect((await resolveValidationReceipt(deps, validationId, { caller: "local" })).status).toBe(
+      "minted"
+    );
   });
 
-  it("rejects a linked judge receipt when the durable run has a skipped-judge status", () => {
-    seedJob("j-claude", { status: "completed" });
-    seedJob("j-codex", { status: "completed" });
-    seedJob("j-judge", { status: "completed" });
-    seedRun("v-linked-status-source", {
+  it("rejects a linked judge receipt when the durable run has a skipped-judge status", async () => {
+    await seedJob("j-claude", { status: "completed" });
+    await seedJob("j-codex", { status: "completed" });
+    await seedJob("j-judge", { status: "completed" });
+    await seedRun("v-linked-status-source", {
       judgeLink: { provider: "codex", jobId: "j-judge", correlationId: "corr-j-judge" },
     });
     expect(
-      resolveValidationReceipt(deps, "v-linked-status-source", { caller: "local" }).status
+      (await resolveValidationReceipt(deps, "v-linked-status-source", { caller: "local" })).status
     ).toBe("minted");
-    const source = requireStoredReceipt("v-linked-status-source");
+    const source = await requireStoredReceipt("v-linked-status-source");
     const validationId = "v-linked-invalid-run-status";
-    recordCoherentReceiptClone(source, validationId, () => undefined, {
+    await recordCoherentReceiptClone(source, validationId, () => undefined, {
       status: "judge_skipped",
     });
 
-    expect(resolveValidationReceipt(deps, validationId, { caller: "local" })).toEqual({
+    expect(await resolveValidationReceipt(deps, validationId, { caller: "local" })).toEqual({
       status: "verification_failed",
       validationId,
     });
@@ -688,17 +709,17 @@ describe("validation receipt mint + resolve", () => {
       (run: SeedRunOptions) =>
         (run.judgeLink!.correlationId = run.providerLinks![0]!.correlationId),
     ],
-  ])("rejects a coherent receipt whose judge aliases a provider %s", (field, aliasJudge) => {
-    seedJob("j-claude", { status: "completed" });
-    seedJob("j-codex", { status: "completed" });
-    seedJob("j-judge", { status: "completed" });
-    seedRun("v-judge-alias-source", {
+  ])("rejects a coherent receipt whose judge aliases a provider %s", async (field, aliasJudge) => {
+    await seedJob("j-claude", { status: "completed" });
+    await seedJob("j-codex", { status: "completed" });
+    await seedJob("j-judge", { status: "completed" });
+    await seedRun("v-judge-alias-source", {
       judgeLink: { provider: "codex", jobId: "j-judge", correlationId: "corr-j-judge" },
     });
-    expect(resolveValidationReceipt(deps, "v-judge-alias-source", { caller: "local" }).status).toBe(
-      "minted"
-    );
-    const source = requireStoredReceipt("v-judge-alias-source");
+    expect(
+      (await resolveValidationReceipt(deps, "v-judge-alias-source", { caller: "local" })).status
+    ).toBe("minted");
+    const source = await requireStoredReceipt("v-judge-alias-source");
     const validationId = `v-judge-alias-${field.replaceAll(" ", "-")}`;
     const sourceReport = JSON.parse(source.reportJson);
     const providerLinks = sourceReport.perModelOutputs.map((output: any, index: number) => ({
@@ -715,7 +736,7 @@ describe("validation receipt mint + resolve", () => {
       },
     };
     aliasJudge(runOverrides);
-    recordCoherentReceiptClone(
+    await recordCoherentReceiptClone(
       source,
       validationId,
       report => {
@@ -725,14 +746,14 @@ describe("validation receipt mint + resolve", () => {
       runOverrides
     );
 
-    expect(resolveValidationReceipt(deps, validationId, { caller: "local" })).toEqual({
+    expect(await resolveValidationReceipt(deps, validationId, { caller: "local" })).toEqual({
       status: "verification_failed",
       validationId,
     });
   });
 
-  it("serves a normally minted existing receipt without reloading nondurable answer jobs", () => {
-    mintDefaultSourceReceipt("v-existing-binding-compatible");
+  it("serves a normally minted existing receipt without reloading nondurable answer jobs", async () => {
+    await mintDefaultSourceReceipt("v-existing-binding-compatible");
     const unavailableManager = {
       getJobOwner() {
         throw new Error("Answer job owner was evicted");
@@ -743,28 +764,30 @@ describe("validation receipt mint + resolve", () => {
     } as unknown as AsyncJobManager;
 
     expect(
-      resolveValidationReceipt(
-        { asyncJobManager: unavailableManager, validationRunStore: store },
-        "v-existing-binding-compatible",
-        { caller: "local" }
+      (
+        await resolveValidationReceipt(
+          { asyncJobManager: unavailableManager, validationRunStore: store },
+          "v-existing-binding-compatible",
+          { caller: "local" }
+        )
       ).status
     ).toBe("minted");
   });
 
-  it("returns pending when a provider job is still running", () => {
-    seedJob("j-claude", { status: "completed" });
-    seedJob("j-codex", { status: "running" });
-    seedRun("v1");
+  it("returns pending when a provider job is still running", async () => {
+    await seedJob("j-claude", { status: "completed" });
+    await seedJob("j-codex", { status: "running" });
+    await seedRun("v1");
 
-    const res = resolveValidationReceipt(deps, "v1", { caller: "local" });
+    const res = await resolveValidationReceipt(deps, "v1", { caller: "local" });
     expect(res.status).toBe("pending");
     if (res.status !== "pending") return;
     expect(res.run.providers.find(p => p.jobId === "j-codex")?.status).toBe("running");
   });
 
-  it("does not finalize before a planned judge is claimed, but permits an explicit skip", () => {
-    seedJob("j-claude", { status: "completed" });
-    store.recordValidationRun({
+  it("does not finalize before a planned judge is claimed, but permits an explicit skip", async () => {
+    await seedJob("j-claude", { status: "completed" });
+    await store.recordValidationRun({
       validationId: "v-planned-judge",
       ownerPrincipal: "local",
       intent: "review",
@@ -779,11 +802,11 @@ describe("validation receipt mint + resolve", () => {
       status: "running",
     });
 
-    expect(resolveValidationReceipt(deps, "v-planned-judge", { caller: "local" }).status).toBe(
-      "pending"
-    );
-    store.setValidationRunStatus("v-planned-judge", "judge_skipped");
-    const skipped = resolveValidationReceipt(deps, "v-planned-judge", { caller: "local" });
+    expect(
+      (await resolveValidationReceipt(deps, "v-planned-judge", { caller: "local" })).status
+    ).toBe("pending");
+    await store.setValidationRunStatus("v-planned-judge", "judge_skipped");
+    const skipped = await resolveValidationReceipt(deps, "v-planned-judge", { caller: "local" });
     expect(skipped.status).toBe("minted");
     if (skipped.status !== "minted") return;
     expect(skipped.receipt.report.synthesis).toMatchObject({
@@ -793,35 +816,41 @@ describe("validation receipt mint + resolve", () => {
     });
   });
 
-  it("returns not_found for an unknown validationId", () => {
-    expect(resolveValidationReceipt(deps, "missing", { caller: "local" }).status).toBe("not_found");
+  it("returns not_found for an unknown validationId", async () => {
+    expect((await resolveValidationReceipt(deps, "missing", { caller: "local" })).status).toBe(
+      "not_found"
+    );
   });
 
-  it("returns not_found for a run owned by another principal", () => {
-    seedJob("j-claude", { status: "completed", owner: "alice" });
-    seedJob("j-codex", { status: "completed", owner: "alice" });
-    seedRun("v-alice", { owner: "alice" });
+  it("returns not_found for a run owned by another principal", async () => {
+    await seedJob("j-claude", { status: "completed", owner: "alice" });
+    await seedJob("j-codex", { status: "completed", owner: "alice" });
+    await seedRun("v-alice", { owner: "alice" });
 
-    expect(resolveValidationReceipt(deps, "v-alice", { caller: "bob" }).status).toBe("not_found");
+    expect((await resolveValidationReceipt(deps, "v-alice", { caller: "bob" })).status).toBe(
+      "not_found"
+    );
     // and the owner can mint it
-    expect(resolveValidationReceipt(deps, "v-alice", { caller: "alice" }).status).toBe("minted");
+    expect((await resolveValidationReceipt(deps, "v-alice", { caller: "alice" })).status).toBe(
+      "minted"
+    );
   });
 
-  it("returns expired_unminted when a linked job was evicted before any mint", () => {
+  it("returns expired_unminted when a linked job was evicted before any mint", async () => {
     // The run links jobs that were never recorded (simulating eviction).
-    seedRun("v-evicted", {
+    await seedRun("v-evicted", {
       providerLinks: [{ provider: "claude", jobId: "gone-1", correlationId: "c1" }],
     });
-    const res = resolveValidationReceipt(deps, "v-evicted", { caller: "local" });
+    const res = await resolveValidationReceipt(deps, "v-evicted", { caller: "local" });
     expect(res.status).toBe("expired_unminted");
   });
 
   it.each([
     [
       "owner",
-      () => {
-        seedJob("j-claude", { status: "completed", owner: "other-owner" });
-        seedRun("v-integrity", {
+      async () => {
+        await seedJob("j-claude", { status: "completed", owner: "other-owner" });
+        await seedRun("v-integrity", {
           providerLinks: [
             { provider: "claude", jobId: "j-claude", correlationId: "corr-j-claude" },
           ],
@@ -831,9 +860,9 @@ describe("validation receipt mint + resolve", () => {
     ],
     [
       "provider",
-      () => {
-        seedJob("j-claude", { status: "completed", cli: "codex" });
-        seedRun("v-integrity", {
+      async () => {
+        await seedJob("j-claude", { status: "completed", cli: "codex" });
+        await seedRun("v-integrity", {
           providerLinks: [
             { provider: "claude", jobId: "j-claude", correlationId: "corr-j-claude" },
           ],
@@ -843,9 +872,9 @@ describe("validation receipt mint + resolve", () => {
     ],
     [
       "correlation",
-      () => {
-        seedJob("j-claude", { status: "completed" });
-        seedRun("v-integrity", {
+      async () => {
+        await seedJob("j-claude", { status: "completed" });
+        await seedRun("v-integrity", {
           providerLinks: [
             { provider: "claude", jobId: "j-claude", correlationId: "wrong-correlation" },
           ],
@@ -855,22 +884,22 @@ describe("validation receipt mint + resolve", () => {
     ],
     [
       "reverse run",
-      () => {
-        seedJob("j-claude", { status: "completed" });
+      async () => {
+        await seedJob("j-claude", { status: "completed" });
         const link = {
           provider: "claude",
           jobId: "j-claude",
           correlationId: "corr-j-claude",
         };
-        seedRun("v-other", { providerLinks: [link], modelList: ["claude"] });
-        seedRun("v-integrity", { providerLinks: [link], modelList: ["claude"] });
+        await seedRun("v-other", { providerLinks: [link], modelList: ["claude"] });
+        await seedRun("v-integrity", { providerLinks: [link], modelList: ["claude"] });
       },
     ],
     [
       "truncated output",
-      () => {
-        seedJob("j-claude", { status: "completed", outputTruncated: true });
-        seedRun("v-integrity", {
+      async () => {
+        await seedJob("j-claude", { status: "completed", outputTruncated: true });
+        await seedRun("v-integrity", {
           providerLinks: [
             { provider: "claude", jobId: "j-claude", correlationId: "corr-j-claude" },
           ],
@@ -878,12 +907,12 @@ describe("validation receipt mint + resolve", () => {
         });
       },
     ],
-  ])("fails closed without a receipt for a provider-link %s mismatch", (_name, arrange) => {
-    arrange();
-    expect(resolveValidationReceipt(deps, "v-integrity", { caller: "local" }).status).toBe(
+  ])("fails closed without a receipt for a provider-link %s mismatch", async (_name, arrange) => {
+    await arrange();
+    expect((await resolveValidationReceipt(deps, "v-integrity", { caller: "local" })).status).toBe(
       "expired_unminted"
     );
-    expect(store.getValidationReceipt("v-integrity")).toBeNull();
+    expect(await store.getValidationReceipt("v-integrity")).toBeNull();
   });
 
   it.each([
@@ -893,10 +922,10 @@ describe("validation receipt mint + resolve", () => {
     ["truncated output", { outputTruncated: true }, "corr-j-judge"],
   ])(
     "fails closed without a receipt for a judge-link %s mismatch",
-    (_name, judgeOptions, judgeCorrelationId) => {
-      seedJob("j-claude", { status: "completed" });
-      seedJob("j-judge", { status: "completed", ...judgeOptions });
-      seedRun("v-integrity", {
+    async (_name, judgeOptions, judgeCorrelationId) => {
+      await seedJob("j-claude", { status: "completed" });
+      await seedJob("j-judge", { status: "completed", ...judgeOptions });
+      await seedRun("v-integrity", {
         providerLinks: [{ provider: "claude", jobId: "j-claude", correlationId: "corr-j-claude" }],
         modelList: ["claude"],
         judgeLink: {
@@ -906,38 +935,38 @@ describe("validation receipt mint + resolve", () => {
         },
       });
 
-      expect(resolveValidationReceipt(deps, "v-integrity", { caller: "local" }).status).toBe(
-        "expired_unminted"
-      );
-      expect(store.getValidationReceipt("v-integrity")).toBeNull();
+      expect(
+        (await resolveValidationReceipt(deps, "v-integrity", { caller: "local" })).status
+      ).toBe("expired_unminted");
+      expect(await store.getValidationReceipt("v-integrity")).toBeNull();
     }
   );
 
-  it("fails closed when a judge reverse link points to another run", () => {
-    seedJob("j-claude", { status: "completed" });
-    seedJob("j-judge", { status: "completed" });
+  it("fails closed when a judge reverse link points to another run", async () => {
+    await seedJob("j-claude", { status: "completed" });
+    await seedJob("j-judge", { status: "completed" });
     const judgeLink = {
       provider: "codex",
       jobId: "j-judge",
       correlationId: "corr-j-judge",
     };
-    seedRun("v-other", { providerLinks: [], modelList: [], judgeLink });
-    seedRun("v-integrity", {
+    await seedRun("v-other", { providerLinks: [], modelList: [], judgeLink });
+    await seedRun("v-integrity", {
       providerLinks: [{ provider: "claude", jobId: "j-claude", correlationId: "corr-j-claude" }],
       modelList: ["claude"],
       judgeLink,
     });
 
-    expect(resolveValidationReceipt(deps, "v-integrity", { caller: "local" }).status).toBe(
+    expect((await resolveValidationReceipt(deps, "v-integrity", { caller: "local" })).status).toBe(
       "expired_unminted"
     );
-    expect(store.getValidationReceipt("v-integrity")).toBeNull();
+    expect(await store.getValidationReceipt("v-integrity")).toBeNull();
   });
 
-  it("rejects a judge link outside the stored judge plan", () => {
-    seedJob("j-claude", { status: "completed" });
-    seedJob("j-judge", { status: "completed" });
-    seedRun("v-integrity", {
+  it("rejects a judge link outside the stored judge plan", async () => {
+    await seedJob("j-claude", { status: "completed" });
+    await seedJob("j-judge", { status: "completed" });
+    await seedRun("v-integrity", {
       providerLinks: [{ provider: "claude", jobId: "j-claude", correlationId: "corr-j-claude" }],
       modelList: ["claude"],
       judgeProvider: "claude",
@@ -948,10 +977,10 @@ describe("validation receipt mint + resolve", () => {
       },
     });
 
-    expect(resolveValidationReceipt(deps, "v-integrity", { caller: "local" }).status).toBe(
+    expect((await resolveValidationReceipt(deps, "v-integrity", { caller: "local" })).status).toBe(
       "expired_unminted"
     );
-    expect(store.getValidationReceipt("v-integrity")).toBeNull();
+    expect(await store.getValidationReceipt("v-integrity")).toBeNull();
   });
 
   it.each([
@@ -976,66 +1005,69 @@ describe("validation receipt mint + resolve", () => {
         { provider: "codex", jobId: "j-other", correlationId: "corr-j-claude" },
       ],
     ],
-  ])("rejects provider roster links with a %s", (_name, providerLinks) => {
-    seedJob("j-claude", { status: "completed" });
-    seedJob("j-other", { status: "completed" });
-    seedRun("v-integrity", { providerLinks, modelList: ["claude", "codex"] });
+  ])("rejects provider roster links with a %s", async (_name, providerLinks) => {
+    await seedJob("j-claude", { status: "completed" });
+    await seedJob("j-other", { status: "completed" });
+    await seedRun("v-integrity", { providerLinks, modelList: ["claude", "codex"] });
 
-    expect(resolveValidationReceipt(deps, "v-integrity", { caller: "local" }).status).toBe(
+    expect((await resolveValidationReceipt(deps, "v-integrity", { caller: "local" })).status).toBe(
       "expired_unminted"
     );
-    expect(store.getValidationReceipt("v-integrity")).toBeNull();
+    expect(await store.getValidationReceipt("v-integrity")).toBeNull();
   });
 
-  it("rejects a provider link outside the stored requested roster", () => {
-    seedJob("j-codex", { status: "completed" });
-    seedRun("v-integrity", {
+  it("rejects a provider link outside the stored requested roster", async () => {
+    await seedJob("j-codex", { status: "completed" });
+    await seedRun("v-integrity", {
       providerLinks: [{ provider: "codex", jobId: "j-codex", correlationId: "corr-j-codex" }],
       modelList: ["claude"],
     });
 
-    expect(resolveValidationReceipt(deps, "v-integrity", { caller: "local" }).status).toBe(
+    expect((await resolveValidationReceipt(deps, "v-integrity", { caller: "local" })).status).toBe(
       "expired_unminted"
     );
-    expect(store.getValidationReceipt("v-integrity")).toBeNull();
+    expect(await store.getValidationReceipt("v-integrity")).toBeNull();
   });
 
-  it("rejects a duplicate requested provider roster", () => {
-    seedJob("j-claude", { status: "completed" });
-    seedRun("v-integrity", {
+  it("rejects a duplicate requested provider roster", async () => {
+    await seedJob("j-claude", { status: "completed" });
+    await seedRun("v-integrity", {
       providerLinks: [{ provider: "claude", jobId: "j-claude", correlationId: "corr-j-claude" }],
       modelList: ["claude", "claude"],
     });
 
-    expect(resolveValidationReceipt(deps, "v-integrity", { caller: "local" }).status).toBe(
+    expect((await resolveValidationReceipt(deps, "v-integrity", { caller: "local" })).status).toBe(
       "expired_unminted"
     );
-    expect(store.getValidationReceipt("v-integrity")).toBeNull();
+    expect(await store.getValidationReceipt("v-integrity")).toBeNull();
   });
 
   it.each([
     ["job id", "j-claude", "corr-j-claude"],
     ["correlation id", "j-judge", "corr-j-claude"],
-  ])("rejects a judge link that aliases a provider %s", (_name, judgeJobId, correlationId) => {
-    seedJob("j-claude", { status: "completed" });
-    if (judgeJobId !== "j-claude") {
-      seedJob("j-judge", { status: "completed", correlationId });
+  ])(
+    "rejects a judge link that aliases a provider %s",
+    async (_name, judgeJobId, correlationId) => {
+      await seedJob("j-claude", { status: "completed" });
+      if (judgeJobId !== "j-claude") {
+        await seedJob("j-judge", { status: "completed", correlationId });
+      }
+      await seedRun("v-integrity", {
+        providerLinks: [{ provider: "claude", jobId: "j-claude", correlationId: "corr-j-claude" }],
+        modelList: ["claude"],
+        judgeLink: { provider: "codex", jobId: judgeJobId, correlationId },
+      });
+
+      expect(
+        (await resolveValidationReceipt(deps, "v-integrity", { caller: "local" })).status
+      ).toBe("expired_unminted");
+      expect(await store.getValidationReceipt("v-integrity")).toBeNull();
     }
-    seedRun("v-integrity", {
-      providerLinks: [{ provider: "claude", jobId: "j-claude", correlationId: "corr-j-claude" }],
-      modelList: ["claude"],
-      judgeLink: { provider: "codex", jobId: judgeJobId, correlationId },
-    });
+  );
 
-    expect(resolveValidationReceipt(deps, "v-integrity", { caller: "local" }).status).toBe(
-      "expired_unminted"
-    );
-    expect(store.getValidationReceipt("v-integrity")).toBeNull();
-  });
-
-  it.each(["owner", "result"])("fails closed when the job %s lookup throws", lookup => {
-    seedJob("j-claude", { status: "completed" });
-    seedRun("v-integrity", {
+  it.each(["owner", "result"])("fails closed when the job %s lookup throws", async lookup => {
+    await seedJob("j-claude", { status: "completed" });
+    await seedRun("v-integrity", {
       providerLinks: [{ provider: "claude", jobId: "j-claude", correlationId: "corr-j-claude" }],
       modelList: ["claude"],
     });
@@ -1054,15 +1086,15 @@ describe("validation receipt mint + resolve", () => {
       } as AsyncJobManager,
     };
 
-    expect(resolveValidationReceipt(deps, "v-integrity", { caller: "local" }).status).toBe(
+    expect((await resolveValidationReceipt(deps, "v-integrity", { caller: "local" })).status).toBe(
       "expired_unminted"
     );
-    expect(store.getValidationReceipt("v-integrity")).toBeNull();
+    expect(await store.getValidationReceipt("v-integrity")).toBeNull();
   });
 
-  it("rejects a job result whose id does not match its durable link", () => {
-    seedJob("j-claude", { status: "completed" });
-    seedRun("v-integrity", {
+  it("rejects a job result whose id does not match its durable link", async () => {
+    await seedJob("j-claude", { status: "completed" });
+    await seedRun("v-integrity", {
       providerLinks: [{ provider: "claude", jobId: "j-claude", correlationId: "corr-j-claude" }],
       modelList: ["claude"],
     });
@@ -1071,42 +1103,44 @@ describe("validation receipt mint + resolve", () => {
       validationRunStore: store,
       asyncJobManager: {
         getJobOwner: (jobId: string) => realManager.getJobOwner(jobId),
-        getJobResult(jobId: string, maxChars: number) {
-          const result = realManager.getJobResult(jobId, maxChars);
+        async getJobResult(jobId: string, maxChars: number) {
+          const result = await realManager.getJobResult(jobId, maxChars);
           return result ? { ...result, id: "different-job" } : null;
         },
       } as AsyncJobManager,
     };
 
-    expect(resolveValidationReceipt(deps, "v-integrity", { caller: "local" }).status).toBe(
+    expect((await resolveValidationReceipt(deps, "v-integrity", { caller: "local" })).status).toBe(
       "expired_unminted"
     );
-    expect(store.getValidationReceipt("v-integrity")).toBeNull();
+    expect(await store.getValidationReceipt("v-integrity")).toBeNull();
   });
 
-  it("mints with a judge when both providers and the judge are terminal", () => {
-    seedJob("j-claude", { status: "completed" });
-    seedJob("j-codex", { status: "completed" });
-    seedJob("j-judge", { status: "completed", stdout: "Summary: agree" });
-    seedRun("v-judge", {
+  it("mints with a judge when both providers and the judge are terminal", async () => {
+    await seedJob("j-claude", { status: "completed" });
+    await seedJob("j-codex", { status: "completed" });
+    await seedJob("j-judge", { status: "completed", stdout: "Summary: agree" });
+    await seedRun("v-judge", {
       judgeLink: { provider: "codex", jobId: "j-judge", correlationId: "corr-j-judge" },
     });
 
-    const res = resolveValidationReceipt(deps, "v-judge", { caller: "local" });
+    const res = await resolveValidationReceipt(deps, "v-judge", { caller: "local" });
     expect(res.status).toBe("minted");
     if (res.status !== "minted") return;
     expect(res.receipt.report.synthesis.status).toBe("completed");
     expect(res.receipt.report.synthesis.judgeModel).toBe("codex");
   });
 
-  it("stays pending while the judge job is still running", () => {
-    seedJob("j-claude", { status: "completed" });
-    seedJob("j-codex", { status: "completed" });
-    seedJob("j-judge", { status: "running" });
-    seedRun("v-judge", {
+  it("stays pending while the judge job is still running", async () => {
+    await seedJob("j-claude", { status: "completed" });
+    await seedJob("j-codex", { status: "completed" });
+    await seedJob("j-judge", { status: "running" });
+    await seedRun("v-judge", {
       judgeLink: { provider: "codex", jobId: "j-judge", correlationId: "corr-j-judge" },
     });
-    expect(resolveValidationReceipt(deps, "v-judge", { caller: "local" }).status).toBe("pending");
+    expect((await resolveValidationReceipt(deps, "v-judge", { caller: "local" })).status).toBe(
+      "pending"
+    );
   });
 
   // Backward compatibility with receipts minted by the shipped <= 2.17.x code.
@@ -1120,18 +1154,23 @@ describe("validation receipt mint + resolve", () => {
   // normalizeJobResult, computeCanonicalSha256) is imported from production and
   // is unchanged since, so this reproduces the on-disk bytes rather than
   // approximating them.
-  function mintLegacyPlannedJudgeReceipt(validationId: string, plannedJudge = "codex"): void {
-    seedJob("j-claude", { status: "completed" });
-    seedJob("j-codex", { status: "completed" });
-    seedRun(validationId, { judgeProvider: plannedJudge });
-    const run = store.getValidationRun(validationId);
+  async function mintLegacyPlannedJudgeReceipt(
+    validationId: string,
+    plannedJudge = "codex"
+  ): Promise<void> {
+    await seedJob("j-claude", { status: "completed" });
+    await seedJob("j-codex", { status: "completed" });
+    await seedRun(validationId, { judgeProvider: plannedJudge });
+    const run = await store.getValidationRun(validationId);
     if (!run) throw new Error(`Expected seeded run ${validationId}`);
     const request = JSON.parse(run.requestJson);
-    const results = run.providerLinks.map(link => {
-      const result = manager.getJobResult(link.jobId, Number.MAX_SAFE_INTEGER);
-      if (!result) throw new Error(`Expected seeded job ${link.jobId}`);
-      return normalizeJobResult(link.provider as any, null, result);
-    });
+    const results = await Promise.all(
+      run.providerLinks.map(async link => {
+        const result = await manager.getJobResult(link.jobId, Number.MAX_SAFE_INTEGER);
+        if (!result) throw new Error(`Expected seeded job ${link.jobId}`);
+        return await normalizeJobResult(link.provider as any, null, result);
+      })
+    );
     // The exact legacy synthesis object: no plannedJudge branch existed.
     const synthesis = {
       status: "not_requested" as const,
@@ -1141,7 +1180,7 @@ describe("validation receipt mint + resolve", () => {
     };
     const { structuredContent } = buildValidationReport({
       validationId,
-      status: deriveValidationRunStatus(results, synthesis.status),
+      status: await deriveValidationRunStatus(results, synthesis.status),
       startedAt: run.createdAt,
       intent: run.intent as any,
       originalRequest: {
@@ -1153,7 +1192,7 @@ describe("validation receipt mint + resolve", () => {
       results,
       synthesis,
     });
-    store.recordValidationReceipt({
+    await store.recordValidationReceipt({
       validationId,
       ownerPrincipal: run.ownerPrincipal,
       mintedAt: new Date().toISOString(),
@@ -1168,12 +1207,12 @@ describe("validation receipt mint + resolve", () => {
       confidence: structuredContent.confidence,
     });
     // The legacy mint always stamped the run finalized right after recording.
-    store.setValidationRunStatus(validationId, "finalized");
+    await store.setValidationRunStatus(validationId, "finalized");
   }
 
-  it("verifies a legacy receipt minted before the planned-judge gate existed", () => {
-    mintLegacyPlannedJudgeReceipt("v-legacy-planned-judge");
-    const stored = requireStoredReceipt("v-legacy-planned-judge");
+  it("verifies a legacy receipt minted before the planned-judge gate existed", async () => {
+    await mintLegacyPlannedJudgeReceipt("v-legacy-planned-judge");
+    const stored = await requireStoredReceipt("v-legacy-planned-judge");
     // Precondition: the fixture really is the legacy shape the old mint wrote.
     expect(JSON.parse(stored.reportJson).synthesis).toEqual({
       status: "not_requested",
@@ -1182,7 +1221,7 @@ describe("validation receipt mint + resolve", () => {
       note: "No judge synthesis was requested.",
     });
 
-    const res = resolveValidationReceipt(deps, "v-legacy-planned-judge", { caller: "local" });
+    const res = await resolveValidationReceipt(deps, "v-legacy-planned-judge", { caller: "local" });
     expect(res.status).toBe("minted");
     if (res.status !== "minted") return;
     // The stored bytes are served back untouched and still hash to the stored
@@ -1192,91 +1231,91 @@ describe("validation receipt mint + resolve", () => {
     expect(res.receipt.report.synthesis.status).toBe("not_requested");
   });
 
-  it("reports verification_failed, not expired_unminted, for a corrupted legacy receipt", () => {
-    mintLegacyPlannedJudgeReceipt("v-legacy-corrupt");
-    const stored = requireStoredReceipt("v-legacy-corrupt");
+  it("reports verification_failed, not expired_unminted, for a corrupted legacy receipt", async () => {
+    await mintLegacyPlannedJudgeReceipt("v-legacy-corrupt");
+    const stored = await requireStoredReceipt("v-legacy-corrupt");
     // Same legacy shape and a roster that matches the run exactly, so the ONLY
     // defect under test is the tampered evidence itself.
     const validationId = "v-legacy-corrupt-clone";
     const report = JSON.parse(stored.reportJson);
     report.validationId = validationId;
-    seedRun(validationId, {
+    await seedRun(validationId, {
       modelList: report.modelList,
       judgeProvider: "codex",
       status: "finalized",
     });
-    store.recordValidationReceipt({
+    await store.recordValidationReceipt({
       ...stored,
       validationId,
       reportJson: JSON.stringify(report),
       canonicalSha256: "0".repeat(64),
     });
 
-    const res = resolveValidationReceipt(deps, validationId, { caller: "local" });
+    const res = await resolveValidationReceipt(deps, validationId, { caller: "local" });
     // Fail-closed: the receipt still refuses to verify ...
     expect(res.status).not.toBe("minted");
     // ... and says so honestly instead of claiming nothing was ever minted.
     expect(res).toEqual({ status: "verification_failed", validationId });
-    expect(store.getValidationReceipt(validationId)).not.toBeNull();
+    expect(await store.getValidationReceipt(validationId)).not.toBeNull();
   });
 
-  it("does not extend the legacy allowance to a run that never finalized", () => {
+  it("does not extend the legacy allowance to a run that never finalized", async () => {
     // The legacy shape is accepted only on a finalized run, which is the state
     // the legacy mint always left behind. A planned-judge run still in
     // `running` is gated to pending today and must never mint this shape, so a
     // receipt claiming it does not verify.
-    mintLegacyPlannedJudgeReceipt("v-legacy-running-source");
-    const stored = requireStoredReceipt("v-legacy-running-source");
+    await mintLegacyPlannedJudgeReceipt("v-legacy-running-source");
+    const stored = await requireStoredReceipt("v-legacy-running-source");
     const validationId = "v-legacy-running";
     const report = JSON.parse(stored.reportJson);
     report.validationId = validationId;
     // Coherently rehashed against a matching roster: only the run status,
     // which the allowance deliberately pins to `finalized`, is out of contract.
-    seedRun(validationId, {
+    await seedRun(validationId, {
       modelList: report.modelList,
       judgeProvider: "codex",
       status: "running",
     });
-    store.recordValidationReceipt({
+    await store.recordValidationReceipt({
       ...stored,
       validationId,
       reportJson: JSON.stringify(report),
       canonicalSha256: computeCanonicalSha256(report),
     });
 
-    expect(resolveValidationReceipt(deps, validationId, { caller: "local" })).toEqual({
+    expect(await resolveValidationReceipt(deps, validationId, { caller: "local" })).toEqual({
       status: "verification_failed",
       validationId,
     });
   });
 
-  it("reports expired_unminted (absence), never verification_failed, when no receipt exists", () => {
+  it("reports expired_unminted (absence), never verification_failed, when no receipt exists", async () => {
     // The run links a job that was never recorded (simulating eviction): there
     // is nothing to verify, so absence is the honest answer.
-    seedRun("v-absent", {
+    await seedRun("v-absent", {
       providerLinks: [{ provider: "claude", jobId: "gone-1", correlationId: "c1" }],
     });
 
-    expect(resolveValidationReceipt(deps, "v-absent", { caller: "local" })).toEqual({
+    expect(await resolveValidationReceipt(deps, "v-absent", { caller: "local" })).toEqual({
       status: "expired_unminted",
       validationId: "v-absent",
     });
-    expect(store.getValidationReceipt("v-absent")).toBeNull();
+    expect(await store.getValidationReceipt("v-absent")).toBeNull();
   });
 
-  it("includeRawResponses returns the full answer as a read-time field, never in the hashed report", () => {
+  it("includeRawResponses returns the full answer as a read-time field, never in the hashed report", async () => {
     // Output longer than both the report's 1800-char rationale excerpt and the
     // manager's default 200,000-char page, with a sentinel only in the full text.
     const longAnswer = `${"verbose ".repeat(26_000)} TAILSENTINEL`;
-    seedJob("j-claude", { status: "completed", stdout: longAnswer });
-    seedJob("j-codex", { status: "completed", stdout: "Verdict: approve" });
-    seedRun("v1");
+    await seedJob("j-claude", { status: "completed", stdout: longAnswer });
+    await seedJob("j-codex", { status: "completed", stdout: "Verdict: approve" });
+    await seedRun("v1");
 
-    const withRaw = resolveValidationReceipt(deps, "v1", {
+    const withRaw = await resolveValidationReceipt(deps, "v1", {
       caller: "local",
       includeRawResponses: true,
     });
-    const withoutRaw = resolveValidationReceipt(deps, "v1", { caller: "local" });
+    const withoutRaw = await resolveValidationReceipt(deps, "v1", { caller: "local" });
     expect(withRaw.status).toBe("minted");
     expect(withoutRaw.status).toBe("minted");
     if (withRaw.status !== "minted" || withoutRaw.status !== "minted") return;
@@ -1290,17 +1329,17 @@ describe("validation receipt mint + resolve", () => {
     expect(withRaw.receipt.canonicalSha256).toBe(withoutRaw.receipt.canonicalSha256);
   });
 
-  it("omits raw responses whose complete-page or byte identity checks fail", () => {
-    seedJob("j-claude", { status: "completed" });
-    seedJob("j-codex", { status: "completed" });
-    seedRun("v1");
-    expect(resolveValidationReceipt(deps, "v1", { caller: "local" }).status).toBe("minted");
+  it("omits raw responses whose complete-page or byte identity checks fail", async () => {
+    await seedJob("j-claude", { status: "completed" });
+    await seedJob("j-codex", { status: "completed" });
+    await seedRun("v1");
+    expect((await resolveValidationReceipt(deps, "v1", { caller: "local" })).status).toBe("minted");
 
     const getJobResult = manager.getJobResult.bind(manager);
     const integrityCheckingManager = {
       getJobOwner: manager.getJobOwner.bind(manager),
-      getJobResult(jobId: string, maxChars?: number) {
-        const value = getJobResult(jobId, maxChars);
+      async getJobResult(jobId: string, maxChars?: number) {
+        const value = await getJobResult(jobId, maxChars);
         if (!value) return null;
         if (jobId === "j-claude") {
           return { ...value, stdoutTruncated: true, stdoutNextOffsetChars: value.stdout.length };
@@ -1309,7 +1348,7 @@ describe("validation receipt mint + resolve", () => {
       },
     } as unknown as AsyncJobManager;
 
-    const resolved = resolveValidationReceipt(
+    const resolved = await resolveValidationReceipt(
       { asyncJobManager: integrityCheckingManager, validationRunStore: store },
       "v1",
       { caller: "local", includeRawResponses: true }
@@ -1320,79 +1359,81 @@ describe("validation receipt mint + resolve", () => {
     expect(resolved.rawResponses).toEqual([]);
   });
 
-  it("eager mint from a collected job id mints the receipt without a read", () => {
-    seedJob("j-claude", { status: "completed" });
-    seedJob("j-codex", { status: "completed" });
-    seedRun("v1");
+  it("eager mint from a collected job id mints the receipt without a read", async () => {
+    await seedJob("j-claude", { status: "completed" });
+    await seedJob("j-codex", { status: "completed" });
+    await seedRun("v1");
 
-    expect(store.getValidationReceipt("v1")).toBeNull();
-    eagerMintFromJobId(deps, "j-codex"); // simulates the job_result hook
-    expect(store.getValidationReceipt("v1")).not.toBeNull();
+    expect(await store.getValidationReceipt("v1")).toBeNull();
+    await eagerMintFromJobId(deps, "j-codex"); // simulates the job_result hook
+    expect(await store.getValidationReceipt("v1")).not.toBeNull();
   });
 
-  it("eager mint is a no-op when the run is not yet terminal", () => {
-    seedJob("j-claude", { status: "completed" });
-    seedJob("j-codex", { status: "running" });
-    seedRun("v1");
-    eagerMintFromJobId(deps, "j-claude");
-    expect(store.getValidationReceipt("v1")).toBeNull();
+  it("eager mint is a no-op when the run is not yet terminal", async () => {
+    await seedJob("j-claude", { status: "completed" });
+    await seedJob("j-codex", { status: "running" });
+    await seedRun("v1");
+    await eagerMintFromJobId(deps, "j-claude");
+    expect(await store.getValidationReceipt("v1")).toBeNull();
   });
 
-  it("returns not_found when no durable run store is wired", () => {
+  it("returns not_found when no durable run store is wired", async () => {
     const noStore: ReceiptDeps = { asyncJobManager: manager };
-    expect(resolveValidationReceipt(noStore, "v1", { caller: "local" }).status).toBe("not_found");
+    expect((await resolveValidationReceipt(noStore, "v1", { caller: "local" })).status).toBe(
+      "not_found"
+    );
   });
 
   // Phase 2: auto-mint by validationId (synthesize_validation convenience) +
   // markdown rendering on read.
-  it("eagerMintFromValidationId mints a terminal run with no judge", () => {
-    seedJob("j-claude", { status: "completed" });
-    seedJob("j-codex", { status: "completed" });
-    seedRun("v1");
-    eagerMintFromValidationId(deps, "v1");
-    expect(store.getValidationReceipt("v1")).not.toBeNull();
+  it("eagerMintFromValidationId mints a terminal run with no judge", async () => {
+    await seedJob("j-claude", { status: "completed" });
+    await seedJob("j-codex", { status: "completed" });
+    await seedRun("v1");
+    await eagerMintFromValidationId(deps, "v1");
+    expect(await store.getValidationReceipt("v1")).not.toBeNull();
   });
 
-  it("eagerMintFromValidationId is a no-op while the judge is still running", () => {
-    seedJob("j-claude", { status: "completed" });
-    seedJob("j-codex", { status: "completed" });
-    seedJob("j-judge", { status: "running" });
-    seedRun("v-judge", {
+  it("eagerMintFromValidationId is a no-op while the judge is still running", async () => {
+    await seedJob("j-claude", { status: "completed" });
+    await seedJob("j-codex", { status: "completed" });
+    await seedJob("j-judge", { status: "running" });
+    await seedRun("v-judge", {
       judgeLink: { provider: "codex", jobId: "j-judge", correlationId: "corr-j-judge" },
     });
-    eagerMintFromValidationId(deps, "v-judge");
-    expect(store.getValidationReceipt("v-judge")).toBeNull();
+    await eagerMintFromValidationId(deps, "v-judge");
+    expect(await store.getValidationReceipt("v-judge")).toBeNull();
   });
 
-  it("marks the run finalized once a receipt is minted", () => {
-    seedJob("j-claude", { status: "completed" });
-    seedJob("j-codex", { status: "completed" });
-    seedRun("v1");
-    expect(store.getValidationRun("v1")?.status).toBe("running");
-    resolveValidationReceipt(deps, "v1", { caller: "local" });
-    expect(store.getValidationRun("v1")?.status).toBe("finalized");
+  it("marks the run finalized once a receipt is minted", async () => {
+    await seedJob("j-claude", { status: "completed" });
+    await seedJob("j-codex", { status: "completed" });
+    await seedRun("v1");
+    expect((await store.getValidationRun("v1"))?.status).toBe("running");
+    await resolveValidationReceipt(deps, "v1", { caller: "local" });
+    expect((await store.getValidationRun("v1"))?.status).toBe("finalized");
   });
 
-  it("records a non-completed judge as skipped synthesis, never completed", () => {
-    seedJob("j-claude", { status: "completed" });
-    seedJob("j-codex", { status: "completed" });
-    seedJob("j-judge", { status: "failed" });
-    seedRun("v-judge", {
+  it("records a non-completed judge as skipped synthesis, never completed", async () => {
+    await seedJob("j-claude", { status: "completed" });
+    await seedJob("j-codex", { status: "completed" });
+    await seedJob("j-judge", { status: "failed" });
+    await seedRun("v-judge", {
       judgeLink: { provider: "codex", jobId: "j-judge", correlationId: "corr-j-judge" },
     });
-    const res = resolveValidationReceipt(deps, "v-judge", { caller: "local" });
+    const res = await resolveValidationReceipt(deps, "v-judge", { caller: "local" });
     expect(res.status).toBe("minted");
     if (res.status !== "minted") return;
     expect(res.receipt.report.synthesis.status).toBe("skipped");
     expect(res.receipt.report.synthesis.note).toMatch(/failed/);
   });
 
-  it("reconstructs skipped providers (requested but not dispatched) in the minted report", () => {
-    seedJob("j-claude", { status: "completed" });
-    seedJob("j-codex", { status: "completed" });
+  it("reconstructs skipped providers (requested but not dispatched) in the minted report", async () => {
+    await seedJob("j-claude", { status: "completed" });
+    await seedJob("j-codex", { status: "completed" });
     // gemini was requested at kickoff but never dispatched (no provider link).
-    seedRun("v1", { modelList: ["claude", "codex", "gemini"] });
-    const res = resolveValidationReceipt(deps, "v1", { caller: "local" });
+    await seedRun("v1", { modelList: ["claude", "codex", "gemini"] });
+    const res = await resolveValidationReceipt(deps, "v1", { caller: "local" });
     expect(res.status).toBe("minted");
     if (res.status !== "minted") return;
     const gemini = res.receipt.report.perModelOutputs.find(o => o.provider === "gemini");
@@ -1400,11 +1441,11 @@ describe("validation receipt mint + resolve", () => {
     expect(res.receipt.report.modelList).toEqual(["claude", "codex", "gemini"]);
   });
 
-  it("the receipt envelope's humanReadable is the renderHumanReport of the stored report", () => {
-    seedJob("j-claude", { status: "completed" });
-    seedJob("j-codex", { status: "completed" });
-    seedRun("v1");
-    const res = resolveValidationReceipt(deps, "v1", { caller: "local" });
+  it("the receipt envelope's humanReadable is the renderHumanReport of the stored report", async () => {
+    await seedJob("j-claude", { status: "completed" });
+    await seedJob("j-codex", { status: "completed" });
+    await seedRun("v1");
+    const res = await resolveValidationReceipt(deps, "v1", { caller: "local" });
     expect(res.status).toBe("minted");
     if (res.status !== "minted") return;
     expect(res.receipt.humanReadable).toBe(renderHumanReport(res.receipt.report));

@@ -1,3 +1,10 @@
+# ============================================================================
+# SHIPPED. Per-node `status` in this file was never maintained: 3 node(s)
+# below still read `planned` for code that is live. Do not read a `planned`
+# node here as evidence that something is unimplemented; check the code.
+# Shipped in 3.1.0-rc.7 (CHANGELOG: 'the test suite stops eating live sessions').
+# Classified 2026-08-18 at HEAD 801950d. Index: docs/plans/README.md
+# ============================================================================
 # Implementation plan: stop the test suite writing to the live session store,
 # and purge the test pollution it has already accumulated.
 #

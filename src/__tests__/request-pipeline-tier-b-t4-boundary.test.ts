@@ -146,7 +146,7 @@ describe("Tier-B T4 terminal-envelope: state 4..8 metric/cleanup boundary", () =
 
   afterEach(async () => {
     await manager.dispose();
-    flight.close();
+    await flight.close();
     rmSync(tmp, { recursive: true, force: true });
     vi.restoreAllMocks();
   });
@@ -374,7 +374,7 @@ describe("Tier-B T4 terminal-envelope: inline terminal parity + codex facts-orde
 
   afterEach(async () => {
     await manager.dispose();
-    flight.close();
+    await flight.close();
     rmSync(tmp, { recursive: true, force: true });
     vi.restoreAllMocks();
   });

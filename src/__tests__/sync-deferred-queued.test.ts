@@ -98,8 +98,8 @@ describe("sync/deferred queued jobs", () => {
 
       expect(body.status).toBe("deferred");
       expect(body.cli).toBe("grok");
-      expect(manager.getJobSnapshot(body.jobId)?.status).toBe("queued");
-      manager.cancelJob(body.jobId);
+      expect((await manager.getJobSnapshot(body.jobId))?.status).toBe("queued");
+      await manager.cancelJob(body.jobId);
     } finally {
       slot.release();
     }
@@ -146,8 +146,8 @@ describe("sync/deferred queued jobs", () => {
 
       expect(body.status).toBe("deferred");
       expect(body.cli).toBe("ollama");
-      expect(manager.getJobSnapshot(body.jobId)?.status).toBe("queued");
-      manager.cancelJob(body.jobId);
+      expect((await manager.getJobSnapshot(body.jobId))?.status).toBe("queued");
+      await manager.cancelJob(body.jobId);
     } finally {
       slot.release();
     }

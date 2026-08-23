@@ -320,7 +320,7 @@ Environment Variables:
   // Connect to database
   console.error("Connecting to database...");
   const db = await createDatabaseConnection(config, logger);
-  const pgManager = new PostgreSQLSessionManager(db.getPool());
+  const pgManager = new PostgreSQLSessionManager(db.getDriver());
   console.error("✓ Connected to database\n");
 
   try {
@@ -358,5 +358,6 @@ Environment Variables:
 
 // Run if executed directly
 if (import.meta.url === `file://${process.argv[1]}`) {
-  main();
+  // `void`: module entry point. Nothing can await it, and it ends the process.
+  void main();
 }

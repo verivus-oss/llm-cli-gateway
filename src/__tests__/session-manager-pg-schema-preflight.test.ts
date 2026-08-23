@@ -1,6 +1,10 @@
 import { describe, expect, it, vi } from "vitest";
-import type { Pool, PoolClient } from "pg";
 import { PostgreSQLSessionManager } from "../session-manager-pg.js";
+import {
+  PostgresStorageDriver,
+  type PgClientLike,
+  type PgPoolLike,
+} from "../storage/drivers/postgres.js";
 import type { KitSessionBinding } from "../personal-config-types.js";
 
 /** Every `sessions` column a fully migrated database exposes. */
@@ -69,10 +73,15 @@ function managerWithSessionColumns(
     return { rows: [], rowCount: 0 };
   });
   const clientQuery = vi.fn(async () => ({ rows: [], rowCount: 1 }));
-  const client = { query: clientQuery, release: vi.fn() } as unknown as PoolClient;
+  const client = { query: clientQuery, release: vi.fn() } as unknown as PgClientLike;
   const connect = vi.fn().mockResolvedValue(client);
-  const pool = { query: poolQuery, connect } as unknown as Pool;
-  return { manager: new PostgreSQLSessionManager(pool), poolQuery, connect, clientQuery };
+  const pool = { query: poolQuery, connect, end: vi.fn() } as unknown as PgPoolLike;
+  // `connect` is still the signal that a write was attempted: the driver checks
+  // out one client for a transaction, exactly as the manager used to.
+  const manager = new PostgreSQLSessionManager(
+    new PostgresStorageDriver({ app: "postgres://fake" }, () => pool)
+  );
+  return { manager, poolQuery, connect, clientQuery };
 }
 
 const withoutGeneration = ALL_SESSION_COLUMNS.filter(column => column !== "session_generation");

@@ -1,0 +1,4836 @@
+{
+  "schemaVersion": 1,
+  "provenance": {
+    "generator": "generate-provider-seed",
+    "generatorVersion": "3.1.0-rc.8",
+    "generatedAt": "2026-08-19T04:02:51.749Z",
+    "platform": "linux",
+    "nodeVersion": "v24.15.0"
+  },
+  "providers": [
+    {
+      "cli": "claude",
+      "executable": "claude",
+      "version": "2.1.235",
+      "commandScope": [],
+      "flags": [
+        {
+          "flag": "--add-dir",
+          "evidence": [
+            "help",
+            "probe"
+          ],
+          "arity": "one",
+          "firstSeen": "2.1.235",
+          "lastSeen": "2.1.235",
+          "probe": {
+            "verdict": "present",
+            "at": "2.1.235"
+          }
+        },
+        {
+          "flag": "--agent",
+          "evidence": [
+            "help",
+            "probe"
+          ],
+          "arity": "one",
+          "firstSeen": "2.1.235",
+          "lastSeen": "2.1.235",
+          "probe": {
+            "verdict": "present",
+            "at": "2.1.235"
+          }
+        },
+        {
+          "flag": "--agents",
+          "evidence": [
+            "help",
+            "probe"
+          ],
+          "arity": "one",
+          "firstSeen": "2.1.235",
+          "lastSeen": "2.1.235",
+          "probe": {
+            "verdict": "present",
+            "at": "2.1.235"
+          }
+        },
+        {
+          "flag": "--allow-dangerously-skip-permissions",
+          "evidence": [
+            "help"
+          ],
+          "firstSeen": "2.1.235",
+          "lastSeen": "2.1.235",
+          "probe": {
+            "verdict": "unparsed",
+            "at": "2.1.235"
+          }
+        },
+        {
+          "flag": "--allowed-tools",
+          "evidence": [
+            "help",
+            "probe"
+          ],
+          "arity": "one",
+          "firstSeen": "2.1.235",
+          "lastSeen": "2.1.235",
+          "probe": {
+            "verdict": "present",
+            "at": "2.1.235"
+          }
+        },
+        {
+          "flag": "--allowedTools",
+          "evidence": [
+            "help",
+            "probe"
+          ],
+          "arity": "one",
+          "firstSeen": "2.1.235",
+          "lastSeen": "2.1.235",
+          "probe": {
+            "verdict": "present",
+            "at": "2.1.235"
+          }
+        },
+        {
+          "flag": "--append-system-prompt",
+          "evidence": [
+            "help",
+            "probe"
+          ],
+          "arity": "one",
+          "firstSeen": "2.1.235",
+          "lastSeen": "2.1.235",
+          "probe": {
+            "verdict": "present",
+            "at": "2.1.235"
+          }
+        },
+        {
+          "flag": "--autocompact",
+          "evidence": [
+            "help"
+          ],
+          "firstSeen": "2.1.235",
+          "lastSeen": "2.1.235",
+          "probe": {
+            "verdict": "unparsed",
+            "at": "2.1.235"
+          }
+        },
+        {
+          "flag": "--ax-screen-reader",
+          "evidence": [
+            "help"
+          ],
+          "firstSeen": "2.1.235",
+          "lastSeen": "2.1.235",
+          "probe": {
+            "verdict": "unparsed",
+            "at": "2.1.235"
+          }
+        },
+        {
+          "flag": "--background",
+          "evidence": [
+            "help"
+          ],
+          "firstSeen": "2.1.235",
+          "lastSeen": "2.1.235",
+          "probe": {
+            "verdict": "unparsed",
+            "at": "2.1.235"
+          }
+        },
+        {
+          "flag": "--bare",
+          "evidence": [
+            "help"
+          ],
+          "firstSeen": "2.1.235",
+          "lastSeen": "2.1.235",
+          "probe": {
+            "verdict": "unparsed",
+            "at": "2.1.235"
+          }
+        },
+        {
+          "flag": "--betas",
+          "evidence": [
+            "help",
+            "probe"
+          ],
+          "arity": "one",
+          "firstSeen": "2.1.235",
+          "lastSeen": "2.1.235",
+          "probe": {
+            "verdict": "present",
+            "at": "2.1.235"
+          }
+        },
+        {
+          "flag": "--bg",
+          "evidence": [
+            "help"
+          ],
+          "firstSeen": "2.1.235",
+          "lastSeen": "2.1.235",
+          "probe": {
+            "verdict": "unparsed",
+            "at": "2.1.235"
+          }
+        },
+        {
+          "flag": "--brief",
+          "evidence": [
+            "help"
+          ],
+          "firstSeen": "2.1.235",
+          "lastSeen": "2.1.235",
+          "probe": {
+            "verdict": "unparsed",
+            "at": "2.1.235"
+          }
+        },
+        {
+          "flag": "--chrome",
+          "evidence": [
+            "help"
+          ],
+          "firstSeen": "2.1.235",
+          "lastSeen": "2.1.235",
+          "probe": {
+            "verdict": "unparsed",
+            "at": "2.1.235"
+          }
+        },
+        {
+          "flag": "--cloud",
+          "evidence": [
+            "help",
+            "probe"
+          ],
+          "arity": "one",
+          "firstSeen": "2.1.235",
+          "lastSeen": "2.1.235",
+          "probe": {
+            "verdict": "present",
+            "at": "2.1.235"
+          }
+        },
+        {
+          "flag": "--continue",
+          "evidence": [
+            "help"
+          ],
+          "firstSeen": "2.1.235",
+          "lastSeen": "2.1.235",
+          "probe": {
+            "verdict": "unparsed",
+            "at": "2.1.235"
+          }
+        },
+        {
+          "flag": "--dangerously-skip-permissions",
+          "evidence": [
+            "help"
+          ],
+          "firstSeen": "2.1.235",
+          "lastSeen": "2.1.235",
+          "probe": {
+            "verdict": "unparsed",
+            "at": "2.1.235"
+          }
+        },
+        {
+          "flag": "--debug",
+          "evidence": [
+            "help",
+            "probe"
+          ],
+          "arity": "one",
+          "firstSeen": "2.1.235",
+          "lastSeen": "2.1.235",
+          "probe": {
+            "verdict": "present",
+            "at": "2.1.235"
+          }
+        },
+        {
+          "flag": "--debug-file",
+          "evidence": [
+            "help",
+            "probe"
+          ],
+          "arity": "one",
+          "firstSeen": "2.1.235",
+          "lastSeen": "2.1.235",
+          "probe": {
+            "verdict": "present",
+            "at": "2.1.235"
+          }
+        },
+        {
+          "flag": "--disable-slash-commands",
+          "evidence": [
+            "help"
+          ],
+          "firstSeen": "2.1.235",
+          "lastSeen": "2.1.235",
+          "probe": {
+            "verdict": "unparsed",
+            "at": "2.1.235"
+          }
+        },
+        {
+          "flag": "--disallowed-tools",
+          "evidence": [
+            "help",
+            "probe"
+          ],
+          "arity": "one",
+          "firstSeen": "2.1.235",
+          "lastSeen": "2.1.235",
+          "probe": {
+            "verdict": "present",
+            "at": "2.1.235"
+          }
+        },
+        {
+          "flag": "--disallowedTools",
+          "evidence": [
+            "help",
+            "probe"
+          ],
+          "arity": "one",
+          "firstSeen": "2.1.235",
+          "lastSeen": "2.1.235",
+          "probe": {
+            "verdict": "present",
+            "at": "2.1.235"
+          }
+        },
+        {
+          "flag": "--effort",
+          "evidence": [
+            "help",
+            "probe"
+          ],
+          "arity": "one",
+          "firstSeen": "2.1.235",
+          "lastSeen": "2.1.235",
+          "probe": {
+            "verdict": "present",
+            "at": "2.1.235"
+          }
+        },
+        {
+          "flag": "--environment",
+          "evidence": [
+            "help",
+            "probe"
+          ],
+          "arity": "one",
+          "firstSeen": "2.1.235",
+          "lastSeen": "2.1.235",
+          "probe": {
+            "verdict": "present",
+            "at": "2.1.235"
+          }
+        },
+        {
+          "flag": "--exclude-dynamic-system-prompt-sections",
+          "evidence": [
+            "help"
+          ],
+          "firstSeen": "2.1.235",
+          "lastSeen": "2.1.235",
+          "probe": {
+            "verdict": "unparsed",
+            "at": "2.1.235"
+          }
+        },
+        {
+          "flag": "--fallback-model",
+          "evidence": [
+            "help",
+            "probe"
+          ],
+          "arity": "one",
+          "firstSeen": "2.1.235",
+          "lastSeen": "2.1.235",
+          "probe": {
+            "verdict": "present",
+            "at": "2.1.235"
+          }
+        },
+        {
+          "flag": "--file",
+          "evidence": [
+            "help",
+            "probe"
+          ],
+          "arity": "one",
+          "firstSeen": "2.1.235",
+          "lastSeen": "2.1.235",
+          "probe": {
+            "verdict": "present",
+            "at": "2.1.235"
+          }
+        },
+        {
+          "flag": "--fork-session",
+          "evidence": [
+            "help"
+          ],
+          "firstSeen": "2.1.235",
+          "lastSeen": "2.1.235",
+          "probe": {
+            "verdict": "unparsed",
+            "at": "2.1.235"
+          }
+        },
+        {
+          "flag": "--forward-subagent-text",
+          "evidence": [
+            "help"
+          ],
+          "firstSeen": "2.1.235",
+          "lastSeen": "2.1.235",
+          "probe": {
+            "verdict": "unparsed",
+            "at": "2.1.235"
+          }
+        },
+        {
+          "flag": "--from-pr",
+          "evidence": [
+            "help",
+            "probe"
+          ],
+          "arity": "one",
+          "firstSeen": "2.1.235",
+          "lastSeen": "2.1.235",
+          "probe": {
+            "verdict": "present",
+            "at": "2.1.235"
+          }
+        },
+        {
+          "flag": "--help",
+          "evidence": [
+            "help"
+          ],
+          "firstSeen": "2.1.235",
+          "lastSeen": "2.1.235",
+          "probe": {
+            "verdict": "unparsed",
+            "at": "2.1.235"
+          }
+        },
+        {
+          "flag": "--ide",
+          "evidence": [
+            "help"
+          ],
+          "firstSeen": "2.1.235",
+          "lastSeen": "2.1.235",
+          "probe": {
+            "verdict": "unparsed",
+            "at": "2.1.235"
+          }
+        },
+        {
+          "flag": "--include-hook-events",
+          "evidence": [
+            "help"
+          ],
+          "firstSeen": "2.1.235",
+          "lastSeen": "2.1.235",
+          "probe": {
+            "verdict": "unparsed",
+            "at": "2.1.235"
+          }
+        },
+        {
+          "flag": "--include-partial-messages",
+          "evidence": [
+            "help"
+          ],
+          "firstSeen": "2.1.235",
+          "lastSeen": "2.1.235",
+          "probe": {
+            "verdict": "unparsed",
+            "at": "2.1.235"
+          }
+        },
+        {
+          "flag": "--input-format",
+          "evidence": [
+            "help"
+          ],
+          "firstSeen": "2.1.235",
+          "lastSeen": "2.1.235",
+          "probe": {
+            "verdict": "unparsed",
+            "at": "2.1.235"
+          }
+        },
+        {
+          "flag": "--json-schema",
+          "evidence": [
+            "help",
+            "probe"
+          ],
+          "arity": "one",
+          "firstSeen": "2.1.235",
+          "lastSeen": "2.1.235",
+          "probe": {
+            "verdict": "present",
+            "at": "2.1.235"
+          }
+        },
+        {
+          "flag": "--max-budget-usd",
+          "evidence": [
+            "help"
+          ],
+          "firstSeen": "2.1.235",
+          "lastSeen": "2.1.235",
+          "probe": {
+            "verdict": "unparsed",
+            "at": "2.1.235"
+          }
+        },
+        {
+          "flag": "--mcp-config",
+          "evidence": [
+            "help",
+            "probe"
+          ],
+          "arity": "one",
+          "firstSeen": "2.1.235",
+          "lastSeen": "2.1.235",
+          "probe": {
+            "verdict": "present",
+            "at": "2.1.235"
+          }
+        },
+        {
+          "flag": "--model",
+          "evidence": [
+            "help",
+            "probe"
+          ],
+          "arity": "one",
+          "firstSeen": "2.1.235",
+          "lastSeen": "2.1.235",
+          "probe": {
+            "verdict": "present",
+            "at": "2.1.235"
+          }
+        },
+        {
+          "flag": "--name",
+          "evidence": [
+            "help",
+            "probe"
+          ],
+          "arity": "one",
+          "firstSeen": "2.1.235",
+          "lastSeen": "2.1.235",
+          "probe": {
+            "verdict": "present",
+            "at": "2.1.235"
+          }
+        },
+        {
+          "flag": "--no-chrome",
+          "evidence": [
+            "help"
+          ],
+          "firstSeen": "2.1.235",
+          "lastSeen": "2.1.235",
+          "probe": {
+            "verdict": "unparsed",
+            "at": "2.1.235"
+          }
+        },
+        {
+          "flag": "--no-session-persistence",
+          "evidence": [
+            "help"
+          ],
+          "firstSeen": "2.1.235",
+          "lastSeen": "2.1.235",
+          "probe": {
+            "verdict": "unparsed",
+            "at": "2.1.235"
+          }
+        },
+        {
+          "flag": "--output-format",
+          "evidence": [
+            "help"
+          ],
+          "firstSeen": "2.1.235",
+          "lastSeen": "2.1.235",
+          "probe": {
+            "verdict": "unparsed",
+            "at": "2.1.235"
+          }
+        },
+        {
+          "flag": "--permission-mode",
+          "evidence": [
+            "help"
+          ],
+          "firstSeen": "2.1.235",
+          "lastSeen": "2.1.235",
+          "probe": {
+            "verdict": "unparsed",
+            "at": "2.1.235"
+          }
+        },
+        {
+          "flag": "--plugin-dir",
+          "evidence": [
+            "help",
+            "probe"
+          ],
+          "arity": "one",
+          "firstSeen": "2.1.235",
+          "lastSeen": "2.1.235",
+          "probe": {
+            "verdict": "present",
+            "at": "2.1.235"
+          }
+        },
+        {
+          "flag": "--plugin-url",
+          "evidence": [
+            "help",
+            "probe"
+          ],
+          "arity": "one",
+          "firstSeen": "2.1.235",
+          "lastSeen": "2.1.235",
+          "probe": {
+            "verdict": "present",
+            "at": "2.1.235"
+          }
+        },
+        {
+          "flag": "--print",
+          "evidence": [
+            "help"
+          ],
+          "firstSeen": "2.1.235",
+          "lastSeen": "2.1.235",
+          "probe": {
+            "verdict": "unparsed",
+            "at": "2.1.235"
+          }
+        },
+        {
+          "flag": "--prompt-suggestions",
+          "evidence": [
+            "help"
+          ],
+          "firstSeen": "2.1.235",
+          "lastSeen": "2.1.235",
+          "probe": {
+            "verdict": "unparsed",
+            "at": "2.1.235"
+          }
+        },
+        {
+          "flag": "--remote-control",
+          "evidence": [
+            "help",
+            "probe"
+          ],
+          "arity": "one",
+          "firstSeen": "2.1.235",
+          "lastSeen": "2.1.235",
+          "probe": {
+            "verdict": "present",
+            "at": "2.1.235"
+          }
+        },
+        {
+          "flag": "--remote-control-session-name-prefix",
+          "evidence": [
+            "help",
+            "probe"
+          ],
+          "arity": "one",
+          "firstSeen": "2.1.235",
+          "lastSeen": "2.1.235",
+          "probe": {
+            "verdict": "present",
+            "at": "2.1.235"
+          }
+        },
+        {
+          "flag": "--replay-user-messages",
+          "evidence": [
+            "help"
+          ],
+          "firstSeen": "2.1.235",
+          "lastSeen": "2.1.235",
+          "probe": {
+            "verdict": "unparsed",
+            "at": "2.1.235"
+          }
+        },
+        {
+          "flag": "--resume",
+          "evidence": [
+            "help",
+            "probe"
+          ],
+          "arity": "one",
+          "firstSeen": "2.1.235",
+          "lastSeen": "2.1.235",
+          "probe": {
+            "verdict": "present",
+            "at": "2.1.235"
+          }
+        },
+        {
+          "flag": "--safe-mode",
+          "evidence": [
+            "help"
+          ],
+          "firstSeen": "2.1.235",
+          "lastSeen": "2.1.235",
+          "probe": {
+            "verdict": "unparsed",
+            "at": "2.1.235"
+          }
+        },
+        {
+          "flag": "--session-id",
+          "evidence": [
+            "help",
+            "probe"
+          ],
+          "arity": "one",
+          "firstSeen": "2.1.235",
+          "lastSeen": "2.1.235",
+          "probe": {
+            "verdict": "present",
+            "at": "2.1.235"
+          }
+        },
+        {
+          "flag": "--setting-sources",
+          "evidence": [
+            "help"
+          ],
+          "firstSeen": "2.1.235",
+          "lastSeen": "2.1.235",
+          "probe": {
+            "verdict": "unparsed",
+            "at": "2.1.235"
+          }
+        },
+        {
+          "flag": "--settings",
+          "evidence": [
+            "help"
+          ],
+          "firstSeen": "2.1.235",
+          "lastSeen": "2.1.235",
+          "probe": {
+            "verdict": "unparsed",
+            "at": "2.1.235"
+          }
+        },
+        {
+          "flag": "--strict-mcp-config",
+          "evidence": [
+            "help"
+          ],
+          "firstSeen": "2.1.235",
+          "lastSeen": "2.1.235",
+          "probe": {
+            "verdict": "unparsed",
+            "at": "2.1.235"
+          }
+        },
+        {
+          "flag": "--system-prompt",
+          "evidence": [
+            "help",
+            "probe"
+          ],
+          "arity": "one",
+          "firstSeen": "2.1.235",
+          "lastSeen": "2.1.235",
+          "probe": {
+            "verdict": "present",
+            "at": "2.1.235"
+          }
+        },
+        {
+          "flag": "--teleport",
+          "evidence": [
+            "help",
+            "probe"
+          ],
+          "arity": "one",
+          "firstSeen": "2.1.235",
+          "lastSeen": "2.1.235",
+          "probe": {
+            "verdict": "present",
+            "at": "2.1.235"
+          }
+        },
+        {
+          "flag": "--tmux",
+          "evidence": [
+            "help"
+          ],
+          "firstSeen": "2.1.235",
+          "lastSeen": "2.1.235",
+          "probe": {
+            "verdict": "unparsed",
+            "at": "2.1.235"
+          }
+        },
+        {
+          "flag": "--tools",
+          "evidence": [
+            "help",
+            "probe"
+          ],
+          "arity": "one",
+          "firstSeen": "2.1.235",
+          "lastSeen": "2.1.235",
+          "probe": {
+            "verdict": "present",
+            "at": "2.1.235"
+          }
+        },
+        {
+          "flag": "--verbose",
+          "evidence": [
+            "help"
+          ],
+          "firstSeen": "2.1.235",
+          "lastSeen": "2.1.235",
+          "probe": {
+            "verdict": "unparsed",
+            "at": "2.1.235"
+          }
+        },
+        {
+          "flag": "--version",
+          "evidence": [
+            "help"
+          ],
+          "firstSeen": "2.1.235",
+          "lastSeen": "2.1.235",
+          "probe": {
+            "verdict": "unparsed",
+            "at": "2.1.235"
+          }
+        },
+        {
+          "flag": "--worktree",
+          "evidence": [
+            "help",
+            "probe"
+          ],
+          "arity": "one",
+          "firstSeen": "2.1.235",
+          "lastSeen": "2.1.235",
+          "probe": {
+            "verdict": "present",
+            "at": "2.1.235"
+          }
+        }
+      ],
+      "unreadSources": [
+        "completions"
+      ]
+    },
+    {
+      "cli": "codex",
+      "executable": "codex",
+      "version": "0.147.0",
+      "commandScope": [
+        "exec"
+      ],
+      "flags": [
+        {
+          "flag": "--add-dir",
+          "evidence": [
+            "completions",
+            "help",
+            "probe"
+          ],
+          "arity": "one",
+          "firstSeen": "0.147.0",
+          "lastSeen": "0.147.0",
+          "probe": {
+            "verdict": "present",
+            "at": "0.147.0"
+          }
+        },
+        {
+          "flag": "--all",
+          "evidence": [
+            "completions",
+            "help"
+          ],
+          "firstSeen": "0.147.0",
+          "lastSeen": "0.147.0",
+          "probe": {
+            "verdict": "absent",
+            "at": "0.147.0"
+          }
+        },
+        {
+          "flag": "--analytics-default-enabled",
+          "evidence": [
+            "completions"
+          ],
+          "firstSeen": "0.147.0",
+          "lastSeen": "0.147.0",
+          "probe": {
+            "verdict": "absent",
+            "at": "0.147.0"
+          }
+        },
+        {
+          "flag": "--api-key",
+          "evidence": [
+            "completions"
+          ],
+          "firstSeen": "0.147.0",
+          "lastSeen": "0.147.0",
+          "probe": {
+            "verdict": "absent",
+            "at": "0.147.0"
+          }
+        },
+        {
+          "flag": "--approve-for-me",
+          "evidence": [
+            "completions",
+            "help",
+            "probe"
+          ],
+          "arity": "none",
+          "firstSeen": "0.147.0",
+          "lastSeen": "0.147.0",
+          "probe": {
+            "verdict": "present",
+            "at": "0.147.0"
+          }
+        },
+        {
+          "flag": "--ascii",
+          "evidence": [
+            "completions"
+          ],
+          "firstSeen": "0.147.0",
+          "lastSeen": "0.147.0",
+          "probe": {
+            "verdict": "absent",
+            "at": "0.147.0"
+          }
+        },
+        {
+          "flag": "--ask-for-approval",
+          "evidence": [
+            "completions"
+          ],
+          "firstSeen": "0.147.0",
+          "lastSeen": "0.147.0",
+          "probe": {
+            "verdict": "absent",
+            "at": "0.147.0"
+          }
+        },
+        {
+          "flag": "--attempt",
+          "evidence": [
+            "completions"
+          ],
+          "firstSeen": "0.147.0",
+          "lastSeen": "0.147.0",
+          "probe": {
+            "verdict": "absent",
+            "at": "0.147.0"
+          }
+        },
+        {
+          "flag": "--attempts",
+          "evidence": [
+            "completions"
+          ],
+          "firstSeen": "0.147.0",
+          "lastSeen": "0.147.0",
+          "probe": {
+            "verdict": "absent",
+            "at": "0.147.0"
+          }
+        },
+        {
+          "flag": "--available",
+          "evidence": [
+            "completions"
+          ],
+          "firstSeen": "0.147.0",
+          "lastSeen": "0.147.0",
+          "probe": {
+            "verdict": "absent",
+            "at": "0.147.0"
+          }
+        },
+        {
+          "flag": "--base",
+          "evidence": [
+            "completions"
+          ],
+          "firstSeen": "0.147.0",
+          "lastSeen": "0.147.0",
+          "probe": {
+            "verdict": "absent",
+            "at": "0.147.0"
+          }
+        },
+        {
+          "flag": "--bearer-token-env-var",
+          "evidence": [
+            "completions"
+          ],
+          "firstSeen": "0.147.0",
+          "lastSeen": "0.147.0",
+          "probe": {
+            "verdict": "absent",
+            "at": "0.147.0"
+          }
+        },
+        {
+          "flag": "--branch",
+          "evidence": [
+            "completions"
+          ],
+          "firstSeen": "0.147.0",
+          "lastSeen": "0.147.0",
+          "probe": {
+            "verdict": "absent",
+            "at": "0.147.0"
+          }
+        },
+        {
+          "flag": "--bundled",
+          "evidence": [
+            "completions"
+          ],
+          "firstSeen": "0.147.0",
+          "lastSeen": "0.147.0",
+          "probe": {
+            "verdict": "absent",
+            "at": "0.147.0"
+          }
+        },
+        {
+          "flag": "--cd",
+          "evidence": [
+            "completions",
+            "help",
+            "probe"
+          ],
+          "arity": "one",
+          "firstSeen": "0.147.0",
+          "lastSeen": "0.147.0",
+          "probe": {
+            "verdict": "present",
+            "at": "0.147.0"
+          }
+        },
+        {
+          "flag": "--code-mode-host",
+          "evidence": [
+            "completions"
+          ],
+          "firstSeen": "0.147.0",
+          "lastSeen": "0.147.0",
+          "probe": {
+            "verdict": "absent",
+            "at": "0.147.0"
+          }
+        },
+        {
+          "flag": "--color",
+          "evidence": [
+            "completions",
+            "help",
+            "probe"
+          ],
+          "arity": "one",
+          "values": [
+            "always",
+            "never",
+            "auto"
+          ],
+          "firstSeen": "0.147.0",
+          "lastSeen": "0.147.0",
+          "probe": {
+            "verdict": "present",
+            "at": "0.147.0"
+          }
+        },
+        {
+          "flag": "--commit",
+          "evidence": [
+            "completions"
+          ],
+          "firstSeen": "0.147.0",
+          "lastSeen": "0.147.0",
+          "probe": {
+            "verdict": "absent",
+            "at": "0.147.0"
+          }
+        },
+        {
+          "flag": "--concurrent-requests",
+          "evidence": [
+            "completions"
+          ],
+          "firstSeen": "0.147.0",
+          "lastSeen": "0.147.0",
+          "probe": {
+            "verdict": "absent",
+            "at": "0.147.0"
+          }
+        },
+        {
+          "flag": "--config",
+          "evidence": [
+            "completions",
+            "help",
+            "probe"
+          ],
+          "arity": "one",
+          "firstSeen": "0.147.0",
+          "lastSeen": "0.147.0",
+          "probe": {
+            "verdict": "present",
+            "at": "0.147.0"
+          }
+        },
+        {
+          "flag": "--cursor",
+          "evidence": [
+            "completions"
+          ],
+          "firstSeen": "0.147.0",
+          "lastSeen": "0.147.0",
+          "probe": {
+            "verdict": "absent",
+            "at": "0.147.0"
+          }
+        },
+        {
+          "flag": "--dangerously-bypass-approvals-and-sandbox",
+          "evidence": [
+            "completions",
+            "help",
+            "probe"
+          ],
+          "arity": "none",
+          "firstSeen": "0.147.0",
+          "lastSeen": "0.147.0",
+          "probe": {
+            "verdict": "present",
+            "at": "0.147.0"
+          }
+        },
+        {
+          "flag": "--dangerously-bypass-hook-trust",
+          "evidence": [
+            "completions",
+            "help",
+            "probe"
+          ],
+          "arity": "none",
+          "firstSeen": "0.147.0",
+          "lastSeen": "0.147.0",
+          "probe": {
+            "verdict": "present",
+            "at": "0.147.0"
+          }
+        },
+        {
+          "flag": "--device-auth",
+          "evidence": [
+            "completions"
+          ],
+          "firstSeen": "0.147.0",
+          "lastSeen": "0.147.0"
+        },
+        {
+          "flag": "--disable",
+          "evidence": [
+            "completions",
+            "help",
+            "probe"
+          ],
+          "arity": "one",
+          "firstSeen": "0.147.0",
+          "lastSeen": "0.147.0",
+          "probe": {
+            "verdict": "present",
+            "at": "0.147.0"
+          }
+        },
+        {
+          "flag": "--dump-dir",
+          "evidence": [
+            "completions"
+          ],
+          "firstSeen": "0.147.0",
+          "lastSeen": "0.147.0",
+          "probe": {
+            "verdict": "absent",
+            "at": "0.147.0"
+          }
+        },
+        {
+          "flag": "--enable",
+          "evidence": [
+            "completions",
+            "help",
+            "probe"
+          ],
+          "arity": "one",
+          "firstSeen": "0.147.0",
+          "lastSeen": "0.147.0",
+          "probe": {
+            "verdict": "present",
+            "at": "0.147.0"
+          }
+        },
+        {
+          "flag": "--env",
+          "evidence": [
+            "completions"
+          ],
+          "firstSeen": "0.147.0",
+          "lastSeen": "0.147.0",
+          "probe": {
+            "verdict": "absent",
+            "at": "0.147.0"
+          }
+        },
+        {
+          "flag": "--environment-id",
+          "evidence": [
+            "completions"
+          ],
+          "firstSeen": "0.147.0",
+          "lastSeen": "0.147.0",
+          "probe": {
+            "verdict": "absent",
+            "at": "0.147.0"
+          }
+        },
+        {
+          "flag": "--ephemeral",
+          "evidence": [
+            "completions",
+            "help",
+            "probe"
+          ],
+          "arity": "none",
+          "firstSeen": "0.147.0",
+          "lastSeen": "0.147.0",
+          "probe": {
+            "verdict": "present",
+            "at": "0.147.0"
+          }
+        },
+        {
+          "flag": "--exit-on-stdin-close",
+          "evidence": [
+            "completions"
+          ],
+          "firstSeen": "0.147.0",
+          "lastSeen": "0.147.0",
+          "probe": {
+            "verdict": "absent",
+            "at": "0.147.0"
+          }
+        },
+        {
+          "flag": "--experimental",
+          "evidence": [
+            "completions"
+          ],
+          "firstSeen": "0.147.0",
+          "lastSeen": "0.147.0",
+          "probe": {
+            "verdict": "absent",
+            "at": "0.147.0"
+          }
+        },
+        {
+          "flag": "--experimental_client-id",
+          "evidence": [
+            "completions"
+          ],
+          "firstSeen": "0.147.0",
+          "lastSeen": "0.147.0",
+          "probe": {
+            "verdict": "absent",
+            "at": "0.147.0"
+          }
+        },
+        {
+          "flag": "--experimental_issuer",
+          "evidence": [
+            "completions"
+          ],
+          "firstSeen": "0.147.0",
+          "lastSeen": "0.147.0",
+          "probe": {
+            "verdict": "absent",
+            "at": "0.147.0"
+          }
+        },
+        {
+          "flag": "--force",
+          "evidence": [
+            "completions"
+          ],
+          "firstSeen": "0.147.0",
+          "lastSeen": "0.147.0",
+          "probe": {
+            "verdict": "absent",
+            "at": "0.147.0"
+          }
+        },
+        {
+          "flag": "--help",
+          "evidence": [
+            "completions",
+            "help",
+            "probe"
+          ],
+          "arity": "none",
+          "firstSeen": "0.147.0",
+          "lastSeen": "0.147.0",
+          "probe": {
+            "verdict": "present",
+            "at": "0.147.0"
+          }
+        },
+        {
+          "flag": "--http-shutdown",
+          "evidence": [
+            "completions"
+          ],
+          "firstSeen": "0.147.0",
+          "lastSeen": "0.147.0",
+          "probe": {
+            "verdict": "absent",
+            "at": "0.147.0"
+          }
+        },
+        {
+          "flag": "--ignore-rules",
+          "evidence": [
+            "completions",
+            "help",
+            "probe"
+          ],
+          "arity": "none",
+          "firstSeen": "0.147.0",
+          "lastSeen": "0.147.0",
+          "probe": {
+            "verdict": "present",
+            "at": "0.147.0"
+          }
+        },
+        {
+          "flag": "--ignore-user-config",
+          "evidence": [
+            "completions",
+            "help",
+            "probe"
+          ],
+          "arity": "none",
+          "firstSeen": "0.147.0",
+          "lastSeen": "0.147.0",
+          "probe": {
+            "verdict": "present",
+            "at": "0.147.0"
+          }
+        },
+        {
+          "flag": "--image",
+          "evidence": [
+            "completions",
+            "help",
+            "probe"
+          ],
+          "arity": "one",
+          "firstSeen": "0.147.0",
+          "lastSeen": "0.147.0",
+          "probe": {
+            "verdict": "present",
+            "at": "0.147.0"
+          }
+        },
+        {
+          "flag": "--include-managed-config",
+          "evidence": [
+            "completions"
+          ],
+          "firstSeen": "0.147.0",
+          "lastSeen": "0.147.0",
+          "probe": {
+            "verdict": "absent",
+            "at": "0.147.0"
+          }
+        },
+        {
+          "flag": "--include-non-interactive",
+          "evidence": [
+            "completions"
+          ],
+          "firstSeen": "0.147.0",
+          "lastSeen": "0.147.0",
+          "probe": {
+            "verdict": "absent",
+            "at": "0.147.0"
+          }
+        },
+        {
+          "flag": "--json",
+          "evidence": [
+            "completions",
+            "help",
+            "probe"
+          ],
+          "arity": "none",
+          "firstSeen": "0.147.0",
+          "lastSeen": "0.147.0",
+          "probe": {
+            "verdict": "present",
+            "at": "0.147.0"
+          }
+        },
+        {
+          "flag": "--last",
+          "evidence": [
+            "completions",
+            "help"
+          ],
+          "firstSeen": "0.147.0",
+          "lastSeen": "0.147.0",
+          "probe": {
+            "verdict": "absent",
+            "at": "0.147.0"
+          }
+        },
+        {
+          "flag": "--limit",
+          "evidence": [
+            "completions"
+          ],
+          "firstSeen": "0.147.0",
+          "lastSeen": "0.147.0",
+          "probe": {
+            "verdict": "absent",
+            "at": "0.147.0"
+          }
+        },
+        {
+          "flag": "--listen",
+          "evidence": [
+            "completions"
+          ],
+          "firstSeen": "0.147.0",
+          "lastSeen": "0.147.0",
+          "probe": {
+            "verdict": "absent",
+            "at": "0.147.0"
+          }
+        },
+        {
+          "flag": "--local-provider",
+          "evidence": [
+            "completions",
+            "help",
+            "probe"
+          ],
+          "arity": "one",
+          "firstSeen": "0.147.0",
+          "lastSeen": "0.147.0",
+          "probe": {
+            "verdict": "present",
+            "at": "0.147.0"
+          }
+        },
+        {
+          "flag": "--marketplace",
+          "evidence": [
+            "completions"
+          ],
+          "firstSeen": "0.147.0",
+          "lastSeen": "0.147.0",
+          "probe": {
+            "verdict": "absent",
+            "at": "0.147.0"
+          }
+        },
+        {
+          "flag": "--model",
+          "evidence": [
+            "completions",
+            "help",
+            "probe"
+          ],
+          "arity": "one",
+          "firstSeen": "0.147.0",
+          "lastSeen": "0.147.0",
+          "probe": {
+            "verdict": "present",
+            "at": "0.147.0"
+          }
+        },
+        {
+          "flag": "--name",
+          "evidence": [
+            "completions"
+          ],
+          "firstSeen": "0.147.0",
+          "lastSeen": "0.147.0",
+          "probe": {
+            "verdict": "absent",
+            "at": "0.147.0"
+          }
+        },
+        {
+          "flag": "--no-alt-screen",
+          "evidence": [
+            "completions"
+          ],
+          "firstSeen": "0.147.0",
+          "lastSeen": "0.147.0",
+          "probe": {
+            "verdict": "absent",
+            "at": "0.147.0"
+          }
+        },
+        {
+          "flag": "--no-color",
+          "evidence": [
+            "completions"
+          ],
+          "firstSeen": "0.147.0",
+          "lastSeen": "0.147.0",
+          "probe": {
+            "verdict": "absent",
+            "at": "0.147.0"
+          }
+        },
+        {
+          "flag": "--oauth-client-id",
+          "evidence": [
+            "completions"
+          ],
+          "firstSeen": "0.147.0",
+          "lastSeen": "0.147.0"
+        },
+        {
+          "flag": "--oauth-resource",
+          "evidence": [
+            "completions"
+          ],
+          "firstSeen": "0.147.0",
+          "lastSeen": "0.147.0"
+        },
+        {
+          "flag": "--oss",
+          "evidence": [
+            "completions",
+            "help",
+            "probe"
+          ],
+          "arity": "none",
+          "firstSeen": "0.147.0",
+          "lastSeen": "0.147.0",
+          "probe": {
+            "verdict": "present",
+            "at": "0.147.0"
+          }
+        },
+        {
+          "flag": "--out",
+          "evidence": [
+            "completions"
+          ],
+          "firstSeen": "0.147.0",
+          "lastSeen": "0.147.0",
+          "probe": {
+            "verdict": "absent",
+            "at": "0.147.0"
+          }
+        },
+        {
+          "flag": "--output",
+          "evidence": [
+            "completions"
+          ],
+          "firstSeen": "0.147.0",
+          "lastSeen": "0.147.0",
+          "probe": {
+            "verdict": "absent",
+            "at": "0.147.0"
+          }
+        },
+        {
+          "flag": "--output-last-message",
+          "evidence": [
+            "completions",
+            "help",
+            "probe"
+          ],
+          "arity": "one",
+          "firstSeen": "0.147.0",
+          "lastSeen": "0.147.0",
+          "probe": {
+            "verdict": "present",
+            "at": "0.147.0"
+          }
+        },
+        {
+          "flag": "--output-schema",
+          "evidence": [
+            "completions",
+            "help",
+            "probe"
+          ],
+          "arity": "one",
+          "firstSeen": "0.147.0",
+          "lastSeen": "0.147.0",
+          "probe": {
+            "verdict": "present",
+            "at": "0.147.0"
+          }
+        },
+        {
+          "flag": "--permission-profile",
+          "evidence": [
+            "completions"
+          ],
+          "firstSeen": "0.147.0",
+          "lastSeen": "0.147.0",
+          "probe": {
+            "verdict": "absent",
+            "at": "0.147.0"
+          }
+        },
+        {
+          "flag": "--port",
+          "evidence": [
+            "completions"
+          ],
+          "firstSeen": "0.147.0",
+          "lastSeen": "0.147.0",
+          "probe": {
+            "verdict": "absent",
+            "at": "0.147.0"
+          }
+        },
+        {
+          "flag": "--prettier",
+          "evidence": [
+            "completions"
+          ],
+          "firstSeen": "0.147.0",
+          "lastSeen": "0.147.0",
+          "probe": {
+            "verdict": "absent",
+            "at": "0.147.0"
+          }
+        },
+        {
+          "flag": "--pretty",
+          "evidence": [
+            "completions"
+          ],
+          "firstSeen": "0.147.0",
+          "lastSeen": "0.147.0",
+          "probe": {
+            "verdict": "absent",
+            "at": "0.147.0"
+          }
+        },
+        {
+          "flag": "--profile",
+          "evidence": [
+            "completions",
+            "help",
+            "probe"
+          ],
+          "arity": "one",
+          "firstSeen": "0.147.0",
+          "lastSeen": "0.147.0",
+          "probe": {
+            "verdict": "present",
+            "at": "0.147.0"
+          }
+        },
+        {
+          "flag": "--psp",
+          "evidence": [
+            "completions",
+            "probe"
+          ],
+          "arity": "none",
+          "firstSeen": "0.147.0",
+          "lastSeen": "0.147.0",
+          "probe": {
+            "verdict": "present",
+            "at": "0.147.0"
+          }
+        },
+        {
+          "flag": "--ref",
+          "evidence": [
+            "completions"
+          ],
+          "firstSeen": "0.147.0",
+          "lastSeen": "0.147.0",
+          "probe": {
+            "verdict": "absent",
+            "at": "0.147.0"
+          }
+        },
+        {
+          "flag": "--remote",
+          "evidence": [
+            "completions"
+          ],
+          "firstSeen": "0.147.0",
+          "lastSeen": "0.147.0",
+          "probe": {
+            "verdict": "absent",
+            "at": "0.147.0"
+          }
+        },
+        {
+          "flag": "--remote-auth-token-env",
+          "evidence": [
+            "completions"
+          ],
+          "firstSeen": "0.147.0",
+          "lastSeen": "0.147.0"
+        },
+        {
+          "flag": "--remote-control",
+          "evidence": [
+            "completions"
+          ],
+          "firstSeen": "0.147.0",
+          "lastSeen": "0.147.0",
+          "probe": {
+            "verdict": "absent",
+            "at": "0.147.0"
+          }
+        },
+        {
+          "flag": "--resolve-host-executables",
+          "evidence": [
+            "completions"
+          ],
+          "firstSeen": "0.147.0",
+          "lastSeen": "0.147.0",
+          "probe": {
+            "verdict": "absent",
+            "at": "0.147.0"
+          }
+        },
+        {
+          "flag": "--rules",
+          "evidence": [
+            "completions"
+          ],
+          "firstSeen": "0.147.0",
+          "lastSeen": "0.147.0",
+          "probe": {
+            "verdict": "absent",
+            "at": "0.147.0"
+          }
+        },
+        {
+          "flag": "--sandbox",
+          "evidence": [
+            "completions",
+            "help",
+            "probe"
+          ],
+          "arity": "one",
+          "values": [
+            "read-only",
+            "workspace-write",
+            "danger-full-access"
+          ],
+          "firstSeen": "0.147.0",
+          "lastSeen": "0.147.0",
+          "probe": {
+            "verdict": "present",
+            "at": "0.147.0"
+          }
+        },
+        {
+          "flag": "--sandbox-state-disable-network",
+          "evidence": [
+            "completions"
+          ],
+          "firstSeen": "0.147.0",
+          "lastSeen": "0.147.0",
+          "probe": {
+            "verdict": "absent",
+            "at": "0.147.0"
+          }
+        },
+        {
+          "flag": "--sandbox-state-json",
+          "evidence": [
+            "completions"
+          ],
+          "firstSeen": "0.147.0",
+          "lastSeen": "0.147.0",
+          "probe": {
+            "verdict": "absent",
+            "at": "0.147.0"
+          }
+        },
+        {
+          "flag": "--sandbox-state-readable-root",
+          "evidence": [
+            "completions"
+          ],
+          "firstSeen": "0.147.0",
+          "lastSeen": "0.147.0",
+          "probe": {
+            "verdict": "absent",
+            "at": "0.147.0"
+          }
+        },
+        {
+          "flag": "--scopes",
+          "evidence": [
+            "completions"
+          ],
+          "firstSeen": "0.147.0",
+          "lastSeen": "0.147.0",
+          "probe": {
+            "verdict": "absent",
+            "at": "0.147.0"
+          }
+        },
+        {
+          "flag": "--search",
+          "evidence": [
+            "completions"
+          ],
+          "firstSeen": "0.147.0",
+          "lastSeen": "0.147.0",
+          "probe": {
+            "verdict": "absent",
+            "at": "0.147.0"
+          }
+        },
+        {
+          "flag": "--server-info",
+          "evidence": [
+            "completions"
+          ],
+          "firstSeen": "0.147.0",
+          "lastSeen": "0.147.0",
+          "probe": {
+            "verdict": "absent",
+            "at": "0.147.0"
+          }
+        },
+        {
+          "flag": "--skip-git-repo-check",
+          "evidence": [
+            "completions",
+            "help",
+            "probe"
+          ],
+          "arity": "none",
+          "firstSeen": "0.147.0",
+          "lastSeen": "0.147.0",
+          "probe": {
+            "verdict": "present",
+            "at": "0.147.0"
+          }
+        },
+        {
+          "flag": "--sock",
+          "evidence": [
+            "completions"
+          ],
+          "firstSeen": "0.147.0",
+          "lastSeen": "0.147.0",
+          "probe": {
+            "verdict": "absent",
+            "at": "0.147.0"
+          }
+        },
+        {
+          "flag": "--sparse",
+          "evidence": [
+            "completions"
+          ],
+          "firstSeen": "0.147.0",
+          "lastSeen": "0.147.0",
+          "probe": {
+            "verdict": "absent",
+            "at": "0.147.0"
+          }
+        },
+        {
+          "flag": "--stdio",
+          "evidence": [
+            "completions"
+          ],
+          "firstSeen": "0.147.0",
+          "lastSeen": "0.147.0",
+          "probe": {
+            "verdict": "absent",
+            "at": "0.147.0"
+          }
+        },
+        {
+          "flag": "--strict-config",
+          "evidence": [
+            "completions",
+            "help",
+            "probe"
+          ],
+          "arity": "none",
+          "firstSeen": "0.147.0",
+          "lastSeen": "0.147.0",
+          "probe": {
+            "verdict": "present",
+            "at": "0.147.0"
+          }
+        },
+        {
+          "flag": "--summary",
+          "evidence": [
+            "completions"
+          ],
+          "firstSeen": "0.147.0",
+          "lastSeen": "0.147.0",
+          "probe": {
+            "verdict": "absent",
+            "at": "0.147.0"
+          }
+        },
+        {
+          "flag": "--title",
+          "evidence": [
+            "completions"
+          ],
+          "firstSeen": "0.147.0",
+          "lastSeen": "0.147.0",
+          "probe": {
+            "verdict": "absent",
+            "at": "0.147.0"
+          }
+        },
+        {
+          "flag": "--uncommitted",
+          "evidence": [
+            "completions"
+          ],
+          "firstSeen": "0.147.0",
+          "lastSeen": "0.147.0",
+          "probe": {
+            "verdict": "absent",
+            "at": "0.147.0"
+          }
+        },
+        {
+          "flag": "--upstream-url",
+          "evidence": [
+            "completions"
+          ],
+          "firstSeen": "0.147.0",
+          "lastSeen": "0.147.0",
+          "probe": {
+            "verdict": "absent",
+            "at": "0.147.0"
+          }
+        },
+        {
+          "flag": "--url",
+          "evidence": [
+            "completions"
+          ],
+          "firstSeen": "0.147.0",
+          "lastSeen": "0.147.0",
+          "probe": {
+            "verdict": "absent",
+            "at": "0.147.0"
+          }
+        },
+        {
+          "flag": "--use-agent-identity-auth",
+          "evidence": [
+            "completions"
+          ],
+          "firstSeen": "0.147.0",
+          "lastSeen": "0.147.0"
+        },
+        {
+          "flag": "--version",
+          "evidence": [
+            "completions",
+            "help",
+            "probe"
+          ],
+          "arity": "none",
+          "firstSeen": "0.147.0",
+          "lastSeen": "0.147.0",
+          "probe": {
+            "verdict": "present",
+            "at": "0.147.0"
+          }
+        },
+        {
+          "flag": "--with-access-token",
+          "evidence": [
+            "completions"
+          ],
+          "firstSeen": "0.147.0",
+          "lastSeen": "0.147.0",
+          "probe": {
+            "verdict": "absent",
+            "at": "0.147.0"
+          }
+        },
+        {
+          "flag": "--with-api-key",
+          "evidence": [
+            "completions"
+          ],
+          "firstSeen": "0.147.0",
+          "lastSeen": "0.147.0",
+          "probe": {
+            "verdict": "absent",
+            "at": "0.147.0"
+          }
+        },
+        {
+          "flag": "--ws-audience",
+          "evidence": [
+            "completions"
+          ],
+          "firstSeen": "0.147.0",
+          "lastSeen": "0.147.0",
+          "probe": {
+            "verdict": "absent",
+            "at": "0.147.0"
+          }
+        },
+        {
+          "flag": "--ws-auth",
+          "evidence": [
+            "completions"
+          ],
+          "firstSeen": "0.147.0",
+          "lastSeen": "0.147.0"
+        },
+        {
+          "flag": "--ws-issuer",
+          "evidence": [
+            "completions"
+          ],
+          "firstSeen": "0.147.0",
+          "lastSeen": "0.147.0",
+          "probe": {
+            "verdict": "absent",
+            "at": "0.147.0"
+          }
+        },
+        {
+          "flag": "--ws-max-clock-skew-seconds",
+          "evidence": [
+            "completions"
+          ],
+          "firstSeen": "0.147.0",
+          "lastSeen": "0.147.0",
+          "probe": {
+            "verdict": "absent",
+            "at": "0.147.0"
+          }
+        },
+        {
+          "flag": "--ws-shared-secret-file",
+          "evidence": [
+            "completions"
+          ],
+          "firstSeen": "0.147.0",
+          "lastSeen": "0.147.0",
+          "probe": {
+            "verdict": "absent",
+            "at": "0.147.0"
+          }
+        },
+        {
+          "flag": "--ws-token-file",
+          "evidence": [
+            "completions"
+          ],
+          "firstSeen": "0.147.0",
+          "lastSeen": "0.147.0",
+          "probe": {
+            "verdict": "absent",
+            "at": "0.147.0"
+          }
+        },
+        {
+          "flag": "--ws-token-sha256",
+          "evidence": [
+            "completions"
+          ],
+          "firstSeen": "0.147.0",
+          "lastSeen": "0.147.0",
+          "probe": {
+            "verdict": "absent",
+            "at": "0.147.0"
+          }
+        }
+      ],
+      "unreadSources": []
+    },
+    {
+      "cli": "cursor",
+      "executable": "cursor-agent",
+      "version": "2026.08.11-e8db854",
+      "commandScope": [],
+      "flags": [
+        {
+          "flag": "--add-dir",
+          "evidence": [
+            "help",
+            "probe"
+          ],
+          "arity": "one",
+          "firstSeen": "2026.08.11-e8db854",
+          "lastSeen": "2026.08.11-e8db854",
+          "probe": {
+            "verdict": "present",
+            "at": "2026.08.11-e8db854"
+          }
+        },
+        {
+          "flag": "--api-key",
+          "evidence": [
+            "help",
+            "probe"
+          ],
+          "arity": "one",
+          "firstSeen": "2026.08.11-e8db854",
+          "lastSeen": "2026.08.11-e8db854",
+          "probe": {
+            "verdict": "present",
+            "at": "2026.08.11-e8db854"
+          }
+        },
+        {
+          "flag": "--approve-mcps",
+          "evidence": [
+            "help"
+          ],
+          "firstSeen": "2026.08.11-e8db854",
+          "lastSeen": "2026.08.11-e8db854",
+          "probe": {
+            "verdict": "unparsed",
+            "at": "2026.08.11-e8db854"
+          }
+        },
+        {
+          "flag": "--auto-review",
+          "evidence": [
+            "help"
+          ],
+          "firstSeen": "2026.08.11-e8db854",
+          "lastSeen": "2026.08.11-e8db854",
+          "probe": {
+            "verdict": "unparsed",
+            "at": "2026.08.11-e8db854"
+          }
+        },
+        {
+          "flag": "--continue",
+          "evidence": [
+            "help"
+          ],
+          "firstSeen": "2026.08.11-e8db854",
+          "lastSeen": "2026.08.11-e8db854",
+          "probe": {
+            "verdict": "unparsed",
+            "at": "2026.08.11-e8db854"
+          }
+        },
+        {
+          "flag": "--endpoint",
+          "evidence": [
+            "help",
+            "probe"
+          ],
+          "arity": "one",
+          "firstSeen": "2026.08.11-e8db854",
+          "lastSeen": "2026.08.11-e8db854",
+          "probe": {
+            "verdict": "present",
+            "at": "2026.08.11-e8db854"
+          }
+        },
+        {
+          "flag": "--force",
+          "evidence": [
+            "help"
+          ],
+          "firstSeen": "2026.08.11-e8db854",
+          "lastSeen": "2026.08.11-e8db854",
+          "probe": {
+            "verdict": "unparsed",
+            "at": "2026.08.11-e8db854"
+          }
+        },
+        {
+          "flag": "--header",
+          "evidence": [
+            "help",
+            "probe"
+          ],
+          "arity": "one",
+          "firstSeen": "2026.08.11-e8db854",
+          "lastSeen": "2026.08.11-e8db854",
+          "probe": {
+            "verdict": "present",
+            "at": "2026.08.11-e8db854"
+          }
+        },
+        {
+          "flag": "--help",
+          "evidence": [
+            "help"
+          ],
+          "firstSeen": "2026.08.11-e8db854",
+          "lastSeen": "2026.08.11-e8db854",
+          "probe": {
+            "verdict": "unparsed",
+            "at": "2026.08.11-e8db854"
+          }
+        },
+        {
+          "flag": "--list-models",
+          "evidence": [
+            "help"
+          ],
+          "firstSeen": "2026.08.11-e8db854",
+          "lastSeen": "2026.08.11-e8db854",
+          "probe": {
+            "verdict": "unparsed",
+            "at": "2026.08.11-e8db854"
+          }
+        },
+        {
+          "flag": "--mode",
+          "evidence": [
+            "help"
+          ],
+          "firstSeen": "2026.08.11-e8db854",
+          "lastSeen": "2026.08.11-e8db854",
+          "probe": {
+            "verdict": "unparsed",
+            "at": "2026.08.11-e8db854"
+          }
+        },
+        {
+          "flag": "--model",
+          "evidence": [
+            "help",
+            "probe"
+          ],
+          "arity": "one",
+          "firstSeen": "2026.08.11-e8db854",
+          "lastSeen": "2026.08.11-e8db854",
+          "probe": {
+            "verdict": "present",
+            "at": "2026.08.11-e8db854"
+          }
+        },
+        {
+          "flag": "--output-format",
+          "evidence": [
+            "help",
+            "probe"
+          ],
+          "arity": "one",
+          "firstSeen": "2026.08.11-e8db854",
+          "lastSeen": "2026.08.11-e8db854",
+          "probe": {
+            "verdict": "present",
+            "at": "2026.08.11-e8db854"
+          }
+        },
+        {
+          "flag": "--plan",
+          "evidence": [
+            "help"
+          ],
+          "firstSeen": "2026.08.11-e8db854",
+          "lastSeen": "2026.08.11-e8db854",
+          "probe": {
+            "verdict": "unparsed",
+            "at": "2026.08.11-e8db854"
+          }
+        },
+        {
+          "flag": "--plugin-dir",
+          "evidence": [
+            "help",
+            "probe"
+          ],
+          "arity": "one",
+          "firstSeen": "2026.08.11-e8db854",
+          "lastSeen": "2026.08.11-e8db854",
+          "probe": {
+            "verdict": "present",
+            "at": "2026.08.11-e8db854"
+          }
+        },
+        {
+          "flag": "--print",
+          "evidence": [
+            "help"
+          ],
+          "firstSeen": "2026.08.11-e8db854",
+          "lastSeen": "2026.08.11-e8db854",
+          "probe": {
+            "verdict": "unparsed",
+            "at": "2026.08.11-e8db854"
+          }
+        },
+        {
+          "flag": "--resume",
+          "evidence": [
+            "help",
+            "probe"
+          ],
+          "arity": "one",
+          "firstSeen": "2026.08.11-e8db854",
+          "lastSeen": "2026.08.11-e8db854",
+          "probe": {
+            "verdict": "present",
+            "at": "2026.08.11-e8db854"
+          }
+        },
+        {
+          "flag": "--sandbox",
+          "evidence": [
+            "help"
+          ],
+          "firstSeen": "2026.08.11-e8db854",
+          "lastSeen": "2026.08.11-e8db854",
+          "probe": {
+            "verdict": "unparsed",
+            "at": "2026.08.11-e8db854"
+          }
+        },
+        {
+          "flag": "--skip-worktree-setup",
+          "evidence": [
+            "help"
+          ],
+          "firstSeen": "2026.08.11-e8db854",
+          "lastSeen": "2026.08.11-e8db854",
+          "probe": {
+            "verdict": "unparsed",
+            "at": "2026.08.11-e8db854"
+          }
+        },
+        {
+          "flag": "--stream-partial-output",
+          "evidence": [
+            "help"
+          ],
+          "firstSeen": "2026.08.11-e8db854",
+          "lastSeen": "2026.08.11-e8db854",
+          "probe": {
+            "verdict": "unparsed",
+            "at": "2026.08.11-e8db854"
+          }
+        },
+        {
+          "flag": "--trust",
+          "evidence": [
+            "help"
+          ],
+          "firstSeen": "2026.08.11-e8db854",
+          "lastSeen": "2026.08.11-e8db854",
+          "probe": {
+            "verdict": "unparsed",
+            "at": "2026.08.11-e8db854"
+          }
+        },
+        {
+          "flag": "--version",
+          "evidence": [
+            "help"
+          ],
+          "firstSeen": "2026.08.11-e8db854",
+          "lastSeen": "2026.08.11-e8db854",
+          "probe": {
+            "verdict": "unparsed",
+            "at": "2026.08.11-e8db854"
+          }
+        },
+        {
+          "flag": "--workspace",
+          "evidence": [
+            "help",
+            "probe"
+          ],
+          "arity": "one",
+          "firstSeen": "2026.08.11-e8db854",
+          "lastSeen": "2026.08.11-e8db854",
+          "probe": {
+            "verdict": "present",
+            "at": "2026.08.11-e8db854"
+          }
+        },
+        {
+          "flag": "--worktree",
+          "evidence": [
+            "help",
+            "probe"
+          ],
+          "arity": "one",
+          "firstSeen": "2026.08.11-e8db854",
+          "lastSeen": "2026.08.11-e8db854",
+          "probe": {
+            "verdict": "present",
+            "at": "2026.08.11-e8db854"
+          }
+        },
+        {
+          "flag": "--worktree-base",
+          "evidence": [
+            "help",
+            "probe"
+          ],
+          "arity": "one",
+          "firstSeen": "2026.08.11-e8db854",
+          "lastSeen": "2026.08.11-e8db854",
+          "probe": {
+            "verdict": "present",
+            "at": "2026.08.11-e8db854"
+          }
+        },
+        {
+          "flag": "--yolo",
+          "evidence": [
+            "help"
+          ],
+          "firstSeen": "2026.08.11-e8db854",
+          "lastSeen": "2026.08.11-e8db854",
+          "probe": {
+            "verdict": "unparsed",
+            "at": "2026.08.11-e8db854"
+          }
+        }
+      ],
+      "unreadSources": [
+        "completions"
+      ]
+    },
+    {
+      "cli": "devin",
+      "executable": "devin",
+      "version": "3000.4.25",
+      "commandScope": [],
+      "flags": [
+        {
+          "flag": "--config",
+          "evidence": [
+            "help",
+            "probe"
+          ],
+          "arity": "one",
+          "firstSeen": "3000.4.25",
+          "lastSeen": "3000.4.25",
+          "probe": {
+            "verdict": "present",
+            "at": "3000.4.25"
+          }
+        },
+        {
+          "flag": "--continue",
+          "evidence": [
+            "help",
+            "probe"
+          ],
+          "arity": "none",
+          "firstSeen": "3000.4.25",
+          "lastSeen": "3000.4.25",
+          "probe": {
+            "verdict": "present",
+            "at": "3000.4.25"
+          }
+        },
+        {
+          "flag": "--export",
+          "evidence": [
+            "help",
+            "probe"
+          ],
+          "arity": "one",
+          "firstSeen": "3000.4.25",
+          "lastSeen": "3000.4.25",
+          "probe": {
+            "verdict": "present",
+            "at": "3000.4.25"
+          }
+        },
+        {
+          "flag": "--help",
+          "evidence": [
+            "help",
+            "probe"
+          ],
+          "arity": "none",
+          "firstSeen": "3000.4.25",
+          "lastSeen": "3000.4.25",
+          "probe": {
+            "verdict": "present",
+            "at": "3000.4.25"
+          }
+        },
+        {
+          "flag": "--model",
+          "evidence": [
+            "help",
+            "probe"
+          ],
+          "arity": "one",
+          "firstSeen": "3000.4.25",
+          "lastSeen": "3000.4.25",
+          "probe": {
+            "verdict": "present",
+            "at": "3000.4.25"
+          }
+        },
+        {
+          "flag": "--permission-mode",
+          "evidence": [
+            "help",
+            "probe"
+          ],
+          "arity": "one",
+          "firstSeen": "3000.4.25",
+          "lastSeen": "3000.4.25",
+          "probe": {
+            "verdict": "present",
+            "at": "3000.4.25"
+          }
+        },
+        {
+          "flag": "--print",
+          "evidence": [
+            "help",
+            "probe"
+          ],
+          "arity": "one",
+          "firstSeen": "3000.4.25",
+          "lastSeen": "3000.4.25",
+          "probe": {
+            "verdict": "present",
+            "at": "3000.4.25"
+          }
+        },
+        {
+          "flag": "--prompt-file",
+          "evidence": [
+            "help",
+            "probe"
+          ],
+          "arity": "one",
+          "firstSeen": "3000.4.25",
+          "lastSeen": "3000.4.25",
+          "probe": {
+            "verdict": "present",
+            "at": "3000.4.25"
+          }
+        },
+        {
+          "flag": "--respect-workspace-trust",
+          "evidence": [
+            "help",
+            "probe"
+          ],
+          "arity": "one",
+          "values": [
+            "true",
+            "false"
+          ],
+          "firstSeen": "3000.4.25",
+          "lastSeen": "3000.4.25",
+          "probe": {
+            "verdict": "present",
+            "at": "3000.4.25"
+          }
+        },
+        {
+          "flag": "--resume",
+          "evidence": [
+            "help",
+            "probe"
+          ],
+          "arity": "one",
+          "firstSeen": "3000.4.25",
+          "lastSeen": "3000.4.25",
+          "probe": {
+            "verdict": "present",
+            "at": "3000.4.25"
+          }
+        },
+        {
+          "flag": "--sandbox",
+          "evidence": [
+            "help",
+            "probe"
+          ],
+          "arity": "none",
+          "firstSeen": "3000.4.25",
+          "lastSeen": "3000.4.25",
+          "probe": {
+            "verdict": "present",
+            "at": "3000.4.25"
+          }
+        },
+        {
+          "flag": "--version",
+          "evidence": [
+            "help",
+            "probe"
+          ],
+          "arity": "none",
+          "firstSeen": "3000.4.25",
+          "lastSeen": "3000.4.25",
+          "probe": {
+            "verdict": "present",
+            "at": "3000.4.25"
+          }
+        }
+      ],
+      "unreadSources": [
+        "completions"
+      ]
+    },
+    {
+      "cli": "gemini",
+      "executable": "agy",
+      "version": "1.1.14",
+      "commandScope": [],
+      "flags": [
+        {
+          "flag": "--add-dir",
+          "evidence": [
+            "help",
+            "probe"
+          ],
+          "arity": "one",
+          "firstSeen": "1.1.14",
+          "lastSeen": "1.1.14",
+          "probe": {
+            "verdict": "present",
+            "at": "1.1.14"
+          }
+        },
+        {
+          "flag": "--agent",
+          "evidence": [
+            "help",
+            "probe"
+          ],
+          "arity": "one",
+          "firstSeen": "1.1.14",
+          "lastSeen": "1.1.14",
+          "probe": {
+            "verdict": "present",
+            "at": "1.1.14"
+          }
+        },
+        {
+          "flag": "--continue",
+          "evidence": [
+            "help",
+            "probe"
+          ],
+          "arity": "none",
+          "firstSeen": "1.1.14",
+          "lastSeen": "1.1.14",
+          "probe": {
+            "verdict": "present",
+            "at": "1.1.14"
+          }
+        },
+        {
+          "flag": "--conversation",
+          "evidence": [
+            "help",
+            "probe"
+          ],
+          "arity": "one",
+          "firstSeen": "1.1.14",
+          "lastSeen": "1.1.14",
+          "probe": {
+            "verdict": "present",
+            "at": "1.1.14"
+          }
+        },
+        {
+          "flag": "--dangerously-skip-permissions",
+          "evidence": [
+            "help",
+            "probe"
+          ],
+          "arity": "none",
+          "firstSeen": "1.1.14",
+          "lastSeen": "1.1.14",
+          "probe": {
+            "verdict": "present",
+            "at": "1.1.14"
+          }
+        },
+        {
+          "flag": "--disable-slash-commands",
+          "evidence": [
+            "help",
+            "probe"
+          ],
+          "arity": "none",
+          "firstSeen": "1.1.14",
+          "lastSeen": "1.1.14",
+          "probe": {
+            "verdict": "present",
+            "at": "1.1.14"
+          }
+        },
+        {
+          "flag": "--effort",
+          "evidence": [
+            "help",
+            "probe"
+          ],
+          "arity": "one",
+          "firstSeen": "1.1.14",
+          "lastSeen": "1.1.14",
+          "probe": {
+            "verdict": "present",
+            "at": "1.1.14"
+          }
+        },
+        {
+          "flag": "--input-format",
+          "evidence": [
+            "help",
+            "probe"
+          ],
+          "arity": "one",
+          "firstSeen": "1.1.14",
+          "lastSeen": "1.1.14",
+          "probe": {
+            "verdict": "present",
+            "at": "1.1.14"
+          }
+        },
+        {
+          "flag": "--json-schema",
+          "evidence": [
+            "help",
+            "probe"
+          ],
+          "arity": "one",
+          "firstSeen": "1.1.14",
+          "lastSeen": "1.1.14",
+          "probe": {
+            "verdict": "present",
+            "at": "1.1.14"
+          }
+        },
+        {
+          "flag": "--log-file",
+          "evidence": [
+            "help",
+            "probe"
+          ],
+          "arity": "one",
+          "firstSeen": "1.1.14",
+          "lastSeen": "1.1.14",
+          "probe": {
+            "verdict": "present",
+            "at": "1.1.14"
+          }
+        },
+        {
+          "flag": "--mode",
+          "evidence": [
+            "help",
+            "probe"
+          ],
+          "arity": "one",
+          "firstSeen": "1.1.14",
+          "lastSeen": "1.1.14",
+          "probe": {
+            "verdict": "present",
+            "at": "1.1.14"
+          }
+        },
+        {
+          "flag": "--model",
+          "evidence": [
+            "help",
+            "probe"
+          ],
+          "arity": "one",
+          "firstSeen": "1.1.14",
+          "lastSeen": "1.1.14",
+          "probe": {
+            "verdict": "present",
+            "at": "1.1.14"
+          }
+        },
+        {
+          "flag": "--new-project",
+          "evidence": [
+            "help",
+            "probe"
+          ],
+          "arity": "none",
+          "firstSeen": "1.1.14",
+          "lastSeen": "1.1.14",
+          "probe": {
+            "verdict": "present",
+            "at": "1.1.14"
+          }
+        },
+        {
+          "flag": "--output-format",
+          "evidence": [
+            "help",
+            "probe"
+          ],
+          "arity": "one",
+          "firstSeen": "1.1.14",
+          "lastSeen": "1.1.14",
+          "probe": {
+            "verdict": "present",
+            "at": "1.1.14"
+          }
+        },
+        {
+          "flag": "--print",
+          "evidence": [
+            "help",
+            "probe"
+          ],
+          "arity": "one",
+          "firstSeen": "1.1.14",
+          "lastSeen": "1.1.14",
+          "probe": {
+            "verdict": "present",
+            "at": "1.1.14"
+          }
+        },
+        {
+          "flag": "--print-timeout",
+          "evidence": [
+            "help",
+            "probe"
+          ],
+          "arity": "one",
+          "firstSeen": "1.1.14",
+          "lastSeen": "1.1.14",
+          "probe": {
+            "verdict": "present",
+            "at": "1.1.14"
+          }
+        },
+        {
+          "flag": "--project",
+          "evidence": [
+            "help",
+            "probe"
+          ],
+          "arity": "one",
+          "firstSeen": "1.1.14",
+          "lastSeen": "1.1.14",
+          "probe": {
+            "verdict": "present",
+            "at": "1.1.14"
+          }
+        },
+        {
+          "flag": "--prompt",
+          "evidence": [
+            "help",
+            "probe"
+          ],
+          "arity": "one",
+          "firstSeen": "1.1.14",
+          "lastSeen": "1.1.14",
+          "probe": {
+            "verdict": "present",
+            "at": "1.1.14"
+          }
+        },
+        {
+          "flag": "--prompt-interactive",
+          "evidence": [
+            "help",
+            "probe"
+          ],
+          "arity": "one",
+          "firstSeen": "1.1.14",
+          "lastSeen": "1.1.14",
+          "probe": {
+            "verdict": "present",
+            "at": "1.1.14"
+          }
+        },
+        {
+          "flag": "--sandbox",
+          "evidence": [
+            "help",
+            "probe"
+          ],
+          "arity": "none",
+          "firstSeen": "1.1.14",
+          "lastSeen": "1.1.14",
+          "probe": {
+            "verdict": "present",
+            "at": "1.1.14"
+          }
+        }
+      ],
+      "unreadSources": [
+        "completions"
+      ]
+    },
+    {
+      "cli": "grok",
+      "executable": "grok",
+      "version": "1.0.5",
+      "commandScope": [],
+      "flags": [
+        {
+          "flag": "----reauthenticate",
+          "evidence": [
+            "completions"
+          ],
+          "firstSeen": "1.0.5",
+          "lastSeen": "1.0.5"
+        },
+        {
+          "flag": "--agent",
+          "evidence": [
+            "completions",
+            "help",
+            "probe"
+          ],
+          "arity": "one",
+          "firstSeen": "1.0.5",
+          "lastSeen": "1.0.5",
+          "probe": {
+            "verdict": "present",
+            "at": "1.0.5"
+          }
+        },
+        {
+          "flag": "--agent-profile",
+          "evidence": [
+            "completions"
+          ],
+          "firstSeen": "1.0.5",
+          "lastSeen": "1.0.5",
+          "probe": {
+            "verdict": "absent",
+            "at": "1.0.5"
+          }
+        },
+        {
+          "flag": "--agents",
+          "evidence": [
+            "completions",
+            "help",
+            "probe"
+          ],
+          "arity": "one",
+          "firstSeen": "1.0.5",
+          "lastSeen": "1.0.5",
+          "probe": {
+            "verdict": "present",
+            "at": "1.0.5"
+          }
+        },
+        {
+          "flag": "--all",
+          "evidence": [
+            "completions"
+          ],
+          "firstSeen": "1.0.5",
+          "lastSeen": "1.0.5",
+          "probe": {
+            "verdict": "absent",
+            "at": "1.0.5"
+          }
+        },
+        {
+          "flag": "--allow",
+          "evidence": [
+            "completions",
+            "help",
+            "probe"
+          ],
+          "arity": "one",
+          "firstSeen": "1.0.5",
+          "lastSeen": "1.0.5",
+          "probe": {
+            "verdict": "present",
+            "at": "1.0.5"
+          }
+        },
+        {
+          "flag": "--allowedTools",
+          "evidence": [
+            "help",
+            "probe"
+          ],
+          "arity": "one",
+          "firstSeen": "1.0.5",
+          "lastSeen": "1.0.5",
+          "probe": {
+            "verdict": "present",
+            "at": "1.0.5"
+          }
+        },
+        {
+          "flag": "--alpha",
+          "evidence": [
+            "completions"
+          ],
+          "firstSeen": "1.0.5",
+          "lastSeen": "1.0.5",
+          "probe": {
+            "verdict": "absent",
+            "at": "1.0.5"
+          }
+        },
+        {
+          "flag": "--always-approve",
+          "evidence": [
+            "completions",
+            "help",
+            "probe"
+          ],
+          "arity": "none",
+          "firstSeen": "1.0.5",
+          "lastSeen": "1.0.5",
+          "probe": {
+            "verdict": "present",
+            "at": "1.0.5"
+          }
+        },
+        {
+          "flag": "--args",
+          "evidence": [
+            "completions"
+          ],
+          "firstSeen": "1.0.5",
+          "lastSeen": "1.0.5",
+          "probe": {
+            "verdict": "absent",
+            "at": "1.0.5"
+          }
+        },
+        {
+          "flag": "--auto",
+          "evidence": [
+            "completions"
+          ],
+          "firstSeen": "1.0.5",
+          "lastSeen": "1.0.5",
+          "probe": {
+            "verdict": "absent",
+            "at": "1.0.5"
+          }
+        },
+        {
+          "flag": "--available",
+          "evidence": [
+            "completions"
+          ],
+          "firstSeen": "1.0.5",
+          "lastSeen": "1.0.5",
+          "probe": {
+            "verdict": "absent",
+            "at": "1.0.5"
+          }
+        },
+        {
+          "flag": "--background-wait-timeout",
+          "evidence": [
+            "completions",
+            "probe"
+          ],
+          "arity": "one",
+          "firstSeen": "1.0.5",
+          "lastSeen": "1.0.5",
+          "probe": {
+            "verdict": "present",
+            "at": "1.0.5"
+          }
+        },
+        {
+          "flag": "--bind",
+          "evidence": [
+            "completions"
+          ],
+          "firstSeen": "1.0.5",
+          "lastSeen": "1.0.5",
+          "probe": {
+            "verdict": "absent",
+            "at": "1.0.5"
+          }
+        },
+        {
+          "flag": "--check",
+          "evidence": [
+            "completions"
+          ],
+          "firstSeen": "1.0.5",
+          "lastSeen": "1.0.5",
+          "probe": {
+            "verdict": "absent",
+            "at": "1.0.5"
+          }
+        },
+        {
+          "flag": "--cli-chat-proxy-base-url",
+          "evidence": [
+            "completions"
+          ],
+          "firstSeen": "1.0.5",
+          "lastSeen": "1.0.5",
+          "probe": {
+            "verdict": "absent",
+            "at": "1.0.5"
+          }
+        },
+        {
+          "flag": "--client-identifier",
+          "evidence": [
+            "completions",
+            "probe"
+          ],
+          "arity": "one",
+          "firstSeen": "1.0.5",
+          "lastSeen": "1.0.5",
+          "probe": {
+            "verdict": "present",
+            "at": "1.0.5"
+          }
+        },
+        {
+          "flag": "--clipboard",
+          "evidence": [
+            "completions"
+          ],
+          "firstSeen": "1.0.5",
+          "lastSeen": "1.0.5",
+          "probe": {
+            "verdict": "absent",
+            "at": "1.0.5"
+          }
+        },
+        {
+          "flag": "--command",
+          "evidence": [
+            "completions"
+          ],
+          "firstSeen": "1.0.5",
+          "lastSeen": "1.0.5",
+          "probe": {
+            "verdict": "absent",
+            "at": "1.0.5"
+          }
+        },
+        {
+          "flag": "--compaction-detail",
+          "evidence": [
+            "completions",
+            "probe"
+          ],
+          "arity": "one",
+          "firstSeen": "1.0.5",
+          "lastSeen": "1.0.5",
+          "probe": {
+            "verdict": "present",
+            "at": "1.0.5"
+          }
+        },
+        {
+          "flag": "--compaction-mode",
+          "evidence": [
+            "completions",
+            "probe"
+          ],
+          "arity": "one",
+          "firstSeen": "1.0.5",
+          "lastSeen": "1.0.5",
+          "probe": {
+            "verdict": "present",
+            "at": "1.0.5"
+          }
+        },
+        {
+          "flag": "--confirm",
+          "evidence": [
+            "completions"
+          ],
+          "firstSeen": "1.0.5",
+          "lastSeen": "1.0.5",
+          "probe": {
+            "verdict": "absent",
+            "at": "1.0.5"
+          }
+        },
+        {
+          "flag": "--continue",
+          "evidence": [
+            "completions",
+            "help",
+            "probe"
+          ],
+          "arity": "none",
+          "firstSeen": "1.0.5",
+          "lastSeen": "1.0.5",
+          "probe": {
+            "verdict": "present",
+            "at": "1.0.5"
+          }
+        },
+        {
+          "flag": "--cwd",
+          "evidence": [
+            "completions",
+            "help",
+            "probe"
+          ],
+          "arity": "one",
+          "firstSeen": "1.0.5",
+          "lastSeen": "1.0.5",
+          "probe": {
+            "verdict": "present",
+            "at": "1.0.5"
+          }
+        },
+        {
+          "flag": "--debug",
+          "evidence": [
+            "completions",
+            "help",
+            "probe"
+          ],
+          "arity": "none",
+          "firstSeen": "1.0.5",
+          "lastSeen": "1.0.5",
+          "probe": {
+            "verdict": "present",
+            "at": "1.0.5"
+          }
+        },
+        {
+          "flag": "--debug-file",
+          "evidence": [
+            "completions",
+            "help",
+            "probe"
+          ],
+          "arity": "one",
+          "firstSeen": "1.0.5",
+          "lastSeen": "1.0.5",
+          "probe": {
+            "verdict": "present",
+            "at": "1.0.5"
+          }
+        },
+        {
+          "flag": "--deny",
+          "evidence": [
+            "completions",
+            "help",
+            "probe"
+          ],
+          "arity": "one",
+          "firstSeen": "1.0.5",
+          "lastSeen": "1.0.5",
+          "probe": {
+            "verdict": "present",
+            "at": "1.0.5"
+          }
+        },
+        {
+          "flag": "--devbox",
+          "evidence": [
+            "completions"
+          ],
+          "firstSeen": "1.0.5",
+          "lastSeen": "1.0.5",
+          "probe": {
+            "verdict": "absent",
+            "at": "1.0.5"
+          }
+        },
+        {
+          "flag": "--device-auth",
+          "evidence": [
+            "completions"
+          ],
+          "firstSeen": "1.0.5",
+          "lastSeen": "1.0.5"
+        },
+        {
+          "flag": "--device-code",
+          "evidence": [
+            "completions"
+          ],
+          "firstSeen": "1.0.5",
+          "lastSeen": "1.0.5",
+          "probe": {
+            "verdict": "absent",
+            "at": "1.0.5"
+          }
+        },
+        {
+          "flag": "--disable-web-search",
+          "evidence": [
+            "completions",
+            "help",
+            "probe"
+          ],
+          "arity": "none",
+          "firstSeen": "1.0.5",
+          "lastSeen": "1.0.5",
+          "probe": {
+            "verdict": "present",
+            "at": "1.0.5"
+          }
+        },
+        {
+          "flag": "--disallowed-tools",
+          "evidence": [
+            "completions",
+            "help",
+            "probe"
+          ],
+          "arity": "one",
+          "firstSeen": "1.0.5",
+          "lastSeen": "1.0.5",
+          "probe": {
+            "verdict": "present",
+            "at": "1.0.5"
+          }
+        },
+        {
+          "flag": "--disallowedTools",
+          "evidence": [
+            "help",
+            "probe"
+          ],
+          "arity": "one",
+          "firstSeen": "1.0.5",
+          "lastSeen": "1.0.5",
+          "probe": {
+            "verdict": "present",
+            "at": "1.0.5"
+          }
+        },
+        {
+          "flag": "--dry-run",
+          "evidence": [
+            "completions"
+          ],
+          "firstSeen": "1.0.5",
+          "lastSeen": "1.0.5",
+          "probe": {
+            "verdict": "absent",
+            "at": "1.0.5"
+          }
+        },
+        {
+          "flag": "--effort",
+          "evidence": [
+            "completions",
+            "help",
+            "probe"
+          ],
+          "arity": "one",
+          "firstSeen": "1.0.5",
+          "lastSeen": "1.0.5",
+          "probe": {
+            "verdict": "present",
+            "at": "1.0.5"
+          }
+        },
+        {
+          "flag": "--enterprise",
+          "evidence": [
+            "completions"
+          ],
+          "firstSeen": "1.0.5",
+          "lastSeen": "1.0.5",
+          "probe": {
+            "verdict": "absent",
+            "at": "1.0.5"
+          }
+        },
+        {
+          "flag": "--env",
+          "evidence": [
+            "completions"
+          ],
+          "firstSeen": "1.0.5",
+          "lastSeen": "1.0.5",
+          "probe": {
+            "verdict": "absent",
+            "at": "1.0.5"
+          }
+        },
+        {
+          "flag": "--experimental-memory",
+          "evidence": [
+            "completions",
+            "probe"
+          ],
+          "arity": "none",
+          "firstSeen": "1.0.5",
+          "lastSeen": "1.0.5",
+          "probe": {
+            "verdict": "present",
+            "at": "1.0.5"
+          }
+        },
+        {
+          "flag": "--force",
+          "evidence": [
+            "completions"
+          ],
+          "firstSeen": "1.0.5",
+          "lastSeen": "1.0.5",
+          "probe": {
+            "verdict": "absent",
+            "at": "1.0.5"
+          }
+        },
+        {
+          "flag": "--force-login",
+          "evidence": [
+            "completions"
+          ],
+          "firstSeen": "1.0.5",
+          "lastSeen": "1.0.5"
+        },
+        {
+          "flag": "--force-reinstall",
+          "evidence": [
+            "completions"
+          ],
+          "firstSeen": "1.0.5",
+          "lastSeen": "1.0.5"
+        },
+        {
+          "flag": "--fork-session",
+          "evidence": [
+            "completions",
+            "help",
+            "probe"
+          ],
+          "arity": "none",
+          "firstSeen": "1.0.5",
+          "lastSeen": "1.0.5",
+          "probe": {
+            "verdict": "present",
+            "at": "1.0.5"
+          }
+        },
+        {
+          "flag": "--fs-read",
+          "evidence": [
+            "completions",
+            "probe"
+          ],
+          "arity": "none",
+          "firstSeen": "1.0.5",
+          "lastSeen": "1.0.5",
+          "probe": {
+            "verdict": "present",
+            "at": "1.0.5"
+          }
+        },
+        {
+          "flag": "--fs-write",
+          "evidence": [
+            "completions",
+            "probe"
+          ],
+          "arity": "none",
+          "firstSeen": "1.0.5",
+          "lastSeen": "1.0.5",
+          "probe": {
+            "verdict": "present",
+            "at": "1.0.5"
+          }
+        },
+        {
+          "flag": "--fullscreen",
+          "evidence": [
+            "completions",
+            "help",
+            "probe"
+          ],
+          "arity": "none",
+          "firstSeen": "1.0.5",
+          "lastSeen": "1.0.5",
+          "probe": {
+            "verdict": "present",
+            "at": "1.0.5"
+          }
+        },
+        {
+          "flag": "--global",
+          "evidence": [
+            "completions"
+          ],
+          "firstSeen": "1.0.5",
+          "lastSeen": "1.0.5",
+          "probe": {
+            "verdict": "absent",
+            "at": "1.0.5"
+          }
+        },
+        {
+          "flag": "--grok-ws-origin",
+          "evidence": [
+            "completions"
+          ],
+          "firstSeen": "1.0.5",
+          "lastSeen": "1.0.5",
+          "probe": {
+            "verdict": "absent",
+            "at": "1.0.5"
+          }
+        },
+        {
+          "flag": "--grok-ws-url",
+          "evidence": [
+            "completions"
+          ],
+          "firstSeen": "1.0.5",
+          "lastSeen": "1.0.5",
+          "probe": {
+            "verdict": "absent",
+            "at": "1.0.5"
+          }
+        },
+        {
+          "flag": "--header",
+          "evidence": [
+            "completions"
+          ],
+          "firstSeen": "1.0.5",
+          "lastSeen": "1.0.5",
+          "probe": {
+            "verdict": "absent",
+            "at": "1.0.5"
+          }
+        },
+        {
+          "flag": "--help",
+          "evidence": [
+            "completions",
+            "help",
+            "probe"
+          ],
+          "arity": "none",
+          "firstSeen": "1.0.5",
+          "lastSeen": "1.0.5",
+          "probe": {
+            "verdict": "present",
+            "at": "1.0.5"
+          }
+        },
+        {
+          "flag": "--hub-url",
+          "evidence": [
+            "completions"
+          ],
+          "firstSeen": "1.0.5",
+          "lastSeen": "1.0.5",
+          "probe": {
+            "verdict": "absent",
+            "at": "1.0.5"
+          }
+        },
+        {
+          "flag": "--hunk-tracker-mode",
+          "evidence": [
+            "completions",
+            "probe"
+          ],
+          "arity": "one",
+          "firstSeen": "1.0.5",
+          "lastSeen": "1.0.5",
+          "probe": {
+            "verdict": "present",
+            "at": "1.0.5"
+          }
+        },
+        {
+          "flag": "--include-partial-messages",
+          "evidence": [
+            "completions",
+            "help",
+            "probe"
+          ],
+          "arity": "none",
+          "firstSeen": "1.0.5",
+          "lastSeen": "1.0.5",
+          "probe": {
+            "verdict": "present",
+            "at": "1.0.5"
+          }
+        },
+        {
+          "flag": "--installer",
+          "evidence": [
+            "completions"
+          ],
+          "firstSeen": "1.0.5",
+          "lastSeen": "1.0.5"
+        },
+        {
+          "flag": "--json",
+          "evidence": [
+            "completions"
+          ],
+          "firstSeen": "1.0.5",
+          "lastSeen": "1.0.5",
+          "probe": {
+            "verdict": "absent",
+            "at": "1.0.5"
+          }
+        },
+        {
+          "flag": "--json-schema",
+          "evidence": [
+            "completions",
+            "help",
+            "probe"
+          ],
+          "arity": "one",
+          "firstSeen": "1.0.5",
+          "lastSeen": "1.0.5",
+          "probe": {
+            "verdict": "present",
+            "at": "1.0.5"
+          }
+        },
+        {
+          "flag": "--keep-data",
+          "evidence": [
+            "completions"
+          ],
+          "firstSeen": "1.0.5",
+          "lastSeen": "1.0.5",
+          "probe": {
+            "verdict": "absent",
+            "at": "1.0.5"
+          }
+        },
+        {
+          "flag": "--leader",
+          "evidence": [
+            "completions",
+            "probe"
+          ],
+          "arity": "none",
+          "firstSeen": "1.0.5",
+          "lastSeen": "1.0.5",
+          "probe": {
+            "verdict": "present",
+            "at": "1.0.5"
+          }
+        },
+        {
+          "flag": "--leader-socket",
+          "evidence": [
+            "completions",
+            "help",
+            "probe"
+          ],
+          "arity": "one",
+          "firstSeen": "1.0.5",
+          "lastSeen": "1.0.5",
+          "probe": {
+            "verdict": "present",
+            "at": "1.0.5"
+          }
+        },
+        {
+          "flag": "--legacy",
+          "evidence": [
+            "completions"
+          ],
+          "firstSeen": "1.0.5",
+          "lastSeen": "1.0.5",
+          "probe": {
+            "verdict": "absent",
+            "at": "1.0.5"
+          }
+        },
+        {
+          "flag": "--limit",
+          "evidence": [
+            "completions"
+          ],
+          "firstSeen": "1.0.5",
+          "lastSeen": "1.0.5",
+          "probe": {
+            "verdict": "absent",
+            "at": "1.0.5"
+          }
+        },
+        {
+          "flag": "--load",
+          "evidence": [
+            "completions",
+            "probe"
+          ],
+          "arity": "one",
+          "firstSeen": "1.0.5",
+          "lastSeen": "1.0.5",
+          "probe": {
+            "verdict": "present",
+            "at": "1.0.5"
+          }
+        },
+        {
+          "flag": "--local",
+          "evidence": [
+            "completions"
+          ],
+          "firstSeen": "1.0.5",
+          "lastSeen": "1.0.5",
+          "probe": {
+            "verdict": "absent",
+            "at": "1.0.5"
+          }
+        },
+        {
+          "flag": "--log-sampling",
+          "evidence": [
+            "completions",
+            "probe"
+          ],
+          "arity": "none",
+          "firstSeen": "1.0.5",
+          "lastSeen": "1.0.5",
+          "probe": {
+            "verdict": "present",
+            "at": "1.0.5"
+          }
+        },
+        {
+          "flag": "--max-age",
+          "evidence": [
+            "completions"
+          ],
+          "firstSeen": "1.0.5",
+          "lastSeen": "1.0.5",
+          "probe": {
+            "verdict": "absent",
+            "at": "1.0.5"
+          }
+        },
+        {
+          "flag": "--max-turns",
+          "evidence": [
+            "completions",
+            "help",
+            "probe"
+          ],
+          "arity": "one",
+          "firstSeen": "1.0.5",
+          "lastSeen": "1.0.5",
+          "probe": {
+            "verdict": "present",
+            "at": "1.0.5"
+          }
+        },
+        {
+          "flag": "--minimal",
+          "evidence": [
+            "completions",
+            "help",
+            "probe"
+          ],
+          "arity": "none",
+          "firstSeen": "1.0.5",
+          "lastSeen": "1.0.5",
+          "probe": {
+            "verdict": "present",
+            "at": "1.0.5"
+          }
+        },
+        {
+          "flag": "--model",
+          "evidence": [
+            "completions",
+            "help",
+            "probe"
+          ],
+          "arity": "one",
+          "firstSeen": "1.0.5",
+          "lastSeen": "1.0.5",
+          "probe": {
+            "verdict": "present",
+            "at": "1.0.5"
+          }
+        },
+        {
+          "flag": "--no-alt-screen",
+          "evidence": [
+            "completions",
+            "help",
+            "probe"
+          ],
+          "arity": "none",
+          "firstSeen": "1.0.5",
+          "lastSeen": "1.0.5",
+          "probe": {
+            "verdict": "present",
+            "at": "1.0.5"
+          }
+        },
+        {
+          "flag": "--no-ask-user",
+          "evidence": [
+            "completions",
+            "probe"
+          ],
+          "arity": "none",
+          "firstSeen": "1.0.5",
+          "lastSeen": "1.0.5",
+          "probe": {
+            "verdict": "present",
+            "at": "1.0.5"
+          }
+        },
+        {
+          "flag": "--no-auto-update",
+          "evidence": [
+            "completions"
+          ],
+          "firstSeen": "1.0.5",
+          "lastSeen": "1.0.5"
+        },
+        {
+          "flag": "--no-exit-on-disconnect",
+          "evidence": [
+            "completions"
+          ],
+          "firstSeen": "1.0.5",
+          "lastSeen": "1.0.5",
+          "probe": {
+            "verdict": "absent",
+            "at": "1.0.5"
+          }
+        },
+        {
+          "flag": "--no-leader",
+          "evidence": [
+            "completions",
+            "probe"
+          ],
+          "arity": "none",
+          "firstSeen": "1.0.5",
+          "lastSeen": "1.0.5",
+          "probe": {
+            "verdict": "present",
+            "at": "1.0.5"
+          }
+        },
+        {
+          "flag": "--no-memory",
+          "evidence": [
+            "completions",
+            "probe"
+          ],
+          "arity": "none",
+          "firstSeen": "1.0.5",
+          "lastSeen": "1.0.5",
+          "probe": {
+            "verdict": "present",
+            "at": "1.0.5"
+          }
+        },
+        {
+          "flag": "--no-plan",
+          "evidence": [
+            "completions",
+            "help",
+            "probe"
+          ],
+          "arity": "none",
+          "firstSeen": "1.0.5",
+          "lastSeen": "1.0.5",
+          "probe": {
+            "verdict": "present",
+            "at": "1.0.5"
+          }
+        },
+        {
+          "flag": "--no-subagents",
+          "evidence": [
+            "completions",
+            "help",
+            "probe"
+          ],
+          "arity": "none",
+          "firstSeen": "1.0.5",
+          "lastSeen": "1.0.5",
+          "probe": {
+            "verdict": "present",
+            "at": "1.0.5"
+          }
+        },
+        {
+          "flag": "--no-wait-for-background",
+          "evidence": [
+            "completions",
+            "probe"
+          ],
+          "arity": "none",
+          "firstSeen": "1.0.5",
+          "lastSeen": "1.0.5",
+          "probe": {
+            "verdict": "present",
+            "at": "1.0.5"
+          }
+        },
+        {
+          "flag": "--oauth",
+          "evidence": [
+            "completions",
+            "help"
+          ],
+          "firstSeen": "1.0.5",
+          "lastSeen": "1.0.5"
+        },
+        {
+          "flag": "--output",
+          "evidence": [
+            "completions"
+          ],
+          "firstSeen": "1.0.5",
+          "lastSeen": "1.0.5",
+          "probe": {
+            "verdict": "absent",
+            "at": "1.0.5"
+          }
+        },
+        {
+          "flag": "--output-format",
+          "evidence": [
+            "completions",
+            "help",
+            "probe"
+          ],
+          "arity": "one",
+          "values": [
+            "plain",
+            "json",
+            "streaming-json",
+            "streaming-messages-json"
+          ],
+          "firstSeen": "1.0.5",
+          "lastSeen": "1.0.5",
+          "probe": {
+            "verdict": "present",
+            "at": "1.0.5"
+          }
+        },
+        {
+          "flag": "--permission-mode",
+          "evidence": [
+            "completions",
+            "help",
+            "probe"
+          ],
+          "arity": "one",
+          "values": [
+            "default",
+            "acceptEdits",
+            "auto",
+            "dontAsk",
+            "bypassPermissions",
+            "plan"
+          ],
+          "firstSeen": "1.0.5",
+          "lastSeen": "1.0.5",
+          "probe": {
+            "verdict": "present",
+            "at": "1.0.5"
+          }
+        },
+        {
+          "flag": "--pid",
+          "evidence": [
+            "completions"
+          ],
+          "firstSeen": "1.0.5",
+          "lastSeen": "1.0.5",
+          "probe": {
+            "verdict": "absent",
+            "at": "1.0.5"
+          }
+        },
+        {
+          "flag": "--plugin-dir",
+          "evidence": [
+            "completions"
+          ],
+          "firstSeen": "1.0.5",
+          "lastSeen": "1.0.5",
+          "probe": {
+            "verdict": "absent",
+            "at": "1.0.5"
+          }
+        },
+        {
+          "flag": "--prompt-file",
+          "evidence": [
+            "completions",
+            "help",
+            "probe"
+          ],
+          "arity": "one",
+          "firstSeen": "1.0.5",
+          "lastSeen": "1.0.5",
+          "probe": {
+            "verdict": "present",
+            "at": "1.0.5"
+          }
+        },
+        {
+          "flag": "--prompt-json",
+          "evidence": [
+            "completions",
+            "help",
+            "probe"
+          ],
+          "arity": "one",
+          "firstSeen": "1.0.5",
+          "lastSeen": "1.0.5",
+          "probe": {
+            "verdict": "present",
+            "at": "1.0.5"
+          }
+        },
+        {
+          "flag": "--push",
+          "evidence": [
+            "completions"
+          ],
+          "firstSeen": "1.0.5",
+          "lastSeen": "1.0.5",
+          "probe": {
+            "verdict": "absent",
+            "at": "1.0.5"
+          }
+        },
+        {
+          "flag": "--reasoning-effort",
+          "evidence": [
+            "completions",
+            "help",
+            "probe"
+          ],
+          "arity": "one",
+          "firstSeen": "1.0.5",
+          "lastSeen": "1.0.5",
+          "probe": {
+            "verdict": "present",
+            "at": "1.0.5"
+          }
+        },
+        {
+          "flag": "--reauth",
+          "evidence": [
+            "completions"
+          ],
+          "firstSeen": "1.0.5",
+          "lastSeen": "1.0.5"
+        },
+        {
+          "flag": "--ref",
+          "evidence": [
+            "completions",
+            "help",
+            "probe"
+          ],
+          "arity": "one",
+          "firstSeen": "1.0.5",
+          "lastSeen": "1.0.5",
+          "probe": {
+            "verdict": "present",
+            "at": "1.0.5"
+          }
+        },
+        {
+          "flag": "--relay-on-demand",
+          "evidence": [
+            "completions"
+          ],
+          "firstSeen": "1.0.5",
+          "lastSeen": "1.0.5",
+          "probe": {
+            "verdict": "absent",
+            "at": "1.0.5"
+          }
+        },
+        {
+          "flag": "--remote",
+          "evidence": [
+            "completions"
+          ],
+          "firstSeen": "1.0.5",
+          "lastSeen": "1.0.5",
+          "probe": {
+            "verdict": "absent",
+            "at": "1.0.5"
+          }
+        },
+        {
+          "flag": "--repo",
+          "evidence": [
+            "completions"
+          ],
+          "firstSeen": "1.0.5",
+          "lastSeen": "1.0.5",
+          "probe": {
+            "verdict": "absent",
+            "at": "1.0.5"
+          }
+        },
+        {
+          "flag": "--restore-code",
+          "evidence": [
+            "completions",
+            "help",
+            "probe"
+          ],
+          "arity": "none",
+          "firstSeen": "1.0.5",
+          "lastSeen": "1.0.5",
+          "probe": {
+            "verdict": "present",
+            "at": "1.0.5"
+          }
+        },
+        {
+          "flag": "--resume",
+          "evidence": [
+            "completions",
+            "help",
+            "probe"
+          ],
+          "arity": "one",
+          "firstSeen": "1.0.5",
+          "lastSeen": "1.0.5",
+          "probe": {
+            "verdict": "present",
+            "at": "1.0.5"
+          }
+        },
+        {
+          "flag": "--rules",
+          "evidence": [
+            "completions",
+            "help",
+            "probe"
+          ],
+          "arity": "one",
+          "firstSeen": "1.0.5",
+          "lastSeen": "1.0.5",
+          "probe": {
+            "verdict": "present",
+            "at": "1.0.5"
+          }
+        },
+        {
+          "flag": "--sandbox",
+          "evidence": [
+            "completions",
+            "help",
+            "probe"
+          ],
+          "arity": "one",
+          "firstSeen": "1.0.5",
+          "lastSeen": "1.0.5",
+          "probe": {
+            "verdict": "present",
+            "at": "1.0.5"
+          }
+        },
+        {
+          "flag": "--scope",
+          "evidence": [
+            "completions"
+          ],
+          "firstSeen": "1.0.5",
+          "lastSeen": "1.0.5",
+          "probe": {
+            "verdict": "absent",
+            "at": "1.0.5"
+          }
+        },
+        {
+          "flag": "--secret",
+          "evidence": [
+            "completions"
+          ],
+          "firstSeen": "1.0.5",
+          "lastSeen": "1.0.5",
+          "probe": {
+            "verdict": "absent",
+            "at": "1.0.5"
+          }
+        },
+        {
+          "flag": "--session-id",
+          "evidence": [
+            "completions",
+            "help",
+            "probe"
+          ],
+          "arity": "one",
+          "firstSeen": "1.0.5",
+          "lastSeen": "1.0.5",
+          "probe": {
+            "verdict": "present",
+            "at": "1.0.5"
+          }
+        },
+        {
+          "flag": "--single",
+          "evidence": [
+            "completions",
+            "help",
+            "probe"
+          ],
+          "arity": "one",
+          "firstSeen": "1.0.5",
+          "lastSeen": "1.0.5",
+          "probe": {
+            "verdict": "present",
+            "at": "1.0.5"
+          }
+        },
+        {
+          "flag": "--stable",
+          "evidence": [
+            "completions"
+          ],
+          "firstSeen": "1.0.5",
+          "lastSeen": "1.0.5",
+          "probe": {
+            "verdict": "absent",
+            "at": "1.0.5"
+          }
+        },
+        {
+          "flag": "--storage-mode",
+          "evidence": [
+            "completions",
+            "probe"
+          ],
+          "arity": "one",
+          "firstSeen": "1.0.5",
+          "lastSeen": "1.0.5",
+          "probe": {
+            "verdict": "present",
+            "at": "1.0.5"
+          }
+        },
+        {
+          "flag": "--system-prompt",
+          "evidence": [
+            "help",
+            "probe"
+          ],
+          "arity": "one",
+          "firstSeen": "1.0.5",
+          "lastSeen": "1.0.5",
+          "probe": {
+            "verdict": "present",
+            "at": "1.0.5"
+          }
+        },
+        {
+          "flag": "--system-prompt-override",
+          "evidence": [
+            "completions",
+            "help",
+            "probe"
+          ],
+          "arity": "one",
+          "firstSeen": "1.0.5",
+          "lastSeen": "1.0.5",
+          "probe": {
+            "verdict": "present",
+            "at": "1.0.5"
+          }
+        },
+        {
+          "flag": "--terminal",
+          "evidence": [
+            "completions",
+            "probe"
+          ],
+          "arity": "none",
+          "firstSeen": "1.0.5",
+          "lastSeen": "1.0.5",
+          "probe": {
+            "verdict": "present",
+            "at": "1.0.5"
+          }
+        },
+        {
+          "flag": "--todo-gate",
+          "evidence": [
+            "completions",
+            "probe"
+          ],
+          "arity": "none",
+          "firstSeen": "1.0.5",
+          "lastSeen": "1.0.5",
+          "probe": {
+            "verdict": "present",
+            "at": "1.0.5"
+          }
+        },
+        {
+          "flag": "--tools",
+          "evidence": [
+            "completions",
+            "help",
+            "probe"
+          ],
+          "arity": "one",
+          "firstSeen": "1.0.5",
+          "lastSeen": "1.0.5",
+          "probe": {
+            "verdict": "present",
+            "at": "1.0.5"
+          }
+        },
+        {
+          "flag": "--transport",
+          "evidence": [
+            "completions"
+          ],
+          "firstSeen": "1.0.5",
+          "lastSeen": "1.0.5",
+          "probe": {
+            "verdict": "absent",
+            "at": "1.0.5"
+          }
+        },
+        {
+          "flag": "--trigger",
+          "evidence": [
+            "completions"
+          ],
+          "firstSeen": "1.0.5",
+          "lastSeen": "1.0.5",
+          "probe": {
+            "verdict": "absent",
+            "at": "1.0.5"
+          }
+        },
+        {
+          "flag": "--trust",
+          "evidence": [
+            "completions",
+            "probe"
+          ],
+          "arity": "none",
+          "firstSeen": "1.0.5",
+          "lastSeen": "1.0.5",
+          "probe": {
+            "verdict": "present",
+            "at": "1.0.5"
+          }
+        },
+        {
+          "flag": "--type",
+          "evidence": [
+            "completions"
+          ],
+          "firstSeen": "1.0.5",
+          "lastSeen": "1.0.5",
+          "probe": {
+            "verdict": "absent",
+            "at": "1.0.5"
+          }
+        },
+        {
+          "flag": "--url",
+          "evidence": [
+            "completions"
+          ],
+          "firstSeen": "1.0.5",
+          "lastSeen": "1.0.5",
+          "probe": {
+            "verdict": "absent",
+            "at": "1.0.5"
+          }
+        },
+        {
+          "flag": "--verbatim",
+          "evidence": [
+            "completions",
+            "help",
+            "probe"
+          ],
+          "arity": "none",
+          "firstSeen": "1.0.5",
+          "lastSeen": "1.0.5",
+          "probe": {
+            "verdict": "present",
+            "at": "1.0.5"
+          }
+        },
+        {
+          "flag": "--version",
+          "evidence": [
+            "completions",
+            "help",
+            "probe"
+          ],
+          "arity": "none",
+          "firstSeen": "1.0.5",
+          "lastSeen": "1.0.5",
+          "probe": {
+            "verdict": "present",
+            "at": "1.0.5"
+          }
+        },
+        {
+          "flag": "--workspace",
+          "evidence": [
+            "completions"
+          ],
+          "firstSeen": "1.0.5",
+          "lastSeen": "1.0.5",
+          "probe": {
+            "verdict": "absent",
+            "at": "1.0.5"
+          }
+        },
+        {
+          "flag": "--worktree",
+          "evidence": [
+            "completions",
+            "help",
+            "probe"
+          ],
+          "arity": "one",
+          "firstSeen": "1.0.5",
+          "lastSeen": "1.0.5",
+          "probe": {
+            "verdict": "present",
+            "at": "1.0.5"
+          }
+        },
+        {
+          "flag": "--worktree-ref",
+          "evidence": [
+            "completions",
+            "help",
+            "probe"
+          ],
+          "arity": "one",
+          "firstSeen": "1.0.5",
+          "lastSeen": "1.0.5",
+          "probe": {
+            "verdict": "present",
+            "at": "1.0.5"
+          }
+        },
+        {
+          "flag": "--xai-api-base-url",
+          "evidence": [
+            "completions"
+          ],
+          "firstSeen": "1.0.5",
+          "lastSeen": "1.0.5",
+          "probe": {
+            "verdict": "absent",
+            "at": "1.0.5"
+          }
+        },
+        {
+          "flag": "--yes",
+          "evidence": [
+            "completions"
+          ],
+          "firstSeen": "1.0.5",
+          "lastSeen": "1.0.5",
+          "probe": {
+            "verdict": "absent",
+            "at": "1.0.5"
+          }
+        }
+      ],
+      "unreadSources": []
+    },
+    {
+      "cli": "mistral",
+      "executable": "vibe",
+      "version": "2.24.1",
+      "commandScope": [],
+      "flags": [
+        {
+          "flag": "--add-dir",
+          "evidence": [
+            "help",
+            "probe"
+          ],
+          "arity": "one",
+          "firstSeen": "2.24.1",
+          "lastSeen": "2.24.1",
+          "probe": {
+            "verdict": "present",
+            "at": "2.24.1"
+          }
+        },
+        {
+          "flag": "--agent",
+          "evidence": [
+            "help",
+            "probe"
+          ],
+          "arity": "one",
+          "firstSeen": "2.24.1",
+          "lastSeen": "2.24.1",
+          "probe": {
+            "verdict": "present",
+            "at": "2.24.1"
+          }
+        },
+        {
+          "flag": "--auto",
+          "evidence": [
+            "help",
+            "probe"
+          ],
+          "arity": "none",
+          "firstSeen": "2.24.1",
+          "lastSeen": "2.24.1",
+          "probe": {
+            "verdict": "present",
+            "at": "2.24.1"
+          }
+        },
+        {
+          "flag": "--auto-approve",
+          "evidence": [
+            "help",
+            "probe"
+          ],
+          "arity": "none",
+          "firstSeen": "2.24.1",
+          "lastSeen": "2.24.1",
+          "probe": {
+            "verdict": "present",
+            "at": "2.24.1"
+          }
+        },
+        {
+          "flag": "--check-upgrade",
+          "evidence": [
+            "help"
+          ],
+          "firstSeen": "2.24.1",
+          "lastSeen": "2.24.1"
+        },
+        {
+          "flag": "--continue",
+          "evidence": [
+            "help",
+            "probe"
+          ],
+          "arity": "none",
+          "firstSeen": "2.24.1",
+          "lastSeen": "2.24.1",
+          "probe": {
+            "verdict": "present",
+            "at": "2.24.1"
+          }
+        },
+        {
+          "flag": "--disabled-tools",
+          "evidence": [
+            "help",
+            "probe"
+          ],
+          "arity": "one",
+          "firstSeen": "2.24.1",
+          "lastSeen": "2.24.1",
+          "probe": {
+            "verdict": "present",
+            "at": "2.24.1"
+          }
+        },
+        {
+          "flag": "--enabled-tools",
+          "evidence": [
+            "help",
+            "probe"
+          ],
+          "arity": "one",
+          "firstSeen": "2.24.1",
+          "lastSeen": "2.24.1",
+          "probe": {
+            "verdict": "present",
+            "at": "2.24.1"
+          }
+        },
+        {
+          "flag": "--help",
+          "evidence": [
+            "help",
+            "probe"
+          ],
+          "arity": "none",
+          "firstSeen": "2.24.1",
+          "lastSeen": "2.24.1",
+          "probe": {
+            "verdict": "present",
+            "at": "2.24.1"
+          }
+        },
+        {
+          "flag": "--max-price",
+          "evidence": [
+            "help"
+          ],
+          "firstSeen": "2.24.1",
+          "lastSeen": "2.24.1",
+          "probe": {
+            "verdict": "unparsed",
+            "at": "2.24.1"
+          }
+        },
+        {
+          "flag": "--max-tokens",
+          "evidence": [
+            "help"
+          ],
+          "firstSeen": "2.24.1",
+          "lastSeen": "2.24.1",
+          "probe": {
+            "verdict": "unparsed",
+            "at": "2.24.1"
+          }
+        },
+        {
+          "flag": "--max-turns",
+          "evidence": [
+            "help"
+          ],
+          "firstSeen": "2.24.1",
+          "lastSeen": "2.24.1",
+          "probe": {
+            "verdict": "unparsed",
+            "at": "2.24.1"
+          }
+        },
+        {
+          "flag": "--output",
+          "evidence": [
+            "help",
+            "probe"
+          ],
+          "arity": "one",
+          "values": [
+            "text",
+            "json",
+            "streaming"
+          ],
+          "firstSeen": "2.24.1",
+          "lastSeen": "2.24.1",
+          "probe": {
+            "verdict": "present",
+            "at": "2.24.1"
+          }
+        },
+        {
+          "flag": "--prompt",
+          "evidence": [
+            "help",
+            "probe"
+          ],
+          "arity": "one",
+          "firstSeen": "2.24.1",
+          "lastSeen": "2.24.1",
+          "probe": {
+            "verdict": "present",
+            "at": "2.24.1"
+          }
+        },
+        {
+          "flag": "--resume",
+          "evidence": [
+            "help",
+            "probe"
+          ],
+          "arity": "one",
+          "firstSeen": "2.24.1",
+          "lastSeen": "2.24.1",
+          "probe": {
+            "verdict": "present",
+            "at": "2.24.1"
+          }
+        },
+        {
+          "flag": "--setup",
+          "evidence": [
+            "help",
+            "probe"
+          ],
+          "arity": "none",
+          "firstSeen": "2.24.1",
+          "lastSeen": "2.24.1",
+          "probe": {
+            "verdict": "present",
+            "at": "2.24.1"
+          }
+        },
+        {
+          "flag": "--trust",
+          "evidence": [
+            "help",
+            "probe"
+          ],
+          "arity": "none",
+          "firstSeen": "2.24.1",
+          "lastSeen": "2.24.1",
+          "probe": {
+            "verdict": "present",
+            "at": "2.24.1"
+          }
+        },
+        {
+          "flag": "--version",
+          "evidence": [
+            "help",
+            "probe"
+          ],
+          "arity": "none",
+          "firstSeen": "2.24.1",
+          "lastSeen": "2.24.1",
+          "probe": {
+            "verdict": "present",
+            "at": "2.24.1"
+          }
+        },
+        {
+          "flag": "--workdir",
+          "evidence": [
+            "help",
+            "probe"
+          ],
+          "arity": "one",
+          "firstSeen": "2.24.1",
+          "lastSeen": "2.24.1",
+          "probe": {
+            "verdict": "present",
+            "at": "2.24.1"
+          }
+        },
+        {
+          "flag": "--worktree",
+          "evidence": [
+            "help",
+            "probe"
+          ],
+          "arity": "one",
+          "firstSeen": "2.24.1",
+          "lastSeen": "2.24.1",
+          "probe": {
+            "verdict": "present",
+            "at": "2.24.1"
+          }
+        },
+        {
+          "flag": "--yolo",
+          "evidence": [
+            "help",
+            "probe"
+          ],
+          "arity": "none",
+          "firstSeen": "2.24.1",
+          "lastSeen": "2.24.1",
+          "probe": {
+            "verdict": "present",
+            "at": "2.24.1"
+          }
+        }
+      ],
+      "unreadSources": [
+        "completions"
+      ]
+    }
+  ]
+}

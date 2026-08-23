@@ -4,7 +4,12 @@ import { AsyncJobManager } from "../async-job-manager.js";
 import { MemoryJobStore } from "../job-store.js";
 import { noopLogger } from "../logger.js";
 import type { PersistenceConfig } from "../config.js";
-import type { FlightLogStart, FlightLogResult, FlightRecorderLike } from "../flight-recorder.js";
+import type {
+  CacheAggregateRow,
+  FlightLogStart,
+  FlightLogResult,
+  FlightRecorderLike,
+} from "../flight-recorder.js";
 import { createSessionManager, type ISessionManager } from "../session-manager.js";
 
 const CLI_TYPES = ["claude", "codex", "gemini", "grok", "mistral"] as const;
@@ -28,6 +33,25 @@ function mkPersistence(): PersistenceConfig {
  * aggregates work without a real SQLite file. Stores rows in a JS array
  * and returns them for SELECT-on-session_id and SELECT-on-stable_prefix_hash.
  */
+interface SeededCacheRow {
+  cli: string;
+  model: string;
+  session_id: string | null;
+  stable_prefix_hash: string | null;
+  cache_read_tokens: number | null;
+  cache_creation_tokens: number | null;
+  datetime_utc: string;
+}
+
+const cacheProjection = (r: SeededCacheRow): CacheAggregateRow => ({
+  cli: r.cli,
+  model: r.model,
+  cache_read_tokens: r.cache_read_tokens ?? 0,
+  cache_creation_tokens: r.cache_creation_tokens ?? 0,
+  stable_prefix_hash: r.stable_prefix_hash,
+  datetime_utc: r.datetime_utc,
+});
+
 class InMemoryFlightRecorder implements FlightRecorderLike {
   private rows: Array<{
     id: string;
@@ -42,7 +66,7 @@ class InMemoryFlightRecorder implements FlightRecorderLike {
     datetime_utc: string;
   }> = [];
 
-  logStart(entry: FlightLogStart): void {
+  async logStart(entry: FlightLogStart): Promise<void> {
     this.rows.push({
       id: entry.correlationId,
       cli: entry.cli,
@@ -56,54 +80,39 @@ class InMemoryFlightRecorder implements FlightRecorderLike {
       datetime_utc: new Date().toISOString(),
     });
   }
-  logComplete(correlationId: string, result: FlightLogResult): void {
+  async logComplete(correlationId: string, result: FlightLogResult): Promise<void> {
     const row = this.rows.find(r => r.id === correlationId);
     if (row) {
       row.cache_read_tokens = result.cacheReadTokens ?? null;
       row.cache_creation_tokens = result.cacheCreationTokens ?? null;
     }
   }
-  queryRequests<T = Record<string, unknown>>(sql: string, ...params: unknown[]): T[] {
-    // Only the cache-stats SELECT patterns are exercised here. We naïvely
-    // match WHERE session_id = ? and WHERE stable_prefix_hash = ?; broader
-    // SELECT * (no WHERE) returns all rows.
-    if (sql.includes("session_id = ?")) {
-      const sid = params[0];
-      return this.rows
-        .filter(r => r.session_id === sid)
-        .map(r => ({
-          cli: r.cli,
-          model: r.model,
-          cache_read_tokens: r.cache_read_tokens ?? 0,
-          cache_creation_tokens: r.cache_creation_tokens ?? 0,
-          stable_prefix_hash: r.stable_prefix_hash,
-          datetime_utc: r.datetime_utc,
-        })) as unknown as T[];
-    }
-    if (sql.includes("stable_prefix_hash = ?")) {
-      const h = params[0];
-      return this.rows
-        .filter(r => r.stable_prefix_hash === h)
-        .map(r => ({
-          cli: r.cli,
-          model: r.model,
-          cache_read_tokens: r.cache_read_tokens ?? 0,
-          cache_creation_tokens: r.cache_creation_tokens ?? 0,
-          stable_prefix_hash: r.stable_prefix_hash,
-          datetime_utc: r.datetime_utc,
-        })) as unknown as T[];
-    }
-    return this.rows.map(r => ({
-      cli: r.cli,
-      model: r.model,
-      cache_read_tokens: r.cache_read_tokens ?? 0,
-      cache_creation_tokens: r.cache_creation_tokens ?? 0,
-      stable_prefix_hash: r.stable_prefix_hash,
-      datetime_utc: r.datetime_utc,
-    })) as unknown as T[];
+  // s2: the fake used to sniff the SQL string (`sql.includes("session_id = ?")`)
+  // to decide what to return, which is what a caller-supplied-SQL surface forces
+  // a test double to do. Named reads make the double say what it means.
+  async readCacheRowsBySession(sessionId: string): Promise<CacheAggregateRow[]> {
+    return this.rows.filter(r => r.session_id === sessionId).map(cacheProjection);
   }
-  flush(): void {}
-  close(): void {}
+  async readCacheRowsByPrefix(stablePrefixHash: string): Promise<CacheAggregateRow[]> {
+    return this.rows.filter(r => r.stable_prefix_hash === stablePrefixHash).map(cacheProjection);
+  }
+  async readCacheRowsGlobal(_sinceIso?: string): Promise<CacheAggregateRow[]> {
+    return this.rows.map(cacheProjection);
+  }
+  async readRequestById(): Promise<null> {
+    return null;
+  }
+  async listRequestSummaries(): Promise<[]> {
+    return [];
+  }
+  async readLcrPriorRows(): Promise<[]> {
+    return [];
+  }
+  async readRoutingDecisions(): Promise<[]> {
+    return [];
+  }
+  async flush(): Promise<void> {}
+  async close(): Promise<void> {}
 }
 
 interface RegisteredTool {

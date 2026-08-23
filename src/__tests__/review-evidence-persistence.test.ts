@@ -6,7 +6,7 @@ import { noopLogger } from "../logger.js";
 async function waitForTerminal(manager: AsyncJobManager, jobId: string): Promise<void> {
   const deadline = Date.now() + 5_000;
   while (Date.now() < deadline) {
-    const snapshot = manager.getJobSnapshot(jobId);
+    const snapshot = await manager.getJobSnapshot(jobId);
     if (snapshot && snapshot.status !== "queued" && snapshot.status !== "running") return;
     await new Promise(resolve => setTimeout(resolve, 20));
   }
@@ -24,7 +24,7 @@ describe("retained review job evidence", () => {
       prompt: evidence,
     });
 
-    const outcome = manager.startJobWithDedup(
+    const outcome = await manager.startJobWithDedup(
       "sh" as LlmCli,
       ["-c", "exit 0", evidence],
       "review-evidence-persistence",
@@ -36,15 +36,15 @@ describe("retained review job evidence", () => {
     await waitForTerminal(manager, outcome.snapshot.id);
 
     const row = store.getById(outcome.snapshot.id);
-    expect(row).not.toBeNull();
-    expect(row!.argsJson).not.toContain(evidence);
-    expect(JSON.parse(row!.argsJson)).toEqual([
+    expect(await row).not.toBeNull();
+    expect((await row!).argsJson).not.toContain(evidence);
+    expect(JSON.parse((await row!).argsJson)).toEqual([
       "-c",
       "exit 0",
       "[review prompt retained in payload_json]",
     ]);
-    expect(row!.payloadJson).toBe(payloadJson);
-    expect(JSON.parse(row!.payloadJson!)).toMatchObject({
+    expect((await row!).payloadJson).toBe(payloadJson);
+    expect(JSON.parse((await row!).payloadJson!)).toMatchObject({
       schemaVersion: "review-job-input.v1",
       prompt: evidence,
     });

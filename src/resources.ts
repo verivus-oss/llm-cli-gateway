@@ -9,7 +9,10 @@ import { CLI_TYPES, PROVIDER_TYPES, type CliType, type ProviderType } from "./se
 import { getRequestContext, principalCanAccess, resolveOwnerPrincipal } from "./request-context.js";
 import { PerformanceMetrics } from "./metrics.js";
 import { getAvailableCliInfo } from "./model-registry.js";
-import { FlightRecorderQuery } from "./flight-recorder.js";
+import { FlightRecorderQuery, NoopFlightRecorder } from "./flight-recorder.js";
+
+/** routing://decisions surfaces at most this many recent routed decisions. */
+const ROUTING_DECISIONS_LIMIT = 50;
 import {
   computeGlobalCacheStats,
   computePrefixCacheStats,
@@ -86,7 +89,7 @@ export class ResourceProvider {
     // Optional read access to the flight recorder. Used by cache-state
     // resources (slice 2). Falls back to a stub returning [] when not
     // injected so existing call sites continue to work without changes.
-    private flightRecorder: FlightRecorderQuery = { queryRequests: () => [] },
+    private flightRecorder: FlightRecorderQuery = new NoopFlightRecorder(),
     // Slice 3: optional cache-awareness config. When present, drives the
     // TTL policy applied to ttlRemainingMs on session-scoped reads.
     // When absent, the default Anthropic 5-min TTL applies (matches the
@@ -165,7 +168,7 @@ export class ResourceProvider {
    * structural: the response shape (GlobalCacheStats) has no `prompt`,
    * `response`, `system`, or `task` field by construction.
    */
-  readCacheStateGlobal(opts: { lastNHours?: number } = {}): GlobalCacheStats {
+  async readCacheStateGlobal(opts: { lastNHours?: number } = {}): Promise<GlobalCacheStats> {
     return computeGlobalCacheStats(this.flightRecorder, opts);
   }
 
@@ -177,8 +180,8 @@ export class ResourceProvider {
    * policy. Null for non-claude sessions or when the gateway has no
    * cache-awareness config loaded (defaults to 5-min policy).
    */
-  readCacheStateSession(sessionId: string): SessionCacheStats {
-    const stats = computeSessionCacheStats(this.flightRecorder, sessionId);
+  async readCacheStateSession(sessionId: string): Promise<SessionCacheStats> {
+    const stats = await computeSessionCacheStats(this.flightRecorder, sessionId);
     const ttlSeconds = this.cacheAwareness?.anthropicTtlSeconds ?? 300;
     stats.ttlRemainingMs = computeTtlRemaining(stats, stats.cli, {
       anthropicTtlSeconds: ttlSeconds,
@@ -190,7 +193,7 @@ export class ResourceProvider {
    * cache-state://prefix/{hash} — per-stable-prefix-hash aggregates.
    * Returns empty defaults for unknown hashes. Token/hash fields only.
    */
-  readCacheStateForPrefix(stablePrefixHash: string): PrefixCacheStats {
+  async readCacheStateForPrefix(stablePrefixHash: string): Promise<PrefixCacheStats> {
     return computePrefixCacheStats(this.flightRecorder, stablePrefixHash);
   }
 
@@ -370,17 +373,8 @@ export class ResourceProvider {
    * principal). Reads through the flight recorder read-only path over routed
    * rows.
    */
-  private readRoutingDecisions(): RoutingDecision[] {
-    const rows = this.flightRecorder.queryRequests<RoutingDecisionRow>(
-      `SELECT r.cli, r.model, r.datetime_utc, r.cost_basis,
-              m.route_est_cost_usd, m.route_est_confidence, m.route_reason,
-              m.route_considered, m.route_reroutes
-       FROM requests r
-       LEFT JOIN gateway_metadata m ON m.request_id = r.id
-       WHERE m.routed = 1
-       ORDER BY r.datetime_utc DESC
-       LIMIT 50`
-    );
+  private async readRoutingDecisions(): Promise<RoutingDecision[]> {
+    const rows = await this.flightRecorder.readRoutingDecisions(ROUTING_DECISIONS_LIMIT);
     return rows.map(row => ({
       provider: row.cli,
       model: row.model,
@@ -401,11 +395,11 @@ export class ResourceProvider {
    * principal field). Adds a `priceAsOf` marker so a consumer knows the vintage
    * of the pricing table / API catalog the router prices against.
    */
-  private readRoutingPriors(): RoutingPriorsPayload {
+  private async readRoutingPriors(): Promise<RoutingPriorsPayload> {
     const scope = this.leastCost?.priorsScope ?? "off";
     // For priors_scope = "principal" the aggregator needs the caller's principal,
     // otherwise it scopes to nothing and returns empty. Global/off ignore it.
-    const priors = computeLcrPriorsFromDb(this.flightRecorder, {
+    const priors = await computeLcrPriorsFromDb(this.flightRecorder, {
       priorsScope: scope,
       ownerPrincipal: resolveOwnerPrincipal(getRequestContext()),
     });
@@ -576,14 +570,14 @@ export class ResourceProvider {
         return {
           uri,
           mimeType: "application/json",
-          text: JSON.stringify({ decisions: this.readRoutingDecisions() }, null, 2),
+          text: JSON.stringify({ decisions: await this.readRoutingDecisions() }, null, 2),
         };
       }
       if (uri === "routing://priors") {
         return {
           uri,
           mimeType: "application/json",
-          text: JSON.stringify(this.readRoutingPriors(), null, 2),
+          text: JSON.stringify(await this.readRoutingPriors(), null, 2),
         };
       }
     }
@@ -680,18 +674,6 @@ export class ResourceProvider {
 }
 
 /** Raw joined row shape read by readRoutingDecisions (routed rows only). */
-interface RoutingDecisionRow {
-  cli: string;
-  model: string;
-  datetime_utc: string;
-  cost_basis: string | null;
-  route_est_cost_usd: number | null;
-  route_est_confidence: string | null;
-  route_reason: string | null;
-  route_considered: number | null;
-  route_reroutes: number | null;
-}
-
 /** One redacted routing decision surfaced by routing://decisions. */
 export interface RoutingDecision {
   provider: string;

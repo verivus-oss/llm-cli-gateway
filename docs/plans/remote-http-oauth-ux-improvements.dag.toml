@@ -1,3 +1,10 @@
+# ============================================================================
+# SHIPPED. Per-node `status` in this file was never maintained: 9 node(s)
+# below still read `planned` for code that is live. Do not read a `planned`
+# node here as evidence that something is unimplemented; check the code.
+# src/connector-setup.ts, src/entrypoint-url.ts and src/remote-url.ts all exist and ship.
+# Classified 2026-08-18 at HEAD 801950d. Index: docs/plans/README.md
+# ============================================================================
 # Implementation plan: remote HTTP + OAuth UX improvements.
 #
 # Goal: make the preferred remote connector path obvious, diagnosable, and

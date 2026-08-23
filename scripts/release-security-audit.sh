@@ -4,6 +4,29 @@ set -euo pipefail
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "${ROOT_DIR}"
 
+echo "==> internal-only paths must not be tracked"
+# This repo mirrors to a public GitHub repo as a PLAIN PUSH of shared history,
+# so a file committed here is public even if a later commit deletes it: git log
+# still serves it. docs/evidence and docs/audits carry operator decisions, host
+# measurements and session forensics, which are not product.
+#
+# Checks the whole history reachable from HEAD, not just the working tree,
+# because untracking a file does not remove it from the commits that had it.
+# Scoped to HEAD, which is what a release is cut from and therefore what can
+# reach the mirror. A local-only backup ref holding the pre-purge history is not
+# a leak; merging one back into HEAD would be, and this catches that.
+INTERNAL_LEAK="$(git log --format=%H HEAD -- docs/evidence docs/audits 2>/dev/null | head -5 || true)"
+if [ -n "${INTERNAL_LEAK}" ]; then
+  echo "FAIL: internal-only paths appear in git history and would reach the public mirror:" >&2
+  for c in ${INTERNAL_LEAK}; do
+    echo "  $(git log -1 --format='%h %s' "$c")" >&2
+    git ls-tree -r --name-only "$c" -- docs/evidence docs/audits | sed 's/^/    /' >&2
+  done
+  echo "Purge them from history before releasing; .gitignore alone is not enough." >&2
+  exit 1
+fi
+echo "no internal-only paths in tracked history."
+
 echo "==> npm vulnerability audit"
 npm audit --omit=dev --audit-level=moderate
 

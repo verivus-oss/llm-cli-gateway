@@ -6,6 +6,7 @@
   "required": [
     "schema_version",
     "ok",
+    "storage",
     "generated_at",
     "system",
     "gateway",
@@ -24,8 +25,113 @@
     "next_actions"
   ],
   "properties": {
-    "schema_version": { "const": "1.0" },
+    "schema_version": { "const": "1.2" },
     "ok": { "type": "boolean" },
+    "storage": {
+      "description": "Storage health for the flight recorder and the job store. Added at schema_version 1.1: 1.0 reported none, so a corrupt or unreadable transcript database produced a report byte-identical to a quiet one. `scanned` is false for a caller that ran no asynchronous scan, and every measurement is null in that case rather than zero.",
+      "type": "object",
+      "required": ["scanned", "flight_recorder", "job_store", "retention", "co_resident", "warnings"],
+      "properties": {
+        "scanned": { "type": "boolean" },
+        "flight_recorder": {
+          "type": "object",
+          "required": [
+            "state",
+            "path",
+            "reads_are_authoritative",
+            "error",
+            "file_bytes",
+            "wal_bytes",
+            "schema_version",
+            "request_rows",
+            "oldest_request",
+            "newest_request"
+          ],
+          "properties": {
+            "state": {
+              "type": ["string", "null"],
+              "enum": ["disabled", "unavailable", "initialising", "degraded", "active", null],
+              "description": "disabled = the operator turned recording off. unavailable = it failed to open. degraded = open, but the schema bootstrap or the last operation failed. initialising = open, bootstrap not settled. active = open and working. null = not scanned."
+            },
+            "path": { "type": ["string", "null"] },
+            "reads_are_authoritative": { "type": "boolean" },
+            "error": { "type": ["string", "null"] },
+            "file_bytes": { "type": ["integer", "null"] },
+            "wal_bytes": { "type": ["integer", "null"] },
+            "schema_version": { "type": ["integer", "null"] },
+            "request_rows": { "type": ["integer", "null"] },
+            "oldest_request": { "type": ["string", "null"] },
+            "newest_request": { "type": ["string", "null"] }
+          },
+          "additionalProperties": false
+        },
+        "job_store": {
+          "type": "object",
+          "required": ["backend", "path", "shares_flight_recorder_file"],
+          "properties": {
+            "backend": { "type": "string" },
+            "path": { "type": ["string", "null"] },
+            "shares_flight_recorder_file": { "type": "boolean" }
+          },
+          "additionalProperties": false
+        },
+        "retention": {
+          "description": "The resolved retention policy and what it would delete. Extended at schema_version 1.2: 1.1 reported the job store's `days` and a hard-coded `unbounded` list, so an operator could see that transcripts were unbounded but not how much that cost or what a bound would remove.",
+          "type": "object",
+          "required": [
+            "days",
+            "unbounded",
+            "policy",
+            "requests_beyond_retention",
+            "reclaimable_bytes"
+          ],
+          "properties": {
+            "days": {
+              "type": ["integer", "null"],
+              "description": "The job store's bound, in days. Unchanged in meaning."
+            },
+            "unbounded": {
+              "type": "array",
+              "items": { "type": "string" },
+              "description": "Subsystems the policy does not bound, derived from it. The two destructive bounds default to OFF, so an unchanged installation lists `requests` and `wedgedValidationRuns` here."
+            },
+            "policy": {
+              "type": ["object", "null"],
+              "additionalProperties": { "type": ["integer", "null"] },
+              "description": "Days per subsystem; null per key means nothing deletes it. null for the whole object means the persistence config could not be read."
+            },
+            "requests_beyond_retention": {
+              "type": ["integer", "null"],
+              "description": "Rows a `requests` sweep would delete right now. A dry run: counted, never deleted. Falls back to the job window when no transcript bound is set."
+            },
+            "reclaimable_bytes": {
+              "type": ["integer", "null"],
+              "description": "Bytes a compaction would return to the filesystem. SQLite only; null on PostgreSQL, where autovacuum reuses the space and there is no operator step. A DELETE frees pages, never bytes."
+            }
+          },
+          "additionalProperties": false
+        },
+        "co_resident": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": ["table", "rows", "unfinished", "live"],
+            "properties": {
+              "table": { "type": "string" },
+              "rows": { "type": "integer" },
+              "unfinished": { "type": "integer" },
+              "live": {
+                "type": "boolean",
+                "description": "False means this table belongs to a subsystem that no longer uses this file. Its rows are frozen at the switchover and still answer queries."
+              }
+            },
+            "additionalProperties": false
+          }
+        },
+        "warnings": { "type": "array", "items": { "type": "string" } }
+      },
+      "additionalProperties": false
+    },
     "generated_at": { "type": "string", "format": "date-time" },
     "system": {
       "type": "object",

@@ -7,7 +7,12 @@ import { AsyncJobManager } from "../async-job-manager.js";
 import { MemoryJobStore } from "../job-store.js";
 import { noopLogger } from "../logger.js";
 import type { PersistenceConfig, CacheAwarenessConfig } from "../config.js";
-import type { FlightLogStart, FlightLogResult, FlightRecorderLike } from "../flight-recorder.js";
+import type {
+  CacheAggregateRow,
+  FlightLogStart,
+  FlightLogResult,
+  FlightRecorderLike,
+} from "../flight-recorder.js";
 import { FileSessionManager, type ISessionManager } from "../session-manager.js";
 import type { WorkspaceRegistry } from "../workspace-registry.js";
 
@@ -83,29 +88,44 @@ class SeededFlightRecorder implements FlightRecorderLike {
     });
   }
 
-  logStart(_entry: FlightLogStart): void {
+  async logStart(_entry: FlightLogStart): Promise<void> {
     // Ignored in TTL tests — we only care about pre-seeded rows.
   }
-  logComplete(_correlationId: string, _result: FlightLogResult): void {}
-  queryRequests<T = Record<string, unknown>>(sql: string, ...params: unknown[]): T[] {
-    if (sql.includes("session_id = ?")) {
-      const sid = params[0];
-      return this.rows
-        .filter(r => r.session_id === sid)
-        .map(r => ({
-          cli: r.cli,
-          model: r.model,
-          cache_read_tokens: r.cache_read_tokens ?? 0,
-          cache_creation_tokens: r.cache_creation_tokens ?? 0,
-          stable_prefix_hash: r.stable_prefix_hash,
-          datetime_utc: r.datetime_utc,
-          cache_control_blocks: r.cache_control_blocks ?? null,
-        })) as unknown as T[];
-    }
-    return [] as T[];
+  async logComplete(_correlationId: string, _result: FlightLogResult): Promise<void> {}
+  // s2: was sniffing `sql.includes("session_id = ?")`. Named reads instead.
+  async readCacheRowsBySession(sessionId: string): Promise<CacheAggregateRow[]> {
+    return this.rows
+      .filter(r => r.session_id === sessionId)
+      .map(r => ({
+        cli: r.cli,
+        model: r.model,
+        cache_read_tokens: r.cache_read_tokens ?? 0,
+        cache_creation_tokens: r.cache_creation_tokens ?? 0,
+        stable_prefix_hash: r.stable_prefix_hash,
+        datetime_utc: r.datetime_utc,
+        cache_control_blocks: r.cache_control_blocks ?? null,
+      }));
   }
-  flush(): void {}
-  close(): void {}
+  async readCacheRowsByPrefix(): Promise<CacheAggregateRow[]> {
+    return [];
+  }
+  async readCacheRowsGlobal(): Promise<CacheAggregateRow[]> {
+    return [];
+  }
+  async readRequestById(): Promise<null> {
+    return null;
+  }
+  async listRequestSummaries(): Promise<[]> {
+    return [];
+  }
+  async readLcrPriorRows(): Promise<[]> {
+    return [];
+  }
+  async readRoutingDecisions(): Promise<[]> {
+    return [];
+  }
+  async flush(): Promise<void> {}
+  async close(): Promise<void> {}
 }
 
 interface RegisteredTool {

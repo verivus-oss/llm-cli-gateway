@@ -152,7 +152,7 @@ interface ProviderPreflight {
   skipReason?: string;
 }
 
-function dispatchProviderJob(
+async function dispatchProviderJob(
   deps: ValidationOrchestratorDeps,
   provider: ValidationProvider,
   prompt: string,
@@ -165,7 +165,7 @@ function dispatchProviderJob(
     validationAdmission?: ValidationJobAdmission;
   },
   preflight: ProviderPreflight
-): StartJobOutcome {
+): Promise<StartJobOutcome> {
   if (preflight.skipReason) {
     // Defence in depth. Callers are expected to return a skipped result before
     // reaching here; if one forgets, refuse rather than launch a seat that the
@@ -182,7 +182,7 @@ function dispatchProviderJob(
     // Repository review evidence is retained with the job's configured expiry,
     // not copied into the flight recorder, whose request rows have no matching
     // retention eviction policy.
-    return deps.asyncJobManager.startHttpJob({
+    return await deps.asyncJobManager.startHttpJob({
       provider: apiProvider,
       apiRequest,
       correlationId,
@@ -200,11 +200,12 @@ function dispatchProviderJob(
     options.review ?? false,
     preflight.trusted
   );
-  assertUpstreamCliArgs(cli, invocation.args);
+  // Validation argv comes from buildProviderInvocation; no caller flags reach it.
+  assertUpstreamCliArgs(cli, invocation.args, undefined);
   const cwd = options.cwd ?? deps.resolveProviderCwd?.(cli);
   if (options.review) {
     const promptSha256 = createHash("sha256").update(prompt).digest("hex");
-    return deps.asyncJobManager.startJobWithDedup(cli, invocation.args, correlationId, {
+    return await deps.asyncJobManager.startJobWithDedup(cli, invocation.args, correlationId, {
       cwd,
       stdin: invocation.stdin,
       persistedArgs: redactReviewPromptArgs(provider, invocation.args, prompt, promptSha256),
@@ -218,7 +219,7 @@ function dispatchProviderJob(
       validationAdmission: options.validationAdmission,
     });
   }
-  return deps.asyncJobManager.startJobWithDedup(cli, invocation.args, correlationId, {
+  return await deps.asyncJobManager.startJobWithDedup(cli, invocation.args, correlationId, {
     cwd,
     stdin: invocation.stdin,
     forceRefresh: options.forceRefresh,
@@ -315,10 +316,10 @@ export interface ValidationRunReport {
   next: string;
 }
 
-export function startValidationRun(
+export async function startValidationRun(
   deps: ValidationOrchestratorDeps,
   input: StartValidationInput
-): ValidationRunReport {
+): Promise<ValidationRunReport> {
   const validationId = randomUUID();
   const startedAt = new Date().toISOString();
   const prompt = buildValidationPrompt({
@@ -330,7 +331,13 @@ export function startValidationRun(
   });
 
   const providers = uniqueProviders(input.providers);
-  const results = providers.map(provider => startProviderJob(deps, provider, prompt, validationId));
+  // Promise.all, not `.map(async ...)`: every element is a promise once
+  // startProviderJob is async, and each downstream consumer reads `.status` off
+  // the element. The seats still start concurrently; only the collection point
+  // is awaited.
+  const results = await Promise.all(
+    providers.map(provider => startProviderJob(deps, provider, prompt, validationId))
+  );
   const runningCount = results.filter(result => result.status === "running").length;
   const synthesis = plannedJudgeSynthesis(input);
   // Phase 0: derive via the shared helper so the run-level status can reach the
@@ -346,7 +353,7 @@ export function startValidationRun(
   // returning, mapping validationId -> the provider jobs that carry the outputs.
   // Only happens under a durable backend (validationRunStore present). Persistence
   // failure must not break kickoff: the caller still gets the validationId.
-  persistValidationRun(deps, {
+  await persistValidationRun(deps, {
     validationId,
     startedAt,
     intent: input.intent,
@@ -390,10 +397,10 @@ export function startValidationRun(
  * evidence prompt. The raw artifact stays in the provider job prompt; the
  * durable validation-run metadata records only its identity and scope.
  */
-export function startReviewRun(
+export async function startReviewRun(
   deps: ValidationOrchestratorDeps,
   input: StartReviewInput
-): ValidationRunReport {
+): Promise<ValidationRunReport> {
   const providers = uniqueProviders(input.providers);
   const apiJudge = findApiReviewer(deps, input.judgeProvider ?? "");
   const includesApiUpload =
@@ -425,7 +432,7 @@ export function startReviewRun(
   // Establish and verify the owner-scoped review authorization before any
   // reviewer can receive repository evidence. Each provider job is then
   // admitted and linked atomically behind a roster-wide launch barrier.
-  persistValidationRun(deps, {
+  await persistValidationRun(deps, {
     validationId,
     startedAt,
     intent: "review",
@@ -440,8 +447,11 @@ export function startReviewRun(
   const deferredLaunches: DeferredJobLaunch[] = [];
   try {
     for (const provider of providers) {
+      // Sequential await, NOT Promise.all: this is the review path, where each
+      // seat is launched deferred and released atomically afterwards. Starting
+      // them concurrently would change the order deferredLaunches is built in.
       results.push(
-        startProviderJob(deps, provider, input.prompt, validationId, {
+        await startProviderJob(deps, provider, input.prompt, validationId, {
           cwd: input.cwd,
           review: true,
           forceRefresh: true,
@@ -452,11 +462,11 @@ export function startReviewRun(
         })
       );
     }
-    verifyValidationProviderLinks(deps, validationId, results);
-    completeReviewAdmission(deps, validationId);
+    await verifyValidationProviderLinks(deps, validationId, results);
+    await completeReviewAdmission(deps, validationId);
   } catch (error) {
-    for (const deferred of deferredLaunches.reverse()) deferred.cancel();
-    fenceReviewAdmission(deps, validationId);
+    for (const deferred of deferredLaunches.reverse()) await deferred.cancel();
+    await fenceReviewAdmission(deps, validationId);
     if (error instanceof DurableJobAdmissionError) {
       throw new ValidationRunPersistenceError();
     }
@@ -498,7 +508,7 @@ export function startReviewRun(
   };
 }
 
-export function startJudgeSynthesis(
+export async function startJudgeSynthesis(
   deps: ValidationOrchestratorDeps,
   input: {
     question: string;
@@ -525,7 +535,7 @@ export function startJudgeSynthesis(
      */
     trustCursorWorkspace?: boolean;
   }
-): ValidationRunReport["synthesis"] {
+): Promise<ValidationRunReport["synthesis"]> {
   if (input.review && !input.validationId) {
     throw new ValidationRunPersistenceError();
   }
@@ -549,7 +559,7 @@ export function startJudgeSynthesis(
   const completedResults = input.providerResults.filter(isJudgeEvidence);
   const omittedResults = input.providerResults.filter(result => !isJudgeEvidence(result));
   if (completedResults.length === 0) {
-    if (input.review) markReviewJudgeSkipped(deps, input.validationId!, input.judgeProvider);
+    if (input.review) await markReviewJudgeSkipped(deps, input.validationId!, input.judgeProvider);
     return {
       status: "skipped",
       judgeModel: input.judgeProvider,
@@ -587,7 +597,7 @@ export function startJudgeSynthesis(
           question: input.question,
           providerResults: completedResults,
         });
-    launch = launchProviderSeat(
+    launch = await launchProviderSeat(
       deps,
       input.judgeProvider,
       judgePrompt,
@@ -614,7 +624,7 @@ export function startJudgeSynthesis(
       throw new ValidationRunPersistenceError();
     }
     if (!isCliInputAdmissionError(error)) throw error;
-    if (input.review) markReviewJudgeSkipped(deps, input.validationId!, input.judgeProvider);
+    if (input.review) await markReviewJudgeSkipped(deps, input.validationId!, input.judgeProvider);
     return {
       status: "skipped",
       judgeModel: input.judgeProvider,
@@ -626,7 +636,7 @@ export function startJudgeSynthesis(
     // A gate refused this seat. Represent it as a skipped judge rather than an
     // error, matching how the roster represents the same refusal, and keep the
     // gate's own reason so the caller learns what to change.
-    if (input.review) markReviewJudgeSkipped(deps, input.validationId!, input.judgeProvider);
+    if (input.review) await markReviewJudgeSkipped(deps, input.validationId!, input.judgeProvider);
     return {
       status: "skipped",
       judgeModel: input.judgeProvider,
@@ -636,7 +646,7 @@ export function startJudgeSynthesis(
   }
   const { snapshot, runtime } = launch;
   if (input.review) launch.deferredLaunch!.release();
-  else linkJudgeJob(deps, input.validationId, input.judgeProvider, snapshot);
+  else await linkJudgeJob(deps, input.validationId, input.judgeProvider, snapshot);
   return {
     status: "running",
     judgeModel: input.judgeProvider,
@@ -653,14 +663,14 @@ export function startJudgeSynthesis(
   };
 }
 
-export function collectValidationJobResult(
+export async function collectValidationJobResult(
   deps: ValidationOrchestratorDeps,
   provider: ValidationProvider,
   jobId: string,
   model: string | null,
   maxChars = 200000
-): NormalizedValidationResult | null {
-  const result = deps.asyncJobManager.getJobResult(jobId, maxChars);
+): Promise<NormalizedValidationResult | null> {
+  const result = await deps.asyncJobManager.getJobResult(jobId, maxChars);
   if (!result) return null;
   return normalizeJobResult(provider, model, result);
 }
@@ -693,7 +703,7 @@ type SeatLaunch =
  * If a fourth gate is ever needed, it goes in providerPreflight and every seat
  * gets it. Do not add a second launch path.
  */
-function launchProviderSeat(
+async function launchProviderSeat(
   deps: ValidationOrchestratorDeps,
   provider: ValidationProvider,
   prompt: string,
@@ -706,7 +716,7 @@ function launchProviderSeat(
     validationAdmission?: ValidationJobAdmission;
     trustWorkspace?: boolean;
   } = {}
-): SeatLaunch {
+): Promise<SeatLaunch> {
   const runtime = resolveReviewerStatus(deps, provider);
   if (!runtime.installed) {
     return { launched: false, runtime, reason: `${runtime.displayName} runtime is not installed.` };
@@ -730,11 +740,18 @@ function launchProviderSeat(
       ? undefined
       : `${runtime.displayName} login status is ${runtime.loginStatus}; the job may fail until login is complete.`;
   try {
-    const outcome = dispatchProviderJob(deps, provider, prompt, correlationId, options, preflight);
+    const outcome = await dispatchProviderJob(
+      deps,
+      provider,
+      prompt,
+      correlationId,
+      options,
+      preflight
+    );
     if (options.deferLaunch && !outcome.deferredLaunch) {
       // Asked for a deferred launch and did not get one: the run cannot be bound
       // durably, so cancel rather than leave an unreleasable job behind.
-      deps.asyncJobManager.cancelJob(outcome.snapshot.id);
+      await deps.asyncJobManager.cancelJob(outcome.snapshot.id);
       throw new ValidationRunPersistenceError();
     }
     return {
@@ -769,7 +786,7 @@ function launchProviderSeat(
   }
 }
 
-function startProviderJob(
+async function startProviderJob(
   deps: ValidationOrchestratorDeps,
   provider: ValidationProvider,
   prompt: string,
@@ -783,8 +800,8 @@ function startProviderJob(
     deferredLaunches?: DeferredJobLaunch[];
     trustWorkspace?: boolean;
   } = {}
-): NormalizedValidationResult {
-  const launch = launchProviderSeat(
+): Promise<NormalizedValidationResult> {
+  const launch = await launchProviderSeat(
     deps,
     provider,
     prompt,
@@ -823,19 +840,23 @@ function plannedJudgeSynthesis(input: StartValidationInput): ValidationRunReport
  * by a different principal (own-or-not-found: never mutate another caller's run).
  * Swallows persistence errors so a storage hiccup never breaks synthesis.
  */
-function linkJudgeJob(
+async function linkJudgeJob(
   deps: ValidationOrchestratorDeps,
   validationId: string | undefined,
   provider: ValidationProvider,
   snapshot: AsyncJobSnapshot
-): void {
+): Promise<void> {
   const store = deps.validationRunStore;
   if (!store || !validationId) return;
   try {
-    const run = store.getValidationRun(validationId);
+    const run = await store.getValidationRun(validationId);
     if (!run) return;
     if (!principalCanAccess(run.ownerPrincipal, resolveOwnerPrincipal(getRequestContext()))) return;
-    if (run.status !== "running" || run.judgeLink || store.getValidationReceipt(validationId)) {
+    if (
+      run.status !== "running" ||
+      run.judgeLink ||
+      (await store.getValidationReceipt(validationId))
+    ) {
       return;
     }
     let plannedJudge: unknown = null;
@@ -851,7 +872,7 @@ function linkJudgeJob(
     ) {
       return;
     }
-    store.setValidationJudgeLink(validationId, {
+    await store.setValidationJudgeLink(validationId, {
       provider: String(provider),
       jobId: snapshot.id,
       correlationId: snapshot.correlationId,
@@ -867,7 +888,7 @@ function linkJudgeJob(
  * runs degrade gracefully on persistence failure. An API review-judge plan
  * requires an exact durable readback so the stored upload policy is authoritative.
  */
-function persistValidationRun(
+async function persistValidationRun(
   deps: ValidationOrchestratorDeps,
   args: {
     validationId: string;
@@ -880,7 +901,7 @@ function persistValidationRun(
     requireDurable?: boolean;
     initialStatus?: ValidationRunRecord["status"];
   }
-): void {
+): Promise<void> {
   const store = deps.validationRunStore;
   if (!store) {
     if (args.requireDurable) throw new ValidationRunPersistenceError();
@@ -904,7 +925,7 @@ function persistValidationRun(
       judgeProvider: args.input.judgeProvider ?? null,
       ...(args.reviewAuthorization ? { reviewAuthorization: args.reviewAuthorization } : {}),
     });
-    store.recordValidationRun({
+    await store.recordValidationRun({
       validationId: args.validationId,
       ownerPrincipal,
       intent: args.intent,
@@ -915,7 +936,7 @@ function persistValidationRun(
       status: args.initialStatus ?? "running",
     });
     if (args.requireDurable) {
-      const persisted = store.getValidationRun(args.validationId);
+      const persisted = await store.getValidationRun(args.validationId);
       if (
         !persisted ||
         persisted.ownerPrincipal !== ownerPrincipal ||
@@ -937,13 +958,25 @@ function persistValidationRun(
   }
 }
 
-function completeReviewAdmission(deps: ValidationOrchestratorDeps, validationId: string): void {
+async function completeReviewAdmission(
+  deps: ValidationOrchestratorDeps,
+  validationId: string
+): Promise<void> {
   const store = deps.validationRunStore;
   if (!store) throw new ValidationRunPersistenceError();
   const ownerPrincipal = resolveOwnerPrincipal(getRequestContext());
   try {
+    // AWAITED. Unawaited this read `!promise`, which is ALWAYS false, so the
+    // throw below could never fire and a failed status transition was accepted
+    // as success. Not a catch that stopped guarding: a CONDITION that stopped
+    // being evaluated.
     if (
-      !store.transitionValidationRunStatus(validationId, ownerPrincipal, "admitting", "running")
+      !(await store.transitionValidationRunStatus(
+        validationId,
+        ownerPrincipal,
+        "admitting",
+        "running"
+      ))
     ) {
       throw new ValidationRunPersistenceError();
     }
@@ -953,18 +986,23 @@ function completeReviewAdmission(deps: ValidationOrchestratorDeps, validationId:
   }
 }
 
-function fenceReviewAdmission(deps: ValidationOrchestratorDeps, validationId: string): void {
+async function fenceReviewAdmission(
+  deps: ValidationOrchestratorDeps,
+  validationId: string
+): Promise<void> {
   const store = deps.validationRunStore;
   if (!store) throw new ValidationRunPersistenceError();
   const ownerPrincipal = resolveOwnerPrincipal(getRequestContext());
   try {
-    const fenced = store.transitionValidationRunStatus(
+    // Same shape as completeReviewAdmission: `!fenced` on an unawaited promise
+    // is always false, so the fence never reported a failure.
+    const fenced = await store.transitionValidationRunStatus(
       validationId,
       ownerPrincipal,
       "admitting",
       "admission_failed"
     );
-    if (!fenced && store.getValidationRun(validationId)?.status !== "admission_failed") {
+    if (!fenced && (await store.getValidationRun(validationId))?.status !== "admission_failed") {
       throw new ValidationRunPersistenceError();
     }
   } catch (error) {
@@ -973,15 +1011,15 @@ function fenceReviewAdmission(deps: ValidationOrchestratorDeps, validationId: st
   }
 }
 
-function markReviewJudgeSkipped(
+async function markReviewJudgeSkipped(
   deps: ValidationOrchestratorDeps,
   validationId: string,
   provider: ValidationProvider
-): void {
+): Promise<void> {
   const store = deps.validationRunStore;
   if (!store) throw new ValidationRunPersistenceError();
   try {
-    store.skipValidationJudge(
+    await store.skipValidationJudge(
       validationId,
       String(provider),
       resolveOwnerPrincipal(getRequestContext())
@@ -991,11 +1029,11 @@ function markReviewJudgeSkipped(
   }
 }
 
-function verifyValidationProviderLinks(
+async function verifyValidationProviderLinks(
   deps: ValidationOrchestratorDeps,
   validationId: string,
   results: NormalizedValidationResult[]
-): void {
+): Promise<void> {
   const store = deps.validationRunStore;
   if (!store) throw new ValidationRunPersistenceError();
   const providerLinks: ValidationRunLink[] = results
@@ -1006,7 +1044,7 @@ function verifyValidationProviderLinks(
       correlationId: result.rawJobReference!.correlationId,
     }));
   try {
-    const persisted = store.getValidationRun(validationId);
+    const persisted = await store.getValidationRun(validationId);
     if (!persisted || JSON.stringify(persisted.providerLinks) !== JSON.stringify(providerLinks)) {
       throw new ValidationRunPersistenceError();
     }

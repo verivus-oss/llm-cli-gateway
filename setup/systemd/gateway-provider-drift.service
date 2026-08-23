@@ -12,11 +12,12 @@ Type=oneshot
 # itself derives the repository from its own location, so nothing else needs
 # changing; set GATEWAY_DRIFT_REPO below only to point at a different checkout.
 ExecStart=/path/to/llm-cli-gateway/scripts/provider-drift-check.sh
-# report = detect and log only. Set to "apply" to additionally rebaseline the
-# version targets in place. Flag REMOVALS are never auto-applied in either
-# mode: `flags` is the argv emit allowlist, so a removal needs a coordinated
-# three-file edit and a flag upstream dropped while the gateway still emits it
-# is a live breakage that wants eyes on it.
+# report = detect and log only. Set to "apply" to additionally rebaseline in
+# place. `apply` covers version targets AND flag removals: the rebaseliner edits
+# the contract, the acknowledgements and the codegen tables in one run, and
+# fails closed with a residual-reference report if any emitter survives. A flag
+# the upstream dropped while the gateway still emits it is a live breakage, so
+# `report` mode still surfaces it for a human rather than acting.
 Environment=GATEWAY_DRIFT_MODE=report
 Nice=10
 # Probing seven CLIs plus a build; generous but bounded.

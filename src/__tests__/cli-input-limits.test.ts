@@ -345,7 +345,7 @@ describe("CLI input byte limits", () => {
       const store = new MemoryJobStore();
       const manager = new AsyncJobManager(noopLogger, undefined, store);
       try {
-        const started = manager.startJob(
+        const started = await manager.startJob(
           "codex",
           ["x".repeat(4 * 1024 * 1024)],
           "corr-native-e2big",
@@ -362,7 +362,7 @@ describe("CLI input byte limits", () => {
         expect(started.finishedAt).not.toBeNull();
         expect(started.error).toContain("too large");
 
-        const durable = store.getById(started.id);
+        const durable = await store.getById(started.id);
         expect(durable).toMatchObject({
           status: "failed",
           exitCode: 126,
@@ -371,7 +371,7 @@ describe("CLI input byte limits", () => {
         });
         expect(durable?.finishedAt).not.toBeNull();
 
-        expect(manager.getJobResult(started.id)).toMatchObject({
+        expect(await manager.getJobResult(started.id)).toMatchObject({
           errorCategory: CLI_INPUT_TOO_LARGE_CATEGORY,
           retryable: false,
         });
@@ -390,7 +390,7 @@ describe("CLI input byte limits", () => {
       const firstManager = new AsyncJobManager(noopLogger, undefined, firstStore);
       let jobId = "";
       try {
-        const started = firstManager.startJob(
+        const started = await firstManager.startJob(
           "codex",
           ["x".repeat(4 * 1024 * 1024)],
           "corr-durable-e2big",
@@ -404,26 +404,26 @@ describe("CLI input byte limits", () => {
         });
       } finally {
         await firstManager.dispose();
-        firstStore.close();
+        await firstStore.close();
       }
 
       const restartedStore = new SqliteJobStore(dbPath);
       const restartedManager = new AsyncJobManager(noopLogger, undefined, restartedStore);
       try {
-        expect(restartedManager.getJobSnapshot(jobId)).toMatchObject({
+        expect(await restartedManager.getJobSnapshot(jobId)).toMatchObject({
           status: "failed",
           exitCode: 126,
           errorCategory: CLI_INPUT_TOO_LARGE_CATEGORY,
           retryable: false,
         });
-        expect(restartedManager.getJobResult(jobId)).toMatchObject({
+        expect(await restartedManager.getJobResult(jobId)).toMatchObject({
           status: "failed",
           errorCategory: CLI_INPUT_TOO_LARGE_CATEGORY,
           retryable: false,
         });
       } finally {
         await restartedManager.dispose();
-        restartedStore.close();
+        await restartedStore.close();
         rmSync(tempDir, { recursive: true, force: true });
       }
     }

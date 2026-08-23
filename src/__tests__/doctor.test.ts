@@ -16,6 +16,7 @@ import type { ApiProviderConfig, LeastCostConfig, ProvidersConfig } from "../con
 import { defaultLeastCostConfig } from "../config.js";
 import { PRICING_AS_OF, API_CATALOG_AS_OF } from "../pricing.js";
 import type { FlightRecorderQuery } from "../flight-recorder.js";
+import { computeLcrPriorsFromDb } from "../lcr-priors.js";
 import type { AuthConfig, RemoteOAuthConfig } from "../auth.js";
 import type { EndpointExposureReport } from "../endpoint-exposure.js";
 import { PERSONAL_CONFIG_SYNC_ERROR_WITHHELD } from "../personal-config.js";
@@ -141,7 +142,7 @@ describe("Layer 6 doctor report (U20)", () => {
     const report = createDoctorReport({});
     validateAgainstSchema(report, schema, "doctor");
 
-    expect(report.schema_version).toBe("1.0");
+    expect(report.schema_version).toBe("1.2");
     expect(report.gateway.name).toBe("llm-cli-gateway");
     expect(report.transport.default).toBe("stdio");
     expect(report.endpoint_exposure.mode).toBe("local_only");
@@ -1083,33 +1084,37 @@ describe("LCR phase_3 doctor least_cost block", () => {
   });
 
   // One flight-recorder row that yields a single (content-type, family)
-  // calibration bucket for the claude-sonnet family. queryRequests is the only
-  // method computeLcrPriorsFromDb touches.
+  // calibration bucket for the claude-sonnet family. readLcrPriorRows is the
+  // only method computeLcrPriorsFromDb touches.
   function fakeRecorderWithOneRow(): FlightRecorderQuery {
     return {
-      queryRequests<T = Record<string, unknown>>(): T[] {
-        return [
-          {
-            cli: "claude",
-            model: "sonnet",
-            // Migration v11: the routing path reads persisted signals, not the
-            // prompt body. Kept equivalent to the previous prose fixture.
-            derived_prompt_chars:
-              "please summarize the following text about routing economics and cost".length,
-            derived_content_class: "prose",
-            input_tokens: 120,
-            output_tokens: 60,
-            cache_read_tokens: 0,
-            cache_creation_tokens: 0,
-            cost_basis: "provider-reported",
-            owner_principal: null,
-            session_id: null,
-            datetime_utc: "2026-07-01T00:00:00Z",
-            cost_usd: 0.01,
-            route_est_cost_usd: 0.009,
-          },
-        ] as unknown as T[];
-      },
+      readCacheRowsBySession: async () => [],
+      readCacheRowsByPrefix: async () => [],
+      readCacheRowsGlobal: async () => [],
+      readRequestById: async () => null,
+      listRequestSummaries: async () => [],
+      readRoutingDecisions: async () => [],
+      readLcrPriorRows: async () => [
+        {
+          cli: "claude",
+          model: "sonnet",
+          // Migration v11: the routing path reads persisted signals, not the
+          // prompt body. Kept equivalent to the previous prose fixture.
+          derived_prompt_chars:
+            "please summarize the following text about routing economics and cost".length,
+          derived_content_class: "prose",
+          input_tokens: 120,
+          output_tokens: 60,
+          cache_read_tokens: 0,
+          cache_creation_tokens: 0,
+          cost_basis: "provider-reported",
+          owner_principal: null,
+          session_id: null,
+          datetime_utc: "2026-07-01T00:00:00Z",
+          cost_usd: 0.01,
+          route_est_cost_usd: 0.009,
+        },
+      ],
     } as unknown as FlightRecorderQuery;
   }
 
@@ -1142,7 +1147,10 @@ describe("LCR phase_3 doctor least_cost block", () => {
     expect(seen.get("claude")?.telemetryTier).toBe("T1");
     expect(seen.get("mistral")?.telemetryTier).toBe("T1");
     expect(seen.get("codex")?.telemetryTier).toBe("T2");
-    expect(seen.get("gemini")?.telemetryTier).toBe("T2");
+    // T4, not T2: agy headless is text-only and the adapter rejects
+    // json/stream-json before spawn, so no usage can ever be extracted.
+    // Corrected in 3.1.0; 0 of 2241 live gemini rows carry token counts.
+    expect(seen.get("gemini")?.telemetryTier).toBe("T4");
     expect(seen.get("grok")?.telemetryTier).toBe("T3");
     expect(seen.get("devin")?.telemetryTier).toBe("T4");
     expect(seen.get("cursor")?.telemetryTier).toBe("T4");
@@ -1176,10 +1184,16 @@ describe("LCR phase_3 doctor least_cost block", () => {
     }
   });
 
-  it("populates calibrationQuality from the flight recorder when routing is enabled", () => {
+  it("populates calibrationQuality from the flight recorder when routing is enabled", async () => {
+    // s7: the recorder is asynchronous, so `printDoctorJson` does the scan and
+    // `createDoctorReport` takes the result. The fake recorder is still the
+    // source, and computeLcrPriorsFromDb is still the only thing that reads it,
+    // so this keeps testing what it always tested.
     const report = createDoctorReport({
       leastCost: enabledConfig({ priorsScope: "global" }),
-      flightRecorder: fakeRecorderWithOneRow(),
+      lcrPriors: await computeLcrPriorsFromDb(fakeRecorderWithOneRow(), {
+        priorsScope: "global",
+      }),
     });
     const lcSchema = (schema.properties as Record<string, JsonSchemaNode>).least_cost;
     validateAgainstSchema(report.least_cost, lcSchema, "doctor.least_cost");
@@ -1194,10 +1208,12 @@ describe("LCR phase_3 doctor least_cost block", () => {
     expect(["high", "medium", "low"]).toContain(bucket?.confidence);
   });
 
-  it("keeps calibrationQuality empty when priors_scope is off", () => {
+  it("keeps calibrationQuality empty when priors_scope is off", async () => {
     const report = createDoctorReport({
       leastCost: enabledConfig({ priorsScope: "off" }),
-      flightRecorder: fakeRecorderWithOneRow(),
+      lcrPriors: await computeLcrPriorsFromDb(fakeRecorderWithOneRow(), {
+        priorsScope: "off",
+      }),
     });
     expect(report.least_cost.calibrationQuality).toEqual([]);
   });
@@ -1218,10 +1234,12 @@ describe("LCR phase_3 doctor least_cost block", () => {
     expect(report.least_cost.calibrationQuality).toEqual([]);
   });
 
-  it("carries no secrets, prompts, or filesystem paths in the least_cost block", () => {
+  it("carries no secrets, prompts, or filesystem paths in the least_cost block", async () => {
     const report = createDoctorReport({
       leastCost: enabledConfig(),
-      flightRecorder: fakeRecorderWithOneRow(),
+      lcrPriors: await computeLcrPriorsFromDb(fakeRecorderWithOneRow(), {
+        priorsScope: "global",
+      }),
     });
     const serialized = JSON.stringify(report.least_cost);
     // The fake row's prompt text must never leak into the economics block.

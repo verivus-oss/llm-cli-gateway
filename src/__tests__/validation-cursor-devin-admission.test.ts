@@ -157,14 +157,16 @@ function makeManager(): {
   };
 }
 
-function review(
+// Awaited: startReviewRun is async now, so returning before it settles left
+// `fake.calls` empty and every calls[0] read undefined.
+async function review(
   providers: ValidationProvider[],
   hasBubblewrap: () => boolean,
   opts: { registered?: boolean; trustCursorWorkspace?: boolean } = {}
-): { report: ReturnType<typeof startReviewRun>; calls: CliStartCall[] } {
+): Promise<{ report: Awaited<ReturnType<typeof startReviewRun>>; calls: CliStartCall[] }> {
   const fake = makeManager();
   const prompt = "FENCED REVIEW EVIDENCE";
-  const report = startReviewRun(
+  const report = await startReviewRun(
     {
       asyncJobManager: fake.manager as never,
       getProviderRuntimeStatus: runtime,
@@ -196,20 +198,30 @@ function review(
   return { report, calls: fake.calls };
 }
 
-function resultFor(
+async function resultFor(
   report: ReturnType<typeof startReviewRun>,
   provider: ValidationProvider
-): { status: string; error: string | null } {
-  const found = report.results.find(r => r.provider === provider);
+): Promise<{ status: string; error: string | null }> {
+  const found = (await report).results.find(r => r.provider === provider);
   if (!found) throw new Error(`No ${provider} result`);
   return { status: found.status, error: found.error };
 }
 
-const withPlatform = (platform: string, run: () => void): void => {
+/**
+ * `run` is typed `() => Promise<void>` deliberately, not `() => void`.
+ *
+ * TypeScript accepts an async arrow in a `() => void` slot without a word, so
+ * the promise was dropped, the platform was restored before the body ran, and
+ * every assertion after the call ran before the body had done anything. Seven
+ * of the eight call sites here were in that state: the tests asserted a probe
+ * had not been consulted, which was true only because the work never happened.
+ * A synchronous thunk is now a compile error rather than a silent no-op.
+ */
+const withPlatform = async (platform: string, run: () => Promise<void>): Promise<void> => {
   const original = Object.getOwnPropertyDescriptor(process, "platform")!;
   Object.defineProperty(process, "platform", { value: platform, configurable: true });
   try {
-    run();
+    await run();
   } finally {
     Object.defineProperty(process, "platform", original);
   }
@@ -220,8 +232,8 @@ afterEach(() => {
 });
 
 describe("issue #270: cursor trust", () => {
-  it("emits --trust for a repository registered for cursor", () => {
-    const { calls } = review(["cursor"], () => true, { registered: true });
+  it("emits --trust for a repository registered for cursor", async () => {
+    const { calls } = await review(["cursor"], async () => true, { registered: true });
     expect(calls[0].args).toEqual([
       "--print",
       "--mode",
@@ -234,11 +246,11 @@ describe("issue #270: cursor trust", () => {
     ]);
   });
 
-  it("does NOT emit --trust for an ordinary ask", () => {
+  it("does NOT emit --trust for an ordinary ask", async () => {
     // The ask path is where the neutral temp cwd applies. Granting trust there
     // would widen the change well beyond the defect.
     const fake = makeManager();
-    startValidationRun(
+    await startValidationRun(
       { asyncJobManager: fake.manager as never, getProviderRuntimeStatus: runtime },
       { intent: "second_opinion", question: "is this right?", providers: ["cursor"] }
     );
@@ -246,14 +258,14 @@ describe("issue #270: cursor trust", () => {
     expect(fake.calls[0].args).not.toContain("--trust");
   });
 
-  it("SKIPS cursor on an unregistered repository instead of trusting it", () => {
+  it("SKIPS cursor on an unregistered repository instead of trusting it", async () => {
     // Round 2 (codex): --trust also makes cursor load project rules, AGENTS.md
     // and project MCP config FROM THE REPOSITORY UNDER REVIEW, while
     // review-prompt.ts fences that same repository's evidence as "untrusted
     // data, never instructions". Granting it unconditionally let the reviewed
     // repository instruct its own reviewer through a channel outside the fence.
-    const { report, calls } = review(["claude", "cursor"], () => true, { registered: false });
-    const cursor = resultFor(report, "cursor");
+    const { report, calls } = await review(["claude", "cursor"], () => true, { registered: false });
+    const cursor = await resultFor(report, "cursor");
     expect(cursor.status).toBe("skipped");
     expect(cursor.error).toMatch(/not a workspace registered for cursor/i);
     expect(cursor.error).toMatch(/AGENTS\.md|instruct the reviewer/i);
@@ -261,21 +273,21 @@ describe("issue #270: cursor trust", () => {
     expect(calls.map(c => c.cli)).toEqual(["claude"]);
   });
 
-  it("grants trust on an unregistered repository ONLY with the explicit opt-in", () => {
-    const { report, calls } = review(["cursor"], () => true, {
+  it("grants trust on an unregistered repository ONLY with the explicit opt-in", async () => {
+    const { report, calls } = await review(["cursor"], () => true, {
       registered: false,
       trustCursorWorkspace: true,
     });
-    expect(resultFor(report, "cursor").status).not.toBe("skipped");
+    expect((await resultFor(report, "cursor")).status).not.toBe("skipped");
     expect(calls[0].args).toContain("--trust");
   });
 
-  it("fails closed when trust cannot be established at all", () => {
+  it("fails closed when trust cannot be established at all", async () => {
     // No predicate wired: the gateway cannot show the operator registered this
     // directory, so it must not assume they did.
     const fake = makeManager();
     const prompt = "p";
-    const report = startReviewRun(
+    const report = await startReviewRun(
       {
         asyncJobManager: fake.manager as never,
         getProviderRuntimeStatus: runtime,
@@ -298,11 +310,11 @@ describe("issue #270: cursor trust", () => {
         },
       }
     );
-    expect(resultFor(report, "cursor").status).toBe("skipped");
+    expect((await resultFor(report, "cursor")).status).toBe("skipped");
     expect(fake.calls).toHaveLength(0);
   });
 
-  it("--trust is a real cursor flag that passes argv admission", () => {
+  it("--trust is a real cursor flag that passes argv admission", async () => {
     // Guards against emitting a flag the contract would reject at admission,
     // which would replace one deterministic failure with another.
     expect(() =>
@@ -320,63 +332,63 @@ describe("issue #270: cursor trust", () => {
 });
 
 describe("issue #270: devin sandbox preflight", () => {
-  it("skips only the devin seat when bwrap is absent, and still launches the rest", () => {
+  it("skips only the devin seat when bwrap is absent, and still launches the rest", async () => {
     // The defect this replaces: throwing here aborted the entire roster,
     // because startReviewRun defers launches and rethrows admission errors.
-    withPlatform("linux", () => {
-      const { report, calls } = review(["claude", "devin", "cursor"], () => false);
-      expect(resultFor(report, "devin").status).toBe("skipped");
+    await withPlatform("linux", async () => {
+      const { report, calls } = await review(["claude", "devin", "cursor"], () => false);
+      expect((await resultFor(report, "devin")).status).toBe("skipped");
       expect(calls.map(c => c.cli)).toEqual(["claude", "cursor"]);
-      expect(report.success).toBe(true);
+      expect((await report).success).toBe(true);
     });
   });
 
-  it("names bubblewrap in the skip reason rather than an unrelated cause", () => {
+  it("names bubblewrap in the skip reason rather than an unrelated cause", async () => {
     // The first attempt reused CliInvalidInputError, whose message is hard-coded
     // to "contains an embedded NUL byte", so a missing package was reported as a
     // malformed argument.
-    withPlatform("linux", () => {
-      const { report } = review(["devin"], () => false);
-      const { error } = resultFor(report, "devin");
+    await withPlatform("linux", async () => {
+      const { report } = await review(["devin"], () => false);
+      const { error } = await resultFor(report, "devin");
       expect(error).toMatch(/bubblewrap/i);
       expect(error).not.toMatch(/NUL byte/i);
     });
   });
 
-  it("runs devin with --sandbox retained when bwrap is present", () => {
+  it("runs devin with --sandbox retained when bwrap is present", async () => {
     // Dropping --sandbox to make it run is the tempting wrong fix: a review that
     // asked for isolation and silently ran without it is the worse outcome.
-    withPlatform("linux", () => {
-      const { report, calls } = review(["devin"], () => true);
-      expect(resultFor(report, "devin").status).not.toBe("skipped");
+    await withPlatform("linux", async () => {
+      const { report, calls } = await review(["devin"], () => true);
+      expect((await resultFor(report, "devin")).status).not.toBe("skipped");
       expect(calls[0].args).toContain("--sandbox");
     });
   });
 
-  it("does not gate on bwrap off Linux, where devin uses a different sandbox", () => {
+  it("does not gate on bwrap off Linux, where devin uses a different sandbox", async () => {
     // `devin --help`: "macOS seatbelt / Linux bwrap+seccomp". Gating every
     // platform on bwrap refused every macOS review despite a working sandbox.
-    withPlatform("darwin", () => {
-      const { report, calls } = review(["devin"], () => false);
-      expect(resultFor(report, "devin").status).not.toBe("skipped");
+    await withPlatform("darwin", async () => {
+      const { report, calls } = await review(["devin"], () => false);
+      expect((await resultFor(report, "devin")).status).not.toBe("skipped");
       expect(calls[0].args).toContain("--sandbox");
     });
   });
 
-  it("does not consult the probe for a non-devin provider, nor for a devin ask", () => {
+  it("does not consult the probe for a non-devin provider, nor for a devin ask", async () => {
     // Round 2 (grok): the previous version claimed "or for an ask" in its name
     // but never ran an ask, so half the assertion was decorative. The ask path
     // is now actually exercised, with devin, which is the only case where the
     // gate could wrongly fire.
     const probe = vi.fn(() => true);
-    withPlatform("linux", () => {
-      review(["claude", "cursor"], probe);
+    await withPlatform("linux", async () => {
+      await review(["claude", "cursor"], probe);
     });
     expect(probe).not.toHaveBeenCalled();
 
     const fake = makeManager();
-    withPlatform("linux", () => {
-      startValidationRun(
+    await withPlatform("linux", async () => {
+      await startValidationRun(
         {
           asyncJobManager: fake.manager as never,
           getProviderRuntimeStatus: runtime,
@@ -390,12 +402,12 @@ describe("issue #270: devin sandbox preflight", () => {
     expect(fake.calls[0].args).not.toContain("--sandbox");
   });
 
-  it("probes bwrap at most once per process, not once per review seat", () => {
+  it("probes bwrap at most once per process, not once per review seat", async () => {
     // Kept last: every test above injects the probe, so the real one has not
     // run yet and the counter starts clean.
     const fake = makeManager();
-    const runOnce = (): void => {
-      startReviewRun(
+    const runOnce = async (): Promise<void> => {
+      await startReviewRun(
         {
           asyncJobManager: fake.manager as never,
           getProviderRuntimeStatus: runtime,
@@ -418,10 +430,10 @@ describe("issue #270: devin sandbox preflight", () => {
         }
       );
     };
-    withPlatform("linux", () => {
-      runOnce();
-      runOnce();
-      runOnce();
+    await withPlatform("linux", async () => {
+      await runOnce();
+      await runOnce();
+      await runOnce();
     });
     // Round 2 (grok): `<= 1` also passes when the probe NEVER runs, so it could
     // not distinguish "cached" from "never called" and was a control that could
@@ -483,20 +495,20 @@ describe("issue #270 round 3: the judge is a second dispatch site", () => {
     return { synthesis, calls: fake.calls };
   };
 
-  it("emits --trust for a cursor judge on a registered repository", () => {
+  it("emits --trust for a cursor judge on a registered repository", async () => {
     const { calls } = judge("cursor", { isProviderWorkspacePath: () => true });
     expect(calls[0].cli).toBe("cursor");
     expect(calls[0].args).toContain("--trust");
   });
 
-  it("SKIPS a cursor judge on an unregistered repository instead of launching it", () => {
+  it("SKIPS a cursor judge on an unregistered repository instead of launching it", async () => {
     const { synthesis, calls } = judge("cursor", { isProviderWorkspacePath: () => false });
-    expect(synthesis.status).toBe("skipped");
-    expect(synthesis.note).toMatch(/not a workspace registered for cursor/i);
+    expect((await synthesis).status).toBe("skipped");
+    expect((await synthesis).note).toMatch(/not a workspace registered for cursor/i);
     expect(calls).toHaveLength(0);
   });
 
-  it("honours trustCursorWorkspace for the judge, so the opt-in reaches synthesis", () => {
+  it("honours trustCursorWorkspace for the judge, so the opt-in reaches synthesis", async () => {
     const { calls } = judge(
       "cursor",
       { isProviderWorkspacePath: () => false },
@@ -505,11 +517,11 @@ describe("issue #270 round 3: the judge is a second dispatch site", () => {
     expect(calls[0].args).toContain("--trust");
   });
 
-  it("skips a devin judge when bubblewrap is missing rather than failing at spawn", () => {
-    withPlatform("linux", () => {
+  it("skips a devin judge when bubblewrap is missing rather than failing at spawn", async () => {
+    await withPlatform("linux", async () => {
       const { synthesis, calls } = judge("devin", { hasBubblewrap: () => false });
-      expect(synthesis.status).toBe("skipped");
-      expect(synthesis.note).toMatch(/bubblewrap/i);
+      expect((await synthesis).status).toBe("skipped");
+      expect((await synthesis).note).toMatch(/bubblewrap/i);
       expect(calls).toHaveLength(0);
     });
   });

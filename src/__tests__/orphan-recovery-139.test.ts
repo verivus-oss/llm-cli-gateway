@@ -106,10 +106,10 @@ describe("#139 durable-lease DDL idempotency (U13, sqlite)", () => {
     rmSync(tmpDir, { recursive: true, force: true });
   });
 
-  it("creates owner_instance + lease_deadline columns and gateway_instances table on a fresh DB", () => {
+  it("creates owner_instance + lease_deadline columns and gateway_instances table on a fresh DB", async () => {
     // Act
     const store = new SqliteJobStore(dbPath);
-    store.close();
+    await store.close();
 
     // Assert
     const db = openDatabase(dbPath);
@@ -128,7 +128,7 @@ describe("#139 durable-lease DDL idempotency (U13, sqlite)", () => {
     }
   });
 
-  it("migrates a legacy jobs table (no lease columns) idempotently, and re-open is a no-op", () => {
+  it("migrates a legacy jobs table (no lease columns) idempotently, and re-open is a no-op", async () => {
     // Arrange: a legacy jobs table lacking owner_instance / lease_deadline.
     const legacy = openDatabase(dbPath);
     legacy.exec(`
@@ -155,9 +155,9 @@ describe("#139 durable-lease DDL idempotency (U13, sqlite)", () => {
 
     // Act: opening the store migrates the legacy table; a second open is a no-op.
     const first = new SqliteJobStore(dbPath);
-    first.close();
+    await first.close();
     const second = new SqliteJobStore(dbPath);
-    second.close();
+    await second.close();
 
     // Assert
     const db = openDatabase(dbPath);
@@ -188,17 +188,17 @@ describe("#139 SqliteJobStore lease surface (U1-U11)", () => {
     store = new SqliteJobStore(dbPath, undefined, { leaseTtlMs: LEASE_TTL });
   });
 
-  afterEach(() => {
+  afterEach(async () => {
     try {
-      store.close();
+      await store.close();
     } catch {
       /* ignore */
     }
     rmSync(tmpDir, { recursive: true, force: true });
   });
 
-  function start(id: string, extra: Record<string, unknown> = {}): void {
-    store.recordStart({
+  async function start(id: string, extra: Record<string, unknown> = {}): Promise<void> {
+    await store.recordStart({
       id,
       correlationId: `corr-${id}`,
       requestKey: `key-${id}`,
@@ -221,9 +221,9 @@ describe("#139 SqliteJobStore lease surface (U1-U11)", () => {
     }
   }
 
-  it("U7: recordStart persists queued + owner_instance + a non-null lease_deadline", () => {
-    start("j", { ownerHostname: "host-A" });
-    const row = store.getById("j");
+  it("U7: recordStart persists queued + owner_instance + a non-null lease_deadline", async () => {
+    await start("j", { ownerHostname: "host-A" });
+    const row = await store.getById("j");
     expect(row?.status).toBe("queued");
     expect(row?.ownerInstance).toBe("inst-A");
     expect(row?.ownerHostname).toBe("host-A");
@@ -231,64 +231,64 @@ describe("#139 SqliteJobStore lease surface (U1-U11)", () => {
     expect(typeof row?.leaseDeadline).toBe("number");
   });
 
-  it("U4: a live row never has a NULL lease immediately after recordStart", () => {
-    start("j");
-    expect(store.getById("j")?.leaseDeadline).toBeGreaterThan(Date.now() - 1000);
+  it("U4: a live row never has a NULL lease immediately after recordStart", async () => {
+    await start("j");
+    expect((await store.getById("j"))?.leaseDeadline).toBeGreaterThan(Date.now() - 1000);
   });
 
-  it("U8: markRunning transitions queued -> running and stamps the pid", () => {
-    start("j", { transport: "process" });
-    store.markRunning("j", { pid: 4242 });
-    const row = store.getById("j");
+  it("U8: markRunning transitions queued -> running and stamps the pid", async () => {
+    await start("j", { transport: "process" });
+    await store.markRunning("j", { pid: 4242 });
+    const row = await store.getById("j");
     expect(row?.status).toBe("running");
     expect(row?.pid).toBe(4242);
     // idempotent: a second markRunning on a now-running row is a no-op.
-    store.markRunning("j", { pid: 9999 });
-    expect(store.getById("j")?.pid).toBe(4242);
+    await store.markRunning("j", { pid: 9999 });
+    expect((await store.getById("j"))?.pid).toBe(4242);
   });
 
-  it("U1: recoverStaleJobs orphans a running row whose lease has expired", () => {
-    start("j", { transport: "process" });
-    store.markRunning("j", { pid: 100 });
+  it("U1: recoverStaleJobs orphans a running row whose lease has expired", async () => {
+    await start("j", { transport: "process" });
+    await store.markRunning("j", { pid: 100 });
     setLease("j", 1);
-    const orphaned = store.recoverStaleJobs(LEASE_TTL, 300000);
+    const orphaned = await store.recoverStaleJobs(LEASE_TTL, 300000);
     expect(orphaned.map(o => o.id)).toContain("j");
-    expect(store.getById("j")?.status).toBe("orphaned");
+    expect((await store.getById("j"))?.status).toBe("orphaned");
   });
 
-  it("U2: recoverStaleJobs does NOT orphan a row whose lease is still valid", () => {
-    start("j", { transport: "process" });
-    store.markRunning("j", { pid: 100 });
+  it("U2: recoverStaleJobs does NOT orphan a row whose lease is still valid", async () => {
+    await start("j", { transport: "process" });
+    await store.markRunning("j", { pid: 100 });
     const orphaned = store.recoverStaleJobs(LEASE_TTL, 300000);
-    expect(orphaned).toHaveLength(0);
-    expect(store.getById("j")?.status).toBe("running");
+    expect(await orphaned).toHaveLength(0);
+    expect((await store.getById("j"))?.status).toBe("running");
   });
 
-  it("U3: a legacy row with a NULL lease is orphaned (the NULL arm)", () => {
-    start("j", { transport: "process" });
-    store.markRunning("j", { pid: 100 });
+  it("U3: a legacy row with a NULL lease is orphaned (the NULL arm)", async () => {
+    await start("j", { transport: "process" });
+    await store.markRunning("j", { pid: 100 });
     setLease("j", null);
-    const orphaned = store.recoverStaleJobs(LEASE_TTL, 300000);
+    const orphaned = await store.recoverStaleJobs(LEASE_TTL, 300000);
     expect(orphaned.map(o => o.id)).toContain("j");
-    expect(store.getById("j")?.status).toBe("orphaned");
+    expect((await store.getById("j"))?.status).toBe("orphaned");
   });
 
-  it("U9: recoverStaleJobs targets queued too (crash between enqueue and launch)", () => {
-    start("j"); // never markRunning -> stays queued
+  it("U9: recoverStaleJobs targets queued too (crash between enqueue and launch)", async () => {
+    await start("j"); // never markRunning -> stays queued
     setLease("j", 1);
-    const orphaned = store.recoverStaleJobs(LEASE_TTL, 300000);
+    const orphaned = await store.recoverStaleJobs(LEASE_TTL, 300000);
     expect(orphaned.map(o => o.id)).toContain("j");
-    expect(store.getById("j")?.status).toBe("orphaned");
+    expect((await store.getById("j"))?.status).toBe("orphaned");
   });
 
-  it("U5: guarded recordComplete lands a terminal status onto an orphaned row, and is a no-op on a terminal row", () => {
-    start("j", { transport: "process" });
-    store.markRunning("j", { pid: 100 });
+  it("U5: guarded recordComplete lands a terminal status onto an orphaned row, and is a no-op on a terminal row", async () => {
+    await start("j", { transport: "process" });
+    await store.markRunning("j", { pid: 100 });
     setLease("j", 1);
-    store.recoverStaleJobs(LEASE_TTL, 300000);
-    expect(store.getById("j")?.status).toBe("orphaned");
+    await store.recoverStaleJobs(LEASE_TTL, 300000);
+    expect((await store.getById("j"))?.status).toBe("orphaned");
     // completion wins over the mistaken orphan
-    store.recordComplete({
+    await store.recordComplete({
       id: "j",
       status: "completed",
       exitCode: 0,
@@ -298,9 +298,9 @@ describe("#139 SqliteJobStore lease surface (U1-U11)", () => {
       error: null,
       finishedAt: new Date().toISOString(),
     });
-    expect(store.getById("j")?.status).toBe("completed");
+    expect((await store.getById("j"))?.status).toBe("completed");
     // a second completion attempt on the now-terminal row is a no-op
-    store.recordComplete({
+    await store.recordComplete({
       id: "j",
       status: "failed",
       exitCode: 1,
@@ -310,42 +310,42 @@ describe("#139 SqliteJobStore lease surface (U1-U11)", () => {
       error: "nope",
       finishedAt: new Date().toISOString(),
     });
-    expect(store.getById("j")?.status).toBe("completed");
+    expect((await store.getById("j"))?.status).toBe("completed");
   });
 
-  it("U11: dedup treats a live queued job as eligible, but never an orphaned row", () => {
-    start("live");
-    expect(store.findByRequestKey("key-live")?.id).toBe("live");
-    start("dead");
+  it("U11: dedup treats a live queued job as eligible, but never an orphaned row", async () => {
+    await start("live");
+    expect((await store.findByRequestKey("key-live"))?.id).toBe("live");
+    await start("dead");
     setLease("dead", 1);
-    store.recoverStaleJobs(LEASE_TTL, 300000);
-    expect(store.getById("dead")?.status).toBe("orphaned");
-    expect(store.findByRequestKey("key-dead")).toBeNull();
+    await store.recoverStaleJobs(LEASE_TTL, 300000);
+    expect((await store.getById("dead"))?.status).toBe("orphaned");
+    expect(await store.findByRequestKey("key-dead")).toBeNull();
   });
 
-  it("heartbeat advances the lease so a would-be-stale job is not swept", () => {
-    start("j", { transport: "process" });
-    store.markRunning("j", { pid: 100 });
+  it("heartbeat advances the lease so a would-be-stale job is not swept", async () => {
+    await start("j", { transport: "process" });
+    await store.markRunning("j", { pid: 100 });
     setLease("j", 1); // simulate lease about to lapse
-    store.heartbeat("inst-A"); // owner heartbeats: re-extends the lease
+    await store.heartbeat("inst-A"); // owner heartbeats: re-extends the lease
     const orphaned = store.recoverStaleJobs(LEASE_TTL, 300000);
-    expect(orphaned).toHaveLength(0);
-    expect(store.getById("j")?.status).toBe("running");
+    expect(await orphaned).toHaveLength(0);
+    expect((await store.getById("j"))?.status).toBe("running");
   });
 
-  it("http job past leaseTtl but within httpJobGrace is NOT orphaned (grace in predicate)", () => {
-    start("h", { transport: "http" });
+  it("http job past leaseTtl but within httpJobGrace is NOT orphaned (grace in predicate)", async () => {
+    await start("h", { transport: "http" });
     setLease("h", 1); // lease expired, but started_at is recent (within grace)
     const orphaned = store.recoverStaleJobs(LEASE_TTL, 300000);
-    expect(orphaned).toHaveLength(0);
-    expect(store.getById("h")?.status).toBe("queued");
+    expect(await orphaned).toHaveLength(0);
+    expect((await store.getById("h"))?.status).toBe("queued");
   });
 
-  it("registerInstance + gcInstances manage observability rows", () => {
-    store.registerInstance({ instanceId: "inst-A", role: "stdio", hostname: "h1", pid: 1 });
+  it("registerInstance + gcInstances manage observability rows", async () => {
+    await store.registerInstance({ instanceId: "inst-A", role: "stdio", hostname: "h1", pid: 1 });
     // GC with a 0ms horizon removes rows older than now (heartbeat is ~now, so
     // nothing removed immediately); a negative horizon removes everything.
-    expect(store.gcInstances(-1)).toBe(1);
+    expect(await store.gcInstances(-1)).toBe(1);
   });
 });
 
@@ -362,18 +362,18 @@ describe("#139 legacy owner-hostname provenance repair", () => {
     rmSync(tmpDir, { recursive: true, force: true });
   });
 
-  it("retains a backfilled legacy hostname after its instance row is garbage-collected", () => {
+  it("retains a backfilled legacy hostname after its instance row is garbage-collected", async () => {
     const ownerInstance = "legacy-backfill-instance";
     const ownerHostname = "legacy-backfill-host";
     const store = new SqliteJobStore(dbPath);
     try {
-      store.registerInstance({
+      await store.registerInstance({
         instanceId: ownerInstance,
         role: "gateway",
         hostname: ownerHostname,
         pid: 1234,
       });
-      store.recordStart({
+      await store.recordStart({
         id: "legacy-backfill-known",
         correlationId: "legacy-backfill-known-corr",
         requestKey: "legacy-backfill-known-key",
@@ -383,7 +383,7 @@ describe("#139 legacy owner-hostname provenance repair", () => {
         pid: null,
         ownerInstance,
       });
-      store.recordStart({
+      await store.recordStart({
         id: "legacy-backfill-unknown",
         correlationId: "legacy-backfill-unknown-corr",
         requestKey: "legacy-backfill-unknown-key",
@@ -394,14 +394,14 @@ describe("#139 legacy owner-hostname provenance repair", () => {
         ownerInstance: "already-gone-instance",
       });
     } finally {
-      store.close();
+      await store.close();
     }
 
     const reopened = new SqliteJobStore(dbPath);
     try {
-      expect(reopened.getById("legacy-backfill-known")?.ownerHostname).toBe(ownerHostname);
+      expect((await reopened.getById("legacy-backfill-known"))?.ownerHostname).toBe(ownerHostname);
       // An unobservable historical owner remains unknown rather than guessed.
-      expect(reopened.getById("legacy-backfill-unknown")?.ownerHostname).toBeNull();
+      expect((await reopened.getById("legacy-backfill-unknown"))?.ownerHostname).toBeNull();
 
       const db = openDatabase(dbPath);
       try {
@@ -414,8 +414,8 @@ describe("#139 legacy owner-hostname provenance repair", () => {
       } finally {
         db.close();
       }
-      expect(reopened.gcInstances(-1)).toBe(1);
-      expect(reopened.selectOrphanedProcessCandidates(ownerHostname)).toEqual([
+      expect(await reopened.gcInstances(-1)).toBe(1);
+      expect(await reopened.selectOrphanedProcessCandidates(ownerHostname)).toEqual([
         {
           id: "legacy-backfill-known",
           pid: null,
@@ -425,7 +425,7 @@ describe("#139 legacy owner-hostname provenance repair", () => {
         },
       ]);
     } finally {
-      reopened.close();
+      await reopened.close();
     }
   });
 });
@@ -439,8 +439,8 @@ describe("#139 MemoryJobStore parity (U12)", () => {
   });
   afterEach(() => store.close());
 
-  function start(id: string, extra: Record<string, unknown> = {}): void {
-    store.recordStart({
+  async function start(id: string, extra: Record<string, unknown> = {}): Promise<void> {
+    await store.recordStart({
       id,
       correlationId: `corr-${id}`,
       requestKey: `key-${id}`,
@@ -453,28 +453,28 @@ describe("#139 MemoryJobStore parity (U12)", () => {
     });
   }
 
-  it("recordStart persists queued with a non-null lease; markRunning flips to running", () => {
-    start("j", { transport: "process" });
-    expect(store.getById("j")?.status).toBe("queued");
-    expect(store.getById("j")?.leaseDeadline).not.toBeNull();
-    store.markRunning("j", { pid: 7 });
-    expect(store.getById("j")?.status).toBe("running");
-    expect(store.getById("j")?.pid).toBe(7);
+  it("recordStart persists queued with a non-null lease; markRunning flips to running", async () => {
+    await start("j", { transport: "process" });
+    expect((await store.getById("j"))?.status).toBe("queued");
+    expect((await store.getById("j"))?.leaseDeadline).not.toBeNull();
+    await store.markRunning("j", { pid: 7 });
+    expect((await store.getById("j"))?.status).toBe("running");
+    expect((await store.getById("j"))?.pid).toBe(7);
   });
 
-  it("recoverStaleJobs is a per-process no-op; register/heartbeat/deregister no-op", () => {
-    start("j");
-    expect(store.recoverStaleJobs(LEASE_TTL, 300000)).toHaveLength(0);
-    expect(store.selectStaleProcessCandidates(LEASE_TTL, 300000)).toHaveLength(0);
-    store.registerInstance({ instanceId: "inst-A", role: null, hostname: null, pid: null });
-    store.heartbeat("inst-A");
-    store.deregisterInstance("inst-A");
-    expect(store.gcInstances(0)).toBe(0);
+  it("recoverStaleJobs is a per-process no-op; register/heartbeat/deregister no-op", async () => {
+    await start("j");
+    expect(await store.recoverStaleJobs(LEASE_TTL, 300000)).toHaveLength(0);
+    expect(await store.selectStaleProcessCandidates(LEASE_TTL, 300000)).toHaveLength(0);
+    await store.registerInstance({ instanceId: "inst-A", role: null, hostname: null, pid: null });
+    await store.heartbeat("inst-A");
+    await store.deregisterInstance("inst-A");
+    expect(await store.gcInstances(0)).toBe(0);
   });
 
-  it("guarded recordComplete is a no-op on an already-terminal row", () => {
-    start("j");
-    store.recordComplete({
+  it("guarded recordComplete is a no-op on an already-terminal row", async () => {
+    await start("j");
+    await store.recordComplete({
       id: "j",
       status: "completed",
       exitCode: 0,
@@ -484,7 +484,7 @@ describe("#139 MemoryJobStore parity (U12)", () => {
       error: null,
       finishedAt: new Date().toISOString(),
     });
-    store.recordComplete({
+    await store.recordComplete({
       id: "j",
       status: "failed",
       exitCode: 1,
@@ -494,13 +494,13 @@ describe("#139 MemoryJobStore parity (U12)", () => {
       error: "no",
       finishedAt: new Date().toISOString(),
     });
-    expect(store.getById("j")?.status).toBe("completed");
-    expect(store.getById("j")?.stdout).toBe("a");
+    expect((await store.getById("j"))?.status).toBe("completed");
+    expect((await store.getById("j"))?.stdout).toBe("a");
   });
 
-  it("dedup treats a live queued job as eligible", () => {
-    start("j");
-    expect(store.findByRequestKey("key-j")?.id).toBe("j");
+  it("dedup treats a live queued job as eligible", async () => {
+    await start("j");
+    expect((await store.findByRequestKey("key-j"))?.id).toBe("j");
   });
 });
 
@@ -522,12 +522,12 @@ describe("#139 AsyncJobManager lease lifecycle (M/N series)", () => {
       recordStart: () => {},
       markRunning: () => {},
       registerInstance: () => {},
-      heartbeat: () => {},
+      heartbeat: () => ({ instanceRowRefreshed: true, jobLeasesAdvanced: 0 }),
       deregisterInstance: () => {},
       selectStaleProcessCandidates: () => [],
       recoverStaleJobs: () => [],
       gcInstances: () => 0,
-      recordOutput: () => {},
+      recordOutput: () => true,
       recordComplete: () => {},
       getById: () => null,
       findByRequestKey: () => null,
@@ -548,23 +548,27 @@ describe("#139 AsyncJobManager lease lifecycle (M/N series)", () => {
     }
   }
 
-  function runHeartbeatTick(manager: AsyncJobManager): void {
-    (manager as unknown as { onHeartbeatTick: (intervalMs: number) => void }).onHeartbeatTick(
-      15_000
-    );
+  // Awaited: the tick is async now, and its single-flight guard SKIPS a tick
+  // that overlaps one still running. Firing three without awaiting would run
+  // one and drop two, which is not what "three consecutive successes" means.
+  async function runHeartbeatTick(manager: AsyncJobManager): Promise<void> {
+    await (
+      manager as unknown as { onHeartbeatTick: (intervalMs: number) => Promise<void> }
+    ).onHeartbeatTick(15_000);
   }
 
-  function runEviction(manager: AsyncJobManager): void {
-    (manager as unknown as { evictCompletedJobs: () => void }).evictCompletedJobs();
+  async function runEviction(manager: AsyncJobManager): Promise<void> {
+    await (manager as unknown as { evictCompletedJobs: () => Promise<void> }).evictCompletedJobs();
   }
 
-  it("M6: registers before admit; a job recorded after construction is stamped with the manager's instance id", () => {
+  it("M6: registers before admit; a job recorded after construction is stamped with the manager's instance id", async () => {
     const store = new SqliteJobStore(dbPath);
     const mgr = new AsyncJobManager(noopLogger, undefined, store);
+    await mgr.whenStartupSettled();
     expect(instanceRows()).toBe(1);
     // recordStart via the store using the manager's instance id (the manager
     // stamps this on every job it admits).
-    store.recordStart({
+    await store.recordStart({
       id: "post-ctor",
       correlationId: "c",
       requestKey: "k",
@@ -574,20 +578,22 @@ describe("#139 AsyncJobManager lease lifecycle (M/N series)", () => {
       pid: null,
       ownerInstance: mgr.getInstanceId(),
     });
-    expect(store.getById("post-ctor")?.ownerInstance).toBe(mgr.getInstanceId());
-    store.close();
+    expect((await store.getById("post-ctor"))?.ownerInstance).toBe(mgr.getInstanceId());
+    await store.close();
   });
 
   it("M7: a null-store (isolate-mode) manager registers nothing and disposes as a no-op", async () => {
     const mgr = new AsyncJobManager(noopLogger, undefined, null);
+    await mgr.whenStartupSettled();
     expect(mgr.canAdmitDurableJobs()).toBe(false);
     await expect(mgr.dispose()).resolves.toBeUndefined();
   });
 
-  it("M8: a durable queued row hydrates with exited=false", () => {
+  it("M8: a durable queued row hydrates with exited=false", async () => {
     const store = new SqliteJobStore(dbPath);
     const mgr = new AsyncJobManager(noopLogger, undefined, store);
-    store.recordStart({
+    await mgr.whenStartupSettled();
+    await store.recordStart({
       id: "q",
       correlationId: "c",
       requestKey: "k",
@@ -598,36 +604,38 @@ describe("#139 AsyncJobManager lease lifecycle (M/N series)", () => {
       ownerInstance: mgr.getInstanceId(),
     });
     // Not in the manager's in-memory map -> hydrated from the store.
-    const snap = mgr.getJobSnapshot("q");
+    const snap = await mgr.getJobSnapshot("q");
     expect(snap?.status).toBe("queued");
     expect(snap?.exited).toBe(false);
-    store.close();
+    await store.close();
   });
 
-  it("N1: a forced durable recordStart failure fails the request and leaves no running job", () => {
+  it("N1: a forced durable recordStart failure fails the request and leaves no running job", async () => {
     const store = mockStore({
       recordStart: () => {
         throw new Error("db down");
       },
     });
     const mgr = new AsyncJobManager(noopLogger, undefined, store);
-    expect(() => mgr.startJobWithDedup("claude", ["-p", "x"], "corr")).toThrow(
+    await mgr.whenStartupSettled();
+    await expect(mgr.startJobWithDedup("claude", ["-p", "x"], "corr")).rejects.toThrow(
       /Durable job admission failed/
     );
     // fail-closed: the acquired running slot was released.
     expect(mgr.getLimiterSnapshot().running).toBe(0);
-    expect(mgr.getJobSnapshot("corr")).toBeNull();
+    expect(await mgr.getJobSnapshot("corr")).toBeNull();
   });
 
-  it("N2: when registration fails, durable admission is disabled and new async work is rejected", () => {
+  it("N2: when registration fails, durable admission is disabled and new async work is rejected", async () => {
     const store = mockStore({
       registerInstance: () => {
         throw new Error("register failed");
       },
     });
     const mgr = new AsyncJobManager(noopLogger, undefined, store);
+    await mgr.whenStartupSettled();
     expect(mgr.canAdmitDurableJobs()).toBe(false);
-    expect(() => mgr.startJobWithDedup("claude", ["-p", "x"], "corr")).toThrow(
+    await expect(mgr.startJobWithDedup("claude", ["-p", "x"], "corr")).rejects.toThrow(
       /Durable async admission is disabled/
     );
   });
@@ -644,12 +652,13 @@ describe("#139 AsyncJobManager lease lifecycle (M/N series)", () => {
       },
     });
     const mgr = new AsyncJobManager(noopLogger, undefined, store);
+    await mgr.whenStartupSettled();
     try {
       // Construction runs one guarded sweep, and the explicit call exercises a
       // later periodic/startup-style cycle. Neither may sweep without having
       // first read candidates and preserved any live PID grace.
       expect(recoverCalls).toBe(0);
-      mgr.runOrphanSweepNow();
+      await mgr.runOrphanSweepNow();
       expect(recoverCalls).toBe(0);
     } finally {
       await mgr.dispose();
@@ -665,15 +674,17 @@ describe("#139 AsyncJobManager lease lifecycle (M/N series)", () => {
       },
       heartbeat: () => {
         if (failHeartbeat) throw new Error("transient store outage");
+        return { instanceRowRefreshed: true, jobLeasesAdvanced: 0 };
       },
     });
     const mgr = new AsyncJobManager(noopLogger, undefined, store);
+    await mgr.whenStartupSettled();
     expect(mgr.canAdmitDurableJobs()).toBe(true);
 
     failHeartbeat = true;
-    runHeartbeatTick(mgr);
-    runHeartbeatTick(mgr);
-    runHeartbeatTick(mgr);
+    await runHeartbeatTick(mgr);
+    await runHeartbeatTick(mgr);
+    await runHeartbeatTick(mgr);
     expect(mgr.canAdmitDurableJobs()).toBe(false);
     expect(mgr.getDurableAdmissionHealth()).toMatchObject({
       storeAttached: true,
@@ -684,10 +695,10 @@ describe("#139 AsyncJobManager lease lifecycle (M/N series)", () => {
     });
 
     failHeartbeat = false;
-    runHeartbeatTick(mgr);
-    runHeartbeatTick(mgr);
+    await runHeartbeatTick(mgr);
+    await runHeartbeatTick(mgr);
     expect(mgr.canAdmitDurableJobs()).toBe(false);
-    runHeartbeatTick(mgr);
+    await runHeartbeatTick(mgr);
 
     expect(mgr.canAdmitDurableJobs()).toBe(true);
     expect(registerCalls).toBe(2); // initial admission + recovery re-registration
@@ -707,12 +718,13 @@ describe("#139 AsyncJobManager lease lifecycle (M/N series)", () => {
       },
     });
     const mgr = new AsyncJobManager(noopLogger, undefined, store);
+    await mgr.whenStartupSettled();
     expect(mgr.canAdmitDurableJobs()).toBe(false);
 
     registrationAvailable = true;
-    runHeartbeatTick(mgr);
-    runHeartbeatTick(mgr);
-    runHeartbeatTick(mgr);
+    await runHeartbeatTick(mgr);
+    await runHeartbeatTick(mgr);
+    await runHeartbeatTick(mgr);
 
     expect(mgr.canAdmitDurableJobs()).toBe(true);
     expect(mgr.getDurableAdmissionHealth().lastHeartbeatRecoveryAt).toMatch(/T/);
@@ -726,6 +738,7 @@ describe("#139 AsyncJobManager lease lifecycle (M/N series)", () => {
     const store = mockStore({
       heartbeat: () => {
         if (failHeartbeat) throw new Error("transient store outage");
+        return { instanceRowRefreshed: true, jobLeasesAdvanced: 0 };
       },
       gcInstances: () => {
         gcCalls++;
@@ -742,9 +755,9 @@ describe("#139 AsyncJobManager lease lifecycle (M/N series)", () => {
 
     try {
       failHeartbeat = true;
-      runHeartbeatTick(mgr);
-      runHeartbeatTick(mgr);
-      runHeartbeatTick(mgr);
+      await runHeartbeatTick(mgr);
+      await runHeartbeatTick(mgr);
+      await runHeartbeatTick(mgr);
       expect(mgr.canAdmitDurableJobs()).toBe(false);
 
       await vi.advanceTimersByTimeAsync(1);
@@ -761,6 +774,7 @@ describe("#139 AsyncJobManager lease lifecycle (M/N series)", () => {
     const store = mockStore({
       heartbeat: () => {
         if (failHeartbeat) throw new Error("transient store outage");
+        return { instanceRowRefreshed: true, jobLeasesAdvanced: 0 };
       },
       evictExpired: () => {
         evictionCalls++;
@@ -768,15 +782,16 @@ describe("#139 AsyncJobManager lease lifecycle (M/N series)", () => {
       },
     });
     const mgr = new AsyncJobManager(noopLogger, undefined, store);
+    await mgr.whenStartupSettled();
 
     try {
       failHeartbeat = true;
-      runHeartbeatTick(mgr);
-      runHeartbeatTick(mgr);
-      runHeartbeatTick(mgr);
+      await runHeartbeatTick(mgr);
+      await runHeartbeatTick(mgr);
+      await runHeartbeatTick(mgr);
       expect(mgr.canAdmitDurableJobs()).toBe(false);
 
-      runEviction(mgr);
+      await runEviction(mgr);
       expect(evictionCalls).toBe(0);
     } finally {
       await mgr.dispose();
@@ -786,12 +801,13 @@ describe("#139 AsyncJobManager lease lifecycle (M/N series)", () => {
   it("M9/M10: dispose deregisters the instance when no owned work remains, and is idempotent", async () => {
     const store = new SqliteJobStore(dbPath);
     const mgr = new AsyncJobManager(noopLogger, undefined, store);
+    await mgr.whenStartupSettled();
     expect(instanceRows()).toBe(1);
     await mgr.dispose();
     expect(instanceRows()).toBe(0);
     // idempotent
     await expect(mgr.dispose()).resolves.toBeUndefined();
-    store.close();
+    await store.close();
   });
 });
 
@@ -818,10 +834,10 @@ describe("#139 cross-LLM review round-1 regressions", () => {
 
   // Codex/Grok finding: markRunning must report whether it actually
   // transitioned, so a process launch fail-closes against a recovered row.
-  it("markRunning returns true for a queued row and false once it is orphaned", () => {
+  it("markRunning returns true for a queued row and false once it is orphaned", async () => {
     const store = new SqliteJobStore(dbPath, undefined, { leaseTtlMs: 90000 });
     try {
-      store.recordStart({
+      await store.recordStart({
         id: "j",
         correlationId: "c",
         requestKey: "k",
@@ -832,25 +848,25 @@ describe("#139 cross-LLM review round-1 regressions", () => {
         ownerInstance: "inst-A",
         transport: "process",
       });
-      expect(store.markRunning("j", { pid: 10 })).toBe(true);
+      expect(await store.markRunning("j", { pid: 10 })).toBe(true);
       // Simulate the row being swept while it was queued: force it orphaned.
       const db = openDatabase(dbPath);
       db.prepare("UPDATE jobs SET status='orphaned' WHERE id='j'").run();
       db.close();
-      expect(store.markRunning("j", { pid: 20 })).toBe(false);
+      expect(await store.markRunning("j", { pid: 20 })).toBe(false);
     } finally {
-      store.close();
+      await store.close();
     }
   });
 
   // Grok finding: the sqlite sweep must be a single guarded UPDATE...RETURNING;
   // a fresh-lease row in the same batch is never orphaned, and the returned list
   // is exactly the rows actually flipped.
-  it("recoverStaleJobs orphans only the expired rows and returns exactly them", () => {
+  it("recoverStaleJobs orphans only the expired rows and returns exactly them", async () => {
     const store = new SqliteJobStore(dbPath, undefined, { leaseTtlMs: 90000 });
     try {
       for (const id of ["dead", "live"]) {
-        store.recordStart({
+        await store.recordStart({
           id,
           correlationId: `c-${id}`,
           requestKey: `k-${id}`,
@@ -862,30 +878,31 @@ describe("#139 cross-LLM review round-1 regressions", () => {
         });
       }
       setLease(dbPath, "dead", 1); // expired; "live" keeps its fresh lease
-      const orphaned = store.recoverStaleJobs(90000, 300000);
+      const orphaned = await store.recoverStaleJobs(90000, 300000);
       expect(orphaned.map(o => o.id)).toEqual(["dead"]);
-      expect(store.getById("dead")?.status).toBe("orphaned");
-      expect(store.getById("live")?.status).toBe("queued");
+      expect((await store.getById("dead"))?.status).toBe("orphaned");
+      expect((await store.getById("live"))?.status).toBe("queued");
     } finally {
-      store.close();
+      await store.close();
     }
   });
 
   // Codex/Grok finding: the advisory pid grace must be strictly one-shot. A
   // live same-host pid buys exactly one extra leaseTtl (advance + clear pid);
   // the next sweep no longer probes it and orphans it.
-  it("the advisory pid grace is one-shot: advance+clear pid, then orphaned next sweep", () => {
+  it("the advisory pid grace is one-shot: advance+clear pid, then orphaned next sweep", async () => {
     const store = new SqliteJobStore(dbPath, undefined, { leaseTtlMs: 90000 });
     const mgr = new AsyncJobManager(noopLogger, undefined, store);
+    await mgr.whenStartupSettled();
     try {
       // A dead owner's process job whose recorded pid is alive on THIS host.
-      store.registerInstance({
+      await store.registerInstance({
         instanceId: "dead-owner",
         role: "stdio",
         hostname: os.hostname(),
         pid: process.pid,
       });
-      store.recordStart({
+      await store.recordStart({
         id: "reused",
         correlationId: "c",
         requestKey: "k",
@@ -896,24 +913,24 @@ describe("#139 cross-LLM review round-1 regressions", () => {
         ownerInstance: "dead-owner",
         transport: "process",
       });
-      store.markRunning("reused", { pid: process.pid });
+      await store.markRunning("reused", { pid: process.pid });
       setLease(dbPath, "reused", 1); // lease expired
 
       // Sweep 1: pid is alive + same host -> grace (advance lease, clear pid),
       // NOT orphaned.
-      mgr.runOrphanSweepNow();
-      expect(store.getById("reused")?.status).toBe("running");
-      expect(store.getById("reused")?.pid).toBeNull(); // pid cleared -> one-shot
-      expect(store.getById("reused")?.leaseDeadline).toBeGreaterThan(Date.now());
+      await mgr.runOrphanSweepNow();
+      expect((await store.getById("reused"))?.status).toBe("running");
+      expect((await store.getById("reused"))?.pid).toBeNull(); // pid cleared -> one-shot
+      expect((await store.getById("reused"))?.leaseDeadline).toBeGreaterThan(Date.now());
 
       // The extra leaseTtl lapses.
       setLease(dbPath, "reused", 1);
       // Sweep 2: pid is NULL now, so it is not re-probed and IS orphaned.
-      mgr.runOrphanSweepNow();
-      expect(store.getById("reused")?.status).toBe("orphaned");
+      await mgr.runOrphanSweepNow();
+      expect((await store.getById("reused"))?.status).toBe("orphaned");
     } finally {
-      mgr.dispose();
-      store.close();
+      await mgr.dispose();
+      await store.close();
     }
   });
 });

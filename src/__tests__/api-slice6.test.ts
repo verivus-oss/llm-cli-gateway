@@ -1,3 +1,4 @@
+import { NoopFlightRecorder } from "../flight-recorder.js";
 import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -261,7 +262,7 @@ describe("Slice 6: resources models:// and sessions:// for API providers", () =>
     new ResourceProvider(
       sessionManager,
       new PerformanceMetrics(),
-      { queryRequests: () => [] },
+      new NoopFlightRecorder(),
       null,
       providers
     );

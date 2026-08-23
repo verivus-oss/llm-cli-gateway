@@ -33,7 +33,7 @@ describe("AsyncJobManager terminal hooks", () => {
     });
 
     try {
-      const successful = manager.startJobWithDedup(
+      const successful = await manager.startJobWithDedup(
         "sh" as LlmCli,
         ["-c", "true"],
         "terminal-hook-success",
@@ -51,13 +51,13 @@ describe("AsyncJobManager terminal hooks", () => {
 
       const successfulOutcome = manager.awaitTerminalHook(successful.snapshot.id);
       await hookStarted;
-      expect(store.getById(successful.snapshot.id)?.kitTerminalFinalized).toBe(false);
+      expect((await store.getById(successful.snapshot.id))?.kitTerminalFinalized).toBe(false);
 
       releaseHook();
       await expect(successfulOutcome).resolves.toBe(true);
-      expect(store.getById(successful.snapshot.id)?.kitTerminalFinalized).toBe(true);
+      expect((await store.getById(successful.snapshot.id))?.kitTerminalFinalized).toBe(true);
 
-      const failed = manager.startJobWithDedup(
+      const failed = await manager.startJobWithDedup(
         "sh" as LlmCli,
         ["-c", "true"],
         "terminal-hook-failure",
@@ -73,10 +73,10 @@ describe("AsyncJobManager terminal hooks", () => {
       );
 
       await expect(manager.awaitTerminalHook(failed.snapshot.id)).resolves.toBe(false);
-      expect(store.getById(failed.snapshot.id)?.kitTerminalFinalized).toBe(false);
+      expect((await store.getById(failed.snapshot.id))?.kitTerminalFinalized).toBe(false);
     } finally {
       await manager.dispose();
-      store.close();
+      await store.close();
       rmSync(testDir, { recursive: true, force: true });
     }
   });

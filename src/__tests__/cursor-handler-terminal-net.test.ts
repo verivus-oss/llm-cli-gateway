@@ -140,7 +140,7 @@ describe("handleCursorRequest terminal net: inline (Mode A) + seam + D5 logs", (
   let logger: ReturnType<typeof capturingLogger>;
   const assertUpstreamCliArgsMock = vi.mocked(assertUpstreamCliArgs);
 
-  beforeEach(() => {
+  beforeEach(async () => {
     tmp = mkdtempSync(join(tmpdir(), "cursor-terminal-net-"));
     flight = new FlightRecorder(join(tmp, "logs.db"));
     manager = new AsyncJobManager(noopLogger);
@@ -153,7 +153,7 @@ describe("handleCursorRequest terminal net: inline (Mode A) + seam + D5 logs", (
 
   afterEach(async () => {
     await manager.dispose();
-    flight.close();
+    await flight.close();
     rmSync(tmp, { recursive: true, force: true });
     vi.restoreAllMocks();
   });
@@ -281,7 +281,7 @@ describe("handleCursorRequest terminal net: deferred (Mode B) + D4 split", () =>
   let flight: FlightRecorder;
   let sessions: FileSessionManager;
 
-  beforeEach(() => {
+  beforeEach(async () => {
     originalDeadline = process.env.SYNC_DEADLINE_MS;
     process.env.SYNC_DEADLINE_MS = "25";
     tmp = mkdtempSync(join(tmpdir(), "cursor-terminal-net-defer-"));
@@ -291,10 +291,10 @@ describe("handleCursorRequest terminal net: deferred (Mode B) + D4 split", () =>
     vi.resetModules();
   });
 
-  afterEach(() => {
+  afterEach(async () => {
     if (originalDeadline === undefined) delete process.env.SYNC_DEADLINE_MS;
     else process.env.SYNC_DEADLINE_MS = originalDeadline;
-    flight.close();
+    await flight.close();
     rmSync(tmp, { recursive: true, force: true });
     vi.resetModules();
     vi.restoreAllMocks();
@@ -339,7 +339,7 @@ describe("handleCursorRequest terminal net: deferred (Mode B) + D4 split", () =>
       expect(logStart).toHaveBeenCalledTimes(1);
       expect(arm).toHaveBeenCalledTimes(1);
       expect(logComplete).not.toHaveBeenCalled();
-      manager.cancelJob(body.jobId);
+      await manager.cancelJob(body.jobId);
     } finally {
       slot.release();
       await manager.dispose();
@@ -382,7 +382,7 @@ describe("handleCursorRequest terminal net: deferred (Mode B) + D4 split", () =>
       expect(mintedBody.status).toBe("deferred");
       expect(mintedBody.sessionId).toMatch(/^gw-/);
       expect(updateUsage).not.toHaveBeenCalled();
-      manager.cancelJob(mintedBody.jobId);
+      await manager.cancelJob(mintedBody.jobId);
 
       // User-provided: usage update fires for the provided id.
       const providedId = "33333333-3333-4333-8333-333333333333";
@@ -396,7 +396,7 @@ describe("handleCursorRequest terminal net: deferred (Mode B) + D4 split", () =>
       expect(providedBody.status).toBe("deferred");
       expect(providedBody.sessionId).toBe(providedId);
       expect(updateUsage).toHaveBeenCalledWith(providedId);
-      manager.cancelJob(providedBody.jobId);
+      await manager.cancelJob(providedBody.jobId);
     } finally {
       slot.release();
       await manager.dispose();

@@ -1,14 +1,17 @@
-import { describe, it, expect, beforeEach, afterEach } from "vitest";
+import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 import { mkdtempSync, rmSync } from "fs";
 import os from "os";
 import path from "path";
 import { createRequire } from "module";
+import { randomUUID } from "node:crypto";
 import { buildCliResponse, createGatewayServer, resolveEffectiveCompression } from "../index.js";
 import { readPersistedRequest } from "../cache-stats.js";
 import { FlightRecorder } from "../flight-recorder.js";
 import { AsyncJobManager } from "../async-job-manager.js";
-import { MemoryJobStore } from "../job-store.js";
+import { MemoryJobStore, SqliteJobStore } from "../job-store.js";
 import { NoopFlightRecorder } from "../flight-recorder.js";
+import type { CompressionTelemetry } from "../flight-recorder.js";
+import type { KitExecutionRef } from "../personal-config-types.js";
 import { runWithRequestContext } from "../request-context.js";
 
 const require = createRequire(import.meta.url);
@@ -57,7 +60,7 @@ function minimalPrep(overrides: Record<string, unknown> = {}): any {
 }
 
 describe("C1/C7 byte-identity through buildCliResponse (spec 9.1)", () => {
-  it("extractUsageAndCost sees identical raw stdout with compression on and off", () => {
+  it("extractUsageAndCost sees identical raw stdout with compression on and off", async () => {
     const stdout = codexStdout(REPLY);
     const off = buildCliResponse(
       "codex",
@@ -105,7 +108,7 @@ describe("C1/C7 byte-identity through buildCliResponse (spec 9.1)", () => {
     expect(on.content[0].text.length).toBeLessThan(off.content[0].text.length);
   });
 
-  it("content[0].text and structuredContent.response mirror the same compressed string", () => {
+  it("content[0].text and structuredContent.response mirror the same compressed string", async () => {
     const on = buildCliResponse(
       "codex",
       codexStdout(REPLY),
@@ -125,7 +128,7 @@ describe("C1/C7 byte-identity through buildCliResponse (spec 9.1)", () => {
 });
 
 describe("review-integrity ordering (spec 5.1 / 9.8)", () => {
-  it("appends warnings uncompressed AFTER the compressed body", () => {
+  it("appends warnings uncompressed AFTER the compressed body", async () => {
     const prep = minimalPrep({
       reviewIntegrity: {
         violations: [
@@ -165,17 +168,17 @@ describe("review-integrity ordering (spec 5.1 / 9.8)", () => {
 describe("byte-recovery escape hatch (spec 5.3 / 9.10)", () => {
   let tmpDir: string;
   let dbPath: string;
-  beforeEach(() => {
+  beforeEach(async () => {
     tmpDir = mkdtempSync(path.join(os.tmpdir(), "compress-escape-"));
     dbPath = path.join(tmpDir, "logs.db");
   });
   afterEach(() => rmSync(tmpDir, { recursive: true, force: true }));
 
-  it("llm_request_result returns the pre-compression stored response", () => {
+  it("llm_request_result returns the pre-compression stored response", async () => {
     const fr = new FlightRecorder(dbPath);
     const raw = REPLY; // what a codex/gemini FR site would store (pre-compression)
-    fr.logStart({ correlationId: "corr-esc", cli: "codex", model: "gpt-5.5", prompt: "p" });
-    fr.logComplete("corr-esc", {
+    await fr.logStart({ correlationId: "corr-esc", cli: "codex", model: "gpt-5.5", prompt: "p" });
+    await fr.logComplete("corr-esc", {
       response: raw,
       durationMs: 5,
       retryCount: 0,
@@ -185,24 +188,51 @@ describe("byte-recovery escape hatch (spec 5.3 / 9.10)", () => {
       status: "completed",
     });
     // Even after compression telemetry is recorded, the stored response is raw.
-    fr.recordCompressionTelemetry("corr-esc", {
+    await fr.recordCompressionTelemetry("corr-esc", {
       route: "log",
       transforms: ["dedup", "leading-note"],
       originalChars: raw.length,
       compressedChars: 100,
       estimatedTokensSaved: 40,
     });
-    const record = readPersistedRequest(fr, "corr-esc", { maxChars: 100000 });
+    const record = await readPersistedRequest(fr, "corr-esc", { maxChars: 100000 });
     expect(record?.response).toBe(raw);
     expect(record?.response).not.toContain("[[gateway-");
-    fr.close();
+    await fr.close();
   });
 });
 
 describe("async llm_job_result wiring (spec 5.2 / 5.4 / 9.9)", () => {
-  function seed(store: MemoryJobStore, id: string, compress: boolean, ndjson: string): void {
+  const KIT_EXECUTION: KitExecutionRef = {
+    version: 1,
+    releaseId: "release-telemetry",
+    configStamp: "stamp-telemetry",
+    scopeRoot: null,
+    scopeHead: null,
+    contextIdentity: "c".repeat(64),
+  };
+
+  /** Captures what llm_job_result actually recorded, rather than swallowing it. */
+  class CompressionCapturingFlightRecorder extends NoopFlightRecorder {
+    readonly compression: Array<{ correlationId: string; telemetry: CompressionTelemetry }> = [];
+
+    override async recordCompressionTelemetry(
+      correlationId: string,
+      telemetry: CompressionTelemetry
+    ): Promise<void> {
+      this.compression.push({ correlationId, telemetry });
+    }
+  }
+
+  async function seed(
+    store: MemoryJobStore,
+    id: string,
+    compress: boolean,
+    ndjson: string,
+    kit?: { kitExecution: KitExecutionRef; kitSessionId: string }
+  ): Promise<void> {
     const now = new Date().toISOString();
-    store.recordStart({
+    await store.recordStart({
       id,
       correlationId: `corr-${id}`,
       requestKey: `k-${id}`,
@@ -213,8 +243,9 @@ describe("async llm_job_result wiring (spec 5.2 / 5.4 / 9.9)", () => {
       startedAt: now,
       pid: null,
       ownerPrincipal: "local",
+      ...(kit ?? {}),
     });
-    store.recordComplete({
+    await store.recordComplete({
       id,
       status: "completed",
       exitCode: 0,
@@ -244,11 +275,13 @@ describe("async llm_job_result wiring (spec 5.2 / 5.4 / 9.9)", () => {
   async function callJobResult(
     store: MemoryJobStore,
     jobId: string,
-    params: Record<string, unknown> = {}
+    params: Record<string, unknown> = {},
+    recorder: NoopFlightRecorder = new NoopFlightRecorder()
   ): Promise<any> {
-    const mgr = new AsyncJobManager(undefined, undefined, store, new NoopFlightRecorder());
+    const mgr = new AsyncJobManager(undefined, undefined, store, recorder);
     const server = createGatewayServer({
       asyncJobManager: mgr,
+      flightRecorder: recorder,
       compression: { enabled: false, sources: { configFile: null } },
     });
     const tool = (server as any)._registeredTools["llm_job_result"];
@@ -261,7 +294,7 @@ describe("async llm_job_result wiring (spec 5.2 / 5.4 / 9.9)", () => {
   it("off keeps raw NDJSON, indented envelope, and parsed.text", async () => {
     const store = new MemoryJobStore();
     const nd = claudeNdjson(REPLY);
-    seed(store, "joff", false, nd);
+    await seed(store, "joff", false, nd);
     const env = await callJobResult(store, "joff");
     expect(env.result.stdout).toContain('"type":"assistant"');
     expect(typeof env.parsed.text).toBe("string");
@@ -270,7 +303,7 @@ describe("async llm_job_result wiring (spec 5.2 / 5.4 / 9.9)", () => {
   it("on swaps NDJSON for compressed prose, compacts the envelope, omits parsed.text, keeps usage", async () => {
     const store = new MemoryJobStore();
     const nd = claudeNdjson(REPLY);
-    seed(store, "jon", true, nd);
+    await seed(store, "jon", true, nd);
     const raw = await callJobResult(store, "jon");
     expect(raw.result.stdout.startsWith("[[gateway-note")).toBe(true);
     expect(raw.result.stdout).not.toContain('"type":"assistant"');
@@ -279,10 +312,86 @@ describe("async llm_job_result wiring (spec 5.2 / 5.4 / 9.9)", () => {
     expect(raw.parsed.usage).toBeTruthy();
   });
 
+  it("records compression telemetry for a NON-Kit job", async () => {
+    // The property that broke. `personalKitJob` was
+    // `Boolean(asyncJobManager.getJobKitExecution(jobId))`; getJobKitExecution
+    // became async with the store, and Boolean(promise) is always true, so
+    // safeRecordCompression's suppressForPersonalKit argument was true for
+    // EVERY job and recordCompressionTelemetry was never called from
+    // llm_job_result at all. Nothing failed, nothing logged, the telemetry
+    // simply stopped existing.
+    const store = new MemoryJobStore();
+    await seed(store, "jtel", true, claudeNdjson(REPLY));
+    const recorder = new CompressionCapturingFlightRecorder();
+    const raw = await callJobResult(store, "jtel", {}, recorder);
+    // Compression really happened, so telemetry is owed.
+    expect(raw.result.stdout.startsWith("[[gateway-note")).toBe(true);
+    expect(recorder.compression).toHaveLength(1);
+    expect(recorder.compression[0]!.correlationId).toBe("corr-jtel");
+    expect(recorder.compression[0]!.telemetry.compressedChars).toBeGreaterThan(0);
+  });
+
+  it("still SUPPRESSES compression telemetry for a Kit job held in memory", async () => {
+    // The control for the fix above. Awaiting the call must not quietly delete
+    // the suppression it was guarding: Kit output is private, so its
+    // compression shape is deliberately not recorded. A fix that made the
+    // non-Kit test pass by dropping the argument would fail here.
+    //
+    // The job has to be LIVE in this manager's memory. job-store.ts:2718 stores
+    // `row.stdout = row.kitExecution ? "" : stdout`, so a Kit row read back
+    // from the store alone has no stdout at all, the `compressJob &&
+    // result.stdout` guard is false, and the suppression is never reached. A
+    // seeded row would therefore have passed this test for the wrong reason.
+    // SqliteJobStore, not MemoryJobStore: Kit admission requires a durable
+    // validation-run store (async-job-manager.ts:3913).
+    const kitDir = mkdtempSync(path.join(os.tmpdir(), "compress-kit-"));
+    const store = new SqliteJobStore(path.join(kitDir, "jobs.db"));
+    const recorder = new CompressionCapturingFlightRecorder();
+    const mgr = new AsyncJobManager(undefined, undefined, store, recorder);
+    await mgr.whenStartupSettled();
+    const reservedKitJobId = randomUUID();
+    const server = createGatewayServer({
+      asyncJobManager: mgr,
+      flightRecorder: recorder,
+      compression: { enabled: false, sources: { configFile: null } },
+    });
+    const tool = (server as any)._registeredTools["llm_job_result"];
+    try {
+      const started = await runWithRequestContext({ principal: "local" } as any, () =>
+        mgr.startJobWithDedup("echo" as any, [REPLY], "corr-kit-live", {
+          compressResponse: true,
+          kitExecution: KIT_EXECUTION,
+          kitSessionId: "gw-kit-telemetry",
+          // A Kit job must carry a caller-reserved durable id and forceRefresh
+          // (async-job-manager.ts:3916); its request key is that id, never a
+          // fingerprint of the private argv.
+          jobId: reservedKitJobId,
+          forceRefresh: true,
+        })
+      );
+      const jobId = started.snapshot.id;
+      await vi.waitFor(async () => {
+        expect((await mgr.getJobSnapshot(jobId))?.status).toBe("completed");
+      });
+      const res = await runWithRequestContext({ principal: "local" } as any, () =>
+        tool.handler({ jobId, maxChars: 200000 }, {})
+      );
+      const raw = JSON.parse(res.content[0].text);
+      // The output IS present and DID compress, so the only reason telemetry is
+      // absent is the Kit suppression.
+      expect(raw.result.stdout.startsWith("[[gateway-note")).toBe(true);
+      expect(recorder.compression).toHaveLength(0);
+    } finally {
+      await mgr.dispose();
+      await store.close();
+      rmSync(kitDir, { recursive: true, force: true });
+    }
+  });
+
   it("returns concatenable raw pages for complete forensic retrieval", async () => {
     const store = new MemoryJobStore();
     const nd = claudeNdjson(REPLY);
-    seed(store, "jpages", false, nd);
+    await seed(store, "jpages", false, nd);
 
     const first = await callJobResult(store, "jpages", {
       maxChars: 20,
@@ -307,7 +416,7 @@ describe("async llm_job_result wiring (spec 5.2 / 5.4 / 9.9)", () => {
 
   it("rejects display-mode offsets because transformed pages cannot concatenate", async () => {
     const store = new MemoryJobStore();
-    seed(store, "jdisplay-offset", false, claudeNdjson(REPLY));
+    await seed(store, "jdisplay-offset", false, claudeNdjson(REPLY));
 
     const response = await callJobResult(store, "jdisplay-offset", {
       maxChars: 20,
@@ -318,7 +427,7 @@ describe("async llm_job_result wiring (spec 5.2 / 5.4 / 9.9)", () => {
     expect(response.error).toMatch(/rawOutput:true/);
   });
 
-  it("dedup key folds the effective decision in both directions (spec 9.9)", () => {
+  it("dedup key folds the effective decision in both directions (spec 9.9)", async () => {
     const mgr = new AsyncJobManager(
       undefined,
       undefined,
@@ -343,7 +452,7 @@ describe("async llm_job_result wiring (spec 5.2 / 5.4 / 9.9)", () => {
 });
 
 describe("resolveEffectiveCompression codex outputSchema bypass (spec 5.2)", () => {
-  it("bypasses when an output schema is declared even with the flag on", () => {
+  it("bypasses when an output schema is declared even with the flag on", async () => {
     const on = { enabled: true, sources: { configFile: null } };
     expect(resolveEffectiveCompression(on, { outputSchemaDeclared: true })).toBe(false);
     expect(

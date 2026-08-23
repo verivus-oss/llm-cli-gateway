@@ -50,7 +50,7 @@ const BASE_CLAUDE_PARAMS = {
 // data-retention assertion; flipping ttl to "5m" fails Kα-3/5/6.
 
 describe("REGRESSIONS Kα — PromptParts.cacheControl + assembleClaudeCacheBlocks (slice κ)", () => {
-  it("PromptPartsSchema accepts cacheControl and preserves it on the parsed value", () => {
+  it("PromptPartsSchema accepts cacheControl and preserves it on the parsed value", async () => {
     const parsed = PromptPartsSchema.safeParse({
       task: "x",
       cacheControl: { system: true },
@@ -64,7 +64,7 @@ describe("REGRESSIONS Kα — PromptParts.cacheControl + assembleClaudeCacheBloc
     }
   });
 
-  it("PromptPartsSchema rejects non-boolean cacheControl entries", () => {
+  it("PromptPartsSchema rejects non-boolean cacheControl entries", async () => {
     const parsed = PromptPartsSchema.safeParse({
       task: "x",
       cacheControl: { system: "yes" },
@@ -72,7 +72,7 @@ describe("REGRESSIONS Kα — PromptParts.cacheControl + assembleClaudeCacheBloc
     expect(parsed.success).toBe(false);
   });
 
-  it("assembleClaudeCacheBlocks emits 4 blocks in order with cache_control only on the marked block", () => {
+  it("assembleClaudeCacheBlocks emits 4 blocks in order with cache_control only on the marked block", async () => {
     const r = assembleClaudeCacheBlocks({
       system: "S",
       tools: "T",
@@ -96,7 +96,7 @@ describe("REGRESSIONS Kα — PromptParts.cacheControl + assembleClaudeCacheBloc
     expect(r.markedBlockCount).toBe(1);
   });
 
-  it("assembleClaudeCacheBlocks skips empty parts and does NOT count their cacheControl marker", () => {
+  it("assembleClaudeCacheBlocks skips empty parts and does NOT count their cacheControl marker", async () => {
     const r = assembleClaudeCacheBlocks({
       task: "K",
       cacheControl: { system: true },
@@ -106,7 +106,7 @@ describe("REGRESSIONS Kα — PromptParts.cacheControl + assembleClaudeCacheBloc
     expect(r.markedBlockCount).toBe(0);
   });
 
-  it("assembleClaudeCacheBlocks content concatenates exactly to assemble(parts).text", () => {
+  it("assembleClaudeCacheBlocks content concatenates exactly to assemble(parts).text", async () => {
     const parts = {
       system: "S",
       tools: "T",
@@ -118,7 +118,7 @@ describe("REGRESSIONS Kα — PromptParts.cacheControl + assembleClaudeCacheBloc
     expect(r.payload.message.content.map(b => b.text).join("")).toBe(assemble(parts).text);
   });
 
-  it("assembleClaudeCacheBlocks never marks the task block, even when system+tools+context are all marked", () => {
+  it("assembleClaudeCacheBlocks never marks the task block, even when system+tools+context are all marked", async () => {
     const r = assembleClaudeCacheBlocks({
       system: "S",
       tools: "T",
@@ -134,7 +134,7 @@ describe("REGRESSIONS Kα — PromptParts.cacheControl + assembleClaudeCacheBloc
     expect(r.markedBlockCount).toBe(3);
   });
 
-  it("every cache_control emitted has ttl exactly '1h'", () => {
+  it("every cache_control emitted has ttl exactly '1h'", async () => {
     const r = assembleClaudeCacheBlocks({
       system: "S",
       tools: "T",
@@ -151,7 +151,7 @@ describe("REGRESSIONS Kα — PromptParts.cacheControl + assembleClaudeCacheBloc
     }
   });
 
-  it("assembleClaudeCacheBlocks default path (no cacheControl) emits zero markers", () => {
+  it("assembleClaudeCacheBlocks default path (no cacheControl) emits zero markers", async () => {
     const r = assembleClaudeCacheBlocks({ task: "K" });
     expect(r.payload.message.content.length).toBe(1);
     expect(r.payload.message.content[0].cache_control).toBeUndefined();
@@ -168,18 +168,18 @@ describe("REGRESSIONS Kα — PromptParts.cacheControl + assembleClaudeCacheBloc
 describe("REGRESSIONS Kβ — prepareClaudeRequest κ branch (slice κ)", () => {
   let testHome: string;
   let originalHome: string | undefined;
-  beforeEach(() => {
+  beforeEach(async () => {
     testHome = mkdtempSync(path.join(os.tmpdir(), "kappa-claude-prep-"));
     originalHome = process.env.HOME;
     process.env.HOME = testHome;
   });
-  afterEach(() => {
+  afterEach(async () => {
     if (originalHome === undefined) delete process.env.HOME;
     else process.env.HOME = originalHome;
     rmSync(testHome, { recursive: true, force: true });
   });
 
-  it("Kβ-1: κ argv contains -p / --input-format stream-json / --output-format stream-json / --include-partial-messages / --verbose and NO positional prompt", () => {
+  it("Kβ-1: κ argv contains -p / --input-format stream-json / --output-format stream-json / --include-partial-messages / --verbose and NO positional prompt", async () => {
     const prep = prepareClaudeRequest({
       ...BASE_CLAUDE_PARAMS,
       promptParts: { system: "S", task: "K", cacheControl: { system: true } },
@@ -201,7 +201,7 @@ describe("REGRESSIONS Kβ — prepareClaudeRequest κ branch (slice κ)", () => 
     expect(args).not.toContain("S\n\nK");
   });
 
-  it("Kβ-2: stdinPayload is valid stream-json user message with cache_control ttl=1h on the marked block", () => {
+  it("Kβ-2: stdinPayload is valid stream-json user message with cache_control ttl=1h on the marked block", async () => {
     const prep = prepareClaudeRequest({
       ...BASE_CLAUDE_PARAMS,
       promptParts: { system: "S", task: "K", cacheControl: { system: true } },
@@ -221,7 +221,7 @@ describe("REGRESSIONS Kβ — prepareClaudeRequest κ branch (slice κ)", () => 
     expect(payload.message.content.map((b: { text: string }) => b.text).join("")).toBe("S\n\nK");
   });
 
-  it("Kβ-3: cacheControl set with outputFormat=text returns an actionable error (no silent format coercion)", () => {
+  it("Kβ-3: cacheControl set with outputFormat=text returns an actionable error (no silent format coercion)", async () => {
     const prep = prepareClaudeRequest({
       ...BASE_CLAUDE_PARAMS,
       outputFormat: "text",
@@ -232,7 +232,7 @@ describe("REGRESSIONS Kβ — prepareClaudeRequest κ branch (slice κ)", () => 
     expect(r.content[0].text).toMatch(/outputFormat.*stream-json/i);
   });
 
-  it("Kβ-4: promptParts WITHOUT cacheControl keeps the guarded positional -p path and emits no stdinPayload (regression)", () => {
+  it("Kβ-4: promptParts WITHOUT cacheControl keeps the guarded positional -p path and emits no stdinPayload (regression)", async () => {
     const prep = prepareClaudeRequest({
       ...BASE_CLAUDE_PARAMS,
       outputFormat: "text",
@@ -249,7 +249,7 @@ describe("REGRESSIONS Kβ — prepareClaudeRequest κ branch (slice κ)", () => 
     expect(prep.args).not.toContain("--input-format");
   });
 
-  it("Kβ-5: plain prompt (no promptParts) keeps positional path and no stdinPayload (regression)", () => {
+  it("Kβ-5: plain prompt (no promptParts) keeps positional path and no stdinPayload (regression)", async () => {
     const prep = prepareClaudeRequest({
       ...BASE_CLAUDE_PARAMS,
       prompt: "hi",
@@ -262,7 +262,7 @@ describe("REGRESSIONS Kβ — prepareClaudeRequest κ branch (slice κ)", () => 
     expect(prep.args).not.toContain("--input-format");
   });
 
-  it("Kβ-6: empty-part cacheControl marker is a no-op and does not activate the κ stdin path", () => {
+  it("Kβ-6: empty-part cacheControl marker is a no-op and does not activate the κ stdin path", async () => {
     const prep = prepareClaudeRequest({
       ...BASE_CLAUDE_PARAMS,
       promptParts: { task: "K", cacheControl: { system: true } },
@@ -276,7 +276,7 @@ describe("REGRESSIONS Kβ — prepareClaudeRequest κ branch (slice κ)", () => 
     expect(prep.warnings?.find(w => w.code === "cache_control_noop")).toBeDefined();
   });
 
-  it("Kβ-7: cacheControlBlocks equals the number of marked non-empty blocks", () => {
+  it("Kβ-7: cacheControlBlocks equals the number of marked non-empty blocks", async () => {
     const prep = prepareClaudeRequest({
       ...BASE_CLAUDE_PARAMS,
       promptParts: {
@@ -291,7 +291,7 @@ describe("REGRESSIONS Kβ — prepareClaudeRequest κ branch (slice κ)", () => 
     expect(prep.cacheControlTtlSeconds).toBe(3600);
   });
 
-  it("Kβ-8: κ argv passes validateUpstreamCliArgs AND has the exact pinned shape (contract + structural)", () => {
+  it("Kβ-8: κ argv passes validateUpstreamCliArgs AND has the exact pinned shape (contract + structural)", async () => {
     const prep = prepareClaudeRequest({
       ...BASE_CLAUDE_PARAMS,
       promptParts: { system: "S", task: "K", cacheControl: { system: true } },
@@ -319,7 +319,7 @@ describe("REGRESSIONS Kβ — prepareClaudeRequest κ branch (slice κ)", () => 
     expect(prep.args[1].startsWith("--")).toBe(true);
   });
 
-  it("Kβ-9: optimizePrompt=true + cacheControl returns an error (rec #5 mutual exclusion)", () => {
+  it("Kβ-9: optimizePrompt=true + cacheControl returns an error (rec #5 mutual exclusion)", async () => {
     const prep = prepareClaudeRequest({
       ...BASE_CLAUDE_PARAMS,
       optimizePrompt: true,
@@ -335,12 +335,12 @@ describe("REGRESSIONS Kβ — prepareClaudeRequest κ branch (slice κ)", () => 
 // ─── REGRESSIONS Kγ — UPSTREAM_CLI_CONTRACTS optional arity + fixture ─
 
 describe("REGRESSIONS Kγ — claude contract gains optional arity + --input-format (slice κ)", () => {
-  it("Kγ-1: legacy positional form ['-p','hello'] still validates (-p arity must accept value)", () => {
+  it("Kγ-1: legacy positional form ['-p','hello'] still validates (-p arity must accept value)", async () => {
     const v = validateUpstreamCliArgs("claude", ["-p", "hello"]);
     expect(v.ok, JSON.stringify(v.violations)).toBe(true);
   });
 
-  it("Kγ-2: full κ combination validates", () => {
+  it("Kγ-2: full κ combination validates", async () => {
     const v = validateUpstreamCliArgs("claude", [
       "-p",
       "--input-format",
@@ -353,28 +353,28 @@ describe("REGRESSIONS Kγ — claude contract gains optional arity + --input-for
     expect(v.ok, JSON.stringify(v.violations)).toBe(true);
   });
 
-  it("Kγ-3: '-p' as the final token (zero-value) validates", () => {
+  it("Kγ-3: '-p' as the final token (zero-value) validates", async () => {
     const v = validateUpstreamCliArgs("claude", ["-p"]);
     expect(v.ok, JSON.stringify(v.violations)).toBe(true);
   });
 
-  it("Kγ-4: UPSTREAM_CLI_CONTRACTS.claude.flags['-p'].arity === 'optional'", () => {
+  it("Kγ-4: UPSTREAM_CLI_CONTRACTS.claude.flags['-p'].arity === 'optional'", async () => {
     expect(UPSTREAM_CLI_CONTRACTS.claude.flags["-p"].arity).toBe("optional");
   });
 
-  it("Kγ-5: --input-format is registered with arity:'one' and values:['text','stream-json']", () => {
+  it("Kγ-5: --input-format is registered with arity:'one' and values:['text','stream-json']", async () => {
     const flag = UPSTREAM_CLI_CONTRACTS.claude.flags["--input-format"];
     expect(flag).toBeDefined();
     expect(flag.arity).toBe("one");
     expect(flag.values).toEqual(["text", "stream-json"]);
   });
 
-  it("Kγ-6: validateUpstreamCliArgs rejects --input-format with an unknown value", () => {
+  it("Kγ-6: validateUpstreamCliArgs rejects --input-format with an unknown value", async () => {
     const v = validateUpstreamCliArgs("claude", ["-p", "x", "--input-format", "yaml"]);
     expect(v.ok).toBe(false);
   });
 
-  it("Kγ-7: claude-input-format-stream-json fixture exists and mechanically passes the contract", () => {
+  it("Kγ-7: claude-input-format-stream-json fixture exists and mechanically passes the contract", async () => {
     const fixture = UPSTREAM_CLI_CONTRACTS.claude.conformanceFixtures.find(
       f => f.id === "claude-input-format-stream-json"
     );
@@ -406,39 +406,39 @@ describe("REGRESSIONS Kδ — executor + AsyncJobManager stdin (slice κ)", () =
     expect(result.stdout).toBe("");
   }, 5000);
 
-  it("Kδ-3: AsyncJobManager dedup key includes stdin (two jobs with same args, different stdin do NOT collide)", () => {
+  it("Kδ-3: AsyncJobManager dedup key includes stdin (two jobs with same args, different stdin do NOT collide)", async () => {
     const mgr = new AsyncJobManager(noopLogger, undefined, new MemoryJobStore());
     // Use a long-running sleep so neither job has terminated by the
     // time we inspect their snapshots. We never await — the manager
     // never blocks on the child.
-    const a = mgr.startJobWithDedup("claude", ["sleep", "30"], "corr-a", {
+    const a = await mgr.startJobWithDedup("claude", ["sleep", "30"], "corr-a", {
       stdin: "payload-A",
     });
-    const b = mgr.startJobWithDedup("claude", ["sleep", "30"], "corr-b", {
+    const b = await mgr.startJobWithDedup("claude", ["sleep", "30"], "corr-b", {
       stdin: "payload-B",
     });
     expect(b.deduped).toBe(false);
     expect(b.snapshot.id).not.toBe(a.snapshot.id);
     // Same stdin: now dedup MUST trip (regression — non-stdin path is
     // unchanged).
-    const c = mgr.startJobWithDedup("claude", ["sleep", "30"], "corr-c", {
+    const c = await mgr.startJobWithDedup("claude", ["sleep", "30"], "corr-c", {
       stdin: "payload-A",
     });
     expect(c.deduped).toBe(true);
     expect(c.snapshot.id).toBe(a.snapshot.id);
 
     // Cleanup so the test process exits cleanly.
-    mgr.cancelJob(a.snapshot.id);
-    mgr.cancelJob(b.snapshot.id);
+    await mgr.cancelJob(a.snapshot.id);
+    await mgr.cancelJob(b.snapshot.id);
   });
 
-  it("Kδ-4: AsyncJobManager dedup still fires for identical-no-stdin requests (regression)", () => {
+  it("Kδ-4: AsyncJobManager dedup still fires for identical-no-stdin requests (regression)", async () => {
     const mgr = new AsyncJobManager(noopLogger, undefined, new MemoryJobStore());
-    const a = mgr.startJobWithDedup("claude", ["sleep", "30"], "corr-a", {});
-    const b = mgr.startJobWithDedup("claude", ["sleep", "30"], "corr-b", {});
+    const a = await mgr.startJobWithDedup("claude", ["sleep", "30"], "corr-a", {});
+    const b = await mgr.startJobWithDedup("claude", ["sleep", "30"], "corr-b", {});
     expect(b.deduped).toBe(true);
     expect(b.snapshot.id).toBe(a.snapshot.id);
-    mgr.cancelJob(a.snapshot.id);
+    await mgr.cancelJob(a.snapshot.id);
   });
 
   // #44: codex now emits `--json` on every request, so a text request and a json
@@ -446,29 +446,29 @@ describe("REGRESSIONS Kδ — executor + AsyncJobManager stdin (slice κ)", () =
   // dedup key they would collide and the second caller would be rendered with the
   // first job's stored outputFormat (a text caller deduping onto a json job gets
   // raw JSONL via llm_job_result). outputFormat must therefore split the key.
-  it("#44: dedup key includes outputFormat (codex text vs json with same argv do NOT collide)", () => {
+  it("#44: dedup key includes outputFormat (codex text vs json with same argv do NOT collide)", async () => {
     const mgr = new AsyncJobManager(noopLogger, undefined, new MemoryJobStore());
-    const a = mgr.startJobWithDedup("codex", ["sleep", "30"], "corr-a", {
+    const a = await mgr.startJobWithDedup("codex", ["sleep", "30"], "corr-a", {
       outputFormat: "json",
     });
-    const b = mgr.startJobWithDedup("codex", ["sleep", "30"], "corr-b", {
+    const b = await mgr.startJobWithDedup("codex", ["sleep", "30"], "corr-b", {
       outputFormat: "text",
     });
     expect(b.deduped).toBe(false);
     expect(b.snapshot.id).not.toBe(a.snapshot.id);
     // Same outputFormat: dedup MUST still fire (regression guard).
-    const c = mgr.startJobWithDedup("codex", ["sleep", "30"], "corr-c", {
+    const c = await mgr.startJobWithDedup("codex", ["sleep", "30"], "corr-c", {
       outputFormat: "json",
     });
     expect(c.deduped).toBe(true);
     expect(c.snapshot.id).toBe(a.snapshot.id);
     // Omitted outputFormat (undefined) is normalised to codex's default "text",
     // so it dedups with the explicit-text job `b` (not split into a third run).
-    const d = mgr.startJobWithDedup("codex", ["sleep", "30"], "corr-d", {});
+    const d = await mgr.startJobWithDedup("codex", ["sleep", "30"], "corr-d", {});
     expect(d.deduped).toBe(true);
     expect(d.snapshot.id).toBe(b.snapshot.id);
-    mgr.cancelJob(a.snapshot.id);
-    mgr.cancelJob(b.snapshot.id);
+    await mgr.cancelJob(a.snapshot.id);
+    await mgr.cancelJob(b.snapshot.id);
   });
 });
 
@@ -478,11 +478,11 @@ describe("REGRESSIONS Kε — flight-recorder cache_control_blocks (slice κ)", 
   let tmpDir: string;
   let dbPath: string;
 
-  beforeEach(() => {
+  beforeEach(async () => {
     tmpDir = mkdtempSync(path.join(os.tmpdir(), "kappa-fr-"));
     dbPath = path.join(tmpDir, "logs.db");
   });
-  afterEach(() => {
+  afterEach(async () => {
     rmSync(tmpDir, { recursive: true, force: true });
   });
 
@@ -498,13 +498,13 @@ describe("REGRESSIONS Kε — flight-recorder cache_control_blocks (slice κ)", 
     }
   }
 
-  it("Kε-1: fresh FR has cache_control_blocks and cache_control_ttl_seconds columns", () => {
-    new FlightRecorder(dbPath).close();
+  it("Kε-1: fresh FR has cache_control_blocks and cache_control_ttl_seconds columns", async () => {
+    await new FlightRecorder(dbPath).close();
     expect(tableColumns(dbPath).has("cache_control_blocks")).toBe(true);
     expect(tableColumns(dbPath).has("cache_control_ttl_seconds")).toBe(true);
   });
 
-  it("Kε-2: pre-κ DB (v3 schema simulated) gets cache_control columns added idempotently with migration rows", () => {
+  it("Kε-2: pre-κ DB (v3 schema simulated) gets cache_control columns added idempotently with migration rows", async () => {
     // Bootstrap a v3-shaped DB (no cache_control_blocks column).
     const seed = new BetterSqlite3(dbPath);
     seed.exec(`
@@ -546,7 +546,7 @@ describe("REGRESSIONS Kε — flight-recorder cache_control_blocks (slice κ)", 
     seed.close();
     expect(tableColumns(dbPath).has("cache_control_blocks")).toBe(false);
 
-    new FlightRecorder(dbPath).close();
+    await new FlightRecorder(dbPath).close();
     expect(tableColumns(dbPath).has("cache_control_blocks")).toBe(true);
     expect(tableColumns(dbPath).has("cache_control_ttl_seconds")).toBe(true);
 
@@ -558,9 +558,9 @@ describe("REGRESSIONS Kε — flight-recorder cache_control_blocks (slice κ)", 
     expect(v5Row).toBeDefined();
   });
 
-  it("Kε-3: logStart with cacheControlBlocks + cacheControlTtlSeconds persists both integers", () => {
+  it("Kε-3: logStart with cacheControlBlocks + cacheControlTtlSeconds persists both integers", async () => {
     const rec = new FlightRecorder(dbPath);
-    rec.logStart({
+    await rec.logStart({
       correlationId: "k3-corr-1",
       cli: "claude",
       model: "sonnet",
@@ -568,7 +568,7 @@ describe("REGRESSIONS Kε — flight-recorder cache_control_blocks (slice κ)", 
       cacheControlBlocks: 3,
       cacheControlTtlSeconds: 3600,
     });
-    rec.close();
+    await rec.close();
     const db = new BetterSqlite3(dbPath);
     const row = db
       .prepare("SELECT cache_control_blocks, cache_control_ttl_seconds FROM requests WHERE id = ?")
@@ -581,15 +581,15 @@ describe("REGRESSIONS Kε — flight-recorder cache_control_blocks (slice κ)", 
     expect(row.cache_control_ttl_seconds).toBe(3600);
   });
 
-  it("Kε-4: logStart WITHOUT cacheControl metadata persists NULLs (regression for legacy callers)", () => {
+  it("Kε-4: logStart WITHOUT cacheControl metadata persists NULLs (regression for legacy callers)", async () => {
     const rec = new FlightRecorder(dbPath);
-    rec.logStart({
+    await rec.logStart({
       correlationId: "k4-corr-1",
       cli: "claude",
       model: "sonnet",
       prompt: "no-kappa",
     });
-    rec.close();
+    await rec.close();
     const db = new BetterSqlite3(dbPath);
     const row = db
       .prepare("SELECT cache_control_blocks, cache_control_ttl_seconds FROM requests WHERE id = ?")
@@ -602,9 +602,9 @@ describe("REGRESSIONS Kε — flight-recorder cache_control_blocks (slice κ)", 
     expect(row.cache_control_ttl_seconds).toBeNull();
   });
 
-  it("Kε-5: opening the FR twice does not duplicate cache-control migration rows (INSERT OR IGNORE)", () => {
-    new FlightRecorder(dbPath).close();
-    new FlightRecorder(dbPath).close();
+  it("Kε-5: opening the FR twice does not duplicate cache-control migration rows (INSERT OR IGNORE)", async () => {
+    await new FlightRecorder(dbPath).close();
+    await new FlightRecorder(dbPath).close();
     const db = new BetterSqlite3(dbPath);
     const cnt = db
       .prepare("SELECT COUNT(*) AS n FROM _migrations WHERE version IN (4, 5)")
@@ -640,18 +640,18 @@ const LARGE_STABLE_BLOCK = "x".repeat(16500);
 describe("REGRESSIONS Kζ — auto-emit (rec #2) + cacheable-uncached warning (rec #4)", () => {
   let testHome: string;
   let originalHome: string | undefined;
-  beforeEach(() => {
+  beforeEach(async () => {
     testHome = mkdtempSync(path.join(os.tmpdir(), "kappa-kzeta-"));
     originalHome = process.env.HOME;
     process.env.HOME = testHome;
   });
-  afterEach(() => {
+  afterEach(async () => {
     if (originalHome === undefined) delete process.env.HOME;
     else process.env.HOME = originalHome;
     rmSync(testHome, { recursive: true, force: true });
   });
 
-  it("Kζ-1: auto-emits cache_control on the LAST non-empty stable block when config opts in and stable prefix exceeds threshold", () => {
+  it("Kζ-1: auto-emits cache_control on the LAST non-empty stable block when config opts in and stable prefix exceeds threshold", async () => {
     const runtime = resolveGatewayServerRuntime(
       {
         cacheAwareness: buildCacheAwareness({ emitAnthropicCacheControl: true }),
@@ -691,7 +691,7 @@ describe("REGRESSIONS Kζ — auto-emit (rec #2) + cacheable-uncached warning (r
     expect(prep.cacheControlTtlSeconds).toBe(3600);
   });
 
-  it("Kζ-2: auto-emit DOES NOT fire when emit_anthropic_cache_control is false (regression)", () => {
+  it("Kζ-2: auto-emit DOES NOT fire when emit_anthropic_cache_control is false (regression)", async () => {
     const runtime = resolveGatewayServerRuntime(
       {
         cacheAwareness: buildCacheAwareness({ emitAnthropicCacheControl: false }),
@@ -712,7 +712,7 @@ describe("REGRESSIONS Kζ — auto-emit (rec #2) + cacheable-uncached warning (r
     expect(prep.args).not.toContain("--input-format");
   });
 
-  it("Kζ-3: auto-emit DOES NOT fire when stable prefix is below the per-model threshold", () => {
+  it("Kζ-3: auto-emit DOES NOT fire when stable prefix is below the per-model threshold", async () => {
     const runtime = resolveGatewayServerRuntime(
       {
         cacheAwareness: buildCacheAwareness({ emitAnthropicCacheControl: true }),
@@ -730,7 +730,7 @@ describe("REGRESSIONS Kζ — auto-emit (rec #2) + cacheable-uncached warning (r
     expect(prep.stdinPayload).toBeUndefined();
   });
 
-  it("Kζ-4: auto-emit DOES NOT fire when optimizePrompt is on (rec #5 desync risk)", () => {
+  it("Kζ-4: auto-emit DOES NOT fire when optimizePrompt is on (rec #5 desync risk)", async () => {
     const runtime = resolveGatewayServerRuntime(
       {
         cacheAwareness: buildCacheAwareness({ emitAnthropicCacheControl: true }),
@@ -749,7 +749,7 @@ describe("REGRESSIONS Kζ — auto-emit (rec #2) + cacheable-uncached warning (r
     expect(prep.stdinPayload).toBeUndefined();
   });
 
-  it("Kζ-5: emits cacheable_prefix_uncached warning when stable prefix is cacheable but no cacheControl is set and config is off (rec #4)", () => {
+  it("Kζ-5: emits cacheable_prefix_uncached warning when stable prefix is cacheable but no cacheControl is set and config is off (rec #4)", async () => {
     const runtime = resolveGatewayServerRuntime(
       {
         cacheAwareness: buildCacheAwareness({ emitAnthropicCacheControl: false }),
@@ -770,7 +770,7 @@ describe("REGRESSIONS Kζ — auto-emit (rec #2) + cacheable-uncached warning (r
     expect(w?.reason).toBe("[cache_awareness].emit_anthropic_cache_control is false");
   });
 
-  it("Kζ-6: emits cacheable_prefix_uncached warning with reason='outputFormat is not stream-json' when outputFormat=text", () => {
+  it("Kζ-6: emits cacheable_prefix_uncached warning with reason='outputFormat is not stream-json' when outputFormat=text", async () => {
     const runtime = resolveGatewayServerRuntime(
       {
         cacheAwareness: buildCacheAwareness({ emitAnthropicCacheControl: true }),
@@ -791,7 +791,7 @@ describe("REGRESSIONS Kζ — auto-emit (rec #2) + cacheable-uncached warning (r
     expect(w?.reason).toBe("outputFormat is not 'stream-json'");
   });
 
-  it("Kζ-7: NO warning when stable prefix is below threshold (regression — don't spam non-cacheable prompts)", () => {
+  it("Kζ-7: NO warning when stable prefix is below threshold (regression — don't spam non-cacheable prompts)", async () => {
     const runtime = resolveGatewayServerRuntime(
       {
         cacheAwareness: buildCacheAwareness({ emitAnthropicCacheControl: false }),
@@ -809,7 +809,7 @@ describe("REGRESSIONS Kζ — auto-emit (rec #2) + cacheable-uncached warning (r
     expect(prep.warnings).toBeUndefined();
   });
 
-  it("Kζ-8: NO warning when caller explicitly opts into cacheControl (regression)", () => {
+  it("Kζ-8: NO warning when caller explicitly opts into cacheControl (regression)", async () => {
     const runtime = resolveGatewayServerRuntime(
       {
         cacheAwareness: buildCacheAwareness({ emitAnthropicCacheControl: false }),
@@ -832,7 +832,7 @@ describe("REGRESSIONS Kζ — auto-emit (rec #2) + cacheable-uncached warning (r
     expect(ccWarning).toBeUndefined();
   });
 
-  it("Kζ-9: no-op explicit cacheControl does not suppress cacheable-prefix warning", () => {
+  it("Kζ-9: no-op explicit cacheControl does not suppress cacheable-prefix warning", async () => {
     const runtime = resolveGatewayServerRuntime(
       {
         cacheAwareness: buildCacheAwareness({ emitAnthropicCacheControl: false }),
@@ -856,7 +856,7 @@ describe("REGRESSIONS Kζ — auto-emit (rec #2) + cacheable-uncached warning (r
     expect(prep.warnings?.find(x => x.code === "cacheable_prefix_uncached")).toBeDefined();
   });
 
-  it("Kζ-10: no-op explicit cacheControl still allows config-driven auto-emission", () => {
+  it("Kζ-10: no-op explicit cacheControl still allows config-driven auto-emission", async () => {
     const runtime = resolveGatewayServerRuntime(
       {
         cacheAwareness: buildCacheAwareness({ emitAnthropicCacheControl: true }),

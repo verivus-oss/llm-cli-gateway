@@ -82,6 +82,13 @@ export interface FlagGenerationMeta {
  * table. Emits in table order; the grok table is ordered to match the
  * hand-written `prepareGrokRequest` emission sequence, so output is byte-equal.
  */
+/**
+ * Reads the merged provider surface for one flag. Injected rather than imported
+ * so this module keeps importing no contract and no loader, and so a test can
+ * derive a shape from a fixture.
+ */
+export type FlagFactsLookup = (flag: string) => { readonly values?: readonly string[] } | undefined;
+
 export function buildArgvFromGeneration(
   contract: CliContract,
   generation: readonly FlagGenerationMeta[],
@@ -163,11 +170,15 @@ export function buildArgvFromGeneration(
  */
 export function deriveZodShapeFromGeneration(
   contract: CliContract,
-  generation: readonly FlagGenerationMeta[]
+  generation: readonly FlagGenerationMeta[],
+  facts?: FlagFactsLookup
 ): Record<string, z.ZodTypeAny> {
   const shape: Record<string, z.ZodTypeAny> = {};
   for (const gen of generation) {
-    const flagContract = contract.flags[gen.flag];
+    // d4c: the MERGED surface when one is supplied, so an enum can widen from a
+    // seed or a pack without a release. The contract remains the fallback and
+    // the floor, so a surface that failed to load costs nothing.
+    const flagContract = facts?.(gen.flag) ?? contract.flags[gen.flag];
     if (!flagContract) {
       throw new Error(
         `provider-codegen: generation references flag '${gen.flag}' absent from ${contract.cli} contract.flags`
@@ -253,14 +264,38 @@ export const GROK_GEN_MAIN: readonly FlagGenerationMeta[] = [
     requestParameter: "effort",
     emit: "value_if_present",
     inputType: "string",
-    describe: "Grok effort level",
+    // KNOWN VALUES, NOT A REJECTION LIST. The contract carried these five as a
+    // Zod enum, which refused input grok's own parser accepts, and n1 removed
+    // the enum. Removing it entirely made the interface poorer than it needed to
+    // be: the policy says `values` becomes description and autocomplete data and
+    // never rejects, so the caller keeps the list and the binary keeps the vote.
+    describe:
+      "Grok effort level. Known values: low, medium, high, xhigh, max. Your installed grok decides what it accepts; these are not enforced.",
   },
   {
     flag: "--reasoning-effort",
     requestParameter: "reasoningEffort",
     emit: "value_if_present",
     inputType: "string",
-    describe: "Reasoning effort for reasoning models",
+    describe:
+      "Reasoning effort for reasoning models. Known values: low, medium, high, xhigh, max. Not enforced; the installed binary decides.",
+  },
+  {
+    flag: "--best-of-n",
+    requestParameter: "bestOfN",
+    emit: "value_if_defined",
+    inputType: "number",
+    numeric: MAX_TURNS_NUMERIC,
+    describe:
+      "Grok --best-of-n <N>: run the task N ways in parallel and pick the best (headless only). Not advertised by grok 1.0.4+; passed through for older installs.",
+  },
+  {
+    flag: "--check",
+    requestParameter: "check",
+    emit: "flag_if_true",
+    inputType: "boolean",
+    describe:
+      "Grok --check: append a self-verification loop to the prompt (headless only). Not advertised by grok 1.0.4+; passed through for older installs.",
   },
   {
     flag: "--tools",
@@ -464,6 +499,25 @@ export const GROK_GEN_TAIL: readonly FlagGenerationMeta[] = [
  * The full covered-flag table in emission order — the concatenation of the
  * runs above. Used by the schema-derivation + parity tests (which set only
  * covered params, so the runs are contiguous).
+ */
+/**
+ * INTERMEDIATE STATE, NOT A CONVENTION TO COPY. Do not add a sibling table for
+ * another provider.
+ *
+ * This table is hand-authored, which makes it exactly as pinned to one author's
+ * machine as the `prepare<X>Request` function it replaced. It was one step of a
+ * move toward discovery-driven data, and the move stalled here with grok
+ * converted and six providers not.
+ *
+ * A half-finished migration is indistinguishable from a finished convention by
+ * inspection, and on 2026-08-18 it was read as one: a `CURSOR_FLAG_GENERATION`
+ * table was written and its parity gate went green before anyone noticed it
+ * contradicted the pass-through policy. Hence this notice, next to the artefact
+ * rather than only in a plan nobody reads first.
+ *
+ * The generic consumers (`buildArgvFromGeneration`,
+ * `deriveZodShapeFromGeneration`) are correct and stay. Only their
+ * hand-authored INPUT is wrong. See docs/plans/gateway-passthrough-policy.dag.toml.
  */
 export const GROK_FLAG_GENERATION: readonly FlagGenerationMeta[] = [
   ...GROK_GEN_OUTPUT_FORMAT,

@@ -1,3 +1,10 @@
+# ============================================================================
+# SHIPPED. Per-node `status` in this file was never maintained: 1 node(s)
+# below still read `planned` for code that is live. Do not read a `planned`
+# node here as evidence that something is unimplemented; check the code.
+# JobLimiter, session caps and the principal-safe dedup window are live in src/async-job-manager.ts, src/config.ts and src/http-transport.ts.
+# Classified 2026-08-18 at HEAD 801950d. Index: docs/plans/README.md
+# ============================================================================
 # Implementation plan: fix issue #130 backpressure follow-up review findings.
 #
 # Goal: complete the issue #130 hardening branch by fixing the queued-job sync

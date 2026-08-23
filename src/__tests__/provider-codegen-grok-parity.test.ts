@@ -217,16 +217,24 @@ describe("provider-codegen: grok schema derivation from the contract", () => {
   });
 
   it("sources enum constraints from the contract (rejects out-of-enum values)", () => {
-    // --effort, --output-format, --compaction-mode, --compaction-detail all
-    // carry `values` in the contract.
-    expect(derived.safeParse({ effort: "bogus" }).success).toBe(false);
+    // --output-format, --compaction-mode and --compaction-detail carry `values`
+    // in the contract. --effort deliberately does NOT: grok 1.0.4 sets no
+    // possible-values on it, so a constraint here would refuse input the binary
+    // parses. See src/__tests__/grok-effort-passthrough.test.ts.
     expect(derived.safeParse({ outputFormat: "xml" }).success).toBe(false);
     expect(derived.safeParse({ compactionMode: "nope" }).success).toBe(false);
     expect(derived.safeParse({ compactionDetail: "loud" }).success).toBe(false);
+    expect(derived.safeParse({ effort: "ludicrous" }).success).toBe(true);
 
     // The derived enum values equal the contract's, proving single-sourcing.
-    const effortField = derived.shape.effort as z.ZodOptional<z.ZodEnum<[string, ...string[]]>>;
-    expect(effortField.unwrap().options).toEqual([...grokContract.flags["--effort"].values!]);
+    // Asserted on a flag that HAS values, now that --effort has none.
+    const formatField = derived.shape.outputFormat as z.ZodOptional<
+      z.ZodEnum<[string, ...string[]]>
+    >;
+    expect(formatField.unwrap().options).toEqual([
+      ...grokContract.flags["--output-format"].values!,
+    ]);
+    expect(grokContract.flags["--effort"].values).toBeUndefined();
   });
 
   it("agrees with the hand-written grok_request tool schema on enum rejection", () => {
@@ -241,14 +249,25 @@ describe("provider-codegen: grok schema derivation from the contract", () => {
 
     // Hand-written schema and derived schema both reject the same bad enum...
     expect(
-      (grokSchema as z.ZodType).safeParse({ prompt: "x", effort: "bogus" }).success,
-      "hand-written grok schema should reject effort=bogus"
+      (grokSchema as z.ZodType).safeParse({ prompt: "x", outputFormat: "xml" }).success,
+      "hand-written grok schema should reject outputFormat=xml"
     ).toBe(false);
-    expect(derived.safeParse({ effort: "bogus" }).success).toBe(false);
+    expect(derived.safeParse({ outputFormat: "xml" }).success).toBe(false);
 
     // ...and both accept the same good enum value.
-    expect((grokSchema as z.ZodType).safeParse({ prompt: "x", effort: "high" }).success).toBe(true);
-    expect(derived.safeParse({ effort: "high" }).success).toBe(true);
+    expect((grokSchema as z.ZodType).safeParse({ prompt: "x", outputFormat: "json" }).success).toBe(
+      true
+    );
+    expect(derived.safeParse({ outputFormat: "json" }).success).toBe(true);
+
+    // And they agree on the UNCONSTRAINED field too, which is the half that
+    // would have caught the sync/async divergence: grok_request_async
+    // hand-declared an effort enum while grok_request derived a free string.
+    expect(
+      (grokSchema as z.ZodType).safeParse({ prompt: "x", effort: "ludicrous" }).success,
+      "hand-written grok schema must not constrain effort"
+    ).toBe(true);
+    expect(derived.safeParse({ effort: "ludicrous" }).success).toBe(true);
   });
 });
 

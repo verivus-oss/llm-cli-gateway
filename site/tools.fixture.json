@@ -1,11 +1,11 @@
 {
   "generatedAt": "deterministic build output",
   "packageName": "llm-cli-gateway",
-  "packageVersion": "3.1.0-rc.8",
+  "packageVersion": "3.2.0-rc.1",
   "siteVersion": "3.0.0",
   "captureCommand": "node scripts/generate-site-discovery.mjs",
   "source": "runtime MCP tools/list from dist/index.js over in-memory MCP transport",
-  "toolCount": 64,
+  "toolCount": 65,
   "tools": [
     {
       "name": "approval_list",
@@ -415,6 +415,29 @@
             "default": false,
             "description": "Restrict Claude to provided MCP config only. mcp_managed always enforces this isolation, even when false is supplied."
           },
+          "providerFlags": {
+            "type": "object",
+            "additionalProperties": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "number"
+                },
+                {
+                  "type": "boolean"
+                },
+                {
+                  "type": "array",
+                  "items": {
+                    "type": "string"
+                  }
+                }
+              ]
+            },
+            "description": "Flags passed to the provider binary verbatim, keyed exactly as the binary spells them (e.g. {\"--best-of-n\": \"3\", \"--verbatim\": true, \"--rules\": [\"a\", \"b\"]}). Use this for any flag your installed CLI accepts that this schema does not name: the binary decides what it supports, not the gateway. true emits the flag alone; a list REPEATS the flag once per item (pass a joined string if your CLI wants a comma-separated value). Values may not start with '-', and a flag the gateway is already emitting for this request is refused rather than duplicated. LOCAL stdio callers only: remote HTTP/OAuth callers are refused every flag here and should use this tool's declared parameters, which carry their own host-path and approval gates."
+          },
           "correlationId": {
             "type": "string",
             "description": "Request trace ID (auto if omitted)"
@@ -790,6 +813,29 @@
             "default": false,
             "description": "Restrict Claude to provided MCP config only. mcp_managed always enforces this isolation, even when false is supplied."
           },
+          "providerFlags": {
+            "type": "object",
+            "additionalProperties": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "number"
+                },
+                {
+                  "type": "boolean"
+                },
+                {
+                  "type": "array",
+                  "items": {
+                    "type": "string"
+                  }
+                }
+              ]
+            },
+            "description": "Flags passed to the provider binary verbatim, keyed exactly as the binary spells them (e.g. {\"--best-of-n\": \"3\", \"--verbatim\": true, \"--rules\": [\"a\", \"b\"]}). Use this for any flag your installed CLI accepts that this schema does not name: the binary decides what it supports, not the gateway. true emits the flag alone; a list REPEATS the flag once per item (pass a joined string if your CLI wants a comma-separated value). Values may not start with '-', and a flag the gateway is already emitting for this request is refused rather than duplicated. LOCAL stdio callers only: remote HTTP/OAuth callers are refused every flag here and should use this tool's declared parameters, which carry their own host-path and approval gates."
+          },
           "correlationId": {
             "type": "string",
             "description": "Request trace ID (auto if omitted)"
@@ -1110,6 +1156,29 @@
             "default": false,
             "description": "Force a fresh session (no resume)"
           },
+          "providerFlags": {
+            "type": "object",
+            "additionalProperties": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "number"
+                },
+                {
+                  "type": "boolean"
+                },
+                {
+                  "type": "array",
+                  "items": {
+                    "type": "string"
+                  }
+                }
+              ]
+            },
+            "description": "Flags passed to the provider binary verbatim, keyed exactly as the binary spells them (e.g. {\"--best-of-n\": \"3\", \"--verbatim\": true, \"--rules\": [\"a\", \"b\"]}). Use this for any flag your installed CLI accepts that this schema does not name: the binary decides what it supports, not the gateway. true emits the flag alone; a list REPEATS the flag once per item (pass a joined string if your CLI wants a comma-separated value). Values may not start with '-', and a flag the gateway is already emitting for this request is refused rather than duplicated. LOCAL stdio callers only: remote HTTP/OAuth callers are refused every flag here and should use this tool's declared parameters, which carry their own host-path and approval gates."
+          },
           "correlationId": {
             "type": "string",
             "description": "Request trace ID (auto if omitted)"
@@ -1423,6 +1492,29 @@
             "type": "boolean",
             "default": false,
             "description": "Force a fresh session (no resume)"
+          },
+          "providerFlags": {
+            "type": "object",
+            "additionalProperties": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "number"
+                },
+                {
+                  "type": "boolean"
+                },
+                {
+                  "type": "array",
+                  "items": {
+                    "type": "string"
+                  }
+                }
+              ]
+            },
+            "description": "Flags passed to the provider binary verbatim, keyed exactly as the binary spells them (e.g. {\"--best-of-n\": \"3\", \"--verbatim\": true, \"--rules\": [\"a\", \"b\"]}). Use this for any flag your installed CLI accepts that this schema does not name: the binary decides what it supports, not the gateway. true emits the flag alone; a list REPEATS the flag once per item (pass a joined string if your CLI wants a comma-separated value). Values may not start with '-', and a flag the gateway is already emitting for this request is refused rather than duplicated. LOCAL stdio callers only: remote HTTP/OAuth callers are refused every flag here and should use this tool's declared parameters, which carry their own host-path and approval gates."
           },
           "correlationId": {
             "type": "string",
@@ -1953,6 +2045,29 @@
             ],
             "description": "On transport=cli, approvalPolicy has no effect because mcp_managed is unavailable. On transport=acp, supplying approvalPolicy is rejected because ACP has its own permission bridge."
           },
+          "providerFlags": {
+            "type": "object",
+            "additionalProperties": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "number"
+                },
+                {
+                  "type": "boolean"
+                },
+                {
+                  "type": "array",
+                  "items": {
+                    "type": "string"
+                  }
+                }
+              ]
+            },
+            "description": "Flags passed to the provider binary verbatim, keyed exactly as the binary spells them (e.g. {\"--best-of-n\": \"3\", \"--verbatim\": true, \"--rules\": [\"a\", \"b\"]}). Use this for any flag your installed CLI accepts that this schema does not name: the binary decides what it supports, not the gateway. true emits the flag alone; a list REPEATS the flag once per item (pass a joined string if your CLI wants a comma-separated value). Values may not start with '-', and a flag the gateway is already emitting for this request is refused rather than duplicated. LOCAL stdio callers only: remote HTTP/OAuth callers are refused every flag here and should use this tool's declared parameters, which carry their own host-path and approval gates."
+          },
           "correlationId": {
             "type": "string",
             "description": "Request trace ID (auto if omitted)"
@@ -2095,6 +2210,29 @@
             ],
             "description": "approvalPolicy is unavailable for this provider. It has no effect with legacy, and mcp_managed is rejected before launch because ambient MCP configuration cannot be isolated."
           },
+          "providerFlags": {
+            "type": "object",
+            "additionalProperties": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "number"
+                },
+                {
+                  "type": "boolean"
+                },
+                {
+                  "type": "array",
+                  "items": {
+                    "type": "string"
+                  }
+                }
+              ]
+            },
+            "description": "Flags passed to the provider binary verbatim, keyed exactly as the binary spells them (e.g. {\"--best-of-n\": \"3\", \"--verbatim\": true, \"--rules\": [\"a\", \"b\"]}). Use this for any flag your installed CLI accepts that this schema does not name: the binary decides what it supports, not the gateway. true emits the flag alone; a list REPEATS the flag once per item (pass a joined string if your CLI wants a comma-separated value). Values may not start with '-', and a flag the gateway is already emitting for this request is refused rather than duplicated. LOCAL stdio callers only: remote HTTP/OAuth callers are refused every flag here and should use this tool's declared parameters, which carry their own host-path and approval gates."
+          },
           "correlationId": {
             "type": "string",
             "description": "Request trace ID (auto if omitted)"
@@ -2207,6 +2345,10 @@
             "type": "boolean",
             "description": "Respect workspace trust (Devin --respect-workspace-trust <bool>). Devin defaults true for interactive and false for print mode; set explicitly to override."
           },
+          "agentConfig": {
+            "type": "string",
+            "description": "Agent config file path (Devin --agent-config <FILE>). devin 3000.4.16 and newer no longer advertise this flag and will reject it; the gateway passes it through rather than refusing it, because older devin installs still accept it and the binary is the authority on its own flags."
+          },
           "agentType": {
             "type": "string",
             "enum": [
@@ -2228,6 +2370,29 @@
             "type": "boolean",
             "default": false,
             "description": "Force a new session on transport=cli. true is rejected on transport=acp."
+          },
+          "providerFlags": {
+            "type": "object",
+            "additionalProperties": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "number"
+                },
+                {
+                  "type": "boolean"
+                },
+                {
+                  "type": "array",
+                  "items": {
+                    "type": "string"
+                  }
+                }
+              ]
+            },
+            "description": "Flags passed to the provider binary verbatim, keyed exactly as the binary spells them (e.g. {\"--best-of-n\": \"3\", \"--verbatim\": true, \"--rules\": [\"a\", \"b\"]}). Use this for any flag your installed CLI accepts that this schema does not name: the binary decides what it supports, not the gateway. true emits the flag alone; a list REPEATS the flag once per item (pass a joined string if your CLI wants a comma-separated value). Values may not start with '-', and a flag the gateway is already emitting for this request is refused rather than duplicated. LOCAL stdio callers only: remote HTTP/OAuth callers are refused every flag here and should use this tool's declared parameters, which carry their own host-path and approval gates."
           },
           "correlationId": {
             "type": "string",
@@ -2370,6 +2535,10 @@
             "type": "boolean",
             "description": "Respect workspace trust (Devin --respect-workspace-trust <bool>). Devin defaults true for interactive and false for print mode; set explicitly to override."
           },
+          "agentConfig": {
+            "type": "string",
+            "description": "Agent config file path (Devin --agent-config <FILE>). devin 3000.4.16 and newer no longer advertise this flag and will reject it; the gateway passes it through rather than refusing it, because older devin installs still accept it and the binary is the authority on its own flags."
+          },
           "sessionId": {
             "type": "string",
             "description": "Devin session ID to resume (--resume <id>; use resumeLatest for --continue). Note: the gw-* id minted for a brand-new session is not resumable via sessionId; continue with resumeLatest:true."
@@ -2383,6 +2552,29 @@
             "type": "boolean",
             "default": false,
             "description": "Force a new session"
+          },
+          "providerFlags": {
+            "type": "object",
+            "additionalProperties": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "number"
+                },
+                {
+                  "type": "boolean"
+                },
+                {
+                  "type": "array",
+                  "items": {
+                    "type": "string"
+                  }
+                }
+              ]
+            },
+            "description": "Flags passed to the provider binary verbatim, keyed exactly as the binary spells them (e.g. {\"--best-of-n\": \"3\", \"--verbatim\": true, \"--rules\": [\"a\", \"b\"]}). Use this for any flag your installed CLI accepts that this schema does not name: the binary decides what it supports, not the gateway. true emits the flag alone; a list REPEATS the flag once per item (pass a joined string if your CLI wants a comma-separated value). Values may not start with '-', and a flag the gateway is already emitting for this request is refused rather than duplicated. LOCAL stdio callers only: remote HTTP/OAuth callers are refused every flag here and should use this tool's declared parameters, which carry their own host-path and approval gates."
           },
           "correlationId": {
             "type": "string",
@@ -2598,6 +2790,29 @@
               "type": "string"
             },
             "description": "Additional workspace directories passed as --add-dir. Stdio/local callers may pass local paths directly. Remote HTTP/OAuth callers must use relative paths inside a selected registered workspace. Do not call workspace_* tools to fix stdio/local provider path access."
+          },
+          "providerFlags": {
+            "type": "object",
+            "additionalProperties": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "number"
+                },
+                {
+                  "type": "boolean"
+                },
+                {
+                  "type": "array",
+                  "items": {
+                    "type": "string"
+                  }
+                }
+              ]
+            },
+            "description": "Flags passed to the provider binary verbatim, keyed exactly as the binary spells them (e.g. {\"--best-of-n\": \"3\", \"--verbatim\": true, \"--rules\": [\"a\", \"b\"]}). Use this for any flag your installed CLI accepts that this schema does not name: the binary decides what it supports, not the gateway. true emits the flag alone; a list REPEATS the flag once per item (pass a joined string if your CLI wants a comma-separated value). Values may not start with '-', and a flag the gateway is already emitting for this request is refused rather than duplicated. LOCAL stdio callers only: remote HTTP/OAuth callers are refused every flag here and should use this tool's declared parameters, which carry their own host-path and approval gates."
           },
           "correlationId": {
             "type": "string",
@@ -2850,6 +3065,29 @@
             },
             "description": "Additional workspace directories passed as --add-dir. Stdio/local callers may pass local paths directly. Remote HTTP/OAuth callers must use relative paths inside a selected registered workspace. Do not call workspace_* tools to fix stdio/local provider path access."
           },
+          "providerFlags": {
+            "type": "object",
+            "additionalProperties": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "number"
+                },
+                {
+                  "type": "boolean"
+                },
+                {
+                  "type": "array",
+                  "items": {
+                    "type": "string"
+                  }
+                }
+              ]
+            },
+            "description": "Flags passed to the provider binary verbatim, keyed exactly as the binary spells them (e.g. {\"--best-of-n\": \"3\", \"--verbatim\": true, \"--rules\": [\"a\", \"b\"]}). Use this for any flag your installed CLI accepts that this schema does not name: the binary decides what it supports, not the gateway. true emits the flag alone; a list REPEATS the flag once per item (pass a joined string if your CLI wants a comma-separated value). Values may not start with '-', and a flag the gateway is already emitting for this request is refused rather than duplicated. LOCAL stdio callers only: remote HTTP/OAuth callers are refused every flag here and should use this tool's declared parameters, which carry their own host-path and approval gates."
+          },
           "correlationId": {
             "type": "string",
             "description": "Request trace ID (auto if omitted)"
@@ -3052,18 +3290,22 @@
           },
           "effort": {
             "type": "string",
-            "enum": [
-              "low",
-              "medium",
-              "high",
-              "xhigh",
-              "max"
-            ],
-            "description": "Grok effort level"
+            "description": "Grok effort level. Known values: low, medium, high, xhigh, max. Your installed grok decides what it accepts; these are not enforced."
           },
           "reasoningEffort": {
             "type": "string",
-            "description": "Reasoning effort for reasoning models"
+            "description": "Reasoning effort for reasoning models. Known values: low, medium, high, xhigh, max. Not enforced; the installed binary decides."
+          },
+          "bestOfN": {
+            "type": "integer",
+            "exclusiveMinimum": 0,
+            "minimum": -9007199254740991,
+            "maximum": 10000,
+            "description": "Grok --best-of-n <N>: run the task N ways in parallel and pick the best (headless only). Not advertised by grok 1.0.4+; passed through for older installs."
+          },
+          "check": {
+            "type": "boolean",
+            "description": "Grok --check: append a self-verification loop to the prompt (headless only). Not advertised by grok 1.0.4+; passed through for older installs."
           },
           "allowedTools": {
             "type": "array",
@@ -3193,6 +3435,29 @@
             "type": "string",
             "minLength": 1,
             "description": "Grok 0.2.32+ --leader-socket <PATH>: custom leader socket path (default ~/.grok/leader.sock). Targets an isolated leader process, e.g. a local/branch Grok build; name it ~/.grok/leader-*.sock to keep `grok leader list/kill` discovery working."
+          },
+          "providerFlags": {
+            "type": "object",
+            "additionalProperties": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "number"
+                },
+                {
+                  "type": "boolean"
+                },
+                {
+                  "type": "array",
+                  "items": {
+                    "type": "string"
+                  }
+                }
+              ]
+            },
+            "description": "Flags passed to the provider binary verbatim, keyed exactly as the binary spells them (e.g. {\"--best-of-n\": \"3\", \"--verbatim\": true, \"--rules\": [\"a\", \"b\"]}). Use this for any flag your installed CLI accepts that this schema does not name: the binary decides what it supports, not the gateway. true emits the flag alone; a list REPEATS the flag once per item (pass a joined string if your CLI wants a comma-separated value). Values may not start with '-', and a flag the gateway is already emitting for this request is refused rather than duplicated. LOCAL stdio callers only: remote HTTP/OAuth callers are refused every flag here and should use this tool's declared parameters, which carry their own host-path and approval gates."
           },
           "sessionId": {
             "type": "string",
@@ -3447,6 +3712,29 @@
             ],
             "description": "Output format for headless mode. Grok default is plain. The gateway parses json and streaming-json; other formats are passed through as raw output."
           },
+          "providerFlags": {
+            "type": "object",
+            "additionalProperties": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "number"
+                },
+                {
+                  "type": "boolean"
+                },
+                {
+                  "type": "array",
+                  "items": {
+                    "type": "string"
+                  }
+                }
+              ]
+            },
+            "description": "Flags passed to the provider binary verbatim, keyed exactly as the binary spells them (e.g. {\"--best-of-n\": \"3\", \"--verbatim\": true, \"--rules\": [\"a\", \"b\"]}). Use this for any flag your installed CLI accepts that this schema does not name: the binary decides what it supports, not the gateway. true emits the flag alone; a list REPEATS the flag once per item (pass a joined string if your CLI wants a comma-separated value). Values may not start with '-', and a flag the gateway is already emitting for this request is refused rather than duplicated. LOCAL stdio callers only: remote HTTP/OAuth callers are refused every flag here and should use this tool's declared parameters, which carry their own host-path and approval gates."
+          },
           "sessionId": {
             "type": "string",
             "description": "Provider-native session ID to resume (emits --resume <id>; use resumeLatest for --continue). Note: the gw-* id minted for a brand-new session is not resumable via sessionId; continue with resumeLatest:true."
@@ -3480,18 +3768,11 @@
           },
           "effort": {
             "type": "string",
-            "enum": [
-              "low",
-              "medium",
-              "high",
-              "xhigh",
-              "max"
-            ],
-            "description": "Grok effort level"
+            "description": "Grok effort level. Known values: low, medium, high, xhigh, max. Your installed grok decides what it accepts; these are not enforced."
           },
           "reasoningEffort": {
             "type": "string",
-            "description": "Reasoning effort for reasoning models"
+            "description": "Reasoning effort for reasoning models. Known values: low, medium, high, xhigh, max. Not enforced; the installed binary decides."
           },
           "approvalStrategy": {
             "type": "string",
@@ -3625,6 +3906,17 @@
           "disableWebSearch": {
             "type": "boolean",
             "description": "Grok --disable-web-search: disable web search and remote retrieval tools."
+          },
+          "bestOfN": {
+            "type": "integer",
+            "exclusiveMinimum": 0,
+            "minimum": -9007199254740991,
+            "maximum": 10000,
+            "description": "Grok --best-of-n <N>: run the task N ways in parallel and pick the best (headless only). Not advertised by grok 1.0.4+; passed through for older installs."
+          },
+          "check": {
+            "type": "boolean",
+            "description": "Grok --check: append a self-verification loop to the prompt (headless only). Not advertised by grok 1.0.4+; passed through for older installs."
           },
           "todoGate": {
             "type": "boolean",
@@ -3990,10 +4282,43 @@
     },
     {
       "name": "llm_process_health",
-      "description": "Report gateway process health: async-job manager state plus the resolved persistence configuration and paths.",
+      "description": "Report gateway process health: async-job manager state, the resolved job-store persistence configuration, and the flight recorder's separate engine and path (the two do NOT share a backend setting).",
       "inputSchema": {
         "type": "object",
         "properties": {},
+        "$schema": "http://json-schema.org/draft-07/schema#"
+      }
+    },
+    {
+      "name": "llm_request_list",
+      "description": "List recent persisted requests (sync and async) newest-first WITHOUT a correlation id, to find one. Returns metadata only; pass a returned correlationId to llm_request_result for the prompt/response, or a returned asyncJobId to llm_job_status.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "limit": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 200,
+            "default": 25,
+            "description": "Max rows to return (1-200)"
+          },
+          "since": {
+            "type": "string",
+            "minLength": 1,
+            "description": "ISO-8601 timestamp lower bound, e.g. 2026-08-21T00:00:00Z"
+          },
+          "cli": {
+            "type": "string",
+            "minLength": 1,
+            "description": "Restrict to one provider as recorded (claude, codex, gemini, grok, mistral, devin, cursor, or an API provider id)"
+          },
+          "sessionId": {
+            "type": "string",
+            "minLength": 1,
+            "description": "Restrict to one gateway session id"
+          }
+        },
+        "additionalProperties": false,
         "$schema": "http://json-schema.org/draft-07/schema#"
       }
     },
@@ -4163,6 +4488,29 @@
               "type": "string"
             },
             "description": "Denylist of built-in tools, each emitted as a separate --disabled-tools <tool> flag"
+          },
+          "providerFlags": {
+            "type": "object",
+            "additionalProperties": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "number"
+                },
+                {
+                  "type": "boolean"
+                },
+                {
+                  "type": "array",
+                  "items": {
+                    "type": "string"
+                  }
+                }
+              ]
+            },
+            "description": "Flags passed to the provider binary verbatim, keyed exactly as the binary spells them (e.g. {\"--best-of-n\": \"3\", \"--verbatim\": true, \"--rules\": [\"a\", \"b\"]}). Use this for any flag your installed CLI accepts that this schema does not name: the binary decides what it supports, not the gateway. true emits the flag alone; a list REPEATS the flag once per item (pass a joined string if your CLI wants a comma-separated value). Values may not start with '-', and a flag the gateway is already emitting for this request is refused rather than duplicated. LOCAL stdio callers only: remote HTTP/OAuth callers are refused every flag here and should use this tool's declared parameters, which carry their own host-path and approval gates."
           },
           "correlationId": {
             "type": "string",
@@ -4393,6 +4741,29 @@
               "type": "string"
             },
             "description": "Denylist of built-in tools, each emitted as a separate --disabled-tools <tool> flag"
+          },
+          "providerFlags": {
+            "type": "object",
+            "additionalProperties": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "number"
+                },
+                {
+                  "type": "boolean"
+                },
+                {
+                  "type": "array",
+                  "items": {
+                    "type": "string"
+                  }
+                }
+              ]
+            },
+            "description": "Flags passed to the provider binary verbatim, keyed exactly as the binary spells them (e.g. {\"--best-of-n\": \"3\", \"--verbatim\": true, \"--rules\": [\"a\", \"b\"]}). Use this for any flag your installed CLI accepts that this schema does not name: the binary decides what it supports, not the gateway. true emits the flag alone; a list REPEATS the flag once per item (pass a joined string if your CLI wants a comma-separated value). Values may not start with '-', and a flag the gateway is already emitting for this request is refused rather than duplicated. LOCAL stdio callers only: remote HTTP/OAuth callers are refused every flag here and should use this tool's declared parameters, which carry their own host-path and approval gates."
           },
           "correlationId": {
             "type": "string",
@@ -5034,7 +5405,7 @@
               "cursor",
               "grok-api"
             ],
-            "description": "Provider filter (claude|codex|gemini|grok|mistral|grok-api)"
+            "description": "Provider filter (claude|codex|gemini|grok|mistral|devin|cursor|grok-api)"
           }
         },
         "additionalProperties": false,
@@ -5059,7 +5430,7 @@
               "cursor",
               "grok-api"
             ],
-            "description": "Provider type (claude|codex|gemini|grok|mistral|grok-api)"
+            "description": "Provider type (claude|codex|gemini|grok|mistral|devin|cursor|grok-api)"
           },
           "description": {
             "type": "string",
@@ -5132,7 +5503,7 @@
               "cursor",
               "grok-api"
             ],
-            "description": "Provider filter (claude|codex|gemini|grok|mistral|grok-api)"
+            "description": "Provider filter (claude|codex|gemini|grok|mistral|devin|cursor|grok-api)"
           }
         },
         "additionalProperties": false,
@@ -5157,7 +5528,7 @@
               "cursor",
               "grok-api"
             ],
-            "description": "Provider type (claude|codex|gemini|grok|mistral|grok-api)"
+            "description": "Provider type (claude|codex|gemini|grok|mistral|devin|cursor|grok-api)"
           },
           "sessionId": {
             "type": [

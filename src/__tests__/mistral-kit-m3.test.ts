@@ -144,7 +144,7 @@ describe("Mistral Kit M3 admission + wiring", () => {
   let startJobWithDedup: ReturnType<typeof vi.spyOn>;
   let savedApiKey: string | undefined;
 
-  beforeEach(() => {
+  beforeEach(async () => {
     root = mkdtempSync(join(tmpdir(), "mistral-kit-m3-"));
     savedApiKey = process.env.MISTRAL_API_KEY;
     process.env.MISTRAL_API_KEY = "sk-mistral-kit-m3-fixture";
@@ -169,7 +169,7 @@ describe("Mistral Kit M3 admission + wiring", () => {
       personalConfig,
       workspaces: workspaceRegistry(root),
       approvalManager: new ApprovalManager(join(root, "approvals.jsonl"), noopLogger),
-      flightRecorder: { logStart() {}, logComplete() {} },
+      flightRecorder: { async logStart() {}, async logComplete() {} },
       logger: noopLogger,
     });
     tools = (server as unknown as Record<string, Record<string, RegisteredTool>>)._registeredTools;
@@ -180,16 +180,19 @@ describe("Mistral Kit M3 admission + wiring", () => {
     if (savedApiKey === undefined) delete process.env.MISTRAL_API_KEY;
     else process.env.MISTRAL_API_KEY = savedApiKey;
     await jobs.dispose();
-    store.close();
+    await store.close();
     rmSync(root, { recursive: true, force: true });
   });
 
-  function invoke(args: Record<string, unknown>): Promise<ReturnType<RegisteredTool["handler"]>> {
+  async function invoke(
+    args: Record<string, unknown>
+  ): Promise<ReturnType<RegisteredTool["handler"]>> {
     const tool = tools.mistral_request;
     if (!tool) throw new Error("mistral_request was not registered");
-    return runWithRequestContext({ transport: "stdio", authKind: "disabled", authScopes: [] }, () =>
-      tool.handler(tool.inputSchema.parse(args), {})
-    ) as Promise<ReturnType<RegisteredTool["handler"]>>;
+    return (await runWithRequestContext(
+      { transport: "stdio", authKind: "disabled", authScopes: [] },
+      async () => tool.handler(tool.inputSchema.parse(args), {})
+    )) as ReturnType<RegisteredTool["handler"]>;
   }
 
   it("admits mistral through BOTH gates onto the verified isolation + session + job path", async () => {

@@ -9,6 +9,12 @@ import {
   type CliType,
 } from "./provider-definitions.js";
 import { envWithExtendedPath, getExtendedPath, resolveCommandForSpawn } from "./executor.js";
+import {
+  loadBundledSeed,
+  resolveWithSkips,
+  retainedAsSurfaceInput,
+  type SurfaceFlag,
+} from "./provider-surface.js";
 
 /**
  * `optional` (slice κ): consumes the next token as the flag's value
@@ -208,9 +214,23 @@ export interface ContractViolation {
   message: string;
 }
 
+export interface UpstreamArgsValidationOptions {
+  /**
+   * The caller's `providerFlags` record. Its keys are exempt from the
+   * unknown-flag rejection and its values give each one's arity.
+   */
+  passthroughFlags?: Readonly<Record<string, unknown>>;
+}
+
 export interface ContractValidationResult {
   ok: boolean;
   violations: ContractViolation[];
+  /**
+   * How many argv flags were accepted under fail_open because the bundled table
+   * does not describe them. A count, not the names: a caller-supplied token can
+   * be a secret and this result is logged and serialised.
+   */
+  unknownFlagCount?: number;
 }
 
 export interface SubcommandContractValidationResult extends ContractValidationResult {
@@ -1081,6 +1101,82 @@ export const UPSTREAM_CLI_CONTRACTS: Record<CliType, CliContract> = {
       ["exec", "resume", "--help"],
     ],
     subcommands: {
+      // Auto-declared by `npm run providers:rebaseline`: upstream advertises
+      // this command. Catalogued only (exposure defaults to tracked_only, so it
+      // is not reachable by callers); risk is a conservative default pending
+      // maintainer verification.
+      agents: subcommand(
+        ["agents"],
+        "Upstream-declared codex command (auto-catalogued, unverified).",
+        "writes_local_config",
+        [],
+        {
+          acknowledgedUpstreamFlags: [
+            "--cd",
+            "--config",
+            "--disable",
+            "--enable",
+            "--no-alt-screen",
+            "--remote",
+            "--remote-auth-token-env",
+          ],
+        }
+      ),
+      // Auto-declared by `npm run providers:rebaseline`: upstream advertises
+      // this command. Catalogued only (exposure defaults to tracked_only, so it
+      // is not reachable by callers); risk is a conservative default pending
+      // maintainer verification.
+      "migrate-rollouts": subcommand(
+        ["migrate-rollouts"],
+        "Upstream-declared codex command (auto-catalogued, unverified).",
+        "writes_local_config",
+        [],
+        {
+          acknowledgedUpstreamFlags: [
+            "--apply",
+            "--config",
+            "--disable",
+            "--enable",
+            "--json",
+            "--max-mib-per-second",
+            "--thread",
+            "--verbose",
+          ],
+        }
+      ),
+      // Auto-declared by `npm run providers:rebaseline`: upstream advertises
+      // this command. Catalogued only (exposure defaults to tracked_only, so it
+      // is not reachable by callers); risk is a conservative default pending
+      // maintainer verification.
+      queue: subcommand(
+        ["queue"],
+        "Upstream-declared codex command (auto-catalogued, unverified).",
+        "writes_local_config",
+        [],
+        {
+          acknowledgedUpstreamFlags: [
+            "--add-dir",
+            "--approve-for-me",
+            "--cd",
+            "--config",
+            "--dangerously-bypass-approvals-and-sandbox",
+            "--dangerously-bypass-hook-trust",
+            "--disable",
+            "--enable",
+            "--image",
+            "--local-provider",
+            "--message",
+            "--model",
+            "--oss",
+            "--profile",
+            "--remote",
+            "--remote-auth-token-env",
+            "--sandbox",
+            "--strict-config",
+            "--thread",
+          ],
+        }
+      ),
       exec: subcommand(
         ["exec"],
         "Run Codex in non-interactive execution mode.",
@@ -1778,6 +1874,15 @@ export const UPSTREAM_CLI_CONTRACTS: Record<CliType, CliContract> = {
     },
     helpArgs: [["--help"]],
     subcommands: {
+      // Auto-declared by `npm run providers:rebaseline`: upstream advertises
+      // this command. Catalogued only (exposure defaults to tracked_only, so it
+      // is not reachable by callers); risk is a conservative default pending
+      // maintainer verification.
+      mcp: subcommand(
+        ["mcp"],
+        "Upstream-declared gemini command (auto-catalogued, unverified).",
+        "writes_local_config"
+      ),
       agent: subcommand(["agent"], "List available Antigravity agents.", "read_only", [], {
         aliases: ["agents"],
         tier: "inspect",
@@ -1910,6 +2015,19 @@ export const UPSTREAM_CLI_CONTRACTS: Record<CliType, CliContract> = {
       "--agent",
       "--disable-slash-commands",
       "--effort",
+      // NOT "--input-format". `providers:rebaseline` added it here and the
+      // capability floor refused the result: seed/capability-floor.json already
+      // records `--input-format:one` for gemini, so the gateway HAS offered it,
+      // discovered from the binary. Acknowledge-only would demote a live flag to
+      // a noted one and take capability from a customer who changed nothing,
+      // which is the defect this branch opened by undoing. It stays a visible
+      // drift finding until it is wired for real.
+      //
+      // `providers:rebaseline --apply` RE-ADDS this line every run: it reads the
+      // binary, not the floor. The comment is documentation; the control is
+      // capability:floor:check, which fails the build. Until the tool consults
+      // the floor before acknowledging a flag, removing this line is a step in
+      // the rebaseline procedure, not a one-time fix.
       "--json-schema",
       "--log-file",
       "--output-format",
@@ -2255,7 +2373,15 @@ export const UPSTREAM_CLI_CONTRACTS: Record<CliType, CliContract> = {
     // Grok documents --single as the long alias of -p, not a second prompt
     // field. Keeping this in the argv contract prevents a future gateway path
     // from rebuilding the duplicate prompt invocation fixed in this release.
-    mutuallyExclusiveFlagGroups: [["-p", "--single"]],
+    // `--effort` is grok's own alias for `--reasoning-effort`, so emitting both
+    // sends the same upstream option twice and grok silently last-wins. The
+    // gateway exposes them as two independent request parameters, so a caller
+    // passing {effort: "high", reasoningEffort: "low"} would otherwise get
+    // whichever the argv builder happened to place last. Reject instead.
+    mutuallyExclusiveFlagGroups: [
+      ["-p", "--single"],
+      ["--effort", "--reasoning-effort"],
+    ],
     // Grok 0.2.77: `--fork-session`, `--json-schema`, and `--worktree-ref` are
     // now wired through the request path (see flags + prepareGrokRequest), so
     // they live in the argv allowlist, not here. `--session-id` is advertised
@@ -2367,8 +2493,31 @@ export const UPSTREAM_CLI_CONTRACTS: Record<CliType, CliContract> = {
         values: GROK_PERMISSION_MODES,
         description: "Permission mode",
       },
-      "--effort": { arity: "one", values: EFFORT_LEVELS, description: "Reasoning effort" },
-      "--reasoning-effort": { arity: "one", description: "Reasoning effort override" },
+      // grok 1.0.4 declares `--reasoning-effort <EFFORT>` with `[aliases:
+      // --effort]` and NO possible-values set. Neither spelling carries `values`
+      // here, and that is deliberate: `values` is a REJECTION list enforced by
+      // validateUpstreamCliArgs, so declaring one refuses input the binary
+      // parses. Verified by experiment on 1.0.4, with a control that proves the
+      // probe can detect an enum at all:
+      //   grok --permission-mode bogus --single  -> "invalid value 'bogus' ...
+      //                                             [possible values: ...]"
+      //   grok --reasoning-effort bogus --single -> falls through to the
+      //                                             missing-value error
+      //   grok --effort bogus --single           -> same
+      // Do NOT "restore" a five-level enum here by symmetry with claude. Claude
+      // is a genuinely different case: `claude --effort bogus` warns, ignores
+      // the value and prints "Valid values: low, medium, high, xhigh, max", so
+      // its five levels are the complete set of EFFECTIVE values and enforcing
+      // them refuses only a no-op. grok documents no set and its behaviour on
+      // other values is unknown, so enforcing one would invent a constraint.
+      "--effort": {
+        arity: "one",
+        description: "Reasoning effort (alias of --reasoning-effort)",
+      },
+      "--reasoning-effort": {
+        arity: "one",
+        description: "Reasoning effort (canonical spelling; --effort is its alias)",
+      },
       "--tools": { arity: "one", description: "Comma-separated allowed tools" },
       "--disallowed-tools": {
         arity: "one",
@@ -2420,6 +2569,22 @@ export const UPSTREAM_CLI_CONTRACTS: Record<CliType, CliContract> = {
       },
       "--agent": { arity: "one", description: "Agent name or definition file path" },
       "--agents": { arity: "one", description: "Inline subagent definitions JSON" },
+      // RESTORED before the 3.1.0 stable tag. grok 1.0.4 no longer advertises
+      // `--best-of-n` or `--check`, and both are passed through anyway: every
+      // customer still on a 0.2.x grok has them, and deleting them took a
+      // working capability from people who upgraded the gateway and never
+      // touched their CLI. The binary is the authority; a customer on 1.0.4
+      // gets grok's own rejection, which is a better error than ours.
+      // See docs/plans/gateway-passthrough-policy.dag.toml.
+      "--best-of-n": {
+        arity: "one",
+        pattern: /^[1-9][0-9]*$/,
+        description: "Run the task N ways in parallel and pick the best (grok 0.2.x)",
+      },
+      "--check": {
+        arity: "none",
+        description: "Append a self-verification loop (grok 0.2.x)",
+      },
       "--disable-web-search": {
         arity: "none",
         description: "Disable web search and remote retrieval tools",
@@ -2476,9 +2641,29 @@ export const UPSTREAM_CLI_CONTRACTS: Record<CliType, CliContract> = {
         arity: "one",
         description: "JSON Schema literal constraining structured output (implies json output)",
       },
-      // Grok 0.2.x context/compaction controls (both enum, env-backed).
-      // As of 0.2.60 these are accepted by the runtime but omitted from --help
-      // output; mark hiddenFromHelp so the installed probe does not flag drift.
+      // Grok context/compaction controls, both env-backed. Omitted from rendered
+      // `--help` since 0.2.60, hence hiddenFromHelp so the installed probe does
+      // not flag drift.
+      //
+      // The `values` below ARE upstream-documented, despite grok's clap not
+      // rejecting an out-of-list value at parse (`--compaction-mode nope` is
+      // accepted). Re-verified against the 1.0.4 executable on 2026-08-18 with
+      // `strings`, which recovers the suppressed help text verbatim:
+      //
+      //   "Compaction mode [summary|transcript|segments]: `summary` (default)
+      //    adds no pointer; `transcript` points at the raw transcript;
+      //    `segments` persists per-segment markdown to grep. Sets
+      //    `GROK_COMPACTION_MODE`"
+      //   "Segments verbatim detail [none|minimal|balanced|verbose] (default
+      //    `verbose`). Only affects `--compaction-mode segments`. Sets
+      //    `GROK_COMPACTION_DETAIL`"
+      //
+      // Both lists match exactly, so enforcement refuses nothing the binary
+      // offers. This is the opposite finding to grok `--effort`, where the help
+      // text declares the flag with NO value set and the contract had invented
+      // one. Parse-acceptance alone does not tell you which case you are in;
+      // `strings` on the binary does, and is the only way to evidence a
+      // hiddenFromHelp flag's contract.
       "--compaction-mode": {
         arity: "one",
         values: ["summary", "transcript", "segments"],
@@ -2507,6 +2692,25 @@ export const UPSTREAM_CLI_CONTRACTS: Record<CliType, CliContract> = {
         description: "Unsupported flag is rejected before spawn",
         args: ["-p", "hello", "--not-a-grok-flag"],
         expect: "fail",
+      },
+      {
+        id: "grok-best-of-n",
+        description:
+          "--best-of-n <N> is accepted. grok 1.0.4+ no longer advertises it; the gateway passes it through so customers still on 0.2.x keep the capability, and lets the binary reject it otherwise.",
+        args: ["-p", "hello", "--best-of-n", "3"],
+        expect: "pass",
+      },
+      {
+        id: "grok-best-of-n-invalid-zero",
+        description: "--best-of-n rejects 0: the contract pattern is upstream's own, not invented",
+        args: ["-p", "hello", "--best-of-n", "0"],
+        expect: "fail",
+      },
+      {
+        id: "grok-check",
+        description: "--check is accepted. Same pass-through rationale as --best-of-n above.",
+        args: ["-p", "hello", "--check"],
+        expect: "pass",
       },
       {
         id: "grok-max-turns",
@@ -3191,6 +3395,7 @@ export const UPSTREAM_CLI_CONTRACTS: Record<CliType, CliContract> = {
         arity: "optional",
         description: "Export the session (optional output path; bare flag uses the default)",
       },
+      "--agent-config": { arity: "one", description: "Agent config file path" },
       "--respect-workspace-trust": {
         arity: "optional",
         values: ["true", "false"],
@@ -3204,14 +3409,25 @@ export const UPSTREAM_CLI_CONTRACTS: Record<CliType, CliContract> = {
     // Probe acknowledgement only. (--config/--sandbox/--export/--respect-workspace-trust
     // graduated to the flags allowlist as wired request fields.)
     //
-    // `--agent-config` was removed in devin 3000.4.16: the binary no longer
-    // advertises it, so the gateway must stop emitting it. Keeping it in `flags`
-    // would leave the gateway sending a dead flag on every request that set the
-    // parameter, the same failure shape as the grok `--best-of-n` regression.
-    // The `agentConfig` request parameter went with it, since a parameter whose
-    // only effect is a rejected invocation is worse than no parameter. Unrelated
-    // to the Personal Agent Config Kit, whose `~/.agent-config` is a baseline
-    // DIRECTORY and shares only the name.
+    // `--agent-config` stopped being advertised by devin 3000.4.16 and is
+    // RETAINED anyway. It was removed in 3.1.0-rc and restored before the stable
+    // tag under docs/plans/gateway-passthrough-policy.dag.toml.
+    //
+    // The removal argued that "a parameter whose only effect is a rejected
+    // invocation is worse than no parameter". That is true for a customer on
+    // 3000.4.16 or newer, and false for every customer still on an older devin,
+    // whose binary still accepts the flag. We serve both, and only one of them
+    // was considered. Deleting it took a working capability away from customers
+    // who never touched their CLI: they upgraded the gateway, and we removed
+    // their flag.
+    //
+    // Under the policy the installed binary is the authority. We emit the flag
+    // and let devin answer. A customer on a newer devin gets devin's own
+    // rejection, which is a better error than ours and is authoritative;
+    // a customer on an older devin keeps the capability they have.
+    //
+    // Unrelated to the Personal Agent Config Kit, whose `~/.agent-config` is a
+    // baseline DIRECTORY and shares only the name.
     acknowledgedUpstreamFlags: ["--print", "--version"],
     env: {},
     conformanceFixtures: [
@@ -3312,10 +3528,11 @@ export const UPSTREAM_CLI_CONTRACTS: Record<CliType, CliContract> = {
         expect: "fail",
       },
       {
-        id: "devin-agent-config-removed",
-        description: "--agent-config is rejected: devin 3000.4.16 dropped it",
+        id: "devin-agent-config",
+        description:
+          "--agent-config path is accepted. devin 3000.4.16+ no longer advertises it, but the gateway passes it through and lets the binary decide: customers on older devin still have the flag.",
         args: ["-p", "hello", "--agent-config", "/tmp/agent.toml"],
-        expect: "fail",
+        expect: "pass",
       },
     ],
   },
@@ -3626,10 +3843,108 @@ export const UPSTREAM_CLI_CONTRACTS: Record<CliType, CliContract> = {
   },
 };
 
+/**
+ * The merged surface, computed once.
+ *
+ * d4a. The bundled contract is the floor and the generated seed adds what the
+ * binaries demonstrably accept, which is 167 flags becoming 266. A flag the
+ * seed evidences is therefore admitted even though no human typed it into
+ * `flags`, which is p1: the installed binary decides, and we are never the
+ * thing that refuses what it would take.
+ *
+ * SEED ONLY. Discovery and overlay are host state and would make the published
+ * tool surface vary by machine, which `surface:invariance:check` exists to
+ * prevent. They arrive with d7 and d8, behind their own gate.
+ *
+ * A seed that fails to load leaves the floor, which is exactly today's
+ * behaviour, so a corrupt artefact costs capability rather than availability.
+ */
+let resolvedSurface: Map<CliType, Map<string, SurfaceFlag>> | undefined;
+
+function surfaceFlags(cli: CliType): Map<string, SurfaceFlag> {
+  if (!resolvedSurface) {
+    const resolution = resolveWithSkips([
+      { name: "retained", load: () => retainedAsSurfaceInput(UPSTREAM_CLI_CONTRACTS) },
+      { name: "seed", load: () => loadBundledSeed() },
+    ]);
+    resolvedSurface = new Map(
+      resolution.providers.map(provider => [
+        provider.cli as CliType,
+        new Map(provider.flags.map(flag => [flag.flag, flag])),
+      ])
+    );
+  }
+  return resolvedSurface.get(cli) ?? new Map();
+}
+
+/**
+ * What the merged surface knows about one flag.
+ *
+ * d4c. Exported so schema derivation reads the same merged view admission does,
+ * rather than a second opinion assembled at another call site. Returns
+ * undefined when nothing knows the flag, which callers treat as their own
+ * integrity failure rather than as a fact about the binary.
+ */
+export function resolvedFlagFacts(cli: CliType, flag: string): SurfaceFlag | undefined {
+  return surfaceFlags(cli).get(flag);
+}
+
+/**
+ * A contract for a flag nobody declared, or undefined when nothing knows it.
+ *
+ * p1 / unparseable_capability = fail_open: the bundled table describes one
+ * machine, so it cannot say whether the customer's binary accepts this. Two
+ * sources may vouch for a flag, and they answer different questions.
+ *
+ * The CALLER, through providerFlags, knows the argv SHAPE exactly, because the
+ * encoding is theirs: `true` emits the flag alone, anything else emits a value
+ * after it. Their answer therefore wins over the surface.
+ *
+ * The SURFACE knows what the binaries ACCEPT, and its arity is used when the
+ * caller has not spoken.
+ *
+ * When NEITHER can tell, the flag consumes nothing. `optional` was used here and
+ * swallowed the following token, hiding it from the positional bound: a reviewer
+ * showed `-p --help value -- hi` passing on claude, where --help takes no value.
+ * Consuming nothing costs a caller nothing, since a caller who wants a value
+ * says so through providerFlags, and it lets the shape guard speak.
+ *
+ * The rest is gateway policy and is deliberately strict: inline `--flag=value`
+ * is refused exactly as it is for most declared flags, and a value beginning
+ * with `-` stays an option rather than becoming free text. Neither is a
+ * capability judgement; both stop our own argv being reinterpreted.
+ *
+ * `values` is deliberately NOT carried across. The surface reads them from one
+ * host and `values` is enforced as a rejection list, so importing them would
+ * refuse input another customer's binary accepts.
+ */
+function undeclaredFlagContract(
+  cli: CliType,
+  flagName: string,
+  passthrough: Readonly<Record<string, unknown>>
+): CliFlagContract | undefined {
+  const namedByCaller = Object.hasOwn(passthrough, flagName);
+  const surfaced = surfaceFlags(cli).get(flagName);
+  if (!namedByCaller && !surfaced) return undefined;
+  const arity: CliFlagArity = namedByCaller
+    ? passthrough[flagName] === true
+      ? "none"
+      : "one"
+    : (surfaced?.arity ?? "none");
+  return {
+    arity,
+    description: `Undeclared ${cli} flag admitted from ${namedByCaller ? "the caller" : "the resolved surface"}`,
+    inlineValue: false,
+    allowLeadingHyphenValue: false,
+  };
+}
+
 export function validateUpstreamCliArgs(
   cli: CliType,
-  args: readonly string[]
+  args: readonly string[],
+  options: UpstreamArgsValidationOptions = {}
 ): ContractValidationResult {
+  const passthrough = options.passthroughFlags ?? {};
   const contract = UPSTREAM_CLI_CONTRACTS[cli];
   const violations: ContractViolation[] = [];
   let i = 0;
@@ -3638,6 +3953,7 @@ export function validateUpstreamCliArgs(
   const positionals: string[] = [];
   const endOfOptionsPositionals: string[] = [];
   const presentFlags = new Set<string>();
+  let unknownFlagCount = 0;
 
   if (contract.command) {
     if (args[0] !== contract.command.requiredFirstArg) {
@@ -3677,19 +3993,30 @@ export function validateUpstreamCliArgs(
     const equalsIndex = arg.indexOf("=");
     const flagName = equalsIndex > 0 ? arg.slice(0, equalsIndex) : arg;
     const inlineValue = equalsIndex > 0 ? arg.slice(equalsIndex + 1) : undefined;
-    const flag = contract.flags[flagName];
-    if (!flag) {
-      if (arg === contract.stdinPromptMarker || !arg.startsWith("-")) {
-        positionals.push(arg);
-      } else {
-        violations.push({
-          cli,
-          index: i,
-          message: `Unsupported ${cli} CLI flag for bundled upstream contract`,
-        });
-      }
+    const declared = contract.flags[flagName];
+    if (!declared && (arg === contract.stdinPromptMarker || !arg.startsWith("-"))) {
+      positionals.push(arg);
       continue;
     }
+    // ONE VALIDATION PATH, SEVERAL FACT SOURCES.
+    //
+    // An undeclared flag is admitted by synthesising a contract for it and then
+    // running exactly the checks a declared flag gets. An earlier version gave
+    // it its own branch that returned early, so knowing MORE about a flag
+    // removed validation instead of adding it: an inline `--flag=--value` was
+    // never checked, and a caller who declared a boolean still had the next
+    // token swallowed. Authority over whether a flag EXISTS is provider data;
+    // authority over the SHAPE of its argv is ours, and the two were conflated.
+    const flag = declared ?? undeclaredFlagContract(cli, flagName, passthrough);
+    if (!flag) {
+      violations.push({
+        cli,
+        index: i,
+        message: `Unsupported ${cli} CLI flag for bundled upstream contract`,
+      });
+      continue;
+    }
+    if (!declared) unknownFlagCount += 1;
     presentFlags.add(flagName);
 
     if (inlineValue !== undefined) {
@@ -3802,11 +4129,25 @@ export function validateUpstreamCliArgs(
     });
   }
 
-  return { ok: violations.length === 0, violations };
+  return {
+    ok: violations.length === 0,
+    violations,
+    ...(unknownFlagCount > 0 ? { unknownFlagCount } : {}),
+  };
 }
 
-export function assertUpstreamCliArgs(cli: CliType, args: readonly string[]): void {
-  const result = validateUpstreamCliArgs(cli, args);
+/**
+ * `passthroughFlags` is REQUIRED, not optional. Yesterday's pass-through surface
+ * shipped green because `prepare*Request` builds argv and something else
+ * validates it; a defaulted parameter would let the next call site repeat that
+ * exactly. Pass `undefined` where the argv is entirely gateway-built.
+ */
+export function assertUpstreamCliArgs(
+  cli: CliType,
+  args: readonly string[],
+  passthroughFlags: Readonly<Record<string, unknown>> | undefined
+): void {
+  const result = validateUpstreamCliArgs(cli, args, { passthroughFlags });
   if (!result.ok) {
     const details = result.violations.map(v => v.message).join("; ");
     throw new Error(`Upstream ${cli} CLI contract violation: ${details}`);

@@ -354,7 +354,7 @@ describe("MCP tool-surface usability (post-usability-review regressions)", () =>
     // EXACT set pinning (post-2.3.0-gate Codex finding): derive the actual
     // sets from the registry and compare them exactly — positive membership
     // alone would let a future mis-classified or unlisted tool slip through.
-    expect(names.length).toBe(62);
+    expect(names.length).toBe(63);
     const setOf = (pred: (a: NonNullable<(typeof registry)[string]["annotations"]>) => boolean) =>
       names.filter(n => pred(registry[n].annotations!)).sort();
     expect(setOf(a => a.readOnlyHint === true)).toEqual(
@@ -371,6 +371,7 @@ describe("MCP tool-surface usability (post-usability-review regressions)", () =>
         "llm_job_status",
         "llm_job_watch",
         "llm_process_health",
+        "llm_request_list",
         "llm_request_result",
         "explain_effective_config",
         "provider_tool_capabilities",

@@ -1,6 +1,6 @@
-import { existsSync, readFileSync } from "node:fs";
+import { existsSync, readFileSync, statSync } from "node:fs";
 import { homedir, platform, arch, release } from "node:os";
-import { dirname, join } from "node:path";
+import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { loadAuthConfig } from "./auth.js";
 import {
@@ -19,7 +19,6 @@ import {
   type ApiProviderLoginGuidance,
 } from "./provider-login-guidance.js";
 import { CLAUDE_MCP_SERVER_NAMES } from "./claude-mcp-config.js";
-import type { FlightRecorderQuery } from "./flight-recorder.js";
 import {
   defaultLeastCostConfig,
   diagnoseRemoteOAuthConfig,
@@ -34,9 +33,15 @@ import {
   type ProvidersConfig,
   type RemoteOAuthConfigDiagnostics,
 } from "./config.js";
+import {
+  persistenceRetentionPolicy,
+  unboundedRetentionSubsystems,
+  type RetentionSubsystemId,
+} from "./storage/retention.js";
 import { telemetryTierFor, type TelemetryTier } from "./lcr-telemetry.js";
 import { API_CATALOG_AS_OF, PRICING_AS_OF, getModelCost, modelIdToFamily } from "./pricing.js";
 import { computeLcrPriorsFromDb } from "./lcr-priors.js";
+import type { LcrPriors } from "./lcr-priors.js";
 import { getCliInfo } from "./model-registry.js";
 import type { Confidence, PriceSource, QualityTier } from "./least-cost-types.js";
 import type { AuthConfig } from "./auth.js";
@@ -47,7 +52,20 @@ import {
 } from "./workspace-registry.js";
 import { buildRemoteConnectorUrls, resolveConfiguredRemoteOrigin } from "./remote-url.js";
 import { computeGlobalCacheStats } from "./cache-stats.js";
-import { FlightRecorder, resolveFlightRecorderDbPath } from "./flight-recorder.js";
+import type { GlobalCacheStats } from "./cache-stats.js";
+import {
+  FlightRecorder,
+  flightRecorderHealth,
+  flightRecorderHealthMessage,
+  createFlightRecorder,
+  flightRecorderDisabled,
+  flightRecorderOpenFailed,
+  flightRecorderReadsAreAuthoritative,
+  resolveFlightRecorderDbPath,
+  type CoResidentTableStats,
+  type FlightRecorderLike,
+  type FlightRecorderState,
+} from "./flight-recorder.js";
 import {
   buildUpstreamContractReport,
   type InstalledCliContractProbe,
@@ -488,9 +506,75 @@ export interface PersonalConfigReadinessInput {
   persistence?: Pick<PersistenceConfig, "backend" | "asyncJobsEnabled"> | null;
 }
 
+/**
+ * Storage health, which `doctor --json` reported NOTHING of.
+ *
+ * It opened the flight recorder inside a swallowing try/catch, ran two reads
+ * inside two more, and then emitted a normal zero-valued `cache_awareness`
+ * block either way. So a corrupt, unreadable or full transcript database
+ * produced a report indistinguishable from a quiet one.
+ */
+export interface StorageHealthReport {
+  /**
+   * FALSE when nobody performed the asynchronous scan, which is the case for
+   * every synchronous caller of `createDoctorReport`. Distinguished from a scan
+   * that ran and found nothing, because that distinction is the whole subject.
+   */
+  scanned: boolean;
+  flight_recorder: {
+    /** NULL when `scanned` is false. Nothing was observed, so nothing is claimed. */
+    state: FlightRecorderState | null;
+    path: string | null;
+    /** True only when an empty read here means "nothing was recorded". */
+    reads_are_authoritative: boolean;
+    error: string | null;
+    /** Null means not measured, never "zero bytes". */
+    file_bytes: number | null;
+    wal_bytes: number | null;
+    schema_version: number | null;
+    request_rows: number | null;
+    oldest_request: string | null;
+    newest_request: string | null;
+  };
+  job_store: {
+    backend: string;
+    path: string | null;
+    /** The job store and the transcript are in the SAME SQLite file. */
+    shares_flight_recorder_file: boolean;
+  };
+  retention: {
+    /** The job store's bound. Kept under its old name and old meaning. */
+    days: number | null;
+    /**
+     * Subsystems the resolved policy does not bound, DERIVED from it. It was a
+     * hard-coded `["requests"]`, which is the second place a retention decision
+     * was being taken.
+     */
+    unbounded: string[];
+    /** Days per subsystem, or null where nothing deletes. The dry-run's basis. */
+    policy: Record<string, number | null> | null;
+    /** What a `requests` sweep would delete right now. Counted, never deleted. */
+    requests_beyond_retention: number | null;
+    /**
+     * Bytes a compaction would return to the filesystem. SQLite only: a DELETE
+     * frees pages onto a freelist and never shrinks the file, so retention
+     * alone leaves a 1.2 GB file at 1.2 GB.
+     */
+    reclaimable_bytes: number | null;
+  };
+  /**
+   * Tables in the recorder's file belonging to other subsystems, with their
+   * non-terminal row counts. On a host switched to Postgres this is the
+   * abandoned copy that still answers queries as though it were live.
+   */
+  co_resident: Array<{ table: string; rows: number; unfinished: number; live: boolean }>;
+  warnings: string[];
+}
+
 export interface DoctorReport {
-  schema_version: "1.0";
+  schema_version: "1.2";
   ok: boolean;
+  storage: StorageHealthReport;
   generated_at: string;
   system: {
     os: NodeJS.Platform;
@@ -941,11 +1025,31 @@ function chatGPTConnectorUrl(env: NodeJS.ProcessEnv, rawPublicUrl: string | null
 export interface CreateDoctorReportOptions {
   env?: NodeJS.ProcessEnv;
   /**
-   * Optional read access to the flight recorder. Drives the
-   * cache_awareness.last_24h and per_cli aggregates. When absent, those
-   * blocks report zeroed aggregates (still PRESENT in the report).
+   * The asynchronous storage scan, performed by the caller. `createDoctorReport`
+   * stays a pure synchronous projection, exactly as it does for `cacheStats`
+   * and `lcrPriors`; omitted, the report says `scanned: false` rather than
+   * inventing zeroes.
    */
-  flightRecorder?: FlightRecorderQuery;
+  storage?: StorageHealthReport;
+  /**
+   * Cache aggregates over the last 24h, ALREADY READ from the flight recorder.
+   * Drives cache_awareness.last_24h and per_cli. When absent, those blocks
+   * report zeroed aggregates (still PRESENT in the report).
+   *
+   * s7: this used to be the recorder handle itself. The recorder is
+   * asynchronous now, and `createDoctorReport` is a pure synchronous
+   * projection whose only I/O was this one scan; `printDoctorJson` does the
+   * read, with its own failure degrading to the zeroed block exactly as the
+   * try/catch here used to.
+   */
+  cacheStats?: GlobalCacheStats;
+  /**
+   * Least-cost calibration priors, ALREADY READ. Same reason as `cacheStats`.
+   * Absent means "not read": either routing is off, `priors_scope` is off, the
+   * recorder is unavailable, or the scan failed. All four leave
+   * `calibrationQuality` empty, which is what the previous code did too.
+   */
+  lcrPriors?: LcrPriors;
   /**
    * Optional CacheAwarenessConfig. Drives `enabled_features`. When
    * absent, `enabled_features` is empty (all behaviour considered off).
@@ -1223,23 +1327,8 @@ function buildCacheAwarenessReport(opts: CreateDoctorReportOptions): CacheAwaren
     enabled.push("ttl_warnings");
   }
 
-  if (!opts.flightRecorder) {
-    return {
-      enabled_features: enabled,
-      last_24h: {
-        hit_rate: 0,
-        total_hits: 0,
-        total_requests: 0,
-        estimated_savings_usd: 0,
-      },
-      per_cli: {},
-    };
-  }
-
-  let stats;
-  try {
-    stats = computeGlobalCacheStats(opts.flightRecorder, { lastNHours: 24 });
-  } catch {
+  const stats = opts.cacheStats;
+  if (!stats) {
     return {
       enabled_features: enabled,
       last_24h: {
@@ -1300,7 +1389,7 @@ function computePricingStaleDays(runIso: string): number {
 function buildLeastCostReport(
   cfg: LeastCostConfig,
   generatedAt: string,
-  flightRecorder?: FlightRecorderQuery
+  priors?: LcrPriors
 ): LeastCostReport {
   const pricing = {
     tableAsOf: PRICING_AS_OF,
@@ -1351,19 +1440,14 @@ function buildLeastCostReport(
   // priors shape is anonymized model-level (content-type:family), never per
   // principal, so no caller identity can leak here.
   const calibrationQuality: LeastCostCalibrationBucketReport[] = [];
-  if (flightRecorder && cfg.priorsScope !== "off") {
-    try {
-      const priors = computeLcrPriorsFromDb(flightRecorder, { priorsScope: cfg.priorsScope });
-      for (const [bucket, entry] of priors.calibration) {
-        calibrationQuality.push({
-          bucket,
-          k: entry.k,
-          samples: entry.samples,
-          confidence: entry.confidence,
-        });
-      }
-    } catch {
-      // Best-effort: leave calibrationQuality empty on any read failure.
+  if (priors && cfg.priorsScope !== "off") {
+    for (const [bucket, entry] of priors.calibration) {
+      calibrationQuality.push({
+        bucket,
+        k: entry.k,
+        samples: entry.samples,
+        confidence: entry.confidence,
+      });
     }
   }
 
@@ -1420,6 +1504,224 @@ function buildProviderCapabilitySummary(
     cache_ttl_ms: 60_000,
     providers,
   };
+}
+
+/** The block a synchronous caller gets: no scan was run, and it says so. */
+export function unscannedStorageHealth(): StorageHealthReport {
+  return {
+    scanned: false,
+    flight_recorder: {
+      state: null,
+      path: resolveFlightRecorderDbPath(),
+      reads_are_authoritative: false,
+      error: null,
+      file_bytes: null,
+      wal_bytes: null,
+      schema_version: null,
+      request_rows: null,
+      oldest_request: null,
+      newest_request: null,
+    },
+    job_store: { backend: "unknown", path: null, shares_flight_recorder_file: false },
+    retention: {
+      days: null,
+      unbounded: [],
+      policy: null,
+      requests_beyond_retention: null,
+      reclaimable_bytes: null,
+    },
+    co_resident: [],
+    warnings: [],
+  };
+}
+
+/**
+ * A file this big with no bound is the symptom an operator feels. 256 MiB is
+ * well below the measured 1.2 GB and well above any fresh installation, so it
+ * fires long before the file is a problem and never on a quiet one.
+ */
+const UNBOUNDED_TRANSCRIPT_WARN_BYTES = 256 * 1024 * 1024;
+
+function policyDays(persistence: PersistenceConfig, id: RetentionSubsystemId): number | null {
+  return persistenceRetentionPolicy(persistence).days[id];
+}
+
+/** doctor writes its own report; the factory's progress lines are not part of it. */
+const noopDoctorLogger = { info: (): void => {}, error: (): void => {} };
+
+function fileBytes(path: string): number | null {
+  try {
+    return statSync(path).size;
+  } catch {
+    // A missing WAL is normal; a missing main file is reported by the state.
+    return null;
+  }
+}
+
+/**
+ * Open the recorder, read its own numbers, and report the failure if either
+ * step fails INSTEAD of degrading to a zeroed block.
+ *
+ * The open and the read are separate states on purpose. "Could not open" and
+ * "opened and then the read failed" have different causes and different fixes,
+ * and doctor collapsed both into silence.
+ */
+export async function collectStorageHealth(
+  existing?: FlightRecorderLike | null
+): Promise<StorageHealthReport> {
+  const block = unscannedStorageHealth();
+  block.scanned = true;
+  const dbPath = resolveFlightRecorderDbPath();
+
+  let persistence: PersistenceConfig | null = null;
+  try {
+    persistence = loadPersistenceConfig();
+  } catch {
+    // A config that will not load is already reported by the gateway block.
+  }
+  if (persistence) {
+    block.job_store = {
+      backend: persistence.backend,
+      path: persistence.path,
+      shares_flight_recorder_file: Boolean(
+        dbPath && persistence.path && resolve(persistence.path) === resolve(dbPath)
+      ),
+    };
+    block.retention.days = persistence.retentionDays;
+    const policy = persistenceRetentionPolicy(persistence);
+    block.retention.policy = { ...policy.days };
+    block.retention.unbounded = unboundedRetentionSubsystems(policy);
+  }
+
+  if (!dbPath) {
+    const disabled = flightRecorderHealth(flightRecorderDisabled());
+    block.flight_recorder.state = disabled.state;
+    block.flight_recorder.path = null;
+    block.flight_recorder.error = null;
+    const message = flightRecorderHealthMessage(disabled);
+    if (message) block.warnings.push(message);
+    return block;
+  }
+
+  // A caller that already holds one hands it over, so doctor does not put a
+  // second writer on the same file to ask it how big it is.
+  const ownsRecorder = !existing;
+  let recorder: FlightRecorderLike;
+  if (existing) {
+    recorder = existing;
+  } else if (persistence) {
+    // The FACTORY, not `new FlightRecorder`. Building the SQLite recorder here
+    // unconditionally meant doctor reported a file on a host whose transcripts
+    // had moved to PostgreSQL, which is the same "one subsystem, two engines"
+    // confusion this block exists to expose.
+    recorder = createFlightRecorder(noopDoctorLogger, persistence.backend, persistence.roleDsns);
+  } else {
+    try {
+      recorder = new FlightRecorder(dbPath);
+    } catch (error) {
+      // NOT swallowed. This is the state doctor could not previously express.
+      recorder = flightRecorderOpenFailed(dbPath, error);
+    }
+  }
+  const onSqliteFile = recorder instanceof FlightRecorder;
+
+  // The `requests` bound when one is set, otherwise the job bound, which is
+  // what this line has always used. Reporting the JOB window as "requests
+  // beyond retention" was the closest thing to a transcript number that
+  // existed; now it is only a fallback, and a set bound answers with its own.
+  const cutoffDays =
+    (persistence ? policyDays(persistence, "requests") : null) ?? block.retention.days;
+  const cutoff =
+    cutoffDays !== null ? new Date(Date.now() - cutoffDays * 86_400_000).toISOString() : undefined;
+  try {
+    const stats = await recorder.readStorageStats(cutoff);
+    block.flight_recorder.schema_version = stats.schemaVersion;
+    block.flight_recorder.request_rows = stats.requestRows;
+    block.flight_recorder.oldest_request = stats.oldestRequest;
+    block.flight_recorder.newest_request = stats.newestRequest;
+    block.retention.requests_beyond_retention = stats.requestsBeyondRetention;
+    block.retention.reclaimable_bytes = stats.reclaimableBytes;
+    block.co_resident = stats.coResident.map((row: CoResidentTableStats) => ({
+      table: row.table,
+      rows: row.rows,
+      unfinished: row.unfinished,
+      // A `jobs` table in this file is LIVE only while the job store is the
+      // same SQLite file. Otherwise it is the abandoned copy, frozen at the
+      // switchover, and its rows will never move again.
+      // A `jobs` table is LIVE when the job store is the same store. On
+      // PostgreSQL that is the unified case rather than the abandoned one, so
+      // the file-path comparison alone would report a live table as frozen.
+      live:
+        row.table === "jobs"
+          ? block.job_store.shares_flight_recorder_file ||
+            (!onSqliteFile && persistence?.backend === "postgres")
+          : true,
+    }));
+  } catch (error) {
+    // Reached the file and could not read it. The health snapshot below is
+    // already `degraded` because every operation records its own failure; this
+    // catch exists so doctor still emits a report rather than throwing.
+    block.warnings.push(
+      `Reading flight-recorder storage statistics FAILED: ${error instanceof Error ? error.message : String(error)}`
+    );
+  }
+
+  const health = flightRecorderHealth(recorder);
+  block.flight_recorder.state = health.state;
+  block.flight_recorder.path = health.path;
+  block.flight_recorder.error = health.error;
+  block.flight_recorder.reads_are_authoritative = flightRecorderReadsAreAuthoritative(health);
+  // Only when the recorder is actually the file. A byte count of a file nothing
+  // writes to is worse than none: it is a measurement of the wrong thing.
+  block.flight_recorder.file_bytes = onSqliteFile ? fileBytes(dbPath) : null;
+  block.flight_recorder.wal_bytes = onSqliteFile ? fileBytes(`${dbPath}-wal`) : null;
+  const recorderMessage = flightRecorderHealthMessage(health);
+  if (recorderMessage) block.warnings.push(recorderMessage);
+
+  // `unbounded` is set from the resolved policy above, not decided here.
+  // s11 left the two destructive bounds OFF by default, so on an unchanged
+  // installation this still reports `requests` and `wedgedValidationRuns`, and
+  // the numbers beside it are what an operator needs to decide otherwise.
+  if (
+    block.retention.unbounded.includes("requests") &&
+    (block.flight_recorder.file_bytes ?? 0) > UNBOUNDED_TRANSCRIPT_WARN_BYTES
+  ) {
+    block.warnings.push(
+      `The flight recorder holds ${block.flight_recorder.request_rows ?? "?"} request(s) in ` +
+        `${Math.round((block.flight_recorder.file_bytes ?? 0) / 1_048_576)} MiB with NO retention bound. ` +
+        `Set [persistence.retention].requests = <days> to bound it; ` +
+        `deleting rows frees pages but not bytes, so run 'llm-cli-gateway storage compact' after.`
+    );
+  }
+  for (const row of block.co_resident) {
+    if (!row.live && row.rows > 0) {
+      block.warnings.push(
+        `The flight recorder's file also holds an ABANDONED '${row.table}' table of ${row.rows} rows (${row.unfinished} never finished). The live job store is '${block.job_store.backend}'. A direct reader of this file cannot tell that table is frozen.`
+      );
+    } else if (row.unfinished > 0 && row.table === "validation_runs") {
+      // s11 gave validation_runs a bound, so "nothing covers this" stopped
+      // being true and the warning now names the key instead of the absence.
+      // `unfinished` is `status = 'running'`, which is a SUPERSET of wedged: a
+      // run whose linked jobs are alive is unfinished and is not reapable.
+      const bounded = !block.retention.unbounded.includes("wedgedValidationRuns");
+      block.warnings.push(
+        `${row.unfinished} validation run(s) are still 'running'. Some may be WEDGED (past the ` +
+          `horizon with every linked job already evicted), which nothing can ever finalize. ` +
+          (bounded
+            ? "[persistence.retention].wedgedValidationRuns is set, so the sweeper reaps those; llm_process_health reports the counts."
+            : "Set [persistence.retention].wedgedValidationRuns = <days> to reap them; llm_process_health reports what that would delete first.")
+      );
+    }
+  }
+
+  if (ownsRecorder) {
+    try {
+      await recorder.close();
+    } catch {
+      // best effort
+    }
+  }
+  return block;
 }
 
 export function createDoctorReport(
@@ -1482,8 +1784,9 @@ export function createDoctorReport(
     opts.personalConfigReadiness ?? loadPersonalConfigReadinessReport(env);
 
   const report: DoctorReport = {
-    schema_version: "1.0",
+    schema_version: "1.2",
     ok: true,
+    storage: opts.storage ?? unscannedStorageHealth(),
     generated_at: generatedAt,
     system: {
       os: platform(),
@@ -1548,7 +1851,7 @@ export function createDoctorReport(
     client_config: clientConfigStatus(),
     cache_awareness: buildCacheAwarenessReport(opts),
     provider_capabilities: buildProviderCapabilitySummary(providerStatuses),
-    least_cost: buildLeastCostReport(leastCostConfig, generatedAt, opts.flightRecorder),
+    least_cost: buildLeastCostReport(leastCostConfig, generatedAt, opts.lcrPriors),
     personal_config: personalConfigReadiness,
     upstream,
     next_actions: [],
@@ -1561,6 +1864,25 @@ export function createDoctorReport(
     report.api_providers = apiProviders;
   }
 
+  // A recorder that could not open, or that is failing operations, is a
+  // FAILURE and not a configuration choice, so it lands on `ok` alongside the
+  // other real faults. `disabled` deliberately does not: the operator asked for
+  // it. Gated on `scanned` because a caller that ran no scan learned nothing.
+  if (
+    report.storage.scanned &&
+    (report.storage.flight_recorder.state === "unavailable" ||
+      report.storage.flight_recorder.state === "degraded")
+  ) {
+    report.ok = false;
+    report.next_actions.push(
+      `Flight recorder storage is ${report.storage.flight_recorder.state}: ${report.storage.flight_recorder.error ?? "no detail"}. Request history reads return empty results that are NOT evidence that no request ran.`
+    );
+  }
+  for (const warning of report.storage.warnings) {
+    if (warning.startsWith("The flight recorder's file also holds an ABANDONED")) {
+      report.next_actions.push(warning);
+    }
+  }
   if (transport === "http" && auth.required && !auth.tokenConfigured) {
     report.ok = false;
     report.next_actions.push("Set LLM_GATEWAY_AUTH_TOKEN before starting HTTP transport.");
@@ -1694,7 +2016,7 @@ export async function printDoctorJson(
   // failures degrade to the zeroed block (buildCacheAwarenessReport
   // handles missing deps).
   let cacheAwareness: CacheAwarenessConfig | undefined;
-  let flightRecorder: FlightRecorder | undefined;
+  let flightRecorder: FlightRecorderLike | undefined;
   let providersConfig: ProvidersConfig | undefined;
   let leastCost: LeastCostConfig | undefined;
   try {
@@ -1707,11 +2029,16 @@ export async function printDoctorJson(
   } catch {
     // ignore
   }
-  try {
-    const dbPath = resolveFlightRecorderDbPath();
-    if (dbPath) flightRecorder = new FlightRecorder(dbPath);
-  } catch {
-    // ignore
+  // The open failure is no longer ignored. It used to leave `flightRecorder`
+  // undefined, which produced the same zeroed cache_awareness block as a
+  // recorder that was never configured, and doctor said nothing either way.
+  const recorderDbPath = resolveFlightRecorderDbPath();
+  if (recorderDbPath) {
+    try {
+      flightRecorder = new FlightRecorder(recorderDbPath);
+    } catch (error) {
+      flightRecorder = flightRecorderOpenFailed(recorderDbPath, error);
+    }
   }
   try {
     providersConfig = loadProvidersConfig();
@@ -1727,10 +2054,41 @@ export async function printDoctorJson(
       apiReachability[runtime.name] = await probeApiProviderReachability(runtime.baseUrl);
     }
   }
+  // The recorder is asynchronous since s7, so the two scans happen HERE and
+  // `createDoctorReport` stays a pure synchronous projection. Each read keeps
+  // the try/catch that used to sit inside the report builders, with the await
+  // INSIDE the try: a call that stopped throwing and started rejecting, inside
+  // a try whose catch can no longer fire, is the dead-catch class this
+  // programme has already shipped once.
+  let cacheStats: GlobalCacheStats | undefined;
+  if (flightRecorder) {
+    try {
+      cacheStats = await computeGlobalCacheStats(flightRecorder, { lastNHours: 24 });
+    } catch {
+      // Degrade to the zeroed cache_awareness block.
+    }
+  }
+  // Gated on priors_scope as well as on the recorder: readLcrPriorRows scans
+  // every request row, so reading it when learning is off would make `doctor`
+  // a full-table scan of a 1.2 GB file for a block it then discards.
+  const priorsScope = leastCost?.priorsScope ?? defaultLeastCostConfig().priorsScope;
+  let lcrPriors: LcrPriors | undefined;
+  if (flightRecorder && priorsScope !== "off") {
+    try {
+      lcrPriors = await computeLcrPriorsFromDb(flightRecorder, { priorsScope });
+    } catch {
+      // Degrade to an empty calibrationQuality array.
+    }
+  }
+  // Scanned with the recorder already open above, so the report carries one
+  // recorder's state rather than two independent openings of one file.
+  const storage = await collectStorageHealth(flightRecorder ?? null);
   const report = createDoctorReport({
     env: process.env,
+    storage,
     cacheAwareness,
-    flightRecorder,
+    cacheStats,
+    lcrPriors,
     probeUpstream: opts.probeUpstream,
     providersConfig,
     apiReachability,
@@ -1739,7 +2097,7 @@ export async function printDoctorJson(
   process.stdout.write(`${JSON.stringify(report, null, 2)}\n`);
   if (flightRecorder) {
     try {
-      flightRecorder.close();
+      await flightRecorder.close();
     } catch {
       // best effort
     }
@@ -1785,13 +2143,17 @@ function isCreateDoctorReportOptions(
   value: NodeJS.ProcessEnv | CreateDoctorReportOptions
 ): value is CreateDoctorReportOptions {
   // CreateDoctorReportOptions carries either `env` (an object) or
-  // `flightRecorder` (an object). A NodeJS.ProcessEnv is a flat
+  // `cacheStats` (an object). A NodeJS.ProcessEnv is a flat
   // Record<string, string|undefined> — even if a shell happens to export
-  // `env=production` or `flightRecorder=...`, the value at that key is a
+  // `env=production` or `cacheStats=...`, the value at that key is a
   // STRING, not an object, so the typeof checks here cannot collide.
+  //
+  // s7 renamed the discriminating key from `flightRecorder` to `cacheStats`
+  // along with the option itself; a key nothing reads is exactly the inert
+  // config key this repository has shipped before.
   if (value === null || typeof value !== "object") return false;
-  if (Object.prototype.hasOwnProperty.call(value, "flightRecorder")) {
-    const candidate = (value as { flightRecorder?: unknown }).flightRecorder;
+  if (Object.prototype.hasOwnProperty.call(value, "cacheStats")) {
+    const candidate = (value as { cacheStats?: unknown }).cacheStats;
     return candidate === undefined || typeof candidate === "object";
   }
   if (Object.prototype.hasOwnProperty.call(value, "leastCost")) {

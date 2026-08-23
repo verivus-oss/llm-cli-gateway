@@ -53,8 +53,8 @@ describe("SessionManager", () => {
       expect(session.ownerPrincipal).toBe("local");
     });
 
-    it("stamps the ambient request-context principal as the owner (F3)", () => {
-      const session = runWithRequestContext(
+    it("stamps the ambient request-context principal as the owner (F3)", async () => {
+      const session = await runWithRequestContext(
         { transport: "http", authScopes: [], authPrincipal: "user-alice@example.com" },
         () => sessionManager.createSession("codex", "Owned session")
       );
@@ -195,7 +195,7 @@ describe("SessionManager", () => {
   describe("session deletion", () => {
     it("notifies cleanup observers for successful delete, clear, and TTL eviction", async () => {
       const observed: string[] = [];
-      sessionManager.addSessionRemovalObserver(session => observed.push(session.id));
+      sessionManager.addSessionRemovalObserver(async session => await observed.push(session.id));
       const deleted = sessionManager.createSession("claude");
       const retained = sessionManager.createSession("codex");
 
@@ -208,7 +208,7 @@ describe("SessionManager", () => {
       expect(observed).toEqual([deleted.id, retained.id]);
 
       const ttlManager = new FileSessionManager(join(testDir, "ttl-sessions.json"), 1);
-      ttlManager.addSessionRemovalObserver(session => observed.push(session.id));
+      ttlManager.addSessionRemovalObserver(async session => await observed.push(session.id));
       const expired = ttlManager.createSession("gemini");
       await new Promise(resolve => setTimeout(resolve, 5));
       expect(ttlManager.getSession(expired.id)).toBeNull();
@@ -221,7 +221,7 @@ describe("SessionManager", () => {
       const manager = new FileSessionManager(join(testDir, "active-ttl-sessions.json"), -1, {
         cleanupHook: session => cleaned.push(session.id),
       });
-      manager.addSessionRemovalObserver(session => removed.push(session.id));
+      manager.addSessionRemovalObserver(async session => await removed.push(session.id));
       const expired = manager.createSession("claude");
 
       expect(manager.getActiveSession("claude")).toBeNull();
@@ -240,7 +240,7 @@ describe("SessionManager", () => {
           cleanupHook: session => cleaned.push(session.id),
         }
       );
-      manager.addSessionRemovalObserver(session => removed.push(session.id));
+      manager.addSessionRemovalObserver(async session => await removed.push(session.id));
       const execution: KitExecutionRef = {
         version: 1,
         releaseId: "release-active-ttl",
@@ -883,16 +883,16 @@ describe("remoteSafeSession + callerIsRemote", () => {
     expect(remoteSafeSession(s)).toBe(s);
   });
 
-  it("callerIsRemote reflects the ambient request transport", () => {
+  it("callerIsRemote reflects the ambient request transport", async () => {
     expect(callerIsRemote()).toBe(false);
     const remote = runWithRequestContext({ authKind: "oauth", authScopes: [] }, () =>
       callerIsRemote()
     );
-    expect(remote).toBe(true);
+    expect(await remote).toBe(true);
     const httpRemote = runWithRequestContext({ transport: "http", authScopes: [] }, () =>
       callerIsRemote()
     );
-    expect(httpRemote).toBe(true);
+    expect(await httpRemote).toBe(true);
   });
 });
 

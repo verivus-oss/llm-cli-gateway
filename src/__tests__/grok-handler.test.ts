@@ -54,10 +54,10 @@ function createMockSessionManager(sessions: Map<string, Session>): ISessionManag
       [...sessions.values()].filter(session => !cli || session.cli === cli)
     ),
     deleteSession: vi.fn(async sessionId => sessions.delete(sessionId)),
-    setActiveSession: vi.fn(async () => true),
+    setActiveSession: vi.fn(() => true),
     getActiveSession: vi.fn(async () => null),
     updateSessionUsage: vi.fn(async () => {}),
-    updateSessionMetadata: vi.fn(async () => true),
+    updateSessionMetadata: vi.fn(() => true),
     clearAllSessions: vi.fn(async () => 0),
   };
 }

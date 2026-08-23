@@ -162,14 +162,14 @@ class CapturingJobManager extends AsyncJobManager {
   private readonly capturedResults = new Map<string, AsyncJobResult>();
   private readonly capturedOwners = new Map<string, string>();
 
-  override startJob(
+  override async startJob(
     ...args: Parameters<AsyncJobManager["startJob"]>
   ): ReturnType<AsyncJobManager["startJob"]> {
     this.starts.push({ cli: args[0], args: [...args[1]], cwd: args[3] });
     return this.snapshot(args[0], args[2]);
   }
 
-  override startJobWithDedup(
+  override async startJobWithDedup(
     ...args: Parameters<AsyncJobManager["startJobWithDedup"]>
   ): ReturnType<AsyncJobManager["startJobWithDedup"]> {
     this.starts.push({ cli: args[0], args: [...args[1]], cwd: args[3].cwd });
@@ -203,11 +203,14 @@ class CapturingJobManager extends AsyncJobManager {
         correlationId: snapshot.correlationId,
       };
       if (admission.role === "judge") {
-        store.setValidationJudgeLink(admission.validationId, link);
+        await store.setValidationJudgeLink(admission.validationId, link);
       } else {
-        const run = store.getValidationRun(admission.validationId);
+        const run = await store.getValidationRun(admission.validationId);
         if (!run) throw new Error("test fixture could not find the review run");
-        store.setValidationProviderLinks(admission.validationId, [...run.providerLinks, link]);
+        await store.setValidationProviderLinks(admission.validationId, [
+          ...run.providerLinks,
+          link,
+        ]);
       }
     }
 
@@ -1557,7 +1560,7 @@ describe("issue #190 workspace wiring", () => {
       expect.objectContaining({ cli: "grok", cwd: repository }),
     ]);
     await gateway.close();
-    store.close();
+    await store.close();
   });
 
   it("promotes a local absolute nested review_changes directory to its canonical Git root", async () => {
@@ -1586,7 +1589,7 @@ describe("issue #190 workspace wiring", () => {
     const report = response.structuredContent?.report as { validationId?: unknown } | undefined;
     expect(report?.validationId).toEqual(expect.any(String));
     expect(
-      JSON.parse(store.getValidationRun(String(report!.validationId))!.requestJson)
+      JSON.parse((await store.getValidationRun(String(report!.validationId))!).requestJson)
     ).toMatchObject({
       reviewAuthorization: {
         repositoryPath: repository,
@@ -1611,7 +1614,7 @@ describe("issue #190 workspace wiring", () => {
     ]);
 
     await gateway.close();
-    store.close();
+    await store.close();
   });
 
   it("rejects a remote review workspace whose Git root escapes its registered path", async () => {
@@ -1645,7 +1648,7 @@ describe("issue #190 workspace wiring", () => {
     expect(manager.starts).toHaveLength(0);
 
     await gateway.close();
-    store.close();
+    await store.close();
   });
 
   it("authorizes a CLI judge against the selected review_changes workspace", async () => {
@@ -1673,7 +1676,7 @@ describe("issue #190 workspace wiring", () => {
     ).rejects.toThrow('does not allow provider "claude"');
     expect(manager.starts).toHaveLength(0);
     await gateway.close();
-    store.close();
+    await store.close();
   });
 
   it("binds a review judge to the re-authorized repository cwd and read-only CLI mode", async () => {
@@ -1701,7 +1704,7 @@ describe("issue #190 workspace wiring", () => {
       { validationId?: unknown } | undefined;
     expect(kickoffReport?.validationId).toEqual(expect.any(String));
     expect(
-      JSON.parse(store.getValidationRun(String(kickoffReport!.validationId))!.requestJson)
+      JSON.parse((await store.getValidationRun(String(kickoffReport!.validationId))!).requestJson)
     ).toMatchObject({
       reviewAuthorization: {
         schemaVersion: "review-run-authorization.v1",
@@ -1734,13 +1737,13 @@ describe("issue #190 workspace wiring", () => {
       }),
     ]);
     await gateway.close();
-    store.close();
+    await store.close();
   });
 
   it("rejects admission_failed review synthesis replay before provider dispatch", async () => {
     const store = new SqliteJobStore(join(root, "admission-failed-replay.db"));
     const manager = new CapturingJobManager(noopLogger, undefined, store);
-    store.recordValidationRun({
+    await store.recordValidationRun({
       validationId: "failed-review",
       ownerPrincipal: "gateway-bearer",
       intent: "review",
@@ -1780,9 +1783,9 @@ describe("issue #190 workspace wiring", () => {
       error: expect.stringContaining("not open"),
     });
     expect(manager.starts).toHaveLength(0);
-    expect(store.getValidationRun("failed-review")?.status).toBe("admission_failed");
+    expect((await store.getValidationRun("failed-review"))?.status).toBe("admission_failed");
     await gateway.close();
-    store.close();
+    await store.close();
   });
 
   it.each([

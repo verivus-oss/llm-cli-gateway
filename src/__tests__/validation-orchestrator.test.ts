@@ -139,12 +139,12 @@ function makeScriptedManager(script: Partial<Record<ValidationProvider, Scripted
 }
 
 describe("Layer 6 validation orchestrator (U20)", () => {
-  it("returns a validation report when all providers start", () => {
+  it("returns a validation report when all providers start", async () => {
     const fake = makeScriptedManager({
       claude: { status: "completed", stdout: "Verdict: approve\nLooks good." },
       codex: { status: "completed", stdout: "Verdict: reject\nFound a bug." },
     });
-    const report = startValidationRun(
+    const report = await startValidationRun(
       {
         asyncJobManager: fake.manager as any,
         getProviderRuntimeStatus: provider => runtime(provider),
@@ -163,9 +163,9 @@ describe("Layer 6 validation orchestrator (U20)", () => {
     expect(report.report.structuredContent.jobIds).toEqual(["job-claude-1", "job-codex-2"]);
   });
 
-  it("builds Cursor validation reviewer jobs with the headless print surface", () => {
+  it("builds Cursor validation reviewer jobs with the headless print surface", async () => {
     const fake = makeScriptedManager({});
-    startValidationRun(
+    await startValidationRun(
       { asyncJobManager: fake.manager as any, getProviderRuntimeStatus: runtime },
       { intent: "validate", question: "can cursor review?", providers: ["cursor"] }
     );
@@ -176,9 +176,9 @@ describe("Layer 6 validation orchestrator (U20)", () => {
     expect(fake.startCalls[0].args.at(-1)).toContain("can cursor review?");
   });
 
-  it("uses the verified Codex stdin marker for validation prompts", () => {
+  it("uses the verified Codex stdin marker for validation prompts", async () => {
     const fake = makeScriptedManager({});
-    startValidationRun(
+    await startValidationRun(
       { asyncJobManager: fake.manager as any, getProviderRuntimeStatus: runtime },
       { intent: "validate", question: "review through stdin", providers: ["codex"] }
     );
@@ -192,9 +192,9 @@ describe("Layer 6 validation orchestrator (U20)", () => {
     expect(fake.startCalls[0].args.join(" ")).not.toContain("review through stdin");
   });
 
-  it("skips only argv-bound reviewers whose assembled prompt exceeds the byte limit", () => {
+  it("skips only argv-bound reviewers whose assembled prompt exceeds the byte limit", async () => {
     const fake = makeScriptedManager({});
-    const report = startValidationRun(
+    const report = await startValidationRun(
       { asyncJobManager: fake.manager as any, getProviderRuntimeStatus: runtime },
       {
         intent: "validate",
@@ -218,14 +218,14 @@ describe("Layer 6 validation orchestrator (U20)", () => {
     expect(fake.startCalls[0].stdin).toContain("中".repeat(100));
   });
 
-  it("normalizes a completed provider result with a verdict heading", () => {
+  it("normalizes a completed provider result with a verdict heading", async () => {
     const fake = makeScriptedManager({
       claude: {
         status: "completed",
         stdout: "Verdict: approve\nRationale: looks good.\n- Risk: depends on cache hit rate",
       },
     });
-    const run = startValidationRun(
+    const run = await startValidationRun(
       {
         asyncJobManager: fake.manager as any,
         getProviderRuntimeStatus: provider => runtime(provider),
@@ -239,14 +239,14 @@ describe("Layer 6 validation orchestrator (U20)", () => {
       "claude-fake"
     );
 
-    expect(normalized).not.toBeNull();
-    expect(normalized!.status).toBe("completed");
-    expect(normalized!.verdict).toBe("approve");
-    expect(normalized!.rationale).toContain("looks good");
-    expect(normalized!.risks.some(r => /risk/i.test(r))).toBe(true);
+    expect(await normalized).not.toBeNull();
+    expect((await normalized!).status).toBe("completed");
+    expect((await normalized!).verdict).toBe("approve");
+    expect((await normalized!).rationale).toContain("looks good");
+    expect((await normalized!).risks.some(r => /risk/i.test(r))).toBe(true);
   });
 
-  it("normalizes a failed provider result with its stderr surfaced as error", () => {
+  it("normalizes a failed provider result with its stderr surfaced as error", async () => {
     const fake = makeScriptedManager({
       codex: {
         status: "failed",
@@ -255,7 +255,7 @@ describe("Layer 6 validation orchestrator (U20)", () => {
         exitCode: 1,
       },
     });
-    const run = startValidationRun(
+    const run = await startValidationRun(
       {
         asyncJobManager: fake.manager as any,
         getProviderRuntimeStatus: provider => runtime(provider),
@@ -269,17 +269,17 @@ describe("Layer 6 validation orchestrator (U20)", () => {
       "codex-fake"
     );
 
-    expect(normalized).not.toBeNull();
-    expect(normalized!.status).toBe("failed");
-    expect(normalized!.verdict).toBe("failed");
-    expect(normalized!.error).toBe("auth required");
+    expect(await normalized).not.toBeNull();
+    expect((await normalized!).status).toBe("failed");
+    expect((await normalized!).verdict).toBe("failed");
+    expect((await normalized!).error).toBe("auth required");
   });
 
-  it("partial success: one provider missing, others started successfully", () => {
+  it("partial success: one provider missing, others started successfully", async () => {
     const fake = makeScriptedManager({
       claude: { status: "completed", stdout: "Verdict: approve" },
     });
-    const report = startValidationRun(
+    const report = await startValidationRun(
       {
         asyncJobManager: fake.manager as any,
         getProviderRuntimeStatus: provider => runtime(provider, provider === "claude"),
@@ -301,9 +301,9 @@ describe("Layer 6 validation orchestrator (U20)", () => {
     expect(started?.rawJobReference).not.toBeNull();
   });
 
-  it("treats all-missing providers as not_started", () => {
+  it("treats all-missing providers as not_started", async () => {
     const fake = makeScriptedManager({});
-    const report = startValidationRun(
+    const report = await startValidationRun(
       {
         asyncJobManager: fake.manager as any,
         getProviderRuntimeStatus: provider => runtime(provider, false),
@@ -317,11 +317,11 @@ describe("Layer 6 validation orchestrator (U20)", () => {
     expect(fake.startCalls).toHaveLength(0);
   });
 
-  it("warns when a started provider's login status is not authenticated", () => {
+  it("warns when a started provider's login status is not authenticated", async () => {
     const fake = makeScriptedManager({
       gemini: { status: "completed", stdout: "Verdict: approve" },
     });
-    const report = startValidationRun(
+    const report = await startValidationRun(
       {
         asyncJobManager: fake.manager as any,
         getProviderRuntimeStatus: provider => runtime(provider, true, "not_authenticated"),
@@ -332,13 +332,13 @@ describe("Layer 6 validation orchestrator (U20)", () => {
     expect(report.results[0].warning).toMatch(/login/i);
   });
 
-  it("judge synthesis runs once all provider results are terminal and at least one completed", () => {
+  it("judge synthesis runs once all provider results are terminal and at least one completed", async () => {
     const fake = makeScriptedManager({
       claude: { status: "completed", stdout: "Verdict: approve\nRationale: looks fine." },
       codex: { status: "completed", stdout: "Verdict: approve" },
       gemini: { status: "completed", stdout: "Verdict: approve" },
     });
-    const run = startValidationRun(
+    const run = await startValidationRun(
       {
         asyncJobManager: fake.manager as any,
         getProviderRuntimeStatus: provider => runtime(provider),
@@ -353,15 +353,18 @@ describe("Layer 6 validation orchestrator (U20)", () => {
 
     expect(run.synthesis.status).toBe("waiting_for_provider_results");
 
-    const collected = run.results.map(result =>
-      collectValidationJobResult(
-        { asyncJobManager: fake.manager as any },
-        result.provider,
-        result.rawJobReference!.jobId,
-        result.provider
-      )!
+    const collected = await Promise.all(
+      run.results.map(
+        async result =>
+          (await collectValidationJobResult(
+            { asyncJobManager: fake.manager as any },
+            result.provider,
+            result.rawJobReference!.jobId,
+            result.provider
+          ))!
+      )
     );
-    const synthesis = startJudgeSynthesis(
+    const synthesis = await startJudgeSynthesis(
       {
         asyncJobManager: fake.manager as any,
         getProviderRuntimeStatus: provider => runtime(provider),
@@ -374,9 +377,9 @@ describe("Layer 6 validation orchestrator (U20)", () => {
     expect(fake.startCalls.at(-1)?.cli).toBe("gemini");
   });
 
-  it("judge synthesis is skipped when the chosen judge runtime is missing", () => {
+  it("judge synthesis is skipped when the chosen judge runtime is missing", async () => {
     const fake = makeScriptedManager({});
-    const synthesis = startJudgeSynthesis(
+    const synthesis = await startJudgeSynthesis(
       {
         asyncJobManager: fake.manager as any,
         getProviderRuntimeStatus: provider => runtime(provider, provider !== "grok"),
@@ -408,7 +411,7 @@ describe("Layer 6 validation orchestrator (U20)", () => {
     expect(fake.startCalls).toHaveLength(0);
   });
 
-  it("returns null when collecting a job_result that does not exist", () => {
+  it("returns null when collecting a job_result that does not exist", async () => {
     const fake = makeScriptedManager({});
     const normalized = collectValidationJobResult(
       { asyncJobManager: fake.manager as any },
@@ -416,6 +419,6 @@ describe("Layer 6 validation orchestrator (U20)", () => {
       "missing-job",
       null
     );
-    expect(normalized).toBeNull();
+    expect(await normalized).toBeNull();
   });
 });

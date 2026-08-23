@@ -58,20 +58,38 @@ class CapturingFlightRecorder implements FlightRecorderLike {
   readonly starts: FlightLogStart[] = [];
   readonly completes: Array<{ correlationId: string; result: FlightLogResult }> = [];
 
-  logStart(entry: FlightLogStart): void {
+  async logStart(entry: FlightLogStart): Promise<void> {
     this.starts.push(entry);
   }
 
-  logComplete(correlationId: string, result: FlightLogResult): void {
+  async logComplete(correlationId: string, result: FlightLogResult): Promise<void> {
     this.completes.push({ correlationId, result });
   }
 
-  queryRequests<T = Record<string, unknown>>(_sql: string, ..._params: unknown[]): T[] {
+  async readCacheRowsBySession(): Promise<[]> {
+    return [];
+  }
+  async readCacheRowsByPrefix(): Promise<[]> {
+    return [];
+  }
+  async readCacheRowsGlobal(): Promise<[]> {
+    return [];
+  }
+  async readRequestById(): Promise<null> {
+    return null;
+  }
+  async listRequestSummaries(): Promise<[]> {
+    return [];
+  }
+  async readLcrPriorRows(): Promise<[]> {
+    return [];
+  }
+  async readRoutingDecisions(): Promise<[]> {
     return [];
   }
 
-  flush(): void {}
-  close(): void {}
+  async flush(): Promise<void> {}
+  async close(): Promise<void> {}
 }
 
 class CapturingLogger implements Logger {
@@ -102,7 +120,7 @@ afterEach(() => {
 async function waitForTerminal(manager: AsyncJobManager, jobId: string): Promise<void> {
   const deadline = Date.now() + 5000;
   while (Date.now() < deadline) {
-    const snapshot = manager.getJobSnapshot(jobId);
+    const snapshot = await manager.getJobSnapshot(jobId);
     if (snapshot && !isAsyncJobInProgress(snapshot.status)) return;
     await new Promise(resolve => setTimeout(resolve, 10));
   }
@@ -147,7 +165,7 @@ describe("child stdin native-error redaction", () => {
     let jobId = "";
 
     try {
-      const started = manager.startJobWithDedup(
+      const started = await manager.startJobWithDedup(
         process.execPath as LlmCli,
         ["-e", "setInterval(() => {}, 1000)"],
         "stdin-native-error-redaction",
@@ -164,20 +182,20 @@ describe("child stdin native-error redaction", () => {
       const snapshot = manager.getJobSnapshot(jobId);
       const result = manager.getJobResult(jobId);
       const durable = store.getById(jobId);
-      expect(snapshot).toMatchObject({
+      expect(await snapshot).toMatchObject({
         status: "failed",
         exitCode: 1,
         error: CHILD_STDIN_WRITE_FAILED_MESSAGE,
         retryable: false,
       });
-      expect(result).toMatchObject({
+      expect(await result).toMatchObject({
         status: "failed",
         exitCode: 1,
         error: CHILD_STDIN_WRITE_FAILED_MESSAGE,
         stderr: CHILD_STDIN_WRITE_FAILED_MESSAGE,
         retryable: false,
       });
-      expect(durable).toMatchObject({
+      expect(await durable).toMatchObject({
         status: "failed",
         exitCode: 1,
         error: CHILD_STDIN_WRITE_FAILED_MESSAGE,
@@ -202,13 +220,13 @@ describe("child stdin native-error redaction", () => {
       expect(allSurfaces).not.toContain("EACCES");
     } finally {
       await manager.dispose();
-      store.close();
+      await store.close();
     }
 
     const reopened = new SqliteJobStore(database, logger);
     try {
       const durableAfterRestart = reopened.getById(jobId);
-      expect(durableAfterRestart).toMatchObject({
+      expect(await durableAfterRestart).toMatchObject({
         status: "failed",
         exitCode: 1,
         error: CHILD_STDIN_WRITE_FAILED_MESSAGE,
@@ -217,7 +235,7 @@ describe("child stdin native-error redaction", () => {
       });
       expect(inspect(durableAfterRestart, { depth: 10 })).not.toContain(RAW_STDIN_ERROR_SENTINEL);
     } finally {
-      reopened.close();
+      await reopened.close();
     }
   });
 
@@ -240,7 +258,7 @@ describe("child stdin native-error redaction", () => {
     const store = new MemoryJobStore();
     const manager = new AsyncJobManager(logger, undefined, store);
     try {
-      const started = manager.startJobWithDedup(
+      const started = await manager.startJobWithDedup(
         process.execPath as LlmCli,
         ["-e", providerExit],
         "stdin-nonzero-precedence",
@@ -252,9 +270,19 @@ describe("child stdin native-error redaction", () => {
       const snapshot = manager.getJobSnapshot(started.snapshot.id);
       const result = manager.getJobResult(started.snapshot.id);
       const durable = store.getById(started.snapshot.id);
-      expect(snapshot).toMatchObject({ status: "failed", exitCode: 42, error: null });
-      expect(result).toMatchObject({ status: "failed", exitCode: 42, error: null, stderr: "" });
-      expect(durable).toMatchObject({ status: "failed", exitCode: 42, error: null, stderr: "" });
+      expect(await snapshot).toMatchObject({ status: "failed", exitCode: 42, error: null });
+      expect(await result).toMatchObject({
+        status: "failed",
+        exitCode: 42,
+        error: null,
+        stderr: "",
+      });
+      expect(await durable).toMatchObject({
+        status: "failed",
+        exitCode: 42,
+        error: null,
+        stderr: "",
+      });
 
       const allSurfaces = inspect(
         { snapshot, result, durable, logs: logger.entries },
@@ -326,7 +354,7 @@ describe("child stdin native-error redaction", () => {
     const store = new MemoryJobStore();
     const manager = new AsyncJobManager(logger, undefined, store);
     try {
-      const idle = manager.startJobWithDedup(
+      const idle = await manager.startJobWithDedup(
         process.execPath as LlmCli,
         ["-e", providerExit],
         "stdin-idle-precedence",
@@ -339,32 +367,35 @@ describe("child stdin native-error redaction", () => {
       await waitForTerminal(manager, idle.snapshot.id);
       await new Promise(resolve => setTimeout(resolve, 40));
       expect(RAW_STDIN_ERROR_REPORTS).toEqual([DELAYED_STDIN_FAILURE, DELAYED_STDIN_FAILURE]);
-      expect(manager.getJobResult(idle.snapshot.id)).toMatchObject({
+      expect(await manager.getJobResult(idle.snapshot.id)).toMatchObject({
         status: "failed",
         exitCode: 125,
         error: "Process killed after 100ms of inactivity",
       });
-      expect(store.getById(idle.snapshot.id)).toMatchObject({ status: "failed", exitCode: 125 });
+      expect(await store.getById(idle.snapshot.id)).toMatchObject({
+        status: "failed",
+        exitCode: 125,
+      });
 
-      const canceled = manager.startJobWithDedup(
+      const canceled = await manager.startJobWithDedup(
         process.execPath as LlmCli,
         ["-e", providerExit],
         "stdin-cancel-precedence",
         { stdin: DELAYED_STDIN_FAILURE, forceRefresh: true }
       );
       await new Promise(resolve => setTimeout(resolve, 80));
-      expect(manager.cancelJob(canceled.snapshot.id)).toEqual({ canceled: true });
+      expect(await manager.cancelJob(canceled.snapshot.id)).toEqual({ canceled: true });
       await new Promise(resolve => setTimeout(resolve, 240));
       expect(RAW_STDIN_ERROR_REPORTS).toEqual([
         DELAYED_STDIN_FAILURE,
         DELAYED_STDIN_FAILURE,
         DELAYED_STDIN_FAILURE,
       ]);
-      expect(manager.getJobResult(canceled.snapshot.id)).toMatchObject({
+      expect(await manager.getJobResult(canceled.snapshot.id)).toMatchObject({
         status: "canceled",
         error: null,
       });
-      expect(store.getById(canceled.snapshot.id)).toMatchObject({
+      expect(await store.getById(canceled.snapshot.id)).toMatchObject({
         status: "canceled",
         error: null,
       });

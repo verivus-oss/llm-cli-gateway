@@ -1,3 +1,10 @@
+# ============================================================================
+# SHIPPED. Per-node `status` in this file was never maintained: 13 node(s)
+# below still read `planned` for code that is live. Do not read a `planned`
+# node here as evidence that something is unimplemented; check the code.
+# src/endpoint-exposure.ts and the stdio/remote workspace gating are live; assertWorkspaceToolCaller gates all four workspace_* tools.
+# Classified 2026-08-18 at HEAD 801950d. Index: docs/plans/README.md
+# ============================================================================
 [meta]
 title = "Local stdio vs remote HTTP workspace gating"
 status = "planned"

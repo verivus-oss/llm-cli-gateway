@@ -3,15 +3,14 @@ import { PROVIDER_TYPES, sessionGenerationIdentity } from "../session-manager.js
 import { PostgreSQLSessionManager } from "../session-manager-pg.js";
 import { resolveGatewayServerRuntime, resolveWorktreeForRequest } from "../index.js";
 import { runWithRequestContext } from "../request-context.js";
-import { setupTestDatabase, cleanTestDatabase } from "./setup.js";
+import { cleanTestDatabase, setupTestDatabase, setupTestStorageDriver } from "./setup.js";
 
 describe("PostgreSQLSessionManager", () => {
   let manager: PostgreSQLSessionManager;
 
   beforeEach(async () => {
     await cleanTestDatabase();
-    const { pool } = await setupTestDatabase();
-    manager = new PostgreSQLSessionManager(pool);
+    manager = new PostgreSQLSessionManager(await setupTestStorageDriver());
   });
 
   //──────────────────────────────────────────────────────────────────────────
@@ -188,7 +187,9 @@ describe("PostgreSQLSessionManager", () => {
   describe("deleteSession", () => {
     it("notifies cleanup observers only after successful removals", async () => {
       const observed: string[] = [];
-      const unsubscribe = manager.addSessionRemovalObserver(session => observed.push(session.id));
+      const unsubscribe = manager.addSessionRemovalObserver(
+        async session => await observed.push(session.id)
+      );
       const deleted = await manager.createSession("claude", "Observer delete");
       const cleared = await manager.createSession("codex", "Observer clear");
 
@@ -216,6 +217,124 @@ describe("PostgreSQLSessionManager", () => {
       const deleted = await manager.deleteSession("non-existent-id");
 
       expect(deleted).toBe(false);
+    });
+
+    it("admits one of two concurrent continuation writes from the same basis", async () => {
+      const s = await manager.createSession("claude", "two turns");
+      const basis = { ...(s.metadata ?? {}) };
+      const identity = sessionGenerationIdentity(s);
+      const fenced = await Promise.all([
+        manager.compareAndSetSession(identity, {
+          kind: "replace_metadata",
+          expectedMetadata: basis,
+          metadata: { ...basis, apiPreviousResponseId: "A" },
+        }),
+        manager.compareAndSetSession(identity, {
+          kind: "replace_metadata",
+          expectedMetadata: basis,
+          metadata: { ...basis, apiPreviousResponseId: "B" },
+        }),
+      ]);
+      expect(fenced.filter(Boolean)).toHaveLength(1);
+      const row = await manager.getSession(s.id);
+      expect((row?.metadata as Record<string, unknown>).apiPreviousResponseId).toBe(
+        fenced[0] ? "A" : "B"
+      );
+
+      // The negative control, in the same test: the unfenced merge these writes
+      // used to take admits BOTH, which is how an earlier turn's handle could
+      // end up in the row with both callers told true.
+      const merged = await Promise.all([
+        manager.updateSessionMetadata(s.id, { apiPreviousResponseId: "A" }),
+        manager.updateSessionMetadata(s.id, { apiPreviousResponseId: "B" }),
+      ]);
+      expect(merged).toEqual([true, true]);
+    });
+
+    it("selects the active pointer's target by owner in the same statement", async () => {
+      const alice = await runWithRequestContext(
+        { transport: "http", authScopes: [], authPrincipal: "alice" },
+        () => manager.createSession("claude", "alice session")
+      );
+      const bobOwn = await runWithRequestContext(
+        { transport: "http", authScopes: [], authPrincipal: "bob" },
+        () => manager.createSession("claude", "bob session")
+      );
+      await runWithRequestContext({ transport: "http", authScopes: [], authPrincipal: "bob" }, () =>
+        manager.setActiveSession("claude", bobOwn.id)
+      );
+
+      const pointed = await runWithRequestContext(
+        { transport: "http", authScopes: [], authPrincipal: "bob" },
+        () => manager.setActiveSession("claude", alice.id)
+      );
+
+      expect(pointed).toBe(false);
+      expect((await manager.getActiveSession("claude"))?.id).toBe(bobOwn.id);
+    });
+
+    it("carries the owner into the DELETE, not only into the caller's decision", async () => {
+      const alice = await runWithRequestContext(
+        { transport: "http", authScopes: [], authPrincipal: "alice" },
+        () => manager.createSession("claude", "alice session")
+      );
+
+      const deleted = await runWithRequestContext(
+        { transport: "http", authScopes: [], authPrincipal: "bob" },
+        () => manager.deleteSession(alice.id)
+      );
+
+      // The DATABASE, not the return value: an unfenced DELETE returns false
+      // from a re-read and still removes the row.
+      expect(deleted).toBe(false);
+      expect(await manager.getSession(alice.id)).toMatchObject({ ownerPrincipal: "alice" });
+    });
+
+    it("does not delete a row another principal took over mid-request", async () => {
+      const alice = await runWithRequestContext(
+        { transport: "http", authScopes: [], authPrincipal: "alice" },
+        () => manager.createSession("claude", "alice session")
+      );
+
+      // A gate the test owns, holding alice's delete between its ownership
+      // read and its statement. It resolves whether or not the fence exists.
+      let release!: () => void;
+      let arrived!: () => void;
+      const gate = new Promise<void>(resolve => (release = resolve));
+      // A two-way barrier. Without the arrival half the swap could land before
+      // the held read completes, the read would return null, and the test would
+      // pass against the unfenced DELETE without ever running it.
+      const reached = new Promise<void>(resolve => (arrived = resolve));
+      const realGetSession = manager.getSession.bind(manager);
+      let held = false;
+      (manager as unknown as Record<string, unknown>).getSession = async (id: string) => {
+        const found = await realGetSession(id);
+        if (!held && id === alice.id) {
+          held = true;
+          arrived();
+          await gate;
+        }
+        return found;
+      };
+
+      const deleting = runWithRequestContext(
+        { transport: "http", authScopes: [], authPrincipal: "alice" },
+        () => manager.deleteSession(alice.id)
+      );
+      await reached;
+
+      // Alice's row goes away legitimately, and bob claims the freed id.
+      await manager.clearAllSessions();
+      await runWithRequestContext({ transport: "http", authScopes: [], authPrincipal: "bob" }, () =>
+        manager.createSession("claude", "bob session", alice.id)
+      );
+      expect(await realGetSession(alice.id)).toMatchObject({ ownerPrincipal: "bob" });
+
+      release();
+      await deleting;
+
+      (manager as unknown as Record<string, unknown>).getSession = realGetSession;
+      expect(await realGetSession(alice.id)).toMatchObject({ ownerPrincipal: "bob" });
     });
 
     it("should clear active session if deleting active session", async () => {
@@ -447,6 +566,71 @@ describe("PostgreSQLSessionManager", () => {
 
     it("should not throw error for non-existent session", async () => {
       await expect(manager.updateSessionUsage("non-existent-id")).resolves.not.toThrow();
+    });
+
+    it("never moves last_used_at backwards, even from a writer with an older basis", async () => {
+      // DEFECT 4. The statement was `SET last_used_at = $1` with a client
+      // `new Date()` captured before the await, unguarded, on a pool of ten.
+      // Of two concurrent turns the later-finishing EARLIER one wrote the older
+      // value and the column regressed. migrations/009's
+      // `cleanup_expired_sessions` DELETEs on this column, so a regressed
+      // timestamp is a live session an operator's cron can remove.
+      const session = await manager.createSession("claude", "monotonic", "monotonic-session");
+      const { pool } = await setupTestDatabase();
+
+      // A writer whose basis is LATER than this process's clock has committed.
+      const ahead = await pool.query<{ last_used_at: Date }>(
+        `UPDATE sessions SET last_used_at = clock_timestamp() + interval '1 hour'
+         WHERE id = $1 RETURNING last_used_at`,
+        [session.id]
+      );
+      const aheadAt = ahead.rows[0].last_used_at;
+
+      expect(await manager.updateSessionUsage(session.id)).toBe(true);
+
+      const after = await pool.query<{ last_used_at: Date }>(
+        "SELECT last_used_at FROM sessions WHERE id = $1",
+        [session.id]
+      );
+      // Read off the DATABASE, not off the boolean the call returned.
+      expect(after.rows[0].last_used_at.getTime()).toBeGreaterThanOrEqual(aheadAt.getTime());
+    });
+
+    it("cannot regress the column while waiting on another writer's row lock", async () => {
+      // The same defect under a REAL serialization conflict rather than a
+      // pre-set value, which is also what proves the guard survives Postgres
+      // re-evaluating the SET expression against the newer row version.
+      //
+      // The barrier is the row lock itself, not a sleep: the UPDATE below is
+      // AWAITED inside an open transaction, so the lock is provably held before
+      // updateSessionUsage is issued, and updateSessionUsage cannot proceed
+      // until the COMMIT.
+      const session = await manager.createSession("claude", "locked", "locked-session");
+      const { pool } = await setupTestDatabase();
+      const holder = await pool.connect();
+      let aheadAt: Date;
+      let usage: Promise<boolean>;
+      try {
+        await holder.query("BEGIN");
+        const ahead = await holder.query<{ last_used_at: Date }>(
+          `UPDATE sessions SET last_used_at = clock_timestamp() + interval '1 hour'
+           WHERE id = $1 RETURNING last_used_at`,
+          [session.id]
+        );
+        aheadAt = ahead.rows[0].last_used_at;
+        // Issued while the lock is held; it blocks in the server.
+        usage = manager.updateSessionUsage(session.id);
+        await holder.query("COMMIT");
+      } finally {
+        holder.release();
+      }
+      expect(await usage).toBe(true);
+
+      const after = await pool.query<{ last_used_at: Date }>(
+        "SELECT last_used_at FROM sessions WHERE id = $1",
+        [session.id]
+      );
+      expect(after.rows[0].last_used_at.getTime()).toBeGreaterThanOrEqual(aheadAt.getTime());
     });
   });
 

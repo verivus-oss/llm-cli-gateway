@@ -122,11 +122,17 @@ lcr_phase = "phase_1"
 
 [cost_model.gemini]
 price_source = "table"
-telemetry_tier = "T2"
-reported_cost = "none"              # no $cost; token counts present => cost DERIVED (enh 1)
+# CORRECTED 2026-08-18 (was T2 / derived-from-tokens). The Antigravity `agy`
+# headless path emits text only, and the adapter REJECTS json/stream-json before
+# spawn, so `extractUsageAndCost`'s gemini arm and `gemini-json-parser` are both
+# unreachable code. Live evidence: 0 of 2241 gemini flight-recorder rows carry
+# token counts. The old T2 label was published through `doctor --json`, the MCP
+# capability resource and `provider_tool_capabilities`.
+telemetry_tier = "T4"
+reported_cost = "none"              # and no counts either: nothing to derive from
 accounting_mode = "inclusive"
-basis = "derived-from-tokens"
-usage = "input/output/cache_read"
+basis = "pre-flight-estimate"
+usage = "none"
 lcr_phase = "phase_1"
 
 [cost_model.grok]
@@ -257,7 +263,7 @@ redaction = "reuse flight-recorder redaction: no secrets, no base_url userinfo, 
 
 [flight_recorder_requirements]
 migration = "additive, nullable columns on gateway_metadata incl route_est_confidence + request-wide cost_basis (matches existing additive-migration pattern)"
-derived_backfill = "logComplete backfills cost_usd + cost_basis='derived-from-tokens' for T2 rows (codex/gemini) from recorded counts x getModelCost/composeCost; T1 rows keep provider-reported"
+derived_backfill = "logComplete backfills cost_usd + cost_basis='derived-from-tokens' for T2 rows (codex only; gemini was listed here until 3.1.0 and emits no counts) from recorded counts x getModelCost/composeCost; T1 rows keep provider-reported"
 reconciliation = "actual cost_usd/output_tokens/model already recorded; reconciliation splits accuracy by cost_basis"
 
 # ---------------------------------------------------------------------------
@@ -288,7 +294,7 @@ config = "loadLeastCostConfig: missing=all-off, schema-invalid=throw, env overri
 
 [test_matrix.integration]
 gated_off = "with enabled=false, route_request/route_request_async are NOT registered."
-gated_on = "with enabled=true, a table-priced CLI request routes to the cheapest tier-eligible candidate and records the routing columns incl cost_basis; a T2 (codex/gemini) route's cost is upgraded to derived-from-tokens on completion."
+gated_on = "with enabled=true, a table-priced CLI request routes to the cheapest tier-eligible candidate and records the routing columns incl cost_basis; a T2 (codex) route's cost is upgraded to derived-from-tokens on completion; gemini is T4 and has no counts to upgrade from."
 surfaces = "provider:surfaces:check passes (no new hand-maintained provider array)."
 
 # ---------------------------------------------------------------------------
@@ -314,7 +320,7 @@ contract = "docs/least-cost-routing-contract.md: frozen decisions + non-goals + 
 # ---------------------------------------------------------------------------
 [rollout]
 phase_0 = "getModelCost + composeCost (enh 1) + modelIdToFamily + layered token-estimator.ts (enh 3, content-aware base + family multipliers, NO calibration yet) + per-CLI breaker accessor + per-provider capacity helper + explicit capability flags + pure least-cost-router.ts + unit tests. No tool yet."
-phase_1 = "route_request/route_request_async behind [least_cost].enabled=false; CLI providers with table prices only; routing block (incl costBasis + confidence); flight-recorder columns incl cost_basis + route_est_confidence; derived-cost backfill on logComplete for T2 providers already emitting counts (codex, gemini); T4 confidence:low for cursor/devin (enh 6)."
+phase_1 = "route_request/route_request_async behind [least_cost].enabled=false; CLI providers with table prices only; routing block (incl costBasis + confidence); flight-recorder columns incl cost_basis + route_est_confidence; derived-cost backfill on logComplete for T2 providers already emitting counts (codex); T4 confidence:low for cursor/devin/gemini (enh 6)."
 phase_2 = "API-provider candidates priced from published catalogs + feedback aggregator (output priors AND input-token calibration k + residual spread feeding the calibrated estimator and confidence band, enh 2/5) + est-vs-actual reconciliation split by cost_basis + routing:// resources."
 phase_2b = "enh 4 (corrected): capture the dropped reasoningTokens in extractAcpPromptUsage + add it to the derived formula; make LCR transport-aware for grok (derive cost only via the operator-gated ACP transport, estimate-only on -p; never flip the ACP default on); extract cache_creation_input_tokens in the Anthropic-API adapter so its disjoint derived cost is complete. Small, isolated, own gate."
 phase_3 = "validation-tool select:'cheapest' opt-in; doctor/health eligibility + telemetry-tier + calibration-quality surfacing (enh 5); reconciliation reporting. Optional real-BPE tokenizer layer (enh 3, open question) is a candidate slice here if adopted."
