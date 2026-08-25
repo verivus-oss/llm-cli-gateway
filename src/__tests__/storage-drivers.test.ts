@@ -431,9 +431,30 @@ describe("SqliteStorageDriver", () => {
         )
     );
 
-    const startedAt = Date.now();
-    await bounded.close();
-    const elapsed = Date.now() - startedAt;
+    // DRIVE THE CLOCK, do not race the machine. This assertion used to be
+    // "500 real inserts cannot finish inside 150ms", which is a claim about the
+    // HARDWARE rather than about the driver: a runner fast enough to drain all
+    // 500 reports `abandoned` 0 and fails. It did exactly that on master,
+    // `expected 0 to be greater than 0`, while passing on every developer
+    // machine, so the test was red for two days and said nothing true.
+    //
+    // The property is the DEADLINE PREDICATE in transaction(): a queued item
+    // that reaches the front after the bound has passed must abandon rather
+    // than land. `close()` arms `drainDeadline` synchronously before its first
+    // await, so moving the clock immediately afterwards puts every remaining
+    // item past the bound no matter how fast the engine is.
+    const realNow = Date.now.bind(Date);
+    let clockOffsetMs = 0;
+    const nowSpy = vi.spyOn(Date, "now").mockImplementation(() => realNow() + clockOffsetMs);
+
+    // Measured on a source the mock does not touch, so "close returned
+    // promptly" stays a real observation rather than a mocked one.
+    const startedAt = performance.now();
+    const closing = bounded.close();
+    clockOffsetMs = 10_000;
+    await closing;
+    const elapsed = performance.now() - startedAt;
+    nowSpy.mockRestore();
 
     const outcomes = await Promise.all(submitted);
     const abandoned = outcomes.filter(o => o === "abandoned").length;
@@ -441,8 +462,8 @@ describe("SqliteStorageDriver", () => {
     // The bound fired: work was abandoned rather than all 500 draining.
     expect(abandoned).toBeGreaterThan(0);
     expect(outcomes.filter(o => o === "other")).toEqual([]);
-    // And it fired NEAR the bound. Generous ceiling, because the point is that
-    // it is bounded at all, not that it is precise: unbounded was 2598 ms over.
+    // And close() returned without waiting out the real 150ms timer, which is
+    // the whole point: the deadline is what bounds a starved microtask queue.
     expect(elapsed).toBeLessThan(150 * 6);
   });
 
