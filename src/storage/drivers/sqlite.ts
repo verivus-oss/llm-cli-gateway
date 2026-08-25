@@ -18,8 +18,17 @@ import {
   type GatewayDatabase,
   type GatewayStatement,
 } from "../../sqlite-driver.js";
-import { resolveStorageRole, type StorageOperationClass, type StorageRole } from "../roles.js";
-import { STORAGE_TRANSACTION_DEADLINE_MS, StorageTransactionDeadlineError } from "../deadline.js";
+import {
+  READ_ONLY_OPERATION_CLASSES,
+  resolveStorageRole,
+  type StorageOperationClass,
+  type StorageRole,
+} from "../roles.js";
+import {
+  STORAGE_READ_SNAPSHOT_DEADLINE_MS,
+  STORAGE_TRANSACTION_DEADLINE_MS,
+  StorageTransactionDeadlineError,
+} from "../deadline.js";
 import { inTransactionOn, nestedConnectionRefusal, runInTransaction } from "../reentrancy.js";
 import { isTransactionControl, transactionControlRefusal } from "../statements.js";
 import type { StorageConnection, StorageDriver, StorageEngine } from "../store.js";
@@ -28,12 +37,6 @@ import type { StorageConnection, StorageDriver, StorageEngine } from "../store.j
 const DEFAULT_DRAIN_TIMEOUT_MS = 2000;
 
 const CLOSING_MESSAGE = "storage: sqlite driver is closing and is not accepting new work";
-
-/** Operation classes that may use the read-only connection. */
-const READ_ONLY_OPERATIONS: ReadonlySet<StorageOperationClass> = new Set([
-  "transcript_read",
-  "analytics_read",
-]);
 
 /**
  * Prepared statements, cached per database handle.
@@ -139,6 +142,7 @@ export class SqliteStorageDriver implements StorageDriver {
   private closePromise: Promise<void> | null = null;
   private readonly drainTimeoutMs: number;
   private readonly transactionDeadlineMs: number;
+  private readonly readSnapshotDeadlineMs: number;
 
   /**
    * `drainTimeoutMs` bounds how long `close()` waits for already-queued
@@ -151,11 +155,17 @@ export class SqliteStorageDriver implements StorageDriver {
    */
   constructor(
     private readonly dbPath: string,
-    options: { drainTimeoutMs?: number; transactionDeadlineMs?: number } = {}
+    options: {
+      drainTimeoutMs?: number;
+      transactionDeadlineMs?: number;
+      readSnapshotDeadlineMs?: number;
+    } = {}
   ) {
     this.writable = openDatabase(dbPath);
     this.drainTimeoutMs = options.drainTimeoutMs ?? DEFAULT_DRAIN_TIMEOUT_MS;
     this.transactionDeadlineMs = options.transactionDeadlineMs ?? STORAGE_TRANSACTION_DEADLINE_MS;
+    this.readSnapshotDeadlineMs =
+      options.readSnapshotDeadlineMs ?? STORAGE_READ_SNAPSHOT_DEADLINE_MS;
   }
 
   /**
@@ -170,7 +180,7 @@ export class SqliteStorageDriver implements StorageDriver {
   ): StorageConnection {
     if (this.closed) throw new Error("storage: sqlite driver is closed");
     resolveStorageRole(operation, this.roles);
-    if (!READ_ONLY_OPERATIONS.has(operation)) {
+    if (!READ_ONLY_OPERATION_CLASSES.has(operation)) {
       return connectionOver(this.writable, transactionControl, deadline);
     }
     this.readable ??= openReadOnly(this.dbPath);
@@ -264,7 +274,7 @@ export class SqliteStorageDriver implements StorageDriver {
     operation: StorageOperationClass,
     fn: (connection: StorageConnection) => Promise<T>
   ): Promise<T> {
-    if (READ_ONLY_OPERATIONS.has(operation)) {
+    if (READ_ONLY_OPERATION_CLASSES.has(operation)) {
       return Promise.reject(
         new Error(`storage: ${operation} is a read class and cannot open a transaction`)
       );
@@ -340,6 +350,90 @@ export class SqliteStorageDriver implements StorageDriver {
     const started = this.queue.then(run);
     this.queue = started.catch(() => undefined);
     return started;
+  }
+
+  /**
+   * A pinned read snapshot on the read-only handle.
+   *
+   * `BEGIN DEFERRED` and not `BEGIN IMMEDIATE`: this takes no write lock and
+   * must not block a live recorder. Under WAL a read transaction sees the
+   * snapshot current when its first read runs and keeps seeing it until it
+   * ends, which is the whole point, and writers carry on into the WAL beside it.
+   *
+   * It does NOT go through the write queue. The queue serialises transactions
+   * that contend for the one writable handle; a read snapshot holds a different
+   * connection, and putting a fifteen-minute analytical read at the head of that
+   * queue would stall every write behind it.
+   *
+   * The deadline is the same clock-read-per-statement mechanism as the write
+   * path, for the same reason: `node:sqlite` is synchronous and exposes no
+   * interrupt, so nothing can be cancelled mid-statement and the check has to
+   * sit at statement boundaries.
+   */
+  readSnapshot<T>(
+    operation: StorageOperationClass,
+    fn: (connection: StorageConnection) => Promise<T>
+  ): Promise<T> {
+    if (!READ_ONLY_OPERATION_CLASSES.has(operation)) {
+      return Promise.reject(
+        new Error(`storage: ${operation} is a write class and cannot open a read snapshot`)
+      );
+    }
+    if (this.closing || this.closed) return Promise.reject(new Error(CLOSING_MESSAGE));
+    if (inTransactionOn(this)) return Promise.reject(nestedConnectionRefusal(this));
+    const deadline: SqliteDeadline | null =
+      this.readSnapshotDeadlineMs > 0
+        ? {
+            expiresAt: Date.now() + this.readSnapshotDeadlineMs,
+            operation,
+            deadlineMs: this.readSnapshotDeadlineMs,
+          }
+        : null;
+    const run = async (): Promise<T> => {
+      const connection = this.connectionFor(operation, true, deadline);
+      // WAL or nothing. Outside WAL a read transaction takes a SHARED lock that
+      // blocks every writer until it ends, so a snapshot held for the analytical
+      // bound would stall the whole gateway rather than merely read it. Measured
+      // on a fresh file: the concurrent writer fails with "database is locked".
+      //
+      // `openDatabase` issues no pragmas by design (plan B2/B3); WAL is set by
+      // the callers that own a file, so in production this refusal never fires.
+      // It fires when someone points a snapshot at a file where the guarantee
+      // does not hold, which is exactly when silence would be worst.
+      const [mode] = await connection.query<{ journal_mode?: string }>("PRAGMA journal_mode");
+      const journal = String(mode?.journal_mode ?? "").toLowerCase();
+      if (journal !== "wal") {
+        throw new Error(
+          `storage: a read snapshot needs WAL, but this database is in "${journal}" mode, ` +
+            `where a read transaction blocks writers for as long as it is held`
+        );
+      }
+      await connection.execute("BEGIN DEFERRED");
+      try {
+        const result = await runInTransaction(this, () => fn(connection));
+        if (deadline !== null && Date.now() >= deadline.expiresAt) {
+          throw new StorageTransactionDeadlineError(
+            "sqlite",
+            deadline.operation,
+            deadline.deadlineMs
+          );
+        }
+        await connection.execute("COMMIT");
+        return result;
+      } catch (error) {
+        // Same rule as the write path: the ROLLBACK must never replace the
+        // error that caused it.
+        try {
+          await connection.execute("ROLLBACK");
+        } catch (rollbackError) {
+          if (error instanceof Error && error.cause === undefined) {
+            error.cause = rollbackError;
+          }
+        }
+        throw error;
+      }
+    };
+    return run();
   }
 
   /**

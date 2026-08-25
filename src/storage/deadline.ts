@@ -18,6 +18,24 @@ export type StorageDeadlineEngine = "sqlite" | "postgres";
 export const STORAGE_TRANSACTION_DEADLINE_MS = 60_000;
 
 /**
+ * The same bound for a PINNED READ SNAPSHOT, which is a different shape of work.
+ *
+ * 60s is right for a gateway write: a request is waiting on it, and a write that
+ * cannot finish in a minute is a write to abandon. An analytical read holds no
+ * request open and exists to scan the whole table: verifying a 12,031-row,
+ * 1.2 GB transcript copy cannot be done inside the write bound, and forcing it
+ * to try is what pushed one draft of the cutover design into opening a private
+ * connection to escape the port entirely.
+ *
+ * Fifteen minutes is a judgement, not a measurement. It is long enough that a
+ * full-table verify is not racing the clock, and short enough that a snapshot
+ * held open by a stuck reader does not pin PostgreSQL's cleanup horizon for an
+ * afternoon. A caller that needs longer should say so explicitly rather than
+ * have this number raised for everyone.
+ */
+export const STORAGE_READ_SNAPSHOT_DEADLINE_MS = 900_000;
+
+/**
  * Thrown when, and ONLY when, the driver has already made the transaction
  * unable to commit. It is a durable statement about the database, not a report
  * that the caller gave up waiting.

@@ -59,6 +59,25 @@ export interface StorageDriver {
     operation: StorageOperationClass,
     fn: (connection: StorageConnection) => Promise<T>
   ): Promise<T>;
+  /**
+   * One pinned, repeatable snapshot for a READ class, and the mirror image of
+   * `transaction`: that method refuses read classes, this one refuses write
+   * classes, and neither is the other with a flag.
+   *
+   * `withConnection` runs each statement on whatever connection it can get, so
+   * two successive reads can see two different states. A verify that hashes a
+   * table row by row needs them to see ONE, or a concurrent writer moves a row
+   * the digest has already passed and the check reports agreement it never had.
+   *
+   * This exists so that need has an answer inside the port. Without it the only
+   * way to hold a snapshot was a private connection, which buys consistency by
+   * giving up role routing, shutdown and error handling: the seam stops being a
+   * seam precisely where the data matters most.
+   */
+  readSnapshot<T>(
+    operation: StorageOperationClass,
+    fn: (connection: StorageConnection) => Promise<T>
+  ): Promise<T>;
   close(): Promise<void>;
 }
 
