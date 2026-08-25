@@ -21,7 +21,7 @@
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { AsyncJobManager } from "../async-job-manager.js";
 import {
   SqliteJobStore,
@@ -314,12 +314,21 @@ describe("DEFECT 2: the heartbeat is one transaction, so a sweep cannot split it
       committed.push(snapshot());
       return result;
     };
+    // Put the heartbeat's writes in a STRICTLY later millisecond than `before`.
+    // Without this the two can land in the same tick and the closing assertion
+    // reads `expected 1787638598432 to be greater than 1787638598432`, which is
+    // the clock's resolution rather than a defect. It failed exactly that way
+    // in CI while passing locally. The property below is about ORDERING of the
+    // committed states, so the timestamps only need to be distinguishable.
+    const realNow = Date.now.bind(Date);
+    const nowSpy = vi.spyOn(Date, "now").mockImplementation(() => realNow() + 1_000);
     try {
       expect(await store.heartbeat("inst-A")).toEqual({
         instanceRowRefreshed: true,
         jobLeasesAdvanced: 1,
       });
     } finally {
+      nowSpy.mockRestore();
       driver.transaction = realTransaction;
     }
 
