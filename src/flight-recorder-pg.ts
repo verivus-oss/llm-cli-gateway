@@ -655,15 +655,42 @@ function redactStart(entry: FlightLogStart): FlightLogStart {
  * on the first INSERT, which is the failure the job store's own readiness check
  * is column-level to avoid.
  */
+/**
+ * Columns whose TYPE the queries below depend on, not merely their presence.
+ *
+ * A name-only readiness check fails OPEN: with `routed` as INTEGER rather than
+ * BOOLEAN the check passed, the recorder reported `active` and
+ * `readsAreAuthoritative`, and then `WHERE m.routed IS TRUE` (:522) was rejected
+ * by the server with "argument of IS TRUE must be type boolean, not type
+ * integer". Health said fine and the read died.
+ *
+ * Only the columns a query treats as a specific type are listed. Everything
+ * else is still checked by name, because a wrong-typed TEXT column produces a
+ * wrong value rather than a rejected statement, and that belongs to the schema
+ * parity gate rather than to a runtime readiness probe.
+ */
+const TRANSCRIPT_REQUIRED_TYPES: Readonly<Record<string, string>> = {
+  "gateway_metadata.routed": "boolean",
+  "gateway_metadata.optimization_applied": "boolean",
+  "gateway_metadata.cost_usd": "double precision",
+  "gateway_metadata.route_est_cost_usd": "double precision",
+};
+
 async function transcriptSchemaReady(driver: PostgresStorageDriver): Promise<boolean> {
   const rows = await driver.withConnection("analytics_read", conn =>
-    conn.query<{ table_name: string; column_name: string }>(
-      `SELECT table_name, column_name FROM information_schema.columns
+    conn.query<{ table_name: string; column_name: string; data_type: string }>(
+      `SELECT table_name, column_name, data_type FROM information_schema.columns
         WHERE table_schema = current_schema() AND table_name IN ('requests', 'gateway_metadata')`
     )
   );
-  const have = new Set(rows.map(row => `${row.table_name}.${row.column_name}`));
-  return TRANSCRIPT_REQUIRED_COLUMNS.every(column => have.has(column));
+  const have = new Map(rows.map(row => [`${row.table_name}.${row.column_name}`, row.data_type]));
+  if (!TRANSCRIPT_REQUIRED_COLUMNS.every(column => have.has(column))) return false;
+  // Type, for the columns a query depends on. Readiness that ignores type is
+  // readiness that reports healthy and then fails the read.
+  for (const [column, expected] of Object.entries(TRANSCRIPT_REQUIRED_TYPES)) {
+    if (have.get(column) !== expected) return false;
+  }
+  return true;
 }
 
 export const TRANSCRIPT_REQUIRED_COLUMNS: readonly string[] = [
