@@ -2376,6 +2376,7 @@ export class AsyncJobManager {
         httpStatus: orphan.transport === "http" ? (orphan.httpStatus ?? undefined) : undefined,
         errorMessage: "Personal Agent Config Kit job was orphaned; detailed output is withheld",
         status: "failed",
+        completionKind: "presumed",
       };
     }
     const hasCapturedStdout = orphan.stdout.length > 0;
@@ -2394,6 +2395,7 @@ export class AsyncJobManager {
         optimizationApplied: false,
         exitCode: 0,
         status: "completed",
+        completionKind: "presumed",
       };
     }
 
@@ -2409,6 +2411,7 @@ export class AsyncJobManager {
       httpStatus: orphan.transport === "http" ? (orphan.httpStatus ?? undefined) : undefined,
       errorMessage: "orphaned after gateway restart",
       status: "failed",
+      completionKind: "presumed",
     };
   }
 

@@ -165,12 +165,14 @@ export const WRITE_ORDERING_RULES = {
   },
   merge_fence: {
     mode: "A delayed first completion arriving after the final one overwrites the final response.",
-    rule: "SETTLED BY EXPERIMENT at s7, which is the first point it could be: with a synchronous recorder two completions could not arrive out of order. Driven both ways against a real database. ACROSS WRITERS the fence is REQUIRED: an earlier-decided completion landing second overwrites the final response body, silently, because the body update is unfenced last-writer-wins; the status stays monotonic because its half is fenced to `started`, which is what makes the loss invisible. WITHIN one recorder it is not reachable: the driver serialises transactions on one queue, so submission order is landing order. The fence is therefore owed to the two-writer case, which the #139 orphan sweep is, and it is not built here because the revision column is transcript-schema authorship that operator decision 0a stops.",
+    rule: "SETTLED BY EXPERIMENT at s7 and BUILT at migrations/023. s7 characterised it and could not fix it: the fence needs a column, and operator decision 0a stopped transcript-schema authorship at the time. The column exists now, so the rule is enforced rather than described. A completion is OBSERVED (this process saw the provider terminate) or PRESUMED (the #139 sweep decided a job was dead), carried as `gateway_metadata.completion_rank` 2 and 1, and a completion lands only where its rank is >= the stored one. Note that BOTH obvious fences are wrong: last-writer-wins loses the real answer when the sweep lands second, which is what s7 measured, and fencing on `status <> 'started'` loses it when the sweep lands FIRST, which is the more common ordering and a worse regression. Authority, not arrival, is the only rule that survives both. The body and the status are now fenced identically; s7's split, where the body was last-wins and the status monotonic, is what made the loss invisible.",
     owner: "s7",
-    status: "characterised",
+    status: "enforced",
     verifiedBy: [
-      "a late second completion refreshes the response and leaves the status monotonic",
-      "REQUIRED across writers: an earlier-decided completion landing second overwrites the final body",
+      "a late second completion refreshes the response and the status together",
+      "across writers: a PRESUMED completion landing second cannot overwrite the observed one",
+      "across writers: an OBSERVED completion landing second replaces the presumption",
+      "a second PRESUMED completion cannot overwrite the first presumption's body",
       "NOT reachable within one recorder: submission order is landing order",
     ],
   },

@@ -270,7 +270,7 @@ describe("flight recorder on the storage port (s7)", () => {
     // distinguished." Whether that matters was unknowable with a synchronous
     // recorder, because two completions could not arrive out of order.
 
-    it("REQUIRED across writers: an earlier-decided completion landing second overwrites the final body", async () => {
+    it("across writers: a PRESUMED completion landing second cannot overwrite the observed one", async () => {
       const instanceA = new FlightRecorder(dbPath);
       const instanceB = new FlightRecorder(dbPath);
       try {
@@ -281,8 +281,13 @@ describe("flight recorder on the storage port (s7)", () => {
           prompt: "p",
         });
 
-        // DECIDED FIRST, by instance B's #139 orphan sweep.
-        const decidedFirst = completion("stale orphan body", "failed");
+        // DECIDED FIRST, by instance B's #139 orphan sweep. The sweep is
+        // PRESUMING an outcome for a job it believes died, which is what
+        // `buildOrphanFlightResult` now marks on every one of its returns.
+        const decidedFirst = {
+          ...completion("stale orphan body", "failed"),
+          completionKind: "presumed" as const,
+        };
         // DECIDED SECOND, by instance A, which actually has the answer.
         const decidedSecond = completion("the real final answer");
 
@@ -293,18 +298,78 @@ describe("flight recorder on the storage port (s7)", () => {
         await instanceB.logComplete("merge-1", decidedFirst);
 
         const row = await instanceA.readRequestById("merge-1");
-        // Status IS monotonic: the metadata half is fenced to `started`, so the
-        // stale writer could not move it back.
+        // migrations/023: the fence is AUTHORITY, not arrival. The sweep is
+        // rank 1 (presumed), the real completion rank 2 (observed), and a
+        // completion lands only if its rank is >= the stored one. So the
+        // guess cannot overwrite the answer even though it arrived later.
+        //
+        // Before 023 this test pinned the opposite as a known defect: "a
+        // revision fence is required rather than optional, for any deployment
+        // with two writers on one row (the #139 sweep is exactly that)". It is
+        // no longer optional, and body and status now agree instead of the body
+        // being last-wins while the status was monotonic.
         expect(row?.status).toBe("completed");
         expect(row?.exit_code).toBe(0);
-        // The body is NOT. The stale writer's response overwrote the final one,
-        // and nothing anywhere reports it. This is the finding: a revision
-        // fence is required rather than optional, for any deployment with two
-        // writers on one row (the #139 sweep is exactly that).
-        expect(row?.response).toBe("stale orphan body");
+        expect(row?.response).toBe("the real final answer");
       } finally {
         await instanceA.close();
         await instanceB.close();
+      }
+    });
+
+    it("across writers: an OBSERVED completion landing second replaces the presumption", async () => {
+      // The other ordering, and the one a naive `status <> 'started'` fence
+      // gets wrong: the sweep gives up on a job FIRST, then the process that
+      // was still alive returns the real answer. Fencing on "already terminal"
+      // would freeze the guess and discard the answer, which is worse than the
+      // defect it set out to fix. Rank admits it because 2 >= 1.
+      const instanceA = new FlightRecorder(dbPath);
+      const instanceB = new FlightRecorder(dbPath);
+      try {
+        await instanceA.logStart({
+          correlationId: "merge-3",
+          cli: "claude",
+          model: "opus",
+          prompt: "p",
+        });
+        await instanceB.logComplete("merge-3", {
+          ...completion("stale orphan body", "failed"),
+          completionKind: "presumed" as const,
+        });
+        await instanceA.logComplete("merge-3", completion("the real final answer"));
+
+        const row = await instanceA.readRequestById("merge-3");
+        expect(row?.response).toBe("the real final answer");
+        expect(row?.status).toBe("completed");
+      } finally {
+        await instanceA.close();
+        await instanceB.close();
+      }
+    });
+
+    it("a second PRESUMED completion cannot overwrite the first presumption's body", async () => {
+      // Two sweeps racing over one abandoned job. Neither outranks the other,
+      // so `rank >= stored` admits the second and the last guess wins. That is
+      // acceptable precisely because neither is evidence; what matters is that
+      // no presumption can displace an observation, which merge-1 covers.
+      const recorder = new FlightRecorder(dbPath);
+      try {
+        await recorder.logStart({
+          correlationId: "merge-4",
+          cli: "claude",
+          model: "opus",
+          prompt: "p",
+        });
+        const presumed = (body: string) => ({
+          ...completion(body, "failed"),
+          completionKind: "presumed" as const,
+        });
+        await recorder.logComplete("merge-4", presumed("first guess"));
+        await recorder.logComplete("merge-4", presumed("second guess"));
+        const row = await recorder.readRequestById("merge-4");
+        expect(row?.response).toBe("second guess");
+      } finally {
+        await recorder.close();
       }
     });
 
@@ -326,9 +391,12 @@ describe("flight recorder on the storage port (s7)", () => {
 
         const row = await recorder.readRequestById("merge-2");
         expect(row?.response).toBe("decided second");
-        // Status stays at the FIRST completion's value: the metadata half is
-        // fenced to `started`, which is the monotonicity half of the rule.
-        expect(row?.status).toBe("failed");
+        // Both completions are OBSERVED (rank 2), so `rank >= stored` admits
+        // the second and last-write-wins still decides. Since 023 the status
+        // follows the same rule as the body rather than being fenced to
+        // `started`: the row now reports one completion's outcome, not the
+        // first one's status beside the last one's body.
+        expect(row?.status).toBe("completed");
       } finally {
         await recorder.close();
       }

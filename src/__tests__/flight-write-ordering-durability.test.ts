@@ -214,7 +214,7 @@ describe("flight write ordering across processes and restarts (s6, design 3.4)",
     }
   });
 
-  it("a late second completion refreshes the response and leaves the status monotonic", async () => {
+  it("a late second completion refreshes the response and the status together", async () => {
     const recorder = new FlightRecorder(dbPath);
     try {
       await recorder.logStart({
@@ -230,11 +230,13 @@ describe("flight write ordering across processes and restarts (s6, design 3.4)",
 
       const row = await recorder.readRequestById("late-1");
       expect(row?.response).toBe("partial plus the late bytes");
-      // CHARACTERISATION of the missing fence: status is monotonic because the
-      // metadata half is guarded to `started`, but the body is last-writer-wins
-      // with no revision, so an out-of-order arrival would win too.
-      expect(row?.status).toBe("failed");
-      expect(row?.exit_code).toBe(1);
+      // Both completions are OBSERVED, so migrations/023 admits the second and
+      // last-write-wins still decides. The status now moves WITH the body
+      // instead of being pinned to the first completion: reporting `failed`
+      // beside a successful late-bytes response was the incoherence the rank
+      // fence removed, not a property worth keeping.
+      expect(row?.status).toBe("completed");
+      expect(row?.exit_code).toBe(0);
     } finally {
       await recorder.close();
     }
