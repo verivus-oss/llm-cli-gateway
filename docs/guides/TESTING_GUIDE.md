@@ -97,7 +97,7 @@ npx vitest -t "should create a session with auto-generated ID"
 ```yaml
 services:
   postgres:
-    image: postgres:16-alpine
+    image: postgres:17-alpine
     env:
       POSTGRES_DB: llm_gateway_test
       POSTGRES_USER: test

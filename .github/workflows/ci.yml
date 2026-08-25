@@ -129,7 +129,7 @@ jobs:
       # committed lockfile BEFORE any dependency code is allowed to execute.
       - run: node scripts/supply-chain/dep-drift-scan.mjs --frozen --allow-missing-dist
       - run: npx --yes npm@12.0.1 ci --strict-allow-scripts --no-audit --no-fund
-      # scripts/test-pg.sh starts postgres:16-alpine with a plain container run,
+      # scripts/test-pg.sh starts postgres:17-alpine with a plain container run,
       # builds, and runs every *-pg.test.ts. It deliberately does NOT use
       # compose: this runner has podman and no docker, and `podman compose`
       # fails for the runner user with "looking up compose provider failed".

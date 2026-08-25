@@ -16,7 +16,7 @@ set -euo pipefail
 
 CONTAINER_NAME="${PG_TEST_CONTAINER:-llm-gateway-pg-test}"
 HOST_PORT="${PG_TEST_PORT:-5433}"
-IMAGE="${PG_TEST_IMAGE:-postgres:16-alpine}"
+IMAGE="${PG_TEST_IMAGE:-postgres:17-alpine}"
 READY_TIMEOUT_SECONDS="${PG_TEST_READY_TIMEOUT:-120}"
 CONTAINER_CLI="${CONTAINER_CLI:-}"
 
