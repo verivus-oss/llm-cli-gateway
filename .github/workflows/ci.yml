@@ -104,6 +104,37 @@ jobs:
           timeout 5 node dist/index.js < /dev/null 2>/dev/null || true
           echo "Server startup smoke test passed"
 
+  postgres-tests:
+    # The PostgreSQL suites, which `npm run check` does NOT run and which no
+    # gate ran at all until this job existed. They stayed red on master for two
+    # days across three defects (a bootstrap/migration schema divergence, a
+    # stale assertion pinning pre-fence behaviour, and hand-maintained
+    # migration lists broken by a new file) because nothing executed them.
+    #
+    # A separate job rather than a step in build-and-test: it needs a database
+    # container, and a failure here should name the engine rather than be
+    # buried in a 6-minute run of everything else.
+    runs-on: ${{ github.repository == 'verivus-oss/llm-cli-gateway' && 'ubuntu-latest' || fromJSON('["self-hosted","Linux","X64","x86_64","workhorse3","gateway"]') }}
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6
+        with:
+          node-version: 24
+          cache: "npm"
+      # Same ordering as build-and-test: the supply-chain gate scores the
+      # committed lockfile BEFORE any dependency code is allowed to execute.
+      - run: node scripts/supply-chain/dep-drift-scan.mjs --frozen --allow-missing-dist
+      - run: npx --yes npm@12.0.1 ci --strict-allow-scripts --no-audit --no-fund
+      # scripts/test-pg.sh starts postgres:16-alpine with a plain container run,
+      # builds, and runs every *-pg.test.ts. It deliberately does NOT use
+      # compose: this runner has podman and no docker, and `podman compose`
+      # fails for the runner user with "looking up compose provider failed".
+      - run: npm run test:pg
+
   npm12-install-policy:
     # build-and-test owns the full test suite and security audit. This job
     # isolates npm 12's clean-install lifecycle-script policy.
