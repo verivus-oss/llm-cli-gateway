@@ -11,7 +11,7 @@
  * it neither sees nor leaves anything in `public` where the other -pg suites live.
  */
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
-import { readFileSync } from "node:fs";
+import { readdirSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { Pool } from "pg";
 import { PostgresFlightRecorder, redactDsn } from "../flight-recorder-pg.js";
@@ -84,6 +84,28 @@ afterAll(async () => {
   await admin.query(`DROP SCHEMA IF EXISTS ${MIRROR} CASCADE`);
   await admin.end();
 });
+
+/**
+ * Every transcript migration, 022 onward, concatenated in version order. The
+ * selection matches `scripts/check-transcript-schema-parity.mjs`, so a 024
+ * lands in the mirror without anyone remembering to add it here.
+ */
+function transcriptMigrations(): string {
+  const dir = join(process.cwd(), "migrations");
+  const files = readdirSync(dir)
+    .filter(name => /^\d+_.*\.sql$/.test(name) && Number(name.slice(0, 3)) >= 22)
+    .sort();
+  if (files.length === 0) throw new Error("no transcript migrations found from 022 onward");
+  return files.map(name => readFileSync(join(dir, name), "utf8")).join("\n");
+}
+
+/** The stored rank, read on a connection the recorder does not own. */
+async function storedRank(requestId: string): Promise<number> {
+  const rows = await raw<{ completion_rank: number }>(
+    `SELECT completion_rank FROM gateway_metadata WHERE request_id = '${requestId}'`
+  );
+  return rows[0]?.completion_rank;
+}
 
 /** Read a column back on a connection this recorder does not own. */
 async function raw<T = Record<string, unknown>>(sql: string): Promise<T[]> {
@@ -240,14 +262,24 @@ describe("a whole transcript round trip", () => {
     expect(stats.oldestRequest).toBe(stats.newestRequest);
   });
 
-  it("fences logComplete on `started`, so a second completion cannot overwrite the first", async () => {
+  it("admits an equal-rank second completion, and moves the body and status TOGETHER", async () => {
+    // Until migrations/023 this test asserted the opposite, and its comment said
+    // "the requests UPDATE is unfenced ... the metadata status is what stays
+    // monotonic". Both halves stopped being true when the rank fence replaced
+    // the `status = 'started'` guard, and nothing caught it because this suite
+    // runs only under `npm run test:pg` and the assertion could not see a body.
+    //
+    // The contract now: a completion lands where its rank is >= the stored one.
+    // Two OBSERVED completions are both rank 2, so the second lands, and the
+    // point of the fence is that the body and the status move together rather
+    // than the body being last-wins under a monotonic status.
     await recorder.logStart(START);
     await recorder.logComplete(ID, RESULT);
     await recorder.logComplete(ID, { ...RESULT, response: "LATER", status: "failed" });
     const row = await recorder.readRequestById(ID);
-    // The requests UPDATE is unfenced, exactly as on SQLite; the metadata
-    // status is what stays monotonic. Asserted so the parity is deliberate.
-    expect(row?.status).toBe("completed");
+    expect(row?.status).toBe("failed");
+    expect(row?.response).toBe("LATER");
+    expect(await storedRank(ID)).toBe(2);
   });
 
   it("writes the compression telemetry once and keeps the first write", async () => {
@@ -335,13 +367,125 @@ describe("the five states", () => {
   });
 });
 
+/**
+ * The rank fence on the engine the s10 cutover actually targets.
+ *
+ * `flight-recorder-port.test.ts` pins all of this on SQLite, and every one of
+ * those tests constructs `new FlightRecorder(dbPath)` and promotes rows through
+ * `DatabaseSync`. So until this block existed, the mechanism protecting migrated
+ * history was verified only on the engine that history is migrating AWAY from,
+ * while the PostgreSQL twin's four `completion_rank` predicates had no test at
+ * all. That is the wrong way round: the cutover's target is PostgreSQL.
+ */
+describe("the completion rank fence (migrations/023)", () => {
+  beforeEach(async () => {
+    await recorder?.close();
+    recorder = new PostgresFlightRecorder({ app: scoped(SCHEMA) }, { redactSecrets: false });
+    await recorder.readStorageStats();
+    await raw("DELETE FROM gateway_metadata; DELETE FROM requests");
+  });
+
+  it("a PRESUMED completion landing second cannot overwrite the OBSERVED one", async () => {
+    // The #139 orphan sweep decides first and lands second. Rank 1 against a
+    // stored 2, so the guess cannot displace the answer. Last-writer-wins is
+    // what s7 measured losing the real completion here.
+    await recorder.logStart(START);
+    await recorder.logComplete(ID, { ...RESULT, response: "the real final answer" });
+    await recorder.logComplete(ID, {
+      ...RESULT,
+      response: "stale orphan body",
+      status: "failed",
+      exitCode: 1,
+      completionKind: "presumed",
+    });
+
+    const row = await recorder.readRequestById(ID);
+    expect(row?.response).toBe("the real final answer");
+    expect(row?.status).toBe("completed");
+    expect(row?.exit_code).toBe(0);
+    expect(await storedRank(ID)).toBe(2);
+  });
+
+  it("an OBSERVED completion landing second REPLACES the presumption", async () => {
+    // The other ordering, and the commoner one. A `status <> 'started'` fence
+    // gets this exactly wrong: it would freeze the sweep's guess and discard
+    // the real answer. Rank admits it because 2 >= 1.
+    await recorder.logStart(START);
+    await recorder.logComplete(ID, {
+      ...RESULT,
+      response: "stale orphan body",
+      status: "failed",
+      exitCode: 1,
+      completionKind: "presumed",
+    });
+    expect(await storedRank(ID)).toBe(1);
+
+    await recorder.logComplete(ID, { ...RESULT, response: "the real final answer" });
+
+    const row = await recorder.readRequestById(ID);
+    expect(row?.response).toBe("the real final answer");
+    expect(row?.status).toBe("completed");
+    expect(await storedRank(ID)).toBe(2);
+  });
+
+  it("RANK 3 is reserved for imported history and nothing live can complete it", async () => {
+    // What the s10 cutover writes, and the only thing standing between a
+    // migrated transcript and a gateway that starts mid-copy. `completionKind`
+    // deliberately cannot express 3, so neither observed (2) nor presumed (1)
+    // satisfies `stored <= incoming`.
+    await recorder.logStart(START);
+    await recorder.logComplete(ID, { ...RESULT, response: "historical answer" });
+    // Promoted on a connection the recorder does not own, exactly as the
+    // cutover's copy would write it. The recorder has no API for rank 3 and
+    // deliberately never will.
+    await raw(`UPDATE gateway_metadata SET completion_rank = 3 WHERE request_id = '${ID}'`);
+
+    await recorder.logComplete(ID, { ...RESULT, response: "live observed answer" });
+    await recorder.logComplete(ID, {
+      ...RESULT,
+      response: "live presumed answer",
+      status: "failed",
+      completionKind: "presumed",
+    });
+
+    const row = await recorder.readRequestById(ID);
+    expect(row?.response).toBe("historical answer");
+    expect(row?.status).toBe("completed");
+    expect(await storedRank(ID)).toBe(3);
+  });
+
+  it("a row the copy left at DEFAULT 0 is NOT protected, which is why s10 writes the literal 3", async () => {
+    // The round-8 blocker, on the target engine. An INSERT that omits
+    // `completion_rank` lands at DEFAULT 0 rather than failing, and every later
+    // completion outranks it. This is the failure the cutover's one-sided
+    // verification assertion exists to catch, so it is pinned here as the
+    // behaviour that makes that assertion necessary.
+    await raw(
+      `INSERT INTO requests (id, datetime_utc, cli, model, prompt, response, owner_principal)
+       VALUES ('imported-0', now()::text, 'claude', 'opus-5', 'p', 'historical answer', 'local');
+       INSERT INTO gateway_metadata (request_id, status) VALUES ('imported-0', 'completed')`
+    );
+    const before = await raw<{ completion_rank: number }>(
+      `SELECT completion_rank FROM gateway_metadata WHERE request_id = 'imported-0'`
+    );
+    expect(before[0].completion_rank).toBe(0);
+
+    await recorder.logComplete("imported-0", { ...RESULT, response: "live overwrite" });
+
+    const row = await recorder.readRequestById("imported-0");
+    expect(row?.response).toBe("live overwrite");
+  });
+});
+
 describe("the bootstrap and the migration are the same schema", () => {
   it("produces identical columns and indexes either way", async () => {
-    // Migration path: the real file, into the mirror schema.
-    const sql = readFileSync(
-      join(process.cwd(), "migrations/022_flight_recorder_transcripts.sql"),
-      "utf8"
-    );
+    // Migration path: EVERY transcript migration, 022 onward, in version order.
+    // Reading 022 alone was wrong the moment 023 added `completion_rank`: the
+    // bootstrap carried the column, the mirror did not, and this test reported
+    // the bootstrap as the drift. `check-transcript-schema-parity.mjs` already
+    // selects them this way; hard-coding one file here left the same fact with
+    // two readers and only one of them corrected.
+    const sql = transcriptMigrations();
     await admin.query(
       `SET search_path TO ${MIRROR};
        CREATE TABLE IF NOT EXISTS schema_migrations (version INTEGER PRIMARY KEY, name TEXT NOT NULL);

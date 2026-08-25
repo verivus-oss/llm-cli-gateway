@@ -48,6 +48,19 @@ export const STORAGE_OPERATION_CLASSES: readonly StorageOperationClass[] = [
   "retention",
 ];
 
+/**
+ * The classes that only ever read. Declared once here, beside the class list,
+ * because both drivers need it and both had their own answer: sqlite.ts kept a
+ * `READ_ONLY_OPERATIONS` set and postgres.ts inlined
+ * `operation === "transcript_read" || operation === "analytics_read"`. Two
+ * copies of one fact is how a class added to one engine's rules and not the
+ * other's becomes a write on a reader credential.
+ */
+export const READ_ONLY_OPERATION_CLASSES: ReadonlySet<StorageOperationClass> = new Set([
+  "transcript_read",
+  "analytics_read",
+]);
+
 /** The credential each operation class wants when the deployment provides it. */
 const PREFERRED_ROLE: Readonly<Record<StorageOperationClass, StorageRole>> = {
   write: "app",

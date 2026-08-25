@@ -78,14 +78,19 @@ const SQL_UPDATE_REQUEST_COMPLETE = `
       SET response = ?, duration_ms = ?, input_tokens = ?, output_tokens = ?,
           cache_read_tokens = ?, cache_creation_tokens = ?, cost_basis = ?
       WHERE id = ?
+        AND EXISTS (
+              SELECT 1 FROM gateway_metadata m
+               WHERE m.request_id = requests.id AND m.completion_rank <= ?
+            )
     `;
 
 const SQL_UPDATE_METADATA_COMPLETE = `
       UPDATE gateway_metadata
       SET retry_count = ?, circuit_breaker_state = ?, cost_usd = ?, approval_decision = ?,
           optimization_applied = ?, thinking_blocks = ?, exit_code = ?, http_status = ?,
-          error_message = ?, provider_session_id = ?, stop_reason = ?, status = ?
-      WHERE request_id = ? AND status = 'started'
+          error_message = ?, provider_session_id = ?, stop_reason = ?, status = ?,
+          completion_rank = ?
+      WHERE request_id = ? AND completion_rank <= ?
     `;
 
 const SQL_UPDATE_COMPRESSION = `
@@ -156,6 +161,7 @@ const SQL_BOOTSTRAP = `
       route_considered INTEGER,
       route_reroutes INTEGER,
       status TEXT NOT NULL DEFAULT 'started',
+      completion_rank SMALLINT NOT NULL DEFAULT 0,
       compression_route TEXT,
       compression_transforms TEXT,
       compression_original_chars INTEGER,
@@ -351,6 +357,7 @@ export class PostgresFlightRecorder implements FlightRecorderOperations {
         ? JSON.stringify(truncateThinkingBlocks(stored.thinkingBlocks))
         : null;
 
+    const completionRank = stored.completionKind === "presumed" ? 1 : 2;
     await this.write("logComplete", async conn => {
       await conn.execute(SQL_UPDATE_REQUEST_COMPLETE, [
         stored.response,
@@ -361,6 +368,7 @@ export class PostgresFlightRecorder implements FlightRecorderOperations {
         stored.cacheCreationTokens ?? null,
         stored.costBasis ?? null,
         correlationId,
+        completionRank,
       ]);
       await conn.execute(SQL_UPDATE_METADATA_COMPLETE, [
         stored.retryCount,
@@ -377,7 +385,9 @@ export class PostgresFlightRecorder implements FlightRecorderOperations {
         stored.providerSessionId ?? null,
         stored.stopReason ?? null,
         stored.status,
+        completionRank,
         correlationId,
+        completionRank,
       ]);
     });
   }

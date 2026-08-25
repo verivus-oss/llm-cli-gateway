@@ -31,7 +31,7 @@
  * DECLARED_TYPE_DIVERGENCE below, so a NEW divergence has to be added here
  * consciously rather than discovered during a migration.
  */
-import { readFileSync } from "node:fs";
+import { readFileSync, readdirSync } from "node:fs";
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -49,6 +49,23 @@ const DECLARED_TYPE_DIVERGENCE = {
   cost_usd: "sqlite REAL -> postgres DOUBLE PRECISION (both IEEE-754 binary64)",
   route_est_cost_usd: "sqlite REAL -> postgres DOUBLE PRECISION",
 };
+
+/**
+ * The BASE type, without the constraints that follow it in a CREATE.
+ *
+ * A CREATE spells a column `SMALLINT NOT NULL DEFAULT 0`; a migration adds the
+ * same column as `SMALLINT` and sets the default and nullability in later
+ * statements. Comparing the raw strings reports drift between two declarations
+ * that agree, which is a false alarm on the one axis this gate exists to
+ * protect. Nullability and defaults are compared by the dynamic
+ * `information_schema` control in flight-recorder-pg.test.ts, which can see the
+ * resolved schema rather than the text that produced it.
+ */
+function baseType(declared) {
+  return declared
+    .replace(/\s+(NOT\s+NULL|NULL|DEFAULT|PRIMARY|UNIQUE|CHECK|REFERENCES|COLLATE)\b.*$/i, "")
+    .trim();
+}
 
 /** Column names and declared types from a CREATE TABLE body, in file order. */
 function parseCreateTable(sql, table) {
@@ -116,6 +133,24 @@ function declarationsFrom(text, label) {
   return { label, per };
 }
 
+/**
+ * The PostgreSQL declaration is 022 PLUS every later migration that alters these
+ * tables, exactly as the SQLite one is a CREATE plus its later ALTERs.
+ *
+ * Reading 022 alone was wrong the moment a 023 added a column: the bootstrap
+ * carried it, 022 did not, and this gate reported the bootstrap as the drift
+ * when the two actually agreed. Concatenating in version order lets
+ * `parseAlterAdds` fold the later columns in the same way it already does for
+ * the recorder's own migration path.
+ */
+function migrationText() {
+  const dir = join(ROOT, "migrations");
+  const files = readdirSync(dir)
+    .filter(f => /^\d+_.*\.sql$/.test(f) && Number(f.slice(0, 3)) >= 22)
+    .sort();
+  return files.map(f => readFileSync(join(dir, f), "utf8")).join("\n");
+}
+
 const sources = [
   declarationsFrom(
     readFileSync(join(ROOT, "src/flight-recorder.ts"), "utf8"),
@@ -125,10 +160,7 @@ const sources = [
     readFileSync(join(ROOT, "src/flight-recorder-pg.ts"), "utf8"),
     "postgres bootstrap (flight-recorder-pg.ts)"
   ),
-  declarationsFrom(
-    readFileSync(join(ROOT, "migrations/022_flight_recorder_transcripts.sql"), "utf8"),
-    "postgres migration (022)"
-  ),
+  declarationsFrom(migrationText(), "postgres migrations (022 onward)"),
 ];
 
 const failures = [];
@@ -165,9 +197,9 @@ if (failures.length === 0) {
     // deliberately: see DECLARED_TYPE_DIVERGENCE.
     for (const name of b.keys()) {
       if (!c.has(name)) continue;
-      if (b.get(name) !== c.get(name)) {
+      if (baseType(b.get(name)) !== baseType(c.get(name))) {
         failures.push(
-          `${table}.${name}: bootstrap declares ${b.get(name)}, migration 022 declares ${c.get(name)}`
+          `${table}.${name}: bootstrap declares ${b.get(name)}, the migrations declare ${c.get(name)}`
         );
       }
     }

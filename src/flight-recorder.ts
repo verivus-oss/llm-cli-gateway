@@ -103,6 +103,32 @@ export interface FlightLogResult {
   errorMessage?: string;
   status: "completed" | "failed";
   /**
+   * Whether this process SAW the provider terminate, or is PRESUMING an outcome
+   * for a job it believes died (the #139 orphan sweep). Both land as
+   * 'completed' or 'failed', so without this the recorder could not tell a real
+   * answer from a guess and the later write won whichever it was.
+   *
+   * Persisted as `gateway_metadata.completion_rank`, and a completion lands
+   * only if its rank is >= the stored one: observed beats presumed whichever
+   * arrives first, presumed never overwrites observed, and two observed
+   * completions keep last-write-wins. Defaults to "observed", so only the sweep
+   * needs to say otherwise.
+   *
+   * RANK 3 IS RESERVED and this type deliberately cannot express it. It means
+   * IMPORTED HISTORY: rows the s10 transcript cutover copies in from a
+   * `logs.db` that predates this engine. Nothing live may complete such a row,
+   * because the fence above is `stored <= incoming` and no value this type can
+   * produce reaches 3.
+   *
+   * That reservation is the whole mechanism, so do not spend it on something
+   * else. A migrated row is irreplaceable history; a live request colliding on
+   * its correlationId is almost certainly a caller reusing an id and can be
+   * re-run. Giving 3 a second meaning would silently make imported history
+   * overwritable again, and nothing would fail until someone went looking for a
+   * transcript that had been quietly replaced.
+   */
+  completionKind?: "observed" | "presumed";
+  /**
    * Phase 7: the provider-minted session id parsed from the provider's own
    * output (e.g. a fresh Grok/Claude/Gemini session UUID that the gateway did
    * not supply). Persisted so a deferred/async job can be resumed with the
@@ -224,6 +250,27 @@ async function ensureCacheControlBlocksColumn(conn: StorageConnection): Promise<
   if (!names.has("cache_control_blocks")) {
     await conn.execute("ALTER TABLE requests ADD COLUMN cache_control_blocks INTEGER");
   }
+}
+
+/**
+ * Idempotent migration adding `completion_rank` to a pre-existing
+ * `gateway_metadata` table (migrations/023 is the PostgreSQL twin).
+ *
+ * A completion is OBSERVED (the process saw the provider terminate) or PRESUMED
+ * (the #139 sweep decided a job was dead and wrote a synthetic body). Both land
+ * as 'completed' or 'failed', so before this column the winner was whichever
+ * wrote last, and a sweep landing second overwrote a real answer with a guess.
+ *
+ * Existing rows are backfilled the safe way: anything already terminal counts
+ * as observed, so a later presumption cannot overwrite it.
+ */
+async function ensureMetadataCompletionRankColumn(conn: StorageConnection): Promise<void> {
+  const names = await columnNames(conn, "gateway_metadata");
+  if (names.has("completion_rank")) return;
+  await conn.execute(
+    "ALTER TABLE gateway_metadata ADD COLUMN completion_rank INTEGER NOT NULL DEFAULT 0"
+  );
+  await conn.execute("UPDATE gateway_metadata SET completion_rank = 2 WHERE status <> 'started'");
 }
 
 /**
@@ -519,6 +566,11 @@ const SQL_UPDATE_REQUEST_COMPLETE = `
           cache_creation_tokens = @cache_creation_tokens,
           cost_basis = @cost_basis
       WHERE id = @id
+        AND EXISTS (
+              SELECT 1 FROM gateway_metadata m
+               WHERE m.request_id = requests.id
+                 AND m.completion_rank <= @completion_rank
+            )
     `;
 
 const SQL_UPDATE_METADATA_COMPLETE = `
@@ -534,8 +586,9 @@ const SQL_UPDATE_METADATA_COMPLETE = `
           error_message = @error_message,
           provider_session_id = @provider_session_id,
           stop_reason = @stop_reason,
-          status = @status
-      WHERE request_id = @id AND status = 'started'
+          status = @status,
+          completion_rank = @completion_rank
+      WHERE request_id = @id AND completion_rank <= @completion_rank
     `;
 
 const SQL_UPDATE_COMPRESSION = `UPDATE gateway_metadata
@@ -602,7 +655,8 @@ const SQL_SCHEMA = `
         route_reason TEXT,
         route_considered INTEGER,
         route_reroutes INTEGER,
-        status TEXT NOT NULL DEFAULT 'started'
+        status TEXT NOT NULL DEFAULT 'started',
+        completion_rank INTEGER NOT NULL DEFAULT 0
       );
 
       CREATE INDEX IF NOT EXISTS idx_requests_datetime ON requests(datetime_utc);
@@ -754,6 +808,7 @@ export class FlightRecorder implements FlightRecorderOperations {
       // v6 (F3): owner_principal on requests, plus http_status on metadata.
       await ensureRequestsOwnerColumn(conn);
       await ensureMetadataHttpStatusColumn(conn);
+      await ensureMetadataCompletionRankColumn(conn);
       await applied(6);
 
       // v7 (phase 7): provider_session_id + stop_reason on metadata.
@@ -874,10 +929,12 @@ export class FlightRecorder implements FlightRecorderOperations {
         ? JSON.stringify(truncateThinkingBlocks(stored.thinkingBlocks))
         : null;
 
+    const completionRank = stored.completionKind === "presumed" ? 1 : 2;
     await this.write("logComplete", async conn => {
       await conn.execute(SQL_UPDATE_REQUEST_COMPLETE, [
         {
           id: correlationId,
+          completion_rank: completionRank,
           response: stored.response,
           duration_ms: stored.durationMs,
           input_tokens: stored.inputTokens ?? null,
@@ -902,6 +959,7 @@ export class FlightRecorder implements FlightRecorderOperations {
           provider_session_id: stored.providerSessionId ?? null,
           stop_reason: stored.stopReason ?? null,
           status: stored.status,
+          completion_rank: completionRank,
         },
       ]);
     });

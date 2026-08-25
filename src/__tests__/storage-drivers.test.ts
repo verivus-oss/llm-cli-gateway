@@ -263,6 +263,70 @@ describe("SqliteStorageDriver", () => {
     );
   });
 
+  it("refuses to open a read snapshot on a WRITE class", async () => {
+    // The mirror image of the rule above, and why `readSnapshot` is a separate
+    // method rather than a flag on `transaction`: each refuses exactly what the
+    // other admits, so neither can be talked into the other's job.
+    await expect(driver.readSnapshot("write", async () => undefined)).rejects.toThrow(
+      /write class/
+    );
+    await expect(driver.readSnapshot("retention", async () => undefined)).rejects.toThrow(
+      /write class/
+    );
+  });
+
+  it("refuses a read snapshot outside WAL, rather than stalling every writer", async () => {
+    // The default journal mode takes a SHARED lock for the read transaction,
+    // which blocks writers until it ends. Held for the analytical bound that is
+    // a gateway stall, so the driver says so instead of delivering a snapshot
+    // whose cost is invisible.
+    await expect(driver.readSnapshot("transcript_read", async () => undefined)).rejects.toThrow(
+      /needs WAL/
+    );
+  });
+
+  it("a read snapshot sees ONE state while a writer commits underneath it", async () => {
+    // The property the cutover verify needs and `withConnection` cannot give:
+    // two reads inside one snapshot agree even though a commit landed between
+    // them. Without it a row-by-row digest can pass a row, have it change, and
+    // report an agreement it never had.
+    // WAL, as every real owner of a database file sets: outside it a read
+    // transaction blocks writers and the snapshot has no non-blocking meaning.
+    await driver.withConnection("write", c => c.query("PRAGMA journal_mode = WAL"));
+    await driver.transaction("write", async connection => {
+      await connection.execute("CREATE TABLE snap(id INTEGER PRIMARY KEY, v TEXT)");
+      await connection.execute("INSERT INTO snap VALUES (1, 'before')");
+    });
+
+    // A SECOND driver on the same file, because that is what a concurrent
+    // writer actually is. Writing through `driver` from inside the snapshot
+    // body is refused by the re-entrancy guard, correctly: one driver holds one
+    // transaction per async context.
+    const writer = new SqliteStorageDriver(join(dir, "t.db"));
+    const seen: string[] = [];
+    try {
+      await driver.readSnapshot("transcript_read", async connection => {
+        const first = await connection.query<{ v: string }>("SELECT v FROM snap WHERE id = 1");
+        seen.push(first[0].v);
+        await writer.transaction("write", async write => {
+          await write.execute("UPDATE snap SET v = 'after' WHERE id = 1");
+        });
+        const second = await connection.query<{ v: string }>("SELECT v FROM snap WHERE id = 1");
+        seen.push(second[0].v);
+      });
+    } finally {
+      await writer.close();
+    }
+
+    expect(seen).toEqual(["before", "before"]);
+    // And the write really did land, so this is not passing because nothing
+    // happened.
+    const after = await driver.withConnection("transcript_read", connection =>
+      connection.query<{ v: string }>("SELECT v FROM snap WHERE id = 1")
+    );
+    expect(after[0].v).toBe("after");
+  });
+
   it("refuses transaction control on a connection from withConnection", async () => {
     // Different engine reason, same rule: a caller-issued BEGIN would bypass
     // the queue that transaction() serialises on, on a connection that cannot

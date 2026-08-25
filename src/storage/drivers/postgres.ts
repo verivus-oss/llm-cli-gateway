@@ -11,12 +11,17 @@
  * tested without a server.
  */
 import {
+  READ_ONLY_OPERATION_CLASSES,
   resolveStorageRole,
   type StorageOperationClass,
   type StorageRole,
   type StorageRoleDsns,
 } from "../roles.js";
-import { STORAGE_TRANSACTION_DEADLINE_MS, StorageTransactionDeadlineError } from "../deadline.js";
+import {
+  STORAGE_READ_SNAPSHOT_DEADLINE_MS,
+  STORAGE_TRANSACTION_DEADLINE_MS,
+  StorageTransactionDeadlineError,
+} from "../deadline.js";
 import { inTransactionOn, nestedConnectionRefusal, runInTransaction } from "../reentrancy.js";
 import { isTransactionControl, transactionControlRefusal } from "../statements.js";
 import type { StorageConnection, StorageDriver, StorageEngine } from "../store.js";
@@ -153,13 +158,16 @@ export class PostgresStorageDriver implements StorageDriver {
   private readonly pools = new Map<StorageRole, PgPoolLike>();
   private closed = false;
   private readonly transactionDeadlineMs: number;
+  private readonly readSnapshotDeadlineMs: number;
 
   constructor(
     dsns: PostgresRoleDsns,
     createPool: PgPoolFactory,
-    options: { transactionDeadlineMs?: number } = {}
+    options: { transactionDeadlineMs?: number; readSnapshotDeadlineMs?: number } = {}
   ) {
     this.transactionDeadlineMs = options.transactionDeadlineMs ?? STORAGE_TRANSACTION_DEADLINE_MS;
+    this.readSnapshotDeadlineMs =
+      options.readSnapshotDeadlineMs ?? STORAGE_READ_SNAPSHOT_DEADLINE_MS;
     const held = new Set<StorageRole>();
     for (const [role, dsn] of Object.entries(dsns) as [StorageRole, string | undefined][]) {
       if (!dsn) continue;
@@ -234,7 +242,7 @@ export class PostgresStorageDriver implements StorageDriver {
     operation: StorageOperationClass,
     fn: (connection: StorageConnection) => Promise<T>
   ): Promise<T> {
-    if (operation === "transcript_read" || operation === "analytics_read") {
+    if (READ_ONLY_OPERATION_CLASSES.has(operation)) {
       throw new Error(`storage: ${operation} is a read class and cannot open a transaction`);
     }
     if (inTransactionOn(this)) throw nestedConnectionRefusal(this);
@@ -294,6 +302,90 @@ export class PostgresStorageDriver implements StorageDriver {
           // No ROLLBACK: there is no connection left to roll back on, and the
           // backend aborts the transaction itself when it reaches the dead
           // client. Attempting it would only replace the useful error.
+          if (deadline.cause === undefined && deadline !== error) deadline.cause = error;
+          throw deadline;
+        }
+        try {
+          await connection.execute("ROLLBACK");
+        } catch (rollbackError) {
+          discard =
+            rollbackError instanceof Error ? rollbackError : new Error(String(rollbackError));
+        }
+        throw error;
+      }
+    } finally {
+      disarm();
+      release(discard);
+    }
+  }
+
+  /**
+   * A pinned REPEATABLE READ READ ONLY snapshot on one backend.
+   *
+   * The isolation level is set in the BEGIN itself because PostgreSQL fixes a
+   * transaction's snapshot at its first query: `SET TRANSACTION` afterwards is
+   * too late to be sure, and a verify that silently ran at READ COMMITTED would
+   * report agreement it never had.
+   *
+   * `SET LOCAL statement_timeout` raises the per-statement bound for this
+   * transaction only, reverting on commit. The pool's 25s is right for a
+   * gateway query and wrong for a full-table scan, and changing it on the pool
+   * would change it for every reader.
+   *
+   * READ ONLY is declared rather than assumed, so the engine refuses a write
+   * that slipped into a read path instead of letting it land.
+   */
+  async readSnapshot<T>(
+    operation: StorageOperationClass,
+    fn: (connection: StorageConnection) => Promise<T>
+  ): Promise<T> {
+    if (!READ_ONLY_OPERATION_CLASSES.has(operation)) {
+      throw new Error(`storage: ${operation} is a write class and cannot open a read snapshot`);
+    }
+    if (inTransactionOn(this)) throw nestedConnectionRefusal(this);
+    const client = await this.poolFor(operation).connect();
+    let discard: Error | undefined;
+    let released = false;
+    const release = (err?: Error): void => {
+      if (released) return;
+      released = true;
+      client.release(err);
+    };
+    let expiry: StorageTransactionDeadlineError | undefined;
+    const expired = (): StorageTransactionDeadlineError | undefined => expiry;
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const disarm = (): void => {
+      if (timer === undefined) return;
+      clearTimeout(timer);
+      timer = undefined;
+    };
+    if (this.readSnapshotDeadlineMs > 0) {
+      timer = setTimeout(() => {
+        expiry = new StorageTransactionDeadlineError(
+          "postgres",
+          operation,
+          this.readSnapshotDeadlineMs
+        );
+        release(expiry);
+      }, this.readSnapshotDeadlineMs);
+      timer.unref?.();
+    }
+    try {
+      const connection = connectionOver(client, true);
+      await connection.execute("BEGIN TRANSACTION ISOLATION LEVEL REPEATABLE READ READ ONLY");
+      try {
+        await connection.execute(`SET LOCAL statement_timeout = ${this.readSnapshotDeadlineMs}`);
+        const result = await runInTransaction(this, () => fn(connection));
+        disarm();
+        const deadline = expired();
+        if (deadline) throw deadline;
+        // COMMIT, not ROLLBACK: nothing was written, and committing is how the
+        // snapshot is released without the log noise of an aborted transaction.
+        await connection.execute("COMMIT");
+        return result;
+      } catch (error) {
+        const deadline = expired();
+        if (deadline) {
           if (deadline.cause === undefined && deadline !== error) deadline.cause = error;
           throw deadline;
         }

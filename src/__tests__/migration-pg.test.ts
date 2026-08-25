@@ -24,7 +24,7 @@ import {
 } from "../personal-config-types.js";
 import { runWithRequestContext } from "../request-context.js";
 import { setupTestDatabase, setupTestStorageDriver, cleanTestDatabase } from "./setup.js";
-import { readFileSync, writeFileSync, mkdirSync, rmSync } from "fs";
+import { readdirSync, readFileSync, writeFileSync, mkdirSync, rmSync } from "fs";
 import { join } from "path";
 import { tmpdir } from "os";
 import { promisify } from "util";
@@ -33,34 +33,27 @@ const execFileAsync = promisify(execFile);
 const TEST_DATABASE_URL =
   process.env.TEST_DATABASE_URL || "postgresql://test:test@localhost:5433/llm_gateway_test";
 
-const ALL_MIGRATION_VERSIONS = [
-  1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22,
-] as const;
+/**
+ * The migration set, DERIVED from the directory rather than transcribed.
+ *
+ * Both of these were hand-maintained lists of a set that only ever grows, and
+ * migration 023 broke five tests here the moment it landed: the ledger
+ * comparison, and three assertions carrying a literal pending-count. A list
+ * that must be edited every time a file is added is a tripwire pointed at the
+ * next author, so the counts below are expressed relative to the real total.
+ */
+const MIGRATION_FILENAMES: Readonly<Record<number, string>> = Object.fromEntries(
+  readdirSync(join(process.cwd(), "migrations"))
+    .filter(name => /^\d+_.*\.sql$/.test(name))
+    .sort()
+    .map(name => [Number(name.slice(0, 3)), name])
+);
+const ALL_MIGRATION_VERSIONS: readonly number[] = Object.keys(MIGRATION_FILENAMES)
+  .map(Number)
+  .sort((a, b) => a - b);
+/** Total pending on a schema that has recorded nothing. */
+const ALL_PENDING = ALL_MIGRATION_VERSIONS.length;
 const KIT_MIGRATION_VERSIONS = [6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17] as const;
-const MIGRATION_FILENAMES: Readonly<Record<number, string>> = {
-  1: "001_initial_schema.sql",
-  2: "002_session_ids_as_text.sql",
-  3: "003_provider_type_sessions.sql",
-  4: "004_session_owner_principal.sql",
-  5: "005_provider_type_open_api_names.sql",
-  6: "006_personal_config_kit_sessions.sql",
-  7: "007_personal_config_kit_job_finalization.sql",
-  8: "008_postgres_job_store_schema.sql",
-  9: "009_personal_config_kit_session_cleanup.sql",
-  10: "010_personal_config_kit_attempt_fences.sql",
-  11: "011_personal_config_kit_output_privacy.sql",
-  12: "012_async_job_response_compression.sql",
-  13: "013_personal_config_kit_request_key_privacy.sql",
-  14: "014_personal_config_kit_native_handle_privacy.sql",
-  15: "015_async_job_owner_hostname.sql",
-  16: "016_async_job_mcp_artifact_cleanup.sql",
-  17: "017_async_job_mcp_artifact_scope.sql",
-  18: "018_repair_legacy_session_summary_dependencies.sql",
-  19: "019_async_job_progress.sql",
-  20: "020_async_job_error_classification.sql",
-  21: "021_session_generation_fence.sql",
-  22: "022_flight_recorder_transcripts.sql",
-};
 
 const SESSION_SUMMARY_COMPATIBILITY_MIGRATION_VERSIONS = new Set([2, 3]);
 
@@ -478,7 +471,7 @@ describe("Session Migration", () => {
       );
       expect(
         [first.stderr, second.stderr].filter(stderr =>
-          stderr.includes("Running 22 pending migration(s)")
+          stderr.includes(`Running ${ALL_PENDING} pending migration(s)`)
         )
       ).toHaveLength(1);
 
@@ -642,7 +635,7 @@ describe("Session Migration", () => {
     }
   });
 
-  it("upgrades an isolated legacy schema through 006-022, retires Kit handles, and scrubs Kit jobs", async () => {
+  it("upgrades an isolated legacy schema to the LATEST, retires Kit handles, and scrubs Kit jobs", async () => {
     const { pool } = await setupTestDatabase();
     const schema = `migration_legacy_${randomUUID().replaceAll("-", "")}`;
     let client: PoolClient | null = null;
@@ -915,7 +908,12 @@ describe("Session Migration", () => {
              END
          WHERE id IN ('legacy-kit-privacy-job', 'legacy-kit-running-privacy-job')`
       );
-      await applyMigrations(client, [16, 17, 18, 19, 20, 21, 22]);
+      // Everything from 16 to the END of the set. Spelling the tail out meant a
+      // new migration silently stopped being covered by this upgrade path.
+      await applyMigrations(
+        client,
+        ALL_MIGRATION_VERSIONS.filter(version => version >= 16)
+      );
       const sessionGenerations = await client.query<{
         session_count: string;
         generation_count: string;
@@ -1179,7 +1177,8 @@ describe("Session Migration", () => {
         cwd: process.cwd(),
         env: { ...process.env, DATABASE_URL: schemaScopedDsn(schema) },
       });
-      expect(stderr).toContain("Running 21 pending migration(s)");
+      // One version is already recorded on this legacy schema.
+      expect(stderr).toContain(`Running ${ALL_PENDING - 1} pending migration(s)`);
 
       const columns = await client.query<{ table_name: string; udt_name: string }>(`
         SELECT table_name, udt_name
@@ -1278,7 +1277,8 @@ describe("Session Migration", () => {
       expect(stderr).toContain(
         "Repaired recorded legacy session schema before applying pending migrations"
       );
-      expect(stderr).toContain("Running 17 pending migration(s)");
+      // Five versions are already recorded on this legacy schema.
+      expect(stderr).toContain(`Running ${ALL_PENDING - 5} pending migration(s)`);
 
       const columns = await client.query<{ table_name: string; udt_name: string }>(
         [
