@@ -1,5 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { mkdtempSync, rmSync } from "node:fs";
+import { DatabaseSync } from "node:sqlite";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
@@ -344,6 +345,45 @@ describe("flight recorder on the storage port (s7)", () => {
       } finally {
         await instanceA.close();
         await instanceB.close();
+      }
+    });
+
+    it("RANK 3 is reserved for imported history and nothing live can complete it", async () => {
+      // The s10 cutover copies rows from a logs.db that predates this engine.
+      // They land at rank 3, above anything `completionKind` can express, so the
+      // fence blocks every live completion on that key. This is the whole
+      // mechanism protecting migrated history from a gateway that starts
+      // mid-copy, and it is pinned here so a later rank 3 with a different
+      // meaning fails loudly instead of quietly unblocking those rows.
+      const recorder = new FlightRecorder(dbPath);
+      try {
+        await recorder.logStart({
+          correlationId: "imported-1",
+          cli: "claude",
+          model: "opus",
+          prompt: "p",
+        });
+        await recorder.logComplete("imported-1", completion("historical answer"));
+        // Promote to imported-history rank, as the cutover's copy would write
+        // it. Done on a separate handle because the recorder has no API for it
+        // and deliberately never will: nothing that can call `logComplete` may
+        // mint rank 3.
+        const promote = new DatabaseSync(dbPath);
+        promote.exec(
+          "UPDATE gateway_metadata SET completion_rank = 3 WHERE request_id = 'imported-1'"
+        );
+        promote.close();
+
+        await recorder.logComplete("imported-1", completion("live observed answer"));
+        await recorder.logComplete("imported-1", {
+          ...completion("live presumed answer", "failed"),
+          completionKind: "presumed" as const,
+        });
+
+        const row = await recorder.readRequestById("imported-1");
+        expect(row?.response).toBe("historical answer");
+      } finally {
+        await recorder.close();
       }
     });
 

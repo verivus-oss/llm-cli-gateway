@@ -113,6 +113,19 @@ export interface FlightLogResult {
    * arrives first, presumed never overwrites observed, and two observed
    * completions keep last-write-wins. Defaults to "observed", so only the sweep
    * needs to say otherwise.
+   *
+   * RANK 3 IS RESERVED and this type deliberately cannot express it. It means
+   * IMPORTED HISTORY: rows the s10 transcript cutover copies in from a
+   * `logs.db` that predates this engine. Nothing live may complete such a row,
+   * because the fence above is `stored <= incoming` and no value this type can
+   * produce reaches 3.
+   *
+   * That reservation is the whole mechanism, so do not spend it on something
+   * else. A migrated row is irreplaceable history; a live request colliding on
+   * its correlationId is almost certainly a caller reusing an id and can be
+   * re-run. Giving 3 a second meaning would silently make imported history
+   * overwritable again, and nothing would fail until someone went looking for a
+   * transcript that had been quietly replaced.
    */
   completionKind?: "observed" | "presumed";
   /**
