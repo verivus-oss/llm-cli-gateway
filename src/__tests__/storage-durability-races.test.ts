@@ -21,7 +21,7 @@
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { AsyncJobManager } from "../async-job-manager.js";
 import {
   SqliteJobStore,
@@ -37,6 +37,28 @@ function expireLease(dbPath: string, jobId: string): void {
   const db = openDatabase(dbPath);
   try {
     db.prepare("UPDATE jobs SET lease_deadline = 1 WHERE id = ?").run(jobId);
+  } finally {
+    db.close();
+  }
+}
+
+/**
+ * Backdate an instance's heartbeat, so a later heartbeat is STRICTLY greater
+ * without depending on a clock tick.
+ *
+ * `last_heartbeat` is written by SQLite (`SQL_HEARTBEAT_INSTANCE` uses
+ * `julianday('now')`), NOT by `Date.now()`. An earlier attempt to separate the
+ * two writes spied on `Date.now` and offset it by a second; that never touched
+ * this column and the test still failed in CI with
+ * `expected <n> to be greater than <n>` when both writes landed in the same
+ * millisecond. Mirrors expireLease: pick a value nothing can collide with.
+ */
+function ageHeartbeat(dbPath: string, instanceId: string): void {
+  const db = openDatabase(dbPath);
+  try {
+    db.prepare("UPDATE gateway_instances SET last_heartbeat = 1 WHERE instance_id = ?").run(
+      instanceId
+    );
   } finally {
     db.close();
   }
@@ -284,6 +306,10 @@ describe("DEFECT 2: the heartbeat is one transaction, so a sweep cannot split it
       ownerHostname: "host-A",
     });
     expireLease(dbPath, "live-job");
+    // Both halves of the property need a baseline the heartbeat is guaranteed
+    // to move past, or the guard below never fires and the loop asserts
+    // NOTHING while still reporting green.
+    ageHeartbeat(dbPath, "inst-A");
 
     const snapshot = (): { lastHeartbeat: number; leaseDeadline: number } => {
       const db = openDatabase(dbPath);
@@ -314,21 +340,15 @@ describe("DEFECT 2: the heartbeat is one transaction, so a sweep cannot split it
       committed.push(snapshot());
       return result;
     };
-    // Put the heartbeat's writes in a STRICTLY later millisecond than `before`.
-    // Without this the two can land in the same tick and the closing assertion
-    // reads `expected 1787638598432 to be greater than 1787638598432`, which is
-    // the clock's resolution rather than a defect. It failed exactly that way
-    // in CI while passing locally. The property below is about ORDERING of the
-    // committed states, so the timestamps only need to be distinguishable.
-    const realNow = Date.now.bind(Date);
-    const nowSpy = vi.spyOn(Date, "now").mockImplementation(() => realNow() + 1_000);
+    // No clock is mocked here on purpose. Both columns are written by SQLite,
+    // so a Date.now spy moves neither; `ageHeartbeat` above is what makes the
+    // comparison deterministic.
     try {
       expect(await store.heartbeat("inst-A")).toEqual({
         instanceRowRefreshed: true,
         jobLeasesAdvanced: 1,
       });
     } finally {
-      nowSpy.mockRestore();
       driver.transaction = realTransaction;
     }
 
