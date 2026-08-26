@@ -16,9 +16,9 @@ import { join } from "node:path";
 import { Pool } from "pg";
 import { PostgresFlightRecorder, redactDsn } from "../flight-recorder-pg.js";
 import type { FlightLogResult, FlightLogStart } from "../flight-recorder.js";
+import { TEST_DATABASE_URL } from "./setup.js";
 
-const BASE_DSN =
-  process.env.TEST_DATABASE_URL || "postgresql://test:test@localhost:5433/llm_gateway_test";
+const BASE_DSN = TEST_DATABASE_URL;
 const SCHEMA = `flight_pg_${process.pid}`;
 const MIRROR = `${SCHEMA}_mirror`;
 
@@ -325,6 +325,23 @@ describe("a whole transcript round trip", () => {
       "postgresql://127.0.0.1:5432/gw"
     );
     expect(recorder.health().path).not.toContain("test:test");
+  });
+
+  it("names the server pg will REACH, not the URL authority", () => {
+    // `pg` resolves through pg-connection-string, which reads ?host=/?port= in
+    // preference to the authority. Reporting the authority told an operator
+    // transcripts were on 127.0.0.1 while the connection went elsewhere. This
+    // string is what doctor shows as where the data lives.
+    expect(redactDsn("postgresql://u:p@127.0.0.1:5432/db?host=elsewhere&port=6666")).toBe(
+      "postgresql://elsewhere:6666/db"
+    );
+    // A query parameter that cannot move the target must not move the report.
+    expect(redactDsn("postgresql://u:p@127.0.0.1:5432/db?sslmode=require")).toBe(
+      "postgresql://127.0.0.1:5432/db"
+    );
+    // pg's parser does not throw on garbage, it returns {host:"base"}, so
+    // well-formedness has to be decided before it is consulted.
+    expect(redactDsn("not a dsn")).toBe("postgresql (dsn not parseable)");
   });
 });
 

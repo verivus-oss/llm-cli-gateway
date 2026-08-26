@@ -20,6 +20,7 @@
  * cutover that moves them. `llm_process_health` reports the split so an
  * operator is never guessing where their history is.
  */
+import { createRequire } from "module";
 import { derivePromptSignals } from "./token-estimator.js";
 import { getRequestContext, principalScopeSql, resolveOwnerPrincipal } from "./request-context.js";
 import { isRedactionEnabled, redactSecrets } from "./secret-redaction.js";
@@ -178,11 +179,54 @@ const SQL_BOOTSTRAP = `
 
 /** Host, port and database only. A DSN carries a password and health output is read aloud. */
 export function redactDsn(dsn: string): string {
+  // Report the server `pg` will ACTUALLY reach, not the URL authority.
+  //
+  // These are two different parsers. `pg` resolves through
+  // `pg-connection-string`, which reads `?host=` and `?port=` in PREFERENCE to
+  // the authority, so a DSN can read `127.0.0.1:5432` to `new URL` while the
+  // connection goes somewhere else. This string is what `doctor` and the
+  // startup log present as where transcripts live, so a wrong answer tells an
+  // operator their data is on a host it is not on.
+  let url: URL;
   try {
-    const url = new URL(dsn);
-    return `postgresql://${url.host}${url.pathname}`;
+    url = new URL(dsn);
   } catch {
+    // Well-formedness only. pg's parser does NOT throw on garbage: it returns
+    // `{ host: "base", database: "not a dsn" }` for the string "not a dsn", so
+    // it cannot be used to decide whether the input was a DSN at all.
     return "postgresql (dsn not parseable)";
+  }
+
+  // With no query string there is nothing that can override the authority, so
+  // the authority IS the resolved target. Verified against pg-connection-string
+  // directly, rather than assumed. A DSN carrying `sslmode=` still takes the
+  // parser path below and still triggers pg's SSL deprecation warning; pg emits
+  // that whenever it parses such a DSN to connect anyway, so this adds an
+  // emission rather than a new class of noise.
+  if (url.search === "") {
+    return `postgresql://${url.host}${url.pathname}`;
+  }
+
+  // Query parameters present: only pg's own parser knows the precedence, and a
+  // second implementation of those rules would go stale the moment pg adds an
+  // override key.
+  try {
+    const require = createRequire(import.meta.url);
+    const { parse } = require("pg-connection-string") as {
+      parse: (s: string) => {
+        host?: string | null;
+        port?: string | null;
+        database?: string | null;
+      };
+    };
+    const c = parse(dsn);
+    const host = c.host ?? "localhost";
+    const port = c.port ? `:${c.port}` : "";
+    return `postgresql://${host}${port}/${c.database ?? ""}`;
+  } catch {
+    // pg is an OPTIONAL peer. Without its parser the target cannot be resolved,
+    // so say so rather than presenting an authority that may be wrong.
+    return `postgresql://${url.host}${url.pathname} (unverified: DSN carries query parameters)`;
   }
 }
 
