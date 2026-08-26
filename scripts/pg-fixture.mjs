@@ -94,6 +94,25 @@ export function assertFixtureDsn(raw, fail = die) {
         "database, not a test fixture."
     );
   }
+  // Round 3's blocker. `pg` resolves its config with a TRUTHY test, so a
+  // field-wise `port: 0` reads as absent and falls back to 5432. Port zero
+  // therefore MEANS the operator's live database exactly as an omitted port
+  // does, while looking like a stated one. Anything outside a real TCP port is
+  // refused rather than just zero, so no other falsy or nonsense value can
+  // reach the same fallback.
+  const port = Number(url.port);
+  if (!Number.isInteger(port) || port < 1 || port > 65535) {
+    return fail(
+      `refusing port ${JSON.stringify(url.port)}. A port pg treats as absent ` +
+        "falls back to 5432, which is the operator's live database."
+    );
+  }
+
+  // An empty user is falsy in that same resolution and silently becomes the OS
+  // user, so the fixture would be entered as whoever ran CI.
+  if (url.username === "") {
+    return fail("refusing a DSN with no user.");
+  }
 
   const database = decodeURIComponent(url.pathname.replace(/^\//, ""));
   if (database !== FIXTURE_DATABASE) {
@@ -105,7 +124,7 @@ export function assertFixtureDsn(raw, fail = die) {
 
   return {
     host: FIXTURE_HOST,
-    port: Number(url.port),
+    port,
     user: decodeURIComponent(url.username),
     password: decodeURIComponent(url.password),
     database,
@@ -224,8 +243,17 @@ async function main() {
   }
 
   process.stderr.write(`pg-fixture: ${describeFixture(fixture)} reset\n`);
-  // The ONLY thing on stdout: the DSN rebuilt from validated fields.
-  process.stdout.write(`${canonicalDsn(fixture)}\n`);
+
+  // The ONLY thing on stdout: the DSN rebuilt from validated fields. The
+  // caller captures this with $(...), which strips ONE trailing newline and
+  // keeps any others, and pg then removes an embedded newline and honours what
+  // follows. So a second line beginning `?port=5432` would be a bypass wearing
+  // the shape of a formatting bug. Enforced rather than left to a comment.
+  const emitted = canonicalDsn(fixture);
+  if (/[\r\n]/.test(emitted)) {
+    die("refusing to emit a multi-line DSN; the caller would capture both lines.");
+  }
+  process.stdout.write(`${emitted}\n`);
 }
 
 // Only run when invoked directly, so the validator can be unit tested.

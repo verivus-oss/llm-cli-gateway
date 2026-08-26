@@ -127,26 +127,32 @@ describe("bootstrap SQL and migrations/ agree", () => {
     expect(mismatched).toEqual([]);
   });
 
-  it("closes the remaining gap only with columns the job store adds itself", () => {
+  it("closes the remaining gap with exactly the columns the job store repairs", () => {
     const bootstrapTables = new Set(bootstrapColumns.map(c => c.table_name));
     const bootstrapKeys = new Set(bootstrapColumns.map(key));
 
     const gap = migratedColumns
       .filter(c => bootstrapTables.has(c.table_name))
-      .filter(c => !bootstrapKeys.has(key(c)));
+      .filter(c => !bootstrapKeys.has(key(c)))
+      .map(key)
+      .sort();
 
-    // Every such column must be one PostgresJobStore declares it requires, and
-    // therefore one its init() adds via ALTER TABLE. Tied to the store's own
-    // constant so a new migration column cannot widen this gap unnoticed.
+    // PINNED, not merely bounded. An earlier version asserted only that each
+    // gap column appeared in POSTGRES_JOB_STORE_REQUIRED_COLUMNS, which is the
+    // full runtime schema rather than a list of what init() repairs. That is a
+    // one-way tie: a new required column missing from BOTH bootstrap and init
+    // would widen the gap and still pass. These three are what
+    // PostgresJobStore.init() actually adds via ALTER TABLE, so changing this
+    // list has to be a deliberate edit here.
+    expect(gap).toEqual(["jobs.error_category", "jobs.progress_json", "jobs.retryable"]);
+
+    // Cross-check the pin against the store's own declaration, so the two
+    // cannot drift apart silently either.
     const required: Record<string, readonly string[]> = POSTGRES_JOB_STORE_REQUIRED_COLUMNS;
-    const unexplained = gap
-      .filter(c => !(required[c.table_name] ?? []).includes(c.column_name))
-      .map(key);
-
-    expect(unexplained).toEqual([]);
-    // The gap is real and non-empty today. If it ever empties, this test has
-    // stopped measuring anything and should be revisited rather than deleted.
-    expect(gap.length).toBeGreaterThan(0);
+    for (const column of gap) {
+      const [table, name] = column.split(".");
+      expect(required[table] ?? []).toContain(name);
+    }
   });
 
   it("leaves the migration-owned tables out of bootstrap, which is by design", () => {

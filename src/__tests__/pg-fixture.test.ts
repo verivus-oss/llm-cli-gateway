@@ -76,6 +76,24 @@ describe("the fixture DSN guard", () => {
         "mysql://test:test@127.0.0.1:5433/llm_gateway_test",
         "refusing protocol",
       ],
+      // Round 3's blocker. pg resolves config with a TRUTHY test, so a
+      // field-wise port 0 reads as absent and falls back to 5432. Port zero
+      // MEANS the live database while looking like a stated port.
+      [
+        "port zero, which pg resolves to 5432",
+        "postgresql://test:test@127.0.0.1:0/llm_gateway_test",
+        "refusing port",
+      ],
+      [
+        "a zero port written as 00",
+        "postgresql://test:test@127.0.0.1:00/llm_gateway_test",
+        "refusing port",
+      ],
+      [
+        "an empty user, which becomes the OS user",
+        "postgresql://:test@127.0.0.1:5433/llm_gateway_test",
+        "no user",
+      ],
       ["an unparseable string", "not a url", "not a parseable URL"],
       ["a fragment", "postgresql://test:test@127.0.0.1:5433/llm_gateway_test#x", "fragment"],
     ];
@@ -131,6 +149,45 @@ describe("the fixture DSN guard", () => {
       expect(client.host).toBe(fixture.host);
       expect(client.port).toBe(fixture.port);
       expect(client.database).toBe(fixture.database);
+    });
+
+    /**
+     * The gate that would have caught round 3's blocker and did not exist.
+     *
+     * pg-fixture.mjs builds its clients FIELD-WISE, never from a string.
+     * Asserting only on canonicalDsn therefore tested a path production does
+     * not take: port 0 survived the string path as 0 while the field path
+     * silently resolved it to 5432. Both are asserted here, and asserted to
+     * AGREE, so a value meaning different things to the two parsers cannot pass.
+     */
+    it("resolves identically whether pg is given fields or the canonical string", () => {
+      const fixture = assertFixtureDsn(VALID);
+
+      const fromFields = new Client({ ...fixture, database: "postgres" });
+      const fromString = new Client({ connectionString: canonicalDsn(fixture, "postgres") });
+
+      expect(fromFields.port).toBe(fixture.port);
+      expect(fromFields.host).toBe(fixture.host);
+      expect(fromString.port).toBe(fromFields.port);
+      expect(fromString.host).toBe(fromFields.host);
+      expect(fromString.database).toBe(fromFields.database);
+    });
+
+    it("never lets the field-wise admin client reach the operator's port", () => {
+      // Directly the round-3 failure: assert on what the DESTRUCTIVE client
+      // resolves to, not on what the DSN looks like.
+      const fixture = assertFixtureDsn(VALID);
+      const destructive = new Client({ ...fixture, database: "postgres" });
+
+      expect(destructive.port).not.toBe(5432);
+      expect(destructive.port).toBe(5433);
+    });
+
+    it("emits a single-line DSN, since the caller captures stdout", () => {
+      // A second stdout line beginning ?port=5432 would be a bypass wearing the
+      // shape of a formatting bug: pg strips the newline and honours it.
+      const fixture = assertFixtureDsn(VALID);
+      expect(canonicalDsn(fixture)).not.toMatch(/[\r\n]/);
     });
 
     it("keeps the admin DSN on the same server, differing only in database", () => {
