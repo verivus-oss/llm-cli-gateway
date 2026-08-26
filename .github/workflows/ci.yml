@@ -117,6 +117,35 @@ jobs:
     runs-on: ${{ github.repository == 'verivus-oss/llm-cli-gateway' && 'ubuntu-latest' || fromJSON('["self-hosted","Linux","X64","x86_64","workhorse3","gateway"]') }}
     permissions:
       contents: read
+    # The self-hosted path RESETS a shared database, so two concurrent runs
+    # would drop the schema out from under each other. Only one runner serves
+    # this repo today, which makes that safe by accident rather than by design;
+    # this makes it explicit so adding a second runner cannot silently break it.
+    # cancel-in-progress is false because cancelling mid-reset is how a fixture
+    # gets left half-built.
+    concurrency:
+      group: postgres-fixture-${{ github.repository }}
+      cancel-in-progress: false
+    env:
+      # Node's tmpdir() is /tmp unless TMPDIR says otherwise, and setup.ts puts
+      # the test config, sessions file and logs database there. On the
+      # self-hosted host /tmp is a single 8 GB tmpfs SHARED by twelve runner
+      # units (PrivateTmp isolates names, not capacity), and it has already
+      # caused an ENOSPC that failed 220 unrelated suites. runner.temp is inside
+      # the runner's own work tree and is cleared per job. Scoped to this job on
+      # purpose: setting it on the unit would change sast and security too.
+      TMPDIR: ${{ runner.temp }}
+      TMP: ${{ runner.temp }}
+      TEMP: ${{ runner.temp }}
+      # Set ONLY off the public mirror. Where it is set, test-pg.sh talks to the
+      # long-lived fixture and never invokes podman, which the runner unit's
+      # RestrictNamespaces forbids anyway. Where it is empty, test-pg.sh starts
+      # its own throwaway container, which is what ubuntu-latest can do.
+      # These are fixture credentials on a loopback-only port, not a secret.
+      # NOTE the inverted condition. GitHub's a && b || c is short-circuit and
+      # '' is FALSY, so `cond && '' || 'dsn'` yields the DSN on BOTH branches.
+      # The truthy branch must carry the value.
+      TEST_DATABASE_URL: ${{ github.repository != 'verivus-oss/llm-cli-gateway' && 'postgresql://test:test@127.0.0.1:5433/llm_gateway_test' || '' }}
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
         with:
@@ -129,10 +158,11 @@ jobs:
       # committed lockfile BEFORE any dependency code is allowed to execute.
       - run: node scripts/supply-chain/dep-drift-scan.mjs --frozen --allow-missing-dist
       - run: npx --yes npm@12.0.1 ci --strict-allow-scripts --no-audit --no-fund
-      # scripts/test-pg.sh starts postgres:17-alpine with a plain container run,
-      # builds, and runs every *-pg.test.ts. It deliberately does NOT use
-      # compose: this runner has podman and no docker, and `podman compose`
-      # fails for the runner user with "looking up compose provider failed".
+      # Two modes, one path. With TEST_DATABASE_URL set the script uses the
+      # long-lived fixture; without it, it starts postgres:17-alpine itself. It
+      # deliberately does NOT use compose: this runner has podman and no docker,
+      # and `podman compose` fails with "looking up compose provider failed".
+      # Both modes reset the fixture and apply migrations/ before vitest.
       - run: npm run test:pg
 
   npm12-install-policy:
