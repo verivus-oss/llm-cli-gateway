@@ -101,8 +101,26 @@ jobs:
           fi
       - name: Verify server starts
         run: |
-          timeout 5 node dist/index.js < /dev/null 2>/dev/null || true
-          echo "Server startup smoke test passed"
+          # `|| true` here meant this step COULD NOT FAIL. A server that threw on
+          # its first line and one that ran healthily for 5s both reached the
+          # `echo` and exited 0, so the last gate before the tarball ships
+          # verified nothing. It had been that way since the workflow was added.
+          #
+          # `timeout` exits 124 only when it had to kill the process, which for a
+          # stdio MCP server reading /dev/null is exactly the success condition:
+          # still running. Measured as 124 on three consecutive local runs. Any
+          # other status means it exited on its own, which is a startup failure.
+          set +e
+          timeout 5 node dist/index.js < /dev/null > /dev/null 2>startup-stderr.txt
+          status=$?
+          set -e
+          if [ "$status" -ne 124 ]; then
+            echo "ERROR: server exited on its own with status ${status}; expected 124 (still running)."
+            echo "--- stderr ---"
+            cat startup-stderr.txt || true
+            exit 1
+          fi
+          echo "Server startup smoke test passed (still running after 5s)"
 
   postgres-tests:
     # The PostgreSQL suites, which `npm run check` does NOT run and which no
