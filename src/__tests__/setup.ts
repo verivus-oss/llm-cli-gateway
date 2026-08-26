@@ -29,6 +29,14 @@ import { assertFixtureDsn, canonicalDsn, defaultFixtureDsn } from "../../scripts
 
 const RAW_TEST_DATABASE_URL: string = process.env.TEST_DATABASE_URL || defaultFixtureDsn();
 
+/**
+ * The REBUILT DSN, never the caller's string.
+ *
+ * It is also written back to `process.env.TEST_DATABASE_URL` below. Nothing
+ * in-tree reads the env directly any more, but a future test that did would
+ * otherwise get the unvalidated original, query parameters included, which is
+ * the representation split this guard exists to close.
+ */
 export const TEST_DATABASE_URL: string = canonicalDsn(
   assertFixtureDsn(RAW_TEST_DATABASE_URL, (message: string) => {
     throw new Error(
@@ -38,6 +46,8 @@ export const TEST_DATABASE_URL: string = canonicalDsn(
     );
   })
 );
+process.env.TEST_DATABASE_URL = TEST_DATABASE_URL;
+
 const PG_TESTS_ENABLED = process.env.PG_TESTS === "1";
 const MIGRATION_LOCK_KEY = 88421173;
 const CLEANUP_LOCK_KEY = 88421174;

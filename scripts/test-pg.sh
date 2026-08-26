@@ -41,7 +41,32 @@ set -euo pipefail
 # The fixture's identity is declared once, in FIXTURE in scripts/pg-fixture.mjs.
 # Asking for it here rather than repeating it means changing the port is one
 # edit, not four with nothing catching a miss.
-eval "$(node scripts/pg-fixture.mjs --print-env)"
+#
+# NOT `eval "$(node ...)"`. `set -e` sees eval's own status, not the command
+# substitution's, so a node that printed some assignments and THEN failed left
+# those assignments in place and the script carried on; with the names already
+# inherited from the environment it carried on with STALE values, and any
+# unexpected stdout was executed as shell code before anything validated it.
+# Capture, check the status, check the SHAPE, then evaluate.
+fixture_env="$(node scripts/pg-fixture.mjs --print-env)" || {
+  echo "FATAL: could not read the fixture definition from scripts/pg-fixture.mjs" >&2
+  exit 1
+}
+if [ -z "${fixture_env}" ]; then
+  echo "FATAL: scripts/pg-fixture.mjs --print-env produced no output" >&2
+  exit 1
+fi
+# Only FIXTURE_<NAME>='...' lines are allowed to reach eval. Anything else, a
+# stray warning or a deliberate injection, is refused rather than executed.
+if printf '%s\n' "${fixture_env}" | grep -qvE "^FIXTURE_[A-Z_]+='([^']|'\\\\'')*'$"; then
+  echo "FATAL: unexpected output from --print-env; refusing to evaluate it:" >&2
+  printf '%s\n' "${fixture_env}" >&2
+  exit 1
+fi
+eval "${fixture_env}"
+: "${FIXTURE_PORT:?fixture port missing}" "${FIXTURE_DB:?fixture database missing}"
+: "${FIXTURE_USER:?fixture user missing}" "${FIXTURE_PASSWORD:?fixture password missing}"
+: "${FIXTURE_IMAGE:?fixture image missing}" "${FIXTURE_DSN:?fixture dsn missing}"
 
 CONTAINER_NAME="${PG_TEST_CONTAINER:-llm-gateway-pg-test}"
 HOST_PORT="${PG_TEST_PORT:-$FIXTURE_PORT}"

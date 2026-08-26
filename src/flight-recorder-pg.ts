@@ -178,6 +178,35 @@ const SQL_BOOTSTRAP = `
   `;
 
 /** Host, port and database only. A DSN carries a password and health output is read aloud. */
+/**
+ * One place that turns a resolved target into a printable identity.
+ *
+ * Round 4 found the previous inline formatting emitted things that were not
+ * URIs and read as a different location entirely:
+ *   `?host=/var/run/postgresql` became `postgresql:///var/run/postgresql:5433/db`,
+ *   which parses as an empty host and a database named `var/run/...`.
+ *   `?host=::1` became `postgresql://::1:5433/db`, unbracketed and ambiguous.
+ * Both are the same failure the function exists to prevent: naming a place the
+ * connection does not go. A unix socket is not a TCP URI, so it is not dressed
+ * as one, and an absent port or database is reported as the value pg will
+ * actually use rather than left blank.
+ */
+function describeTarget(host: string, port: string | number, database: string): string {
+  const db = database === "" ? "(pg default: the connecting user)" : database;
+  // libpq's default, which is what pg falls back to for an absent port.
+  const p = String(port) === "" ? "5432 (default)" : String(port);
+  if (host.startsWith("/")) {
+    return `postgresql socket ${host} port ${p} database ${db}`;
+  }
+  if (host === "") {
+    return `postgresql host (pg default) port ${p} database ${db}`;
+  }
+  // Bracket IPv6 unless the caller already did. `url.host` brackets; the
+  // connection-string parser returns the bare form.
+  const h = host.includes(":") && !host.startsWith("[") ? `[${host}]` : host;
+  return `postgresql://${h}:${p}/${db}`;
+}
+
 export function redactDsn(dsn: string): string {
   // Report the server `pg` will ACTUALLY reach, not the URL authority.
   //
@@ -197,14 +226,14 @@ export function redactDsn(dsn: string): string {
     return "postgresql (dsn not parseable)";
   }
 
-  // With no query string there is nothing that can override the authority, so
-  // the authority IS the resolved target. Verified against pg-connection-string
-  // directly, rather than assumed. A DSN carrying `sslmode=` still takes the
-  // parser path below and still triggers pg's SSL deprecation warning; pg emits
-  // that whenever it parses such a DSN to connect anyway, so this adds an
-  // emission rather than a new class of noise.
+  // With no query string nothing can override the authority's HOST, so
+  // `url.host` is the resolved host. Verified against pg-connection-string.
+  // `url.host` keeps IPv6 bracketed, which the parser path below has to
+  // reconstruct. Note this path still defers to `describeTarget` for the port
+  // and database, because an ABSENT port means 5432 to pg and an absent
+  // database means the user: the authority alone does not say where it goes.
   if (url.search === "") {
-    return `postgresql://${url.host}${url.pathname}`;
+    return describeTarget(url.hostname, url.port, url.pathname.replace(/^\//, ""));
   }
 
   // Query parameters present: only pg's own parser knows the precedence, and a
@@ -220,9 +249,7 @@ export function redactDsn(dsn: string): string {
       };
     };
     const c = parse(dsn);
-    const host = c.host ?? "localhost";
-    const port = c.port ? `:${c.port}` : "";
-    return `postgresql://${host}${port}/${c.database ?? ""}`;
+    return describeTarget(c.host ?? "", c.port ?? "", c.database ?? "");
   } catch {
     // pg is an OPTIONAL peer. Without its parser the target cannot be resolved,
     // so say so rather than presenting an authority that may be wrong.

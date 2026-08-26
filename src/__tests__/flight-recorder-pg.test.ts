@@ -343,6 +343,40 @@ describe("a whole transcript round trip", () => {
     // well-formedness has to be decided before it is consulted.
     expect(redactDsn("not a dsn")).toBe("postgresql (dsn not parseable)");
   });
+
+  /**
+   * Round 4 found the formatter emitting strings that were not URIs and read as
+   * a different location, which is the same lie in a different costume.
+   */
+  it("does not dress a unix socket as a TCP URI", () => {
+    // The old form produced `postgresql:///var/run/postgresql:5433/db`, which
+    // parses as an empty host and a database named `var/run/postgresql:5433/db`.
+    expect(redactDsn("postgresql://u:p@127.0.0.1:5432/db?host=/var/run/postgresql")).toBe(
+      "postgresql socket /var/run/postgresql port 5432 database db"
+    );
+  });
+
+  it("brackets IPv6 whichever side it arrives from", () => {
+    // The authority form is already bracketed by `new URL`; the connection
+    // string parser returns the bare form, and the old code emitted
+    // `postgresql://::1:5433/db`, which is ambiguous.
+    expect(redactDsn("postgresql://u:p@127.0.0.1:5432/db?host=::1")).toBe(
+      "postgresql://[::1]:5432/db"
+    );
+    expect(redactDsn("postgresql://u:p@[::1]:5433/db")).toBe("postgresql://[::1]:5433/db");
+  });
+
+  it("names the default pg substitutes rather than reporting a blank", () => {
+    // An absent port means 5432 to pg and an absent database means the
+    // connecting user. Reporting either as empty is what made the old no-query
+    // fast path overstate what the authority proved.
+    expect(redactDsn("postgresql://u:p@127.0.0.1/db")).toBe(
+      "postgresql://127.0.0.1:5432 (default)/db"
+    );
+    expect(redactDsn("postgresql://u:p@127.0.0.1:5432")).toBe(
+      "postgresql://127.0.0.1:5432/(pg default: the connecting user)"
+    );
+  });
 });
 
 describe("the five states", () => {

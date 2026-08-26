@@ -1,7 +1,13 @@
 import { describe, expect, it } from "vitest";
 import { Client } from "pg";
 // @ts-expect-error -- plain ESM script, no type declarations by design.
-import { assertFixtureDsn, canonicalDsn, describeFixture } from "../../scripts/pg-fixture.mjs";
+import {
+  FIXTURE,
+  assertFixtureDsn,
+  canonicalDsn,
+  describeFixture,
+  printEnv,
+} from "../../scripts/pg-fixture.mjs";
 
 /**
  * The guard in front of a DESTRUCTIVE reset.
@@ -92,7 +98,24 @@ describe("the fixture DSN guard", () => {
       [
         "an empty user, which becomes the OS user",
         "postgresql://:test@127.0.0.1:5433/llm_gateway_test",
-        "no user",
+        "refusing user",
+      ],
+      // Round 4. `pg` resolves EVERY field with a truthy test, so any falsy
+      // value is replaced by ambient state, not treated as absent.
+      [
+        "an empty password, which pg replaces with PGPASSWORD",
+        "postgresql://test:@127.0.0.1:5433/llm_gateway_test",
+        "empty password",
+      ],
+      [
+        "an omitted password",
+        "postgresql://test@127.0.0.1:5433/llm_gateway_test",
+        "empty password",
+      ],
+      [
+        "a user the fixture does not use",
+        "postgresql://postgres:test@127.0.0.1:5433/llm_gateway_test",
+        "refusing user",
       ],
       ["an unparseable string", "not a url", "not a parseable URL"],
       ["a fragment", "postgresql://test:test@127.0.0.1:5433/llm_gateway_test#x", "fragment"],
@@ -214,5 +237,52 @@ describe("the fixture DSN guard", () => {
       expect(client.port).toBe(5433);
       expect(describeFixture(fixture)).not.toContain("p/a@ss");
     });
+  });
+});
+
+describe("printEnv, which a shell evaluates", () => {
+  it("emits only single-quoted FIXTURE_ assignments", () => {
+    // test-pg.sh refuses anything that does not match this shape rather than
+    // evaluating it, so the two have to agree. A line that escaped this pattern
+    // would be executed as shell code.
+    const lines = printEnv().split("\n");
+    expect(lines.length).toBeGreaterThan(0);
+    for (const line of lines) {
+      expect(line).toMatch(/^FIXTURE_[A-Z_]+='([^']|'\\'')*'$/);
+    }
+  });
+
+  it("carries every field the shell requires", () => {
+    const emitted = new Set(
+      printEnv()
+        .split("\n")
+        .map(l => l.split("=")[0])
+    );
+    for (const name of [
+      "FIXTURE_HOST",
+      "FIXTURE_PORT",
+      "FIXTURE_DB",
+      "FIXTURE_USER",
+      "FIXTURE_PASSWORD",
+      "FIXTURE_IMAGE",
+      "FIXTURE_DSN",
+    ]) {
+      expect(emitted).toContain(name);
+    }
+  });
+
+  it("quotes a value containing an apostrophe so the shell sees it intact", () => {
+    // FIXTURE holds no such value today. This pins the ESCAPING, so a future
+    // value cannot silently break out of the quoting into executable text.
+    const q = (v: string): string => `'${String(v).replace(/'/g, `'\\''`)}'`;
+    expect(q("a'b")).toBe(`'a'\\''b'`);
+    expect(q("a; echo pwned")).toBe("'a; echo pwned'");
+    expect(q("$(id)")).toBe("'$(id)'");
+  });
+
+  it("never emits a newline inside a value", () => {
+    for (const v of Object.values(FIXTURE)) {
+      expect(String(v)).not.toMatch(/[\r\n]/);
+    }
   });
 });

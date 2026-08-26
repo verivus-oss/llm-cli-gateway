@@ -59,8 +59,22 @@ jobs:
       - run: npm run build
       - run: npm run lint
       - run: npm run format:check
+      # setup.ts writes the test config, sessions file and logs.db through Node's
+      # tmpdir(), which is /tmp unless TMPDIR says otherwise. On the self-hosted
+      # host that is one 8 GB tmpfs SHARED by twelve runner units, and it has
+      # already caused an ENOSPC that failed 220 unrelated suites. Round 4 found
+      # this was set on the postgres job ONLY, so the constraint was enforced on
+      # one job out of six while being described as general.
       - run: npm run test:fuzz
+        env:
+          TMPDIR: ${{ runner.temp }}
+          TMP: ${{ runner.temp }}
+          TEMP: ${{ runner.temp }}
       - run: npm run test:ci
+        env:
+          TMPDIR: ${{ runner.temp }}
+          TMP: ${{ runner.temp }}
+          TEMP: ${{ runner.temp }}
       # security:audit gates on npm-shrinkwrap.json presence + parity; the
       # shrinkwrap is generated, never committed (it would break npm ci).
       - run: node scripts/make-prod-shrinkwrap.mjs
@@ -100,6 +114,10 @@ jobs:
             exit 1
           fi
       - name: Verify server starts
+        env:
+          TMPDIR: ${{ runner.temp }}
+          TMP: ${{ runner.temp }}
+          TEMP: ${{ runner.temp }}
         run: |
           # This step has never verified a startup, in either of its two prior
           # forms. The original `|| true` meant it could not fail at all. The

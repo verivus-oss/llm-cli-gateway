@@ -131,10 +131,29 @@ export function assertFixtureDsn(raw, fail = die) {
     );
   }
 
-  // An empty user is falsy in that same resolution and silently becomes the OS
-  // user, so the fixture would be entered as whoever ran CI.
-  if (url.username === "") {
-    return fail("refusing a DSN with no user.");
+  // `pg` resolves EVERY field with a truthy test (`config[key] || env || default`),
+  // so any falsy value is silently replaced by ambient state. Round 3 closed
+  // that for port, round 4 found user and password still open. Each field is
+  // pinned to what FIXTURE declares rather than merely non-empty, so the
+  // accepted DSN and the connected one cannot differ in ANY component.
+  const user = decodeURIComponent(url.username);
+  if (user !== FIXTURE.user) {
+    return fail(
+      `refusing user ${JSON.stringify(user)}. The fixture connects as ` +
+        `${JSON.stringify(FIXTURE.user)}; an empty or different user is replaced by ` +
+        "PGUSER or the OS user."
+    );
+  }
+
+  // An empty password is NOT "no password": pg substitutes PGPASSWORD from the
+  // environment, so the reset would authenticate with a secret the DSN never
+  // stated. Refuse it rather than let ambient state decide.
+  const password = decodeURIComponent(url.password);
+  if (password === "") {
+    return fail(
+      "refusing a DSN with an empty password. pg replaces a falsy password with " +
+        "PGPASSWORD, so the connection would use a credential the DSN did not state."
+    );
   }
 
   const database = decodeURIComponent(url.pathname.replace(/^\//, ""));
@@ -148,8 +167,8 @@ export function assertFixtureDsn(raw, fail = die) {
   return {
     host: FIXTURE_HOST,
     port,
-    user: decodeURIComponent(url.username),
-    password: decodeURIComponent(url.password),
+    user,
+    password,
     database,
   };
 }
