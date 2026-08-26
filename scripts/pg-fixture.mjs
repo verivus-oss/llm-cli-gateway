@@ -180,7 +180,13 @@ async function main() {
     const code = lastError && lastError.code;
     const reason =
       code === "ECONNREFUSED" || code === "ENOTFOUND" || code === "EHOSTUNREACH"
-        ? "The fixture server is not running. This is a missing fixture, not a test failure."
+        ? "The fixture server is not running. This is a MISSING FIXTURE, not a " +
+          "test failure. It is a long-lived container the CI job deliberately " +
+          "does not own, so recreate it on the runner host as the operator user:\n" +
+          "  podman run -d --name llm-gateway-pg-ci --restart=always \\\n" +
+          "    -e POSTGRES_DB=llm_gateway_test -e POSTGRES_USER=test -e POSTGRES_PASSWORD=test \\\n" +
+          "    -p 127.0.0.1:5433:5432 -v llm-gateway-pg-ci-data:/var/lib/postgresql/data \\\n" +
+          "    postgres:17-alpine"
         : `The server answered but the connection failed: ${lastError ? lastError.message : "unknown"}`;
     die(`${describeFixture(fixture)} unreachable after ${timeoutSeconds}s. ${reason}`);
   }
