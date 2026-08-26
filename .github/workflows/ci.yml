@@ -127,16 +127,6 @@ jobs:
       group: postgres-fixture-${{ github.repository }}
       cancel-in-progress: false
     env:
-      # Node's tmpdir() is /tmp unless TMPDIR says otherwise, and setup.ts puts
-      # the test config, sessions file and logs database there. On the
-      # self-hosted host /tmp is a single 8 GB tmpfs SHARED by twelve runner
-      # units (PrivateTmp isolates names, not capacity), and it has already
-      # caused an ENOSPC that failed 220 unrelated suites. runner.temp is inside
-      # the runner's own work tree and is cleared per job. Scoped to this job on
-      # purpose: setting it on the unit would change sast and security too.
-      TMPDIR: ${{ runner.temp }}
-      TMP: ${{ runner.temp }}
-      TEMP: ${{ runner.temp }}
       # Set ONLY off the public mirror. Where it is set, test-pg.sh talks to the
       # long-lived fixture and never invokes podman, which the runner unit's
       # RestrictNamespaces forbids anyway. Where it is empty, test-pg.sh starts
@@ -164,6 +154,21 @@ jobs:
       # and `podman compose` fails with "looking up compose provider failed".
       # Both modes reset the fixture and apply migrations/ before vitest.
       - run: npm run test:pg
+        # Node's tmpdir() is /tmp unless TMPDIR says otherwise, and setup.ts
+        # puts the test config, sessions file and logs database there. On the
+        # self-hosted host /tmp is a single 8 GB tmpfs SHARED by twelve runner
+        # units (PrivateTmp isolates names, not capacity), and it has already
+        # caused an ENOSPC that failed 220 unrelated suites.
+        #
+        # STEP level, not job level: the `runner` context does not exist in a
+        # job `env:` block, so this silently expanded to the empty string there
+        # and Node fell straight back to /tmp. actionlint caught it; a local
+        # check that exports TMPDIR by hand never would, because it tests the
+        # mechanism rather than the wiring.
+        env:
+          TMPDIR: ${{ runner.temp }}
+          TMP: ${{ runner.temp }}
+          TEMP: ${{ runner.temp }}
 
   npm12-install-policy:
     # build-and-test owns the full test suite and security audit. This job
