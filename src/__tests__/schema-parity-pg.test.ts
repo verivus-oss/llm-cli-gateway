@@ -3,7 +3,7 @@ import { randomUUID } from "node:crypto";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { Pool } from "pg";
 import { POSTGRES_JOB_STORE_REQUIRED_COLUMNS } from "../postgres-job-store-schema.js";
-import { JOB_SCHEMA_SQL, SESSION_SCHEMA_SQL } from "./setup.js";
+import { JOB_SCHEMA_SQL, SESSION_SCHEMA_SQL, TEST_DATABASE_URL } from "./setup.js";
 
 /**
  * Bootstrap SQL versus migrations/, compared rather than assumed.
@@ -29,9 +29,6 @@ import { JOB_SCHEMA_SQL, SESSION_SCHEMA_SQL } from "./setup.js";
  * That gap is asserted against the store's own declared requirement rather than
  * a list typed out here, so a new column cannot widen it unnoticed.
  */
-
-const TEST_DATABASE_URL =
-  process.env.TEST_DATABASE_URL || "postgresql://test:test@127.0.0.1:5433/llm_gateway_test";
 
 const suffix = randomUUID().replaceAll("-", "");
 const BOOTSTRAP_SCHEMA = `parity_bootstrap_${suffix}`;

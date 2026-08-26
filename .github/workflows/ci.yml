@@ -149,11 +149,15 @@ jobs:
       # long-lived fixture and never invokes podman, which the runner unit's
       # RestrictNamespaces forbids anyway. Where it is empty, test-pg.sh starts
       # its own throwaway container, which is what ubuntu-latest can do.
-      # These are fixture credentials on a loopback-only port, not a secret.
+      #
+      # A FLAG, not the DSN. The fixture's host, port, database and credentials
+      # are declared once in FIXTURE in scripts/pg-fixture.mjs; repeating them
+      # here made a port change a four-file edit with nothing catching a miss.
+      #
       # NOTE the inverted condition. GitHub's a && b || c is short-circuit and
-      # '' is FALSY, so `cond && '' || 'dsn'` yields the DSN on BOTH branches.
+      # '' is FALSY, so `cond && '' || '1'` yields '1' on BOTH branches.
       # The truthy branch must carry the value.
-      TEST_DATABASE_URL: ${{ github.repository != 'verivus-oss/llm-cli-gateway' && 'postgresql://test:test@127.0.0.1:5433/llm_gateway_test' || '' }}
+      PG_TEST_EXTERNAL: ${{ github.repository != 'verivus-oss/llm-cli-gateway' && '1' || '' }}
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
         with:

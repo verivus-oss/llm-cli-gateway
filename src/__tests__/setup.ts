@@ -6,9 +6,38 @@ import { beforeAll, afterAll, beforeEach } from "vitest";
 import type { Logger } from "../logger.js";
 import { PostgresStorageDriver, type PgPoolLike } from "../storage/drivers/postgres.js";
 
-// Test database configuration
-const TEST_DATABASE_URL =
-  process.env.TEST_DATABASE_URL || "postgresql://test:test@localhost:5433/llm_gateway_test";
+/**
+ * The fixture DSN, PROVED to be a fixture before anything destructive runs.
+ *
+ * `cleanTestDatabase` below issues `DELETE FROM` across nine tables, and the
+ * operator's live gateway database listens one port away on the same loopback
+ * address. `scripts/test-pg.sh` validates the DSN and hands over a rebuilt one,
+ * but that guard only exists on that path: `npx vitest run <file>-pg.test.ts`
+ * with a hand-set TEST_DATABASE_URL is a documented invocation in CLAUDE.md and
+ * reached the deletes with no host or port check at all. A fence with a
+ * documented way around it is not a fence, so the same guard runs here.
+ *
+ * It THROWS rather than exiting: a refusal should fail the suite loudly with a
+ * reason, not kill the runner. The exported value is the REBUILT DSN, never the
+ * caller's string, because pg honours `?host=`/`?port=` over the URL authority.
+ *
+ * The default comes from FIXTURE in pg-fixture.mjs rather than a literal, so
+ * the fixture's host, port and database are declared in exactly one place.
+ */
+// @ts-expect-error -- plain ESM script, no type declarations by design.
+import { assertFixtureDsn, canonicalDsn, defaultFixtureDsn } from "../../scripts/pg-fixture.mjs";
+
+const RAW_TEST_DATABASE_URL: string = process.env.TEST_DATABASE_URL || defaultFixtureDsn();
+
+export const TEST_DATABASE_URL: string = canonicalDsn(
+  assertFixtureDsn(RAW_TEST_DATABASE_URL, (message: string) => {
+    throw new Error(
+      `TEST_DATABASE_URL is not a disposable fixture: ${message}\n` +
+        "The PostgreSQL suites DELETE from nine tables and drop schemas. " +
+        "Point TEST_DATABASE_URL at the test fixture, or run via `npm run test:pg`."
+    );
+  })
+);
 const PG_TESTS_ENABLED = process.env.PG_TESTS === "1";
 const MIGRATION_LOCK_KEY = 88421173;
 const CLEANUP_LOCK_KEY = 88421174;

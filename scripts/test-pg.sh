@@ -38,12 +38,32 @@
 # the job store adds itself.
 set -euo pipefail
 
+# The fixture's identity is declared once, in FIXTURE in scripts/pg-fixture.mjs.
+# Asking for it here rather than repeating it means changing the port is one
+# edit, not four with nothing catching a miss.
+eval "$(node -e '
+  import("./scripts/pg-fixture.mjs").then(m => {
+    const f = m.FIXTURE;
+    const q = s => "\x27" + String(s).replace(/\x27/g, "\x27\\\x27\x27") + "\x27";
+    process.stdout.write(
+      `FIXTURE_PORT=${q(f.port)}\nFIXTURE_DB=${q(f.database)}\n` +
+      `FIXTURE_USER=${q(f.user)}\nFIXTURE_PASSWORD=${q(f.password)}\n` +
+      `FIXTURE_IMAGE=${q(f.image)}\nFIXTURE_DSN=${q(m.defaultFixtureDsn())}\n`);
+  });
+')"
+
 CONTAINER_NAME="${PG_TEST_CONTAINER:-llm-gateway-pg-test}"
-HOST_PORT="${PG_TEST_PORT:-5433}"
-IMAGE="${PG_TEST_IMAGE:-postgres:17-alpine}"
+HOST_PORT="${PG_TEST_PORT:-$FIXTURE_PORT}"
+IMAGE="${PG_TEST_IMAGE:-$FIXTURE_IMAGE}"
 READY_TIMEOUT_SECONDS="${PG_TEST_READY_TIMEOUT:-120}"
 CONTAINER_CLI="${CONTAINER_CLI:-}"
 EXTERNAL_DSN="${TEST_DATABASE_URL:-}"
+# PG_TEST_EXTERNAL=1 means "use the long-lived fixture" without the caller
+# having to spell its DSN out. That keeps ci.yml free of a copy of the fixture
+# identity, which was one of the four places a port change had to be edited.
+if [ -z "${EXTERNAL_DSN}" ] && [ "${PG_TEST_EXTERNAL:-}" = "1" ]; then
+  EXTERNAL_DSN="${FIXTURE_DSN}"
+fi
 
 # Prove the target is a disposable fixture, wait for it, reset it, then put the
 # canonical schema on it. pg-fixture.mjs refuses anything not provably a
@@ -120,13 +140,24 @@ trap cleanup EXIT INT TERM
 # be reported as "port already allocated", which names the symptom not the cause.
 cleanup
 
+# A LONG-LIVED fixture on this port is the far more likely holder, and podman's
+# own message ("pasta failed ... Address already in use") names neither the
+# cause nor the remedy. On a host that runs the CI fixture, container mode
+# cannot bind at all, so say which of the two ways forward the caller wants.
+if command -v ss >/dev/null 2>&1 && ss -ltn 2>/dev/null | grep -q "127.0.0.1:${HOST_PORT} "; then
+  printf 'Port %s on 127.0.0.1 is already served, most likely the long-lived CI fixture.\n' "${HOST_PORT}" >&2
+  printf 'Either use it:      PG_TEST_EXTERNAL=1 %s\n' "$0" >&2
+  printf 'or pick a free port: PG_TEST_PORT=5434 %s\n' "$0" >&2
+  exit 1
+fi
+
 # Bound to 127.0.0.1 rather than every interface. A test database carrying
 # fixture credentials should not be reachable from the network.
 "${CONTAINER_CLI}" run -d \
   --name "${CONTAINER_NAME}" \
-  -e POSTGRES_DB=llm_gateway_test \
-  -e POSTGRES_USER=test \
-  -e POSTGRES_PASSWORD=test \
+  -e POSTGRES_DB="${FIXTURE_DB}" \
+  -e POSTGRES_USER="${FIXTURE_USER}" \
+  -e POSTGRES_PASSWORD="${FIXTURE_PASSWORD}" \
   -p "127.0.0.1:${HOST_PORT}:5432" \
   --tmpfs /var/lib/postgresql/data \
   "${IMAGE}" >/dev/null
@@ -137,7 +168,7 @@ cleanup
 # first test then connects to a closed port.
 consecutive=0
 for _ in $(seq 1 "${READY_TIMEOUT_SECONDS}"); do
-  if "${CONTAINER_CLI}" exec "${CONTAINER_NAME}" pg_isready -U test -q >/dev/null 2>&1; then
+  if "${CONTAINER_CLI}" exec "${CONTAINER_NAME}" pg_isready -U "${FIXTURE_USER}" -q >/dev/null 2>&1; then
     consecutive=$((consecutive + 1))
     if [ "${consecutive}" -ge 3 ]; then
       break
@@ -155,6 +186,12 @@ if [ "${consecutive}" -lt 3 ]; then
 fi
 
 npm run build
-EXTERNAL_DSN="postgresql://test:test@127.0.0.1:${HOST_PORT}/llm_gateway_test"
+# Default port: the canonical fixture DSN. Overridden port: rebuild it, still
+# from the fixture's own user/password/database rather than fresh literals.
+if [ "${HOST_PORT}" = "${FIXTURE_PORT}" ]; then
+  EXTERNAL_DSN="${FIXTURE_DSN}"
+else
+  EXTERNAL_DSN="postgresql://${FIXTURE_USER}:${FIXTURE_PASSWORD}@127.0.0.1:${HOST_PORT}/${FIXTURE_DB}"
+fi
 prepare_fixture "${EXTERNAL_DSN}"
 run_suites "$@"

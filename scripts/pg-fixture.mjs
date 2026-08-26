@@ -29,12 +29,35 @@
 // reset both go through `pg` rather than shell tools.
 import process from "node:process";
 
-const FIXTURE_DATABASE = "llm_gateway_test";
-// 127.0.0.1 only. `localhost` is a name whose resolution is not pinned, and
-// `[::1]` parsed cleanly but neither `pg` nor `dns.lookup` accepts the
-// bracketed form, so allowing it advertised a route that does not exist.
-const FIXTURE_HOST = "127.0.0.1";
+/**
+ * THE fixture, declared once.
+ *
+ * Host, port, database and credentials were previously spelled out separately
+ * in this file, in `scripts/test-pg.sh` twice, in `ci.yml`, and in
+ * `src/__tests__/setup.ts`. Changing the port meant four edits with nothing
+ * catching a miss. Everything that needs to name the fixture now derives it
+ * from here.
+ *
+ * 127.0.0.1 only: `localhost` is a name whose resolution is not pinned, and
+ * `[::1]` parses cleanly but neither `pg` nor `dns.lookup` accepts the
+ * bracketed form, so allowing it advertised a route that does not exist.
+ */
+export const FIXTURE = Object.freeze({
+  host: "127.0.0.1",
+  port: 5433,
+  database: "llm_gateway_test",
+  user: "test",
+  password: "test",
+  container: "llm-gateway-pg-ci",
+  volume: "llm-gateway-pg-ci-data",
+  image: "postgres:17-alpine",
+});
+
+const FIXTURE_DATABASE = FIXTURE.database;
+const FIXTURE_HOST = FIXTURE.host;
 // The operator's live database. Never a valid fixture, on any host, ever.
+// Deliberately NOT derived from FIXTURE: it is a different thing, and tying
+// the two together would let a change to one silently move the other.
 const FORBIDDEN_PORT = "5432";
 const ALLOWED_PROTOCOLS = new Set(["postgres:", "postgresql:"]);
 
@@ -139,6 +162,22 @@ export function canonicalDsn(f, database = f.database) {
   return `postgresql://${auth}@${f.host}:${f.port}/${encodeURIComponent(database)}`;
 }
 
+/** The fixture DSN every caller defaults to. Built from FIXTURE, never typed out. */
+export function defaultFixtureDsn() {
+  return canonicalDsn(FIXTURE);
+}
+
+/** The command that recreates the fixture, generated so it cannot drift from FIXTURE. */
+export function recreateCommand() {
+  return [
+    `  podman run -d --name ${FIXTURE.container} --restart=always \\`,
+    `    -e POSTGRES_DB=${FIXTURE.database} -e POSTGRES_USER=${FIXTURE.user}` +
+      ` -e POSTGRES_PASSWORD=${FIXTURE.password} \\`,
+    `    -p ${FIXTURE.host}:${FIXTURE.port}:5432 -v ${FIXTURE.volume}:/var/lib/postgresql/data \\`,
+    `    ${FIXTURE.image}`,
+  ].join("\n");
+}
+
 /** Safe to print: identity only, never credentials. */
 export function describeFixture(f) {
   return `${f.host}:${f.port}/${f.database}`;
@@ -202,10 +241,7 @@ async function main() {
         ? "The fixture server is not running. This is a MISSING FIXTURE, not a " +
           "test failure. It is a long-lived container the CI job deliberately " +
           "does not own, so recreate it on the runner host as the operator user:\n" +
-          "  podman run -d --name llm-gateway-pg-ci --restart=always \\\n" +
-          "    -e POSTGRES_DB=llm_gateway_test -e POSTGRES_USER=test -e POSTGRES_PASSWORD=test \\\n" +
-          "    -p 127.0.0.1:5433:5432 -v llm-gateway-pg-ci-data:/var/lib/postgresql/data \\\n" +
-          "    postgres:17-alpine"
+          recreateCommand()
         : `The server answered but the connection failed: ${lastError ? lastError.message : "unknown"}`;
     die(`${describeFixture(fixture)} unreachable after ${timeoutSeconds}s. ${reason}`);
   }

@@ -9,7 +9,12 @@ import type {
 } from "../personal-config-types.js";
 import { runWithRequestContext } from "../request-context.js";
 import { kitActiveSessionKey } from "../session-manager.js";
-import { cleanTestDatabase, setupTestDatabase, setupTestStorageDriver } from "./setup.js";
+import {
+  TEST_DATABASE_URL,
+  cleanTestDatabase,
+  setupTestDatabase,
+  setupTestStorageDriver,
+} from "./setup.js";
 import { PostgresStorageDriver, type PgPoolLike } from "../storage/drivers/postgres.js";
 
 /**
@@ -67,9 +72,7 @@ function requestContext(principal: string) {
 }
 
 function schemaScopedDsn(schema: string): string {
-  const dsn = new URL(
-    process.env.TEST_DATABASE_URL || "postgresql://test:test@localhost:5433/llm_gateway_test"
-  );
+  const dsn = new URL(TEST_DATABASE_URL);
   dsn.searchParams.set("options", `-c search_path=${schema},public`);
   return dsn.toString();
 }
