@@ -76,7 +76,7 @@ let testPool: Pool | null = null;
 //   017     → durable Claude MCP artifact scope provenance
 //   018     → legacy session/view dependency repair
 //   021     → opaque session generation fences for compare-and-set writes
-const SESSION_SCHEMA_SQL = `
+export const SESSION_SCHEMA_SQL = `
   CREATE TABLE IF NOT EXISTS sessions (
     id TEXT PRIMARY KEY,
     cli VARCHAR(32) NOT NULL CHECK (cli ~ '^[A-Za-z][A-Za-z0-9._-]*$'),
@@ -125,7 +125,7 @@ const SESSION_SCHEMA_SQL = `
     ADD CONSTRAINT active_sessions_cli_check CHECK (cli ~ '^[A-Za-z][A-Za-z0-9._-]*$');
 `;
 
-const JOB_SCHEMA_SQL = `
+export const JOB_SCHEMA_SQL = `
   CREATE TABLE IF NOT EXISTS jobs (
     id TEXT PRIMARY KEY,
     correlation_id TEXT NOT NULL,

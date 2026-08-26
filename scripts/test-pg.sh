@@ -24,10 +24,18 @@
 # against it.
 #
 # Applying migrations is what makes the tested schema the CANONICAL one rather
-# than the inlined bootstrap SQL in setup.ts. Measured: bootstrap alone produces
-# 9 tables and 86 columns, migrations produce 13 and 144, and the 9 shared
-# tables are column-for-column identical. So this costs nothing today. It is
-# here to stop that agreement from being a coincidence nothing enforces.
+# than the inlined bootstrap SQL in setup.ts.
+#
+# It costs something, and the cost is paid elsewhere. Once migrations have built
+# every table, setup.ts's CREATE TABLE IF NOT EXISTS and ADD COLUMN IF NOT
+# EXISTS can no longer fail, so a column present in setup.ts but MISSING from
+# migrations/ would be silently reconciled. `schema-parity-pg.test.ts` is the
+# gate for that: it builds both schemas in isolation and compares them. An
+# earlier comment here claimed the two were column-for-column identical; that
+# was measured after the suites had run, and PostgresJobStore.init() repairs the
+# bootstrap schema on startup, so it measured the repair. Bootstrap is a strict
+# SUBSET of migrations. The parity test asserts the gap is exactly the columns
+# the job store adds itself.
 set -euo pipefail
 
 CONTAINER_NAME="${PG_TEST_CONTAINER:-llm-gateway-pg-test}"
@@ -41,9 +49,15 @@ EXTERNAL_DSN="${TEST_DATABASE_URL:-}"
 # canonical schema on it. pg-fixture.mjs refuses anything not provably a
 # fixture, which is what stands between a transposed port and the operator's
 # live database on the neighbouring one.
+#
+# It prints ONE line on stdout: the DSN rebuilt from the fields it validated.
+# Everything downstream uses THAT and never the caller's string, because pg
+# honours `?host=`/`?port=` query parameters over the URL authority, so
+# forwarding the original would hand the dangerous operations a target the
+# guard never inspected. EXTERNAL_DSN is reassigned here for the same reason.
 prepare_fixture() {
-  node scripts/pg-fixture.mjs "$1"
-  DATABASE_URL="$1" node dist/migrate.js
+  EXTERNAL_DSN="$(node scripts/pg-fixture.mjs "$1")"
+  DATABASE_URL="${EXTERNAL_DSN}" node dist/migrate.js
 }
 
 run_suites() {
@@ -61,17 +75,15 @@ run_suites() {
     npx --no-install vitest run --no-file-parallelism "${files[@]}"
 }
 
-# Never echo a DSN as given: it carries the fixture password.
-redact_dsn() {
-  printf '%s' "$1" | sed -E 's#://[^@/]*@#://***@#'
-}
-
 # EXTERNAL MODE, deliberately BEFORE any container-CLI discovery. On the CI
 # runner podman is on PATH but cannot run, so probing for one here would turn a
 # correctly configured job into a confusing failure about compose providers.
 if [ -n "${EXTERNAL_DSN}" ]; then
-  printf 'Using the PostgreSQL server at %s (no container will be started).\n' \
-    "$(redact_dsn "${EXTERNAL_DSN}")"
+  # Deliberately NOT echoing the DSN here. The old redactor used [^@/]* which
+  # stops at a slash, so a password containing one printed intact, and it ran
+  # BEFORE validation. pg-fixture.mjs prints host:port/database on stderr after
+  # it has proved them, which is the only form worth showing.
+  echo 'Using an external PostgreSQL server (no container will be started).'
   npm run build
   prepare_fixture "${EXTERNAL_DSN}"
   run_suites "$@"
