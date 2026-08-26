@@ -41,16 +41,7 @@ set -euo pipefail
 # The fixture's identity is declared once, in FIXTURE in scripts/pg-fixture.mjs.
 # Asking for it here rather than repeating it means changing the port is one
 # edit, not four with nothing catching a miss.
-eval "$(node -e '
-  import("./scripts/pg-fixture.mjs").then(m => {
-    const f = m.FIXTURE;
-    const q = s => "\x27" + String(s).replace(/\x27/g, "\x27\\\x27\x27") + "\x27";
-    process.stdout.write(
-      `FIXTURE_PORT=${q(f.port)}\nFIXTURE_DB=${q(f.database)}\n` +
-      `FIXTURE_USER=${q(f.user)}\nFIXTURE_PASSWORD=${q(f.password)}\n` +
-      `FIXTURE_IMAGE=${q(f.image)}\nFIXTURE_DSN=${q(m.defaultFixtureDsn())}\n`);
-  });
-')"
+eval "$(node scripts/pg-fixture.mjs --print-env)"
 
 CONTAINER_NAME="${PG_TEST_CONTAINER:-llm-gateway-pg-test}"
 HOST_PORT="${PG_TEST_PORT:-$FIXTURE_PORT}"

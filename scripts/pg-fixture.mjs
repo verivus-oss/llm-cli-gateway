@@ -167,6 +167,27 @@ export function defaultFixtureDsn() {
   return canonicalDsn(FIXTURE);
 }
 
+/**
+ * FIXTURE as shell assignments, for `eval "$(node scripts/pg-fixture.mjs --print-env)"`.
+ *
+ * The quoting lives here rather than in an embedded `node -e` inside the shell
+ * script: that form made the script carry JavaScript template syntax inside
+ * single quotes, which shellcheck flags (SC2016) and which put the escaping
+ * rules somewhere nothing could test.
+ */
+export function printEnv() {
+  const q = v => `'${String(v).replace(/'/g, `'\\''`)}'`;
+  return [
+    `FIXTURE_HOST=${q(FIXTURE.host)}`,
+    `FIXTURE_PORT=${q(FIXTURE.port)}`,
+    `FIXTURE_DB=${q(FIXTURE.database)}`,
+    `FIXTURE_USER=${q(FIXTURE.user)}`,
+    `FIXTURE_PASSWORD=${q(FIXTURE.password)}`,
+    `FIXTURE_IMAGE=${q(FIXTURE.image)}`,
+    `FIXTURE_DSN=${q(defaultFixtureDsn())}`,
+  ].join("\n");
+}
+
 /** The command that recreates the fixture, generated so it cannot drift from FIXTURE. */
 export function recreateCommand() {
   return [
@@ -211,7 +232,11 @@ async function waitReady(Client, config, timeoutSeconds) {
 
 async function main() {
   const raw = process.argv[2];
-  if (!raw) die("usage: pg-fixture.mjs <dsn>");
+  if (raw === "--print-env") {
+    process.stdout.write(`${printEnv()}\n`);
+    return;
+  }
+  if (!raw) die("usage: pg-fixture.mjs <dsn> | --print-env");
 
   const fixture = assertFixtureDsn(raw);
 
