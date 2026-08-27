@@ -277,6 +277,40 @@ describe("redactDsn names the server pg will actually reach", () => {
     );
   });
 
+  it("neutralises characters that reorder the log line around them", () => {
+    // Found by attacking the round-7 quoting fix rather than by a reviewer.
+    // JSON.stringify does NOT escape bidi controls, so a database named
+    // `db\u202Egnirts` survived quoting and still reverses everything after it
+    // when the line is rendered. Same failure as the newline: a value from the
+    // input deciding how the REST of the line reads.
+    ambient();
+    const report = redactDsn("postgresql://u:p@127.0.0.1:5433/db%E2%80%AEgnirts");
+    expect(report).not.toMatch(/[\u200B-\u200F\u202A-\u202E\u2066-\u2069\uFEFF]/);
+    expect(report).toBe('postgresql host 127.0.0.1 port 5433 database "db\\u202egnirts"');
+    // An accented name is NOT mangled: escaping the whole non-ASCII range
+    // would make every legitimate international database name unreadable.
+    expect(redactDsn("postgresql://u:p@127.0.0.1:5433/%C3%A9t%C3%A9")).toBe(
+      'postgresql host 127.0.0.1 port 5433 database "\u00e9t\u00e9"'
+    );
+  });
+
+  it("bounds a field rather than putting an unbounded value on one log line", () => {
+    // pg imposes no length worth relying on, so a 100KB database name went
+    // straight into the startup log line as a single field.
+    ambient();
+    const long = "a".repeat(300);
+    const report = redactDsn(`postgresql://u:p@127.0.0.1:5433/${long}`);
+    expect(report.length).toBeLessThan(200);
+    // Truncation must SAY it truncated, and say what the real length was, or
+    // the report quietly names a database that is not the one pg opened.
+    expect(report).toContain("... (300 chars)");
+    // A name at the limit is untouched.
+    const short = "b".repeat(120);
+    expect(redactDsn(`postgresql://u:p@127.0.0.1:5433/${short}`)).toBe(
+      `postgresql host 127.0.0.1 port 5433 database ${short}`
+    );
+  });
+
   it("refuses a string that is not a PostgreSQL DSN rather than inventing a target", () => {
     // pg's parser does not throw on garbage: parse("not a dsn") returns
     // { host: "base", database: "not a dsn" }, so it cannot decide whether the

@@ -311,8 +311,32 @@ function normaliseTcpHost(host: string): string {
  * JSON quoting is used because it escapes control characters as well as quotes,
  * and because a reader already knows how to read it.
  */
+const MAX_FIELD_CHARS = 120;
+
+/**
+ * Characters that REORDER or hide the text around them when a log line is
+ * rendered: bidi overrides and embeddings, isolates, zero-width marks and the
+ * byte-order mark. JSON quoting does NOT escape these, so `db\u202Egnirts`
+ * survived it and still reverses everything that follows it on the line.
+ *
+ * That is the same failure as the newline: a value from the input deciding how
+ * the REST of the line reads. Escaping the whole non-ASCII range instead would
+ * mangle every legitimate accented database name, so only these are escaped.
+ */
+const TEXT_DIRECTION_CONTROLS = /[\u200B-\u200F\u202A-\u202E\u2066-\u2069\uFEFF]/g;
+
 function show(value: string): string {
-  return /^[A-Za-z0-9._:/[\]-]+$/.test(value) ? value : JSON.stringify(value);
+  // A long value is truncated BEFORE quoting: pg imposes no length limit worth
+  // relying on here, and a health line is read by a human, not parsed.
+  const bounded =
+    value.length > MAX_FIELD_CHARS
+      ? `${value.slice(0, MAX_FIELD_CHARS)}... (${value.length} chars)`
+      : value;
+  if (/^[A-Za-z0-9._:/[\]-]+$/.test(bounded)) return bounded;
+  return JSON.stringify(bounded).replace(
+    TEXT_DIRECTION_CONTROLS,
+    c => `\\u${c.charCodeAt(0).toString(16).padStart(4, "0")}`
+  );
 }
 
 function resolveTarget(dsn: string): ResolvedTarget | null {
