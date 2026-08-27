@@ -203,38 +203,59 @@ describe("release to public Pages contract", () => {
     // units, and Node's tmpdir() writes there unless TMPDIR says otherwise.
     //
     // This was a per-step `env:` block, and two review rounds each found steps
-    // that had been added without it: a fence every author must remember is
-    // not a fence. It is now exported once per job through $GITHUB_ENV, which
-    // covers every later step. This test is what makes REMOVING that step
-    // fail, which nothing did before: round 6 found the CI change could be
-    // reverted wholesale with the suite still green.
+    // added without it: a fence every author must remember is not a fence. It
+    // is exported once per job through $GITHUB_ENV, which covers every LATER
+    // step. Round 7 found two ways past the first version of this test, both
+    // asserted below: repository code moved INSIDE the fence step (which
+    // $GITHUB_ENV does not cover, by GitHub's own definition), and the fence
+    // moved after a `uses:` step (which the old regex did not count).
     const ciWorkflow = readRepositoryFile(".github/workflows/ci.yml");
     // Only the `jobs:` mapping. Splitting the whole file also yields `on:`
     // children, which have no steps and cannot fence anything.
     const jobsSection = ciWorkflow.slice(ciWorkflow.indexOf("\njobs:\n"));
     const jobs = jobsSection.split(/\n {2}(?=[A-Za-z0-9_-]+:\n)/).slice(1);
     expect(jobs.length, "no jobs parsed out of ci.yml").toBeGreaterThanOrEqual(4);
+    const FENCE_NAME = "Keep temporary files off the shared /tmp";
     for (const job of jobs) {
       const name = job.slice(0, job.indexOf(":"));
       const body = withoutComments(job);
-      const fence = body.indexOf('>> "$GITHUB_ENV"');
-      expect(fence, `${name} does not fence TMPDIR at all`).toBeGreaterThanOrEqual(0);
-      expect(body, `${name} fences the wrong variables`).toContain("TMPDIR=%s");
-      // RUNNER_TEMP, not the `runner` context: round 4 shipped a job-level
-      // `env:` using ${runner.temp}, which is not available there and expanded
-      // to the empty string.
-      expect(body, `${name} does not use RUNNER_TEMP`).toContain('"$RUNNER_TEMP"');
-      // Ahead of every step that runs repository code, or it fences nothing.
-      const firstOtherRun = body.search(/^ {6}- (run|name): (?!Keep temporary files)/m);
-      expect(firstOtherRun, `${name} runs a step before the TMPDIR fence`).toBeGreaterThan(
-        fence - job.length
+      // Every step in the job, in order, whether `run:` or `uses:`.
+      const steps = [...body.matchAll(/^ {6}- (?:name: (.*)|uses: (.*)|run: (.*))$/gm)];
+      expect(steps.length, `${name} has no steps`).toBeGreaterThan(0);
+      const fenceIndex = steps.findIndex(m => (m[1] ?? "").trim() === FENCE_NAME);
+      expect(fenceIndex, `${name} has no TMPDIR fence step`).toBeGreaterThanOrEqual(0);
+      // FIRST, ahead of `uses:` actions too. checkout and setup-node write to
+      // the temporary directory themselves.
+      expect(fenceIndex, `${name} runs a step before the TMPDIR fence`).toBe(0);
+
+      const fenceBody = body.slice(
+        body.indexOf(FENCE_NAME),
+        steps.length > 1 ? body.indexOf(steps[1][0]) : body.length
       );
-      const fenceStep = body.indexOf("Keep temporary files off the shared /tmp");
-      expect(fenceStep, `${name} is missing the fence step`).toBeGreaterThanOrEqual(0);
-      expect(
-        fenceStep,
-        `${name} fences AFTER a step that already ran repository code`
-      ).toBeLessThan(firstOtherRun);
+      expect(fenceBody, `${name} fences the wrong variables`).toContain("TMPDIR=%s");
+      // RUNNER_TEMP, not the `runner` context: round 4 shipped a job-level
+      // `env:` using that context, which is unavailable there and expanded to
+      // the empty string.
+      expect(fenceBody, `${name} does not use RUNNER_TEMP`).toContain('"$RUNNER_TEMP"');
+      expect(fenceBody, `${name} does not write to $GITHUB_ENV`).toContain('>> "$GITHUB_ENV"');
+      // $GITHUB_ENV reaches SUBSEQUENT steps, never the step that writes it,
+      // so repository code inside this step would run unfenced. Round 7 moved
+      // a command in here and the whole file still passed.
+      const fenceCommands = fenceBody
+        .split("\n")
+        .map(line => line.trim())
+        .filter(
+          line =>
+            line.length > 0 &&
+            line !== FENCE_NAME &&
+            !line.startsWith("- name:") &&
+            line !== "run: |"
+        );
+      for (const line of fenceCommands) {
+        expect(line, `${name} runs something other than the export inside the fence step`).toMatch(
+          /^(printf 'TMPDIR|"\$RUNNER_TEMP")/
+        );
+      }
     }
   });
 

@@ -212,6 +212,51 @@ describe("the testing guide against the script it documents", () => {
     }
   });
 
+  it("names no suite that does not exist", () => {
+    // The forward check alone let a FICTIONAL row sit in the table forever.
+    // Round 7 added `invented-pg.test.ts` to the guide and all 15 tests passed.
+    const guideText = guide();
+    const table = guideText.slice(
+      guideText.indexOf("## Test Suites"),
+      guideText.indexOf("## Running Tests")
+    );
+    const listed = [...table.matchAll(/`([A-Za-z0-9._-]+-pg\.test\.ts)`/g)].map(m => m[1]);
+    expect(listed.length, "no suites listed in the guide").toBeGreaterThan(2);
+    const real = new Set(readdirSync("src/__tests__").filter(f => f.endsWith("-pg.test.ts")));
+    for (const file of listed) {
+      expect(real.has(file), `the guide lists ${file}, which does not exist`).toBe(true);
+    }
+  });
+
+  it("states the port rule the guard actually enforces", () => {
+    // Round 7: the guide claimed EVERY identity field was pinned to FIXTURE,
+    // while assertFixtureDsn accepts 5434 so that PG_TEST_PORT works. Both
+    // reviewers found it, and changing the row to "5433 only" passed 50 tests.
+    // What the guard refuses is 5432, the operator's live database.
+    const fixtureSource = readFileSync("scripts/pg-fixture.mjs", "utf8");
+    expect(fixtureSource, "the guard no longer singles out 5432").toContain("5432");
+    const guideText = guide();
+    expect(guideText).toContain("any port except `5432`");
+    expect(guideText, "the guide claims the port is pinned").not.toMatch(
+      /port[^|\n]*pinned to `FIXTURE`/
+    );
+    expect(guideText, "the guide still says every identity field is pinned").not.toContain(
+      "Every identity field is pinned"
+    );
+  });
+
+  it("shows the CI fence design the workflow actually uses", () => {
+    // The guide's yaml excerpt taught the per-step `${runner.temp}` block that
+    // this branch removed. Round 7: the guide tests passed anyway, because
+    // none of them looked at the excerpt.
+    const guideText = guide();
+    expect(guideText, "the guide still teaches the per-step runner.temp fence").not.toMatch(
+      /TMPDIR: \$\{\{ runner\.temp \}\}/
+    );
+    expect(guideText).toContain('>> "$GITHUB_ENV"');
+    expect(guideText).toContain("$RUNNER_TEMP");
+  });
+
   it("carries no hand-maintained test counts, which is what went stale", () => {
     const table = guide().slice(
       guide().indexOf("## Test Suites"),

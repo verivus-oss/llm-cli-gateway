@@ -36,7 +36,10 @@ CONTAINER_CLI=podman npm run test:pg
 `scripts/pg-fixture.mjs` refuses any `TEST_DATABASE_URL` that is not provably
 the disposable fixture, because the suites `DELETE FROM` nine tables and the
 script issues `DROP DATABASE`, one port away from the operator's live database.
-Every identity field is pinned to `FIXTURE` in that file:
+The credential, user and database are pinned to `FIXTURE` in that file. The
+PORT deliberately is NOT, so `PG_TEST_PORT` can start a second throwaway
+server; what it refuses is `5432`, the port the operator's live database
+answers on. The full rule set:
 
 | field    | required                                                      |
 | -------- | ------------------------------------------------------------- |
@@ -137,7 +140,7 @@ npx vitest -t "should create a session with auto-generated ID"
 | --------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | Port conflict on 5433 | The long-lived CI fixture may hold it. `PG_TEST_EXTERNAL=1 npm run test:pg` to use it, or `PG_TEST_PORT=5434` for a free port. test-pg.sh names this rather than surfacing podman's "Address already in use". |
 | Connection refused    | `scripts/pg-fixture.mjs` waits for three consecutive successes and then says whether the fixture is missing, printing the command that recreates it.                                                          |
-| DSN refused           | Deliberate. The guard pins host, port, database, user and password; see the table under Quick Start.                                                                                                          |
+| DSN refused           | Deliberate. The guard pins host, database, user and password, and refuses port 5432; see the table under Quick Start.                                                                                         |
 | Stale data            | Verify `cleanTestDatabase()` runs in `beforeEach`                                                                                                                                                             |
 | Tests timing out      | Check container resources; increase `testTimeout` in `vitest.config.ts`                                                                                                                                       |
 
@@ -154,14 +157,19 @@ postgres-tests:
     # test-pg.sh starts its own throwaway container instead.
     PG_TEST_EXTERNAL: ${{ github.repository != 'verivus-oss/llm-cli-gateway' && '1' || '' }}
   steps:
+    # ONE fence per job, first step, before checkout. Node's tmpdir() is /tmp
+    # unless told otherwise, and setup.ts writes the test config, sessions file
+    # and logs database through it; on a shared runner /tmp is one small tmpfs
+    # used by every unit on the host. $GITHUB_ENV reaches every LATER step, so
+    # a step added tomorrow inherits this instead of needing its own `env:`.
+    # RUNNER_TEMP, not ${{ runner.temp }}: that context is unavailable in a
+    # job-level `env:` and expands to the empty string there.
+    - name: Keep temporary files off the shared /tmp
+      run: |
+        printf 'TMPDIR=%s\nTMP=%s\nTEMP=%s\n' \
+          "$RUNNER_TEMP" "$RUNNER_TEMP" "$RUNNER_TEMP" >> "$GITHUB_ENV"
+    - uses: actions/checkout@... # pinned by SHA in the real file
     - run: npm run test:pg
-      env:
-        # Node's tmpdir() is /tmp unless told otherwise, and setup.ts writes the
-        # test config, sessions file and logs database through it. On a shared
-        # runner /tmp is one small tmpfs used by every unit on the host.
-        TMPDIR: ${{ runner.temp }}
-        TMP: ${{ runner.temp }}
-        TEMP: ${{ runner.temp }}
 ```
 
 Note the inverted condition: GitHub's `a && b || c` is short-circuit and `''` is

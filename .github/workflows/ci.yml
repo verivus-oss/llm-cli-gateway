@@ -76,12 +76,8 @@ jobs:
       - run: npm run build
       - run: npm run lint
       - run: npm run format:check
-      # setup.ts writes the test config, sessions file and logs.db through Node's
-      # tmpdir(), which is /tmp unless TMPDIR says otherwise. On the self-hosted
-      # host that is one 8 GB tmpfs SHARED by twelve runner units, and it has
-      # already caused an ENOSPC that failed 220 unrelated suites. Round 4 found
-      # this was set on the postgres job ONLY, so the constraint was enforced on
-      # one job out of six while being described as general.
+      # These write through Node's tmpdir(); the fence at the top of the job is
+      # what keeps that off the shared /tmp.
       - run: npm run test:fuzz
       - run: npm run test:ci
       # security:audit gates on npm-shrinkwrap.json presence + parity; the
@@ -240,18 +236,11 @@ jobs:
       # deliberately does NOT use compose: this runner has podman and no docker,
       # and `podman compose` fails with "looking up compose provider failed".
       # Both modes reset the fixture and apply migrations/ before vitest.
+      # setup.ts puts the test config, sessions file and logs database under
+      # Node's tmpdir(). The job's first step already pointed that at
+      # RUNNER_TEMP; this step carried its own `env:` block until round 7, when
+      # a per-step fence turned out to be a rule every author has to remember.
       - run: npm run test:pg
-        # Node's tmpdir() is /tmp unless TMPDIR says otherwise, and setup.ts
-        # puts the test config, sessions file and logs database there. On the
-        # self-hosted host /tmp is a single 8 GB tmpfs SHARED by twelve runner
-        # units (PrivateTmp isolates names, not capacity), and it has already
-        # caused an ENOSPC that failed 220 unrelated suites.
-        #
-        # STEP level, not job level: the `runner` context does not exist in a
-        # job `env:` block, so this silently expanded to the empty string there
-        # and Node fell straight back to /tmp. actionlint caught it; a local
-        # check that exports TMPDIR by hand never would, because it tests the
-        # mechanism rather than the wiring.
 
   npm12-install-policy:
     # build-and-test owns the full test suite and security audit. This job
