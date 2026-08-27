@@ -12,10 +12,10 @@
  * is stable; comparing it to the client object the driver hands to the socket
  * proves it is TRUE. Every case does both.
  */
-import fs from "fs";
+import fs, { readFileSync } from "fs";
 import { createRequire } from "module";
 import { afterEach, describe, expect, it } from "vitest";
-import { redactDsn, withoutSslFileParams } from "../flight-recorder-pg.js";
+import { redactDsn } from "../flight-recorder-pg.js";
 
 const require = createRequire(import.meta.url);
 const { Client } = require("pg") as {
@@ -629,6 +629,89 @@ describe("redactDsn names the server pg will actually reach", () => {
     }
   });
 
+  it("never leaks pg's internal dummy hostname", () => {
+    // Round 10 BLOCKER, both reviewers. pg rewrites `@/` to `@___DUMMY___/`
+    // and sets a PRIVATE flag that turns the hostname back into "". The old
+    // code copied the rewrite, not the flag, then serialised the URL, so
+    // adding a cert parameter to an empty-authority DSN reported host
+    // `___DUMMY___` while pg used localhost. Nothing is serialised now.
+    for (const query of ["", "?sslcert=/etc/hosts", "?SSLCERT=/etc/hosts", "?sslkey=/etc/hosts"]) {
+      ambient();
+      const dsn = `postgresql://u:p@/db${query}`;
+      const report = expectAgreesWithPg(dsn);
+      expect(report, query).not.toContain("DUMMY");
+      expect(report, query).toBe(
+        "postgresql host localhost (default) port 5432 (default) database db"
+      );
+    }
+  });
+
+  it("agrees with pg when TAB, LF or CR sit INSIDE the scheme", () => {
+    // Round 10 BLOCKER. Round 9 trimmed only the ends. WHATWG removes these
+    // from ANYWHERE in a URL before reading the scheme, so `post<TAB>gresql://`
+    // is the same DSN to pg and 24 cases disagreed.
+    for (const code of [9, 10, 13]) {
+      ambient();
+      const dsn = `post${String.fromCharCode(code)}gresql://u:p@127.0.0.1:5433/db`;
+      expect(expectAgreesWithPg(dsn), `U+${code}`).toBe(
+        "postgresql host 127.0.0.1 port 5433 database db"
+      );
+    }
+  });
+
+  it("escapes every invisible or controlling character, by property", () => {
+    // Round 10: naming Bidi_Control fixed CSI and ALM and still passed
+    // U+00AD, U+034F, U+070F, U+2060, U+FE0F and U+E0061. The class is
+    // `Cf` plus `Default_Ignorable_Code_Point`, plus C1 and DEL which JSON
+    // leaves raw. Asserted on the RAW report: the oracle JSON-parses and
+    // therefore cannot see escaping at all.
+    const UNSAFE = /[\u0080-\u009F\u007F\u2028\u2029]|\p{Cf}|\p{Default_Ignorable_Code_Point}/u;
+    for (const cp of [
+      0x00ad, 0x034f, 0x070f, 0x2060, 0xfe0f, 0xe0061, 0x009b, 0x061c, 0x202e, 0x2028,
+    ]) {
+      ambient();
+      const name = encodeURIComponent(String.fromCodePoint(cp));
+      const report = redactDsn(`postgresql://u:p@127.0.0.1:5433/db${name}x`);
+      expect(UNSAFE.test(report), `U+${cp.toString(16)}`).toBe(false);
+      expect(report.split("\n"), `U+${cp.toString(16)}`).toHaveLength(1);
+    }
+  });
+
+  it("truncates by code point, never through a surrogate pair", () => {
+    // Round 10 BLOCKER. Slicing by UTF-16 code unit severed an emoji and then
+    // called 121 code units "121 chars".
+    ambient();
+    const atLimit = "a".repeat(119) + String.fromCodePoint(0x1f600);
+    expect([...atLimit]).toHaveLength(120);
+    expect(atLimit.length, "121 UTF-16 units, which is what used to be cut").toBe(121);
+    const report = redactDsn(`postgresql://u:p@127.0.0.1:5433/${encodeURIComponent(atLimit)}`);
+    // Exactly at the limit by code point, so it is NOT truncated at all.
+    expect(report).not.toContain("chars)");
+    expect(report).toContain(String.fromCodePoint(0x1f600));
+    // No lone surrogate anywhere in the output.
+    expect(/[\uD800-\uDBFF](?![\uDC00-\uDFFF])/.test(report)).toBe(false);
+    // And the count reported for a genuinely long value is in code points.
+    ambient();
+    const long = String.fromCodePoint(0x1f600).repeat(130);
+    expect(redactDsn(`postgresql://u:p@127.0.0.1:5433/${encodeURIComponent(long)}`)).toContain(
+      "... (130 chars)"
+    );
+  });
+
+  it("reads no file at all, whatever the SSL parameters say", () => {
+    // The read is suppressed rather than the string rewritten, which is what
+    // let every rewriting bug through. Also proves the guard is REMOVED again.
+    ambient();
+    const { reads } = readsDuring(() =>
+      redactDsn(
+        "postgresql://u:p@127.0.0.1:5433/db?sslcert=/etc/hosts&sslkey=/etc/hosts&sslrootcert=/etc/hosts"
+      )
+    );
+    expect(reads.filter(r => r.includes("/etc/hosts"))).toEqual([]);
+    // The guard must not survive the call: a later read has to work normally.
+    expect(readFileSync("package.json", "utf8").length).toBeGreaterThan(0);
+  });
+
   it("refuses a string that is not a PostgreSQL DSN rather than inventing a target", () => {
     // pg's parser does not throw on garbage: parse("not a dsn") returns
     // { host: "base", database: "not a dsn" }, so it cannot decide whether the
@@ -647,64 +730,5 @@ describe("redactDsn names the server pg will actually reach", () => {
     expect(expectAgreesWithPg("postgres://u:p@127.0.0.1:5432/db")).toBe(
       "postgresql host 127.0.0.1 port 5432 database db"
     );
-  });
-});
-
-describe("the SSL-parameter stripper itself", () => {
-  // Called directly. Two of its branches are broader than pg and so cannot be
-  // seen through redactDsn: pg does not read a file for an uppercase SSLCERT,
-  // and pg ignores fragments. Mutating either failed nothing until this
-  // describe existed, which is the whole reason it exists.
-  it("removes exactly the three file-reading parameters, whatever their case", () => {
-    expect(withoutSslFileParams("postgresql://h/db?sslcert=/x&host=e")).toBe(
-      "postgresql://h/db?host=e"
-    );
-    expect(withoutSslFileParams("postgresql://h/db?SSLCERT=/x&host=e")).toBe(
-      "postgresql://h/db?host=e"
-    );
-    expect(withoutSslFileParams("postgresql://h/db?SslKey=/x&host=e")).toBe(
-      "postgresql://h/db?host=e"
-    );
-    expect(withoutSslFileParams("postgresql://h/db?sslrootcert=/x&host=e")).toBe(
-      "postgresql://h/db?host=e"
-    );
-    expect(withoutSslFileParams("postgresql://h/db?sslcert=/x&sslkey=/y&sslrootcert=/z")).toBe(
-      "postgresql://h/db"
-    );
-  });
-
-  it("keeps a parameter that merely STARTS with one of the three names", () => {
-    // A prefix match here would silently drop an unrelated parameter, and if
-    // that parameter were `host` or `port` it would move the reported target.
-    expect(withoutSslFileParams("postgresql://h/db?sslcertificate=x&host=e")).toBe(
-      "postgresql://h/db?sslcertificate=x&host=e"
-    );
-    expect(withoutSslFileParams("postgresql://h/db?sslmode=require")).toBe(
-      "postgresql://h/db?sslmode=require"
-    );
-  });
-
-  it("keeps the fragment, wherever the stripped parameter sits", () => {
-    // With the stripped parameter LAST, a naive split takes the fragment with
-    // it. pg ignores fragments, so redactDsn cannot see this; the stripper's
-    // contract is still to return the same DSN minus those parameters.
-    expect(withoutSslFileParams("postgresql://h/db?host=e&sslcert=/x#frag")).toBe(
-      "postgresql://h/db?host=e#frag"
-    );
-    expect(withoutSslFileParams("postgresql://h/db?sslcert=/x#frag")).toBe(
-      "postgresql://h/db#frag"
-    );
-  });
-
-  it("leaves a DSN it has no business touching exactly as it found it", () => {
-    for (const dsn of [
-      "postgresql://h/db",
-      "postgresql://h/db?",
-      "postgresql://h/db?host=e",
-      "postgresql://h/db#frag",
-      "postgresql://h/sslcert=x",
-    ]) {
-      expect(withoutSslFileParams(dsn), dsn).toBe(dsn);
-    }
   });
 });
