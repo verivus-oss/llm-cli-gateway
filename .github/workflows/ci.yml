@@ -7,7 +7,7 @@ on:
     branches: [master, main]
 
 # Default to read-only on the GITHUB_TOKEN. Every job below either reads
-# the working tree, builds, lints, or runs tests — none push commits,
+# the working tree, builds, lints, or runs tests. None push commits,
 # create issues, or write release artifacts. Future jobs that need write
 # access should declare permissions at the job level rather than
 # loosening this top-level default. Caught by zizmor (excessive-permissions).
@@ -17,8 +17,8 @@ permissions:
 jobs:
   build-and-test:
     runs-on: ${{ github.repository == 'verivus-oss/llm-cli-gateway' && 'ubuntu-latest' || fromJSON('["self-hosted","Linux","X64","x86_64","workhorse3","gateway"]') }}
-    # Job-level permissions match the workflow default explicitly — zizmor
-    # flags ambiguous-inheritance otherwise.
+    # Job-level permissions match the workflow default explicitly (zizmor
+    # flags ambiguous-inheritance otherwise).
     permissions:
       contents: read
     strategy:
@@ -26,6 +26,23 @@ jobs:
       matrix:
         node-version: [24]
     steps:
+      # ONE fence per job, not one per step. Node's tmpdir() is /tmp unless
+      # TMPDIR says otherwise, and on the self-hosted host /tmp is a single
+      # 8 GB tmpfs SHARED by twelve runner units; filling it has already failed
+      # 220 unrelated suites. Rounds 4 and 6 each found steps that had been
+      # written without the per-step `env:` block, which is the tell that a
+      # per-step fence is a VIGILANCE rule: it holds only while every author
+      # remembers it, and the next step added will not have it.
+      #
+      # $GITHUB_ENV applies to every LATER step in the job, so exporting once
+      # here makes the property hold by DEFAULT and a new step inherits it.
+      # RUNNER_TEMP rather than ${{ runner.temp }}: the `runner` context is not
+      # available in a job-level `env:`, which round 4 shipped and actionlint
+      # caught only after it had expanded to the empty string.
+      - name: Keep temporary files off the shared /tmp
+        run: |
+          printf 'TMPDIR=%s\nTMP=%s\nTEMP=%s\n' \
+            "$RUNNER_TEMP" "$RUNNER_TEMP" "$RUNNER_TEMP" >> "$GITHUB_ENV"
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
         with:
           # Wipe the auth token from .git/config after checkout so it
@@ -66,29 +83,34 @@ jobs:
       # this was set on the postgres job ONLY, so the constraint was enforced on
       # one job out of six while being described as general.
       - run: npm run test:fuzz
-        env:
-          TMPDIR: ${{ runner.temp }}
-          TMP: ${{ runner.temp }}
-          TEMP: ${{ runner.temp }}
       - run: npm run test:ci
-        env:
-          TMPDIR: ${{ runner.temp }}
-          TMP: ${{ runner.temp }}
-          TEMP: ${{ runner.temp }}
       # security:audit gates on npm-shrinkwrap.json presence + parity; the
       # shrinkwrap is generated, never committed (it would break npm ci).
       - run: node scripts/make-prod-shrinkwrap.mjs
       - run: npm run security:audit
-        env:
-          TMPDIR: ${{ runner.temp }}
-          TMP: ${{ runner.temp }}
-          TEMP: ${{ runner.temp }}
 
   pack-smoke-test:
     runs-on: ${{ github.repository == 'verivus-oss/llm-cli-gateway' && 'ubuntu-latest' || fromJSON('["self-hosted","Linux","X64","x86_64","workhorse3","gateway"]') }}
     permissions:
       contents: read
     steps:
+      # ONE fence per job, not one per step. Node's tmpdir() is /tmp unless
+      # TMPDIR says otherwise, and on the self-hosted host /tmp is a single
+      # 8 GB tmpfs SHARED by twelve runner units; filling it has already failed
+      # 220 unrelated suites. Rounds 4 and 6 each found steps that had been
+      # written without the per-step `env:` block, which is the tell that a
+      # per-step fence is a VIGILANCE rule: it holds only while every author
+      # remembers it, and the next step added will not have it.
+      #
+      # $GITHUB_ENV applies to every LATER step in the job, so exporting once
+      # here makes the property hold by DEFAULT and a new step inherits it.
+      # RUNNER_TEMP rather than ${{ runner.temp }}: the `runner` context is not
+      # available in a job-level `env:`, which round 4 shipped and actionlint
+      # caught only after it had expanded to the empty string.
+      - name: Keep temporary files off the shared /tmp
+        run: |
+          printf 'TMPDIR=%s\nTMP=%s\nTEMP=%s\n' \
+            "$RUNNER_TEMP" "$RUNNER_TEMP" "$RUNNER_TEMP" >> "$GITHUB_ENV"
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
         with:
           persist-credentials: false
@@ -118,10 +140,6 @@ jobs:
             exit 1
           fi
       - name: Verify server starts
-        env:
-          TMPDIR: ${{ runner.temp }}
-          TMP: ${{ runner.temp }}
-          TEMP: ${{ runner.temp }}
         run: |
           # This step has never verified a startup, in either of its two prior
           # forms. The original `|| true` meant it could not fail at all. The
@@ -189,6 +207,23 @@ jobs:
       # The truthy branch must carry the value.
       PG_TEST_EXTERNAL: ${{ github.repository != 'verivus-oss/llm-cli-gateway' && '1' || '' }}
     steps:
+      # ONE fence per job, not one per step. Node's tmpdir() is /tmp unless
+      # TMPDIR says otherwise, and on the self-hosted host /tmp is a single
+      # 8 GB tmpfs SHARED by twelve runner units; filling it has already failed
+      # 220 unrelated suites. Rounds 4 and 6 each found steps that had been
+      # written without the per-step `env:` block, which is the tell that a
+      # per-step fence is a VIGILANCE rule: it holds only while every author
+      # remembers it, and the next step added will not have it.
+      #
+      # $GITHUB_ENV applies to every LATER step in the job, so exporting once
+      # here makes the property hold by DEFAULT and a new step inherits it.
+      # RUNNER_TEMP rather than ${{ runner.temp }}: the `runner` context is not
+      # available in a job-level `env:`, which round 4 shipped and actionlint
+      # caught only after it had expanded to the empty string.
+      - name: Keep temporary files off the shared /tmp
+        run: |
+          printf 'TMPDIR=%s\nTMP=%s\nTEMP=%s\n' \
+            "$RUNNER_TEMP" "$RUNNER_TEMP" "$RUNNER_TEMP" >> "$GITHUB_ENV"
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
         with:
           persist-credentials: false
@@ -217,10 +252,6 @@ jobs:
         # and Node fell straight back to /tmp. actionlint caught it; a local
         # check that exports TMPDIR by hand never would, because it tests the
         # mechanism rather than the wiring.
-        env:
-          TMPDIR: ${{ runner.temp }}
-          TMP: ${{ runner.temp }}
-          TEMP: ${{ runner.temp }}
 
   npm12-install-policy:
     # build-and-test owns the full test suite and security audit. This job
@@ -229,6 +260,23 @@ jobs:
     permissions:
       contents: read
     steps:
+      # ONE fence per job, not one per step. Node's tmpdir() is /tmp unless
+      # TMPDIR says otherwise, and on the self-hosted host /tmp is a single
+      # 8 GB tmpfs SHARED by twelve runner units; filling it has already failed
+      # 220 unrelated suites. Rounds 4 and 6 each found steps that had been
+      # written without the per-step `env:` block, which is the tell that a
+      # per-step fence is a VIGILANCE rule: it holds only while every author
+      # remembers it, and the next step added will not have it.
+      #
+      # $GITHUB_ENV applies to every LATER step in the job, so exporting once
+      # here makes the property hold by DEFAULT and a new step inherits it.
+      # RUNNER_TEMP rather than ${{ runner.temp }}: the `runner` context is not
+      # available in a job-level `env:`, which round 4 shipped and actionlint
+      # caught only after it had expanded to the empty string.
+      - name: Keep temporary files off the shared /tmp
+        run: |
+          printf 'TMPDIR=%s\nTMP=%s\nTEMP=%s\n' \
+            "$RUNNER_TEMP" "$RUNNER_TEMP" "$RUNNER_TEMP" >> "$GITHUB_ENV"
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
         with:
           persist-credentials: false
@@ -245,10 +293,6 @@ jobs:
       - name: Clean install with npm 12 script policy
         run: npx --yes npm@12.0.1 ci --strict-allow-scripts --no-audit --no-fund
       - name: Verify approved native test fixture
-        env:
-          TMPDIR: ${{ runner.temp }}
-          TMP: ${{ runner.temp }}
-          TEMP: ${{ runner.temp }}
         run: ./node_modules/.bin/vitest run src/__tests__/flight-recorder.test.ts
       # Keep the platform-specific simulation separate from the Linux native
       # fixture above, so each policy assertion has a clear failure mode.

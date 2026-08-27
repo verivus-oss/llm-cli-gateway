@@ -160,9 +160,10 @@ export function assertFixtureDsn(raw, fail = die) {
         ? "refusing a DSN with an empty password. pg replaces a falsy password " +
             "with PGPASSWORD, so the connection would use a credential the DSN " +
             "did not state."
-        : "refusing a password the fixture does not use. Every identity field is " +
-            "pinned to FIXTURE so the accepted DSN and the connected one cannot " +
-            "differ in any component."
+        : "refusing a password the fixture does not use. The credential, user " +
+            "and database are pinned to FIXTURE; the PORT deliberately is not, " +
+            "so that PG_TEST_PORT can start a second throwaway server. Anything " +
+            "answering on another port with another password is not the fixture."
     );
   }
 

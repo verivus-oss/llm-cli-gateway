@@ -198,6 +198,46 @@ describe("release to public Pages contract", () => {
     expect(ciWorkflow).toContain("ci --strict-allow-scripts");
   });
 
+  it("keeps every CI job's temporary files off the shared /tmp", () => {
+    // The self-hosted host has ONE 8 GB tmpfs at /tmp shared by twelve runner
+    // units, and Node's tmpdir() writes there unless TMPDIR says otherwise.
+    //
+    // This was a per-step `env:` block, and two review rounds each found steps
+    // that had been added without it: a fence every author must remember is
+    // not a fence. It is now exported once per job through $GITHUB_ENV, which
+    // covers every later step. This test is what makes REMOVING that step
+    // fail, which nothing did before: round 6 found the CI change could be
+    // reverted wholesale with the suite still green.
+    const ciWorkflow = readRepositoryFile(".github/workflows/ci.yml");
+    // Only the `jobs:` mapping. Splitting the whole file also yields `on:`
+    // children, which have no steps and cannot fence anything.
+    const jobsSection = ciWorkflow.slice(ciWorkflow.indexOf("\njobs:\n"));
+    const jobs = jobsSection.split(/\n {2}(?=[A-Za-z0-9_-]+:\n)/).slice(1);
+    expect(jobs.length, "no jobs parsed out of ci.yml").toBeGreaterThanOrEqual(4);
+    for (const job of jobs) {
+      const name = job.slice(0, job.indexOf(":"));
+      const body = withoutComments(job);
+      const fence = body.indexOf('>> "$GITHUB_ENV"');
+      expect(fence, `${name} does not fence TMPDIR at all`).toBeGreaterThanOrEqual(0);
+      expect(body, `${name} fences the wrong variables`).toContain("TMPDIR=%s");
+      // RUNNER_TEMP, not the `runner` context: round 4 shipped a job-level
+      // `env:` using ${runner.temp}, which is not available there and expanded
+      // to the empty string.
+      expect(body, `${name} does not use RUNNER_TEMP`).toContain('"$RUNNER_TEMP"');
+      // Ahead of every step that runs repository code, or it fences nothing.
+      const firstOtherRun = body.search(/^ {6}- (run|name): (?!Keep temporary files)/m);
+      expect(firstOtherRun, `${name} runs a step before the TMPDIR fence`).toBeGreaterThan(
+        fence - job.length
+      );
+      const fenceStep = body.indexOf("Keep temporary files off the shared /tmp");
+      expect(fenceStep, `${name} is missing the fence step`).toBeGreaterThanOrEqual(0);
+      expect(
+        fenceStep,
+        `${name} fences AFTER a step that already ran repository code`
+      ).toBeLessThan(firstOtherRun);
+    }
+  });
+
   it("keeps public maintainer guidance free of internal service-account identities", () => {
     expect(maintainersPage).not.toMatch(/\.gserviceaccount\.com/);
   });

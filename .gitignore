@@ -74,8 +74,18 @@ pnpm-workspace.yaml
 docs/audits
 docs/evidence
 
-# Review briefs: process, not product. Same reason as docs/audits.
+# Review briefs and their verification records: process, not product, and they
+# must never reach the public mirror. Same reason as docs/audits.
+#
+# The two patterns below were written for the exact filenames in front of me at
+# the time and matched nothing since: VERIFICATION-R6.md and BRIEF-R6.md both
+# sat untracked-but-VISIBLE for a whole round. Untracked is not safe here, it
+# is one `git add -A` away from published, and this session has already swept
+# up a node_modules symlink, .scratch and a .msg file that way. Match the
+# PREFIX, so the next round's filename is covered before it is invented.
 REVIEW-SPEC-*.md
+VERIFICATION-*.md
+BRIEF-*.md
 *-VERIFICATION-REPORT.md
 .scratch
 .msg

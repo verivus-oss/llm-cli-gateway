@@ -2,8 +2,12 @@
 
 ## Prerequisites
 
-- Docker with Compose, or Podman with Compose support
 - Node.js >=24.4.0
+- EITHER podman or docker (for the throwaway container), OR a PostgreSQL server
+  you already run, reached with `TEST_DATABASE_URL` or `PG_TEST_EXTERNAL=1`.
+  Compose is NOT required and NOT used: `scripts/test-pg.sh` calls `run`, `exec`
+  and `rm` directly, because `podman compose` needs a provider the CI user does
+  not have. CI takes the external path and starts no container at all.
 
 ## Quick Start
 
@@ -51,15 +55,31 @@ string, and `src/__tests__/setup.ts` runs the same guard so a direct
 
 ## Test Suites
 
-| Suite              | File                         | Tests | Description                               |
-| ------------------ | ---------------------------- | ----- | ----------------------------------------- |
-| Session Manager PG | `session-manager-pg.test.ts` | 47    | CRUD, active-session updates, concurrency |
-| Migration          | `migration-pg.test.ts`       | 13    | File-to-PG migration, metadata, errors    |
+Every `src/__tests__/*-pg.test.ts` file, discovered by `scripts/test-pg.sh`
+rather than listed anywhere. This table names what each one covers; it
+deliberately carries NO test counts, because the two counts it used to carry
+were both wrong by round 6 and a number nothing checks goes stale silently.
+
+```bash
+# The current counts, from the suites themselves
+npm run test:pg
+```
+
+| File                                     | Covers                                                     |
+| ---------------------------------------- | ---------------------------------------------------------- |
+| `session-manager-pg.test.ts`             | CRUD, active-session updates, concurrency                  |
+| `migration-pg.test.ts`                   | File-to-PG migration, metadata, errors                     |
+| `job-store-pg.test.ts`                   | Async-job persistence, status fences, instance scoping     |
+| `flight-recorder-pg.test.ts`             | Request transcripts, the five states, co-resident tables   |
+| `schema-parity-pg.test.ts`               | Bootstrap SQL against `migrations/`, gap pinned explicitly |
+| `storage-drivers-pg.test.ts`             | The storage port over the PostgreSQL driver                |
+| `personal-config-persistence-pg.test.ts` | Kit admission and durable artefacts                        |
+| `provider-open-names-pg.test.ts`         | Provider-name projections on PostgreSQL                    |
 
 ## Running Tests
 
 ```bash
-# File-based tests only (no Docker needed)
+# File-based tests only (no container and no server needed)
 npm test
 
 # PostgreSQL tests only
@@ -74,11 +94,15 @@ npm run test:session-pg
 
 ## Environment Variables
 
-| Variable            | Default                                                  | Description                    |
-| ------------------- | -------------------------------------------------------- | ------------------------------ |
-| `CONTAINER_CLI`     | auto-detect (`docker`, then `podman`)                    | Container CLI used for Compose |
-| `TEST_DATABASE_URL` | `postgresql://test:test@127.0.0.1:5433/llm_gateway_test` | Test PG connection             |
-| `PG_TESTS`          | unset                                                    | Set to `1` to include PG tests |
+| Variable            | Default                                                  | Description                                                         |
+| ------------------- | -------------------------------------------------------- | ------------------------------------------------------------------- |
+| `CONTAINER_CLI`     | auto-detect (`podman`, then `docker`)                    | Container CLI for the throwaway container. Unused in external mode. |
+| `TEST_DATABASE_URL` | `postgresql://test:test@127.0.0.1:5433/llm_gateway_test` | Test PG connection                                                  |
+| `PG_TESTS`          | unset                                                    | Set to `1` to include PG tests                                      |
+| `PG_TEST_EXTERNAL`  | unset                                                    | `1` uses the long-lived fixture without spelling its DSN out        |
+| `PG_TEST_PORT`      | `FIXTURE.port` (5433)                                    | Host port for the throwaway container, to avoid a busy 5433         |
+| `PG_TEST_CONTAINER` | `llm-gateway-pg-test`                                    | Name of the throwaway container                                     |
+| `PG_TEST_IMAGE`     | `FIXTURE.image`                                          | Image for the throwaway container                                   |
 
 ## Test Infrastructure
 

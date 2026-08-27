@@ -14,7 +14,7 @@ import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
 import { readdirSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { Pool } from "pg";
-import { PostgresFlightRecorder, redactDsn } from "../flight-recorder-pg.js";
+import { PostgresFlightRecorder } from "../flight-recorder-pg.js";
 import type { FlightLogResult, FlightLogStart } from "../flight-recorder.js";
 import { TEST_DATABASE_URL } from "./setup.js";
 
@@ -321,84 +321,11 @@ describe("a whole transcript round trip", () => {
   });
 
   it("does not put a password on a health surface", () => {
-    expect(redactDsn("postgresql://u:sup3rsecret@127.0.0.1:5432/gw")).toBe(
-      "postgresql://127.0.0.1:5432/gw"
-    );
+    // redactDsn itself is unit-tested in dsn-target-report.test.ts, which is
+    // NOT gated on PG_TESTS. Round 6 found every assertion about it living
+    // here, so `npm test` was green for four rounds while the function
+    // reported a server pg does not connect to.
     expect(recorder.health().path).not.toContain("test:test");
-  });
-
-  it("names the server pg will REACH, not the URL authority", () => {
-    // `pg` resolves through pg-connection-string, which reads ?host=/?port= in
-    // preference to the authority. Reporting the authority told an operator
-    // transcripts were on 127.0.0.1 while the connection went elsewhere. This
-    // string is what doctor shows as where the data lives.
-    expect(redactDsn("postgresql://u:p@127.0.0.1:5432/db?host=elsewhere&port=6666")).toBe(
-      "postgresql://elsewhere:6666/db"
-    );
-    // A query parameter that cannot move the target must not move the report.
-    expect(redactDsn("postgresql://u:p@127.0.0.1:5432/db?sslmode=require")).toBe(
-      "postgresql://127.0.0.1:5432/db"
-    );
-    // pg's parser does not throw on garbage, it returns {host:"base"}, so
-    // well-formedness has to be decided before it is consulted.
-    expect(redactDsn("not a dsn")).toBe("postgresql (dsn not parseable)");
-  });
-
-  /**
-   * Round 4 found the formatter emitting strings that were not URIs and read as
-   * a different location, which is the same lie in a different costume.
-   */
-  it("does not dress a unix socket as a TCP URI", () => {
-    // The old form produced `postgresql:///var/run/postgresql:5433/db`, which
-    // parses as an empty host and a database named `var/run/postgresql:5433/db`.
-    expect(redactDsn("postgresql://u:p@127.0.0.1:5432/db?host=/var/run/postgresql")).toBe(
-      "postgresql socket /var/run/postgresql port 5432 database db"
-    );
-  });
-
-  it("brackets IPv6 whichever side it arrives from", () => {
-    // The authority form is already bracketed by `new URL`; the connection
-    // string parser returns the bare form, and the old code emitted
-    // `postgresql://::1:5433/db`, which is ambiguous.
-    expect(redactDsn("postgresql://u:p@127.0.0.1:5432/db?host=::1")).toBe(
-      "postgresql://[::1]:5432/db"
-    );
-    expect(redactDsn("postgresql://u:p@[::1]:5433/db")).toBe("postgresql://[::1]:5433/db");
-  });
-
-  it("follows the ambient PG* variables pg would actually use", () => {
-    // The reported "default" was a lie whenever PGPORT or PGDATABASE was set:
-    // pg resolves `config[key] || process.env.PG* || default`, so an absent
-    // field does NOT mean the libpq default. Measured: PGPORT=6543 wins.
-    const prevPort = process.env.PGPORT;
-    const prevDb = process.env.PGDATABASE;
-    try {
-      process.env.PGPORT = "6543";
-      process.env.PGDATABASE = "ambient_db";
-      expect(redactDsn("postgresql://u:p@127.0.0.1/db")).toBe(
-        "postgresql://127.0.0.1:6543 (from PGPORT)/db"
-      );
-      expect(redactDsn("postgresql://u:p@127.0.0.1:5433")).toBe(
-        "postgresql://127.0.0.1:5433/ambient_db (from PGDATABASE)"
-      );
-    } finally {
-      if (prevPort === undefined) delete process.env.PGPORT;
-      else process.env.PGPORT = prevPort;
-      if (prevDb === undefined) delete process.env.PGDATABASE;
-      else process.env.PGDATABASE = prevDb;
-    }
-  });
-
-  it("names the default pg substitutes rather than reporting a blank", () => {
-    // An absent port means 5432 to pg and an absent database means the
-    // connecting user. Reporting either as empty is what made the old no-query
-    // fast path overstate what the authority proved.
-    expect(redactDsn("postgresql://u:p@127.0.0.1/db")).toBe(
-      "postgresql://127.0.0.1:5432 (default)/db"
-    );
-    expect(redactDsn("postgresql://u:p@127.0.0.1:5432")).toBe(
-      "postgresql://127.0.0.1:5432/(default: the connecting user)"
-    );
   });
 });
 

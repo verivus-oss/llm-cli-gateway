@@ -119,6 +119,25 @@ describe("the fixture DSN guard", () => {
         "postgresql://postgres:test@127.0.0.1:5433/llm_gateway_test",
         "refusing user",
       ],
+      // Round 6 BLOCKER. The empty-password cases above pass against BOTH the
+      // current pin and the earlier `password === ""` check, so reverting the
+      // pin left the suite green while a DSN carrying somebody else's
+      // credential reached `DROP DATABASE`. This is the case that separates them.
+      [
+        "a non-empty password the fixture does not use",
+        "postgresql://test:hunter2@127.0.0.1:5433/llm_gateway_test",
+        "refusing a password the fixture does not use",
+      ],
+      [
+        "a password that differs only by case",
+        "postgresql://test:TEST@127.0.0.1:5433/llm_gateway_test",
+        "refusing a password the fixture does not use",
+      ],
+      [
+        "a percent-encoded password that decodes to something else",
+        "postgresql://test:%74%65%73%74%78@127.0.0.1:5433/llm_gateway_test",
+        "refusing a password the fixture does not use",
+      ],
       ["an unparseable string", "not a url", "not a parseable URL"],
       ["a fragment", "postgresql://test:test@127.0.0.1:5433/llm_gateway_test#x", "fragment"],
     ];

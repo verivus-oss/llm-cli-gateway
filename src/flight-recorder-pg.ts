@@ -177,110 +177,161 @@ const SQL_BOOTSTRAP = `
     CREATE INDEX IF NOT EXISTS idx_metadata_status ON gateway_metadata(status);
   `;
 
-/** Host, port and database only. A DSN carries a password and health output is read aloud. */
 /**
- * One place that turns a resolved target into a printable identity.
+ * One place that turns a DSN into a printable identity: host, port and
+ * database, never the password, and never a place the connection does not go.
  *
- * Round 4 found the previous inline formatting emitted things that were not
- * URIs and read as a different location entirely:
- *   `?host=/var/run/postgresql` became `postgresql:///var/run/postgresql:5433/db`,
- *   which parses as an empty host and a database named `var/run/...`.
- *   `?host=::1` became `postgresql://::1:5433/db`, unbracketed and ambiguous.
- * Both are the same failure the function exists to prevent: naming a place the
- * connection does not go. A unix socket is not a TCP URI, so it is not dressed
- * as one, and an absent port or database is reported as the value pg will
- * actually use rather than left blank.
+ * THE DEFECT CLASS THIS EXISTS TO CLOSE is reporting a target in a
+ * representation other than the one `pg` resolves. Four rounds produced four
+ * variants of it, each fixed at the site and each reappearing a layer out:
+ *
+ *   r3  the URL authority was reported while `?host=` moved the connection.
+ *   r4  `?host=/var/run/postgresql` became `postgresql:///var/run/postgresql:5433/db`,
+ *       which re-parses as an empty host and a database named `var/run/...`.
+ *   r4  `?host=::1` became `postgresql://::1:5433/db`, unbracketed and ambiguous.
+ *   r5  an absent port was reported as `5432 (default)` while PGPORT won.
+ *   r6  the r5 fix annotated provenance INSIDE a URI, so PGPORT=6543 produced
+ *       `postgresql://127.0.0.1:6543 (from PGPORT)/db` (not a URI at all) and
+ *       PGDATABASE produced `postgresql://127.0.0.1:5433/ambient_db (from PGDATABASE)`,
+ *       which IS a valid URI naming a database that does not exist.
+ *
+ * Every one of those came from the same two mistakes, so both are removed here
+ * rather than patched again.
+ *
+ * ONE PARSER. `pg` resolves a DSN through `pg-connection-string` and then
+ * layers `config[key] || process.env.PG* || default` on top. Re-implementing
+ * either half is what produced r3 and r5, so neither is re-implemented: the
+ * resolved target is read off a `pg.Client` constructed and never connected,
+ * which IS the code that decides where the connection goes. `parse` is
+ * consulted only to learn which fields the DSN stated explicitly, so that a
+ * substituted value can be marked as substituted.
+ *
+ * ONE SHAPE. Never a URI. A URI-shaped report has to be abandoned for sockets,
+ * for IPv6 and for any annotated field, and every abandonment was a chance to
+ * emit something that still looked like a DSN and was not. A reader cannot
+ * paste this form into a client by accident, which is the point.
  */
-function describeTarget(host: string, port: string | number, database: string): string {
-  // pg resolves each field as `config[key] || process.env.PG* || default`, so
-  // an absent field does NOT mean the libpq default: with PGPORT set, a DSN
-  // with no port connects to PGPORT. Round 5 measured PGPORT=6543 winning while
-  // this function reported "5432 (default)". Reporting a default pg may not use
-  // is the same lie the function exists to prevent, so the same precedence is
-  // applied here and the substituted value is marked as such.
-  const resolved = (
-    explicit: string,
-    envName: "PGHOST" | "PGPORT" | "PGDATABASE",
-    fallback: string
-  ): string => {
-    if (explicit !== "") return explicit;
-    const ambient = process.env[envName];
-    if (ambient !== undefined && ambient !== "") return `${ambient} (from ${envName})`;
-    return `${fallback} (default)`;
-  };
+type FieldSource = "explicit" | "PGHOST" | "PGPORT" | "PGDATABASE" | "PGUSER" | "default";
 
-  const p = resolved(String(port), "PGPORT", "5432");
-  const db =
-    database === ""
-      ? (() => {
-          const ambient = process.env.PGDATABASE;
-          return ambient !== undefined && ambient !== ""
-            ? `${ambient} (from PGDATABASE)`
-            : "(default: the connecting user)";
-        })()
-      : database;
-
-  // A unix socket is not a TCP URI, so it is not dressed as one.
-  if (host.startsWith("/")) {
-    return `postgresql socket ${host} port ${p} database ${db}`;
-  }
-  if (host === "") {
-    return `postgresql host ${resolved("", "PGHOST", "localhost")} port ${p} database ${db}`;
-  }
-  // Bracket IPv6 unless the caller already did: `url.hostname` brackets, the
-  // connection-string parser returns the bare form.
-  const h = host.includes(":") && !host.startsWith("[") ? `[${host}]` : host;
-  return `postgresql://${h}:${p}/${db}`;
+interface ResolvedTarget {
+  host: string;
+  hostSource: FieldSource;
+  isSocket: boolean;
+  port: string;
+  portSource: FieldSource;
+  database: string;
+  databaseSource: FieldSource;
 }
 
-export function redactDsn(dsn: string): string {
-  // Report the server `pg` will ACTUALLY reach, not the URL authority.
-  //
-  // These are two different parsers. `pg` resolves through
-  // `pg-connection-string`, which reads `?host=` and `?port=` in PREFERENCE to
-  // the authority, so a DSN can read `127.0.0.1:5432` to `new URL` while the
-  // connection goes somewhere else. This string is what `doctor` and the
-  // startup log present as where transcripts live, so a wrong answer tells an
-  // operator their data is on a host it is not on.
-  let url: URL;
-  try {
-    url = new URL(dsn);
-  } catch {
-    // Well-formedness only. pg's parser does NOT throw on garbage: it returns
-    // `{ host: "base", database: "not a dsn" }` for the string "not a dsn", so
-    // it cannot be used to decide whether the input was a DSN at all.
-    return "postgresql (dsn not parseable)";
-  }
-
-  // With no query string nothing can override the authority's HOST, so
-  // `url.host` is the resolved host. Verified against pg-connection-string.
-  // `url.host` keeps IPv6 bracketed, which the parser path below has to
-  // reconstruct. Note this path still defers to `describeTarget` for the port
-  // and database, because an ABSENT port means 5432 to pg and an absent
-  // database means the user: the authority alone does not say where it goes.
-  if (url.search === "") {
-    return describeTarget(url.hostname, url.port, url.pathname.replace(/^\//, ""));
-  }
-
-  // Query parameters present: only pg's own parser knows the precedence, and a
-  // second implementation of those rules would go stale the moment pg adds an
-  // override key.
-  try {
-    const require = createRequire(import.meta.url);
-    const { parse } = require("pg-connection-string") as {
-      parse: (s: string) => {
-        host?: string | null;
-        port?: string | null;
-        database?: string | null;
-      };
+/** `pg` is an optional peer, but redactDsn is only reached where it must exist. */
+function loadPgTargetResolvers(): {
+  parse: (s: string) => Record<string, string | null | undefined>;
+  Client: new (config: { connectionString: string }) => {
+    host?: string;
+    port?: number;
+    database?: string;
+    user?: string;
+  };
+} {
+  const require = createRequire(import.meta.url);
+  const { parse } = require("pg-connection-string") as {
+    parse: (s: string) => Record<string, string | null | undefined>;
+  };
+  const { Client } = require("pg") as {
+    Client: new (config: { connectionString: string }) => {
+      host?: string;
+      port?: number;
+      database?: string;
+      user?: string;
     };
-    const c = parse(dsn);
-    return describeTarget(c.host ?? "", c.port ?? "", c.database ?? "");
+  };
+  return { parse, Client };
+}
+
+/** IPv6 arrives bracketed from the authority and bare from `?host=`. Pick one. */
+function normaliseHost(host: string): string {
+  const bare = host.startsWith("[") && host.endsWith("]") ? host.slice(1, -1) : host;
+  return bare.includes(":") ? `[${bare}]` : bare;
+}
+
+function resolveTarget(dsn: string): ResolvedTarget | null {
+  // pg's parser does NOT throw on garbage: `parse("not a dsn")` returns
+  // `{ host: "base", database: "not a dsn" }`, so it cannot decide whether the
+  // input was a DSN. Requiring the scheme is the well-formedness test, and it
+  // is `pg`'s own: pg-connection-string only treats a string as a URL when it
+  // carries one. Round 6 measured `new URL` rejecting `postgresql://u:p@/db`,
+  // which pg accepts and resolves to localhost, so `new URL` cannot be it.
+  if (!/^postgres(ql)?:\/\//i.test(dsn)) return null;
+
+  let parse: ReturnType<typeof loadPgTargetResolvers>["parse"];
+  let Client: ReturnType<typeof loadPgTargetResolvers>["Client"];
+  try {
+    ({ parse, Client } = loadPgTargetResolvers());
   } catch {
-    // pg is an OPTIONAL peer. Without its parser the target cannot be resolved,
-    // so say so rather than presenting an authority that may be wrong.
-    return `postgresql://${url.host}${url.pathname} (unverified: DSN carries query parameters)`;
+    return null;
   }
+
+  let stated: Record<string, string | null | undefined>;
+  let resolved: { host?: string; port?: number; database?: string; user?: string };
+  try {
+    stated = parse(dsn);
+    // Constructed, never connected. This is the object whose fields the driver
+    // hands to the socket, so reading them cannot disagree with the connection.
+    resolved = new Client({ connectionString: dsn });
+  } catch {
+    return null;
+  }
+
+  const wasStated = (value: string | null | undefined): boolean =>
+    value !== null && value !== undefined && value !== "";
+  const ambient = (name: string): boolean => {
+    const value = process.env[name];
+    return value !== undefined && value !== "";
+  };
+  const sourceOf = (
+    statedValue: string | null | undefined,
+    envName: "PGHOST" | "PGPORT" | "PGDATABASE",
+    envFallback: FieldSource
+  ): FieldSource =>
+    wasStated(statedValue) ? "explicit" : ambient(envName) ? envName : envFallback;
+
+  const host = String(resolved.host ?? "");
+  return {
+    host: normaliseHost(host),
+    hostSource: sourceOf(stated.host, "PGHOST", "default"),
+    isSocket: host.startsWith("/"),
+    port: String(resolved.port ?? ""),
+    portSource: sourceOf(stated.port, "PGPORT", "default"),
+    database: String(resolved.database ?? ""),
+    // An absent database does not mean a default NAME: pg substitutes the
+    // connecting user, so the provenance is PGUSER or the OS user, not a
+    // constant. Reporting "(default)" against a real database name read as a
+    // name that was chosen rather than inherited.
+    databaseSource: wasStated(stated.database)
+      ? "explicit"
+      : ambient("PGDATABASE")
+        ? "PGDATABASE"
+        : ambient("PGUSER")
+          ? "PGUSER"
+          : "default",
+  };
+}
+
+function annotate(source: FieldSource, defaultNote: string): string {
+  if (source === "explicit") return "";
+  if (source === "default") return ` (${defaultNote})`;
+  return ` (from ${source})`;
+}
+
+/** Host, port and database only. A DSN carries a password and health output is read aloud. */
+export function redactDsn(dsn: string): string {
+  const target = resolveTarget(dsn);
+  if (target === null) return "postgresql (dsn not parseable)";
+  const where = target.isSocket ? "socket" : "host";
+  const host = `${target.host}${annotate(target.hostSource, "default")}`;
+  const port = `${target.port}${annotate(target.portSource, "default")}`;
+  const database = `${target.database}${annotate(target.databaseSource, "default: the connecting user")}`;
+  return `postgresql ${where} ${host} port ${port} database ${database}`;
 }
 
 type RoutedFlightOperation = Exclude<keyof FlightRecorderOperations, "close">;
