@@ -1,4 +1,4 @@
-import { readFileSync } from "node:fs";
+import { readdirSync, readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
@@ -202,58 +202,82 @@ describe("release to public Pages contract", () => {
     // The self-hosted host has ONE 8 GB tmpfs at /tmp shared by twelve runner
     // units, and Node's tmpdir() writes there unless TMPDIR says otherwise.
     //
-    // This was a per-step `env:` block, and two review rounds each found steps
-    // added without it: a fence every author must remember is not a fence. It
-    // is exported once per job through $GITHUB_ENV, which covers every LATER
-    // step. Round 7 found two ways past the first version of this test, both
-    // asserted below: repository code moved INSIDE the fence step (which
-    // $GITHUB_ENV does not cover, by GitHub's own definition), and the fence
-    // moved after a `uses:` step (which the old regex did not count).
-    const ciWorkflow = readRepositoryFile(".github/workflows/ci.yml");
-    // Only the `jobs:` mapping. Splitting the whole file also yields `on:`
-    // children, which have no steps and cannot fence anything.
-    const jobsSection = ciWorkflow.slice(ciWorkflow.indexOf("\njobs:\n"));
-    const jobs = jobsSection.split(/\n {2}(?=[A-Za-z0-9_-]+:\n)/).slice(1);
-    expect(jobs.length, "no jobs parsed out of ci.yml").toBeGreaterThanOrEqual(4);
-    const FENCE_NAME = "Keep temporary files off the shared /tmp";
-    for (const job of jobs) {
-      const name = job.slice(0, job.indexOf(":"));
-      const body = withoutComments(job);
-      // Every step in the job, in order, whether `run:` or `uses:`.
-      const steps = [...body.matchAll(/^ {6}- (?:name: (.*)|uses: (.*)|run: (.*))$/gm)];
-      expect(steps.length, `${name} has no steps`).toBeGreaterThan(0);
-      const fenceIndex = steps.findIndex(m => (m[1] ?? "").trim() === FENCE_NAME);
-      expect(fenceIndex, `${name} has no TMPDIR fence step`).toBeGreaterThanOrEqual(0);
-      // FIRST, ahead of `uses:` actions too. checkout and setup-node write to
-      // the temporary directory themselves.
-      expect(fenceIndex, `${name} runs a step before the TMPDIR fence`).toBe(0);
+    // Three rounds of reviewers have walked past a version of this test:
+    //   r7 codex  moved repository code INSIDE the fence step. $GITHUB_ENV
+    //             reaches SUBSEQUENT steps only, so that code ran unfenced.
+    //   r7 grok   moved the fence behind `uses: actions/checkout`.
+    //   r8 both   made the first step key `if:` / `id:` / `shell:` instead of
+    //             name/uses/run, which the step REGEX could not see at all;
+    //             and appended `; node ...` to the export's continuation line,
+    //             which a line-PREFIX check accepts.
+    //
+    // So steps are no longer recognised by which key comes first. A step is
+    // its DASH. And the fence step's body must equal the export exactly,
+    // rather than merely starting with it.
+    // EVERY workflow, not just ci.yml. Round 8: sast.yml and security.yml run
+    // on the same self-hosted labels with no fence at all, so this test's own
+    // name was false while it passed. The sweep is by the RUNNER LABEL, so a
+    // new self-hosted workflow is covered the day it is added.
+    const workflowDir = ".github/workflows";
+    const jobs = [];
+    for (const file of readdirSync(join(repoRoot, workflowDir)).sort()) {
+      if (!file.endsWith(".yml") && !file.endsWith(".yaml")) continue;
+      const text = readRepositoryFile(`${workflowDir}/${file}`);
+      const jobsAt = text.indexOf("\njobs:\n");
+      if (jobsAt < 0) continue;
+      for (const job of text
+        .slice(jobsAt)
+        .split(/\n {2}(?=[A-Za-z0-9_-]+:\n)/)
+        .slice(1)) {
+        // Only jobs that land on the shared host have the problem.
+        if (!job.includes("workhorse3")) continue;
+        jobs.push({ file, job });
+      }
+    }
+    expect(jobs.length, "no self-hosted jobs found in any workflow").toBeGreaterThanOrEqual(6);
 
-      const fenceBody = body.slice(
-        body.indexOf(FENCE_NAME),
-        steps.length > 1 ? body.indexOf(steps[1][0]) : body.length
-      );
-      expect(fenceBody, `${name} fences the wrong variables`).toContain("TMPDIR=%s");
-      // RUNNER_TEMP, not the `runner` context: round 4 shipped a job-level
-      // `env:` using that context, which is unavailable there and expanded to
-      // the empty string.
-      expect(fenceBody, `${name} does not use RUNNER_TEMP`).toContain('"$RUNNER_TEMP"');
-      expect(fenceBody, `${name} does not write to $GITHUB_ENV`).toContain('>> "$GITHUB_ENV"');
-      // $GITHUB_ENV reaches SUBSEQUENT steps, never the step that writes it,
-      // so repository code inside this step would run unfenced. Round 7 moved
-      // a command in here and the whole file still passed.
-      const fenceCommands = fenceBody
+    const FENCE_NAME = "Keep temporary files off the shared /tmp";
+    const EXPECTED_EXPORT = [
+      "- name: Keep temporary files off the shared /tmp",
+      "run: |",
+      "printf 'TMPDIR=%s\\nTMP=%s\\nTEMP=%s\\n' \\",
+      '"$RUNNER_TEMP" "$RUNNER_TEMP" "$RUNNER_TEMP" >> "$GITHUB_ENV"',
+    ];
+
+    for (const { file, job } of jobs) {
+      const name = `${file}:${job.slice(0, job.indexOf(":"))}`;
+      const body = withoutComments(job);
+      const stepsAt = body.indexOf("\n    steps:\n");
+      expect(stepsAt, `${name} has no steps block`).toBeGreaterThanOrEqual(0);
+      // A step begins at its list dash, whatever key follows it.
+      const steps = body
+        .slice(stepsAt)
+        .split(/\n(?= {6}- )/)
+        .slice(1);
+      expect(steps.length, `${name} has no steps`).toBeGreaterThan(0);
+
+      // FIRST, ahead of `uses:` actions too: checkout and setup-node write to
+      // the temporary directory themselves.
+      expect(steps[0], `${name} runs a step before the TMPDIR fence`).toContain(FENCE_NAME);
+
+      // EXACTLY the export, not merely beginning with it. An appended
+      // `; node ...` on the continuation line runs before $GITHUB_ENV applies.
+      const fenceLines = steps[0]
         .split("\n")
         .map(line => line.trim())
-        .filter(
-          line =>
-            line.length > 0 &&
-            line !== FENCE_NAME &&
-            !line.startsWith("- name:") &&
-            line !== "run: |"
+        .filter(line => line.length > 0);
+      expect(fenceLines, `${name}'s fence step does more than export TMPDIR`).toEqual(
+        EXPECTED_EXPORT
+      );
+
+      // Nothing later may take it away again. $GITHUB_ENV loses to a step
+      // `env:`, and `unset` inside a run block beats both.
+      for (const step of steps.slice(1)) {
+        expect(step, `${name} unsets the fence in a later step`).not.toMatch(
+          /\bunset\b[^\n]*\bTMPDIR\b/
         );
-      for (const line of fenceCommands) {
-        expect(line, `${name} runs something other than the export inside the fence step`).toMatch(
-          /^(printf 'TMPDIR|"\$RUNNER_TEMP")/
+        expect(step, `${name} overrides TMPDIR in a later step env:`).not.toMatch(
+          /^\s+TMPDIR:(?! \$\{\{ runner\.temp \}\})/m
         );
       }
     }
