@@ -76,7 +76,18 @@ function pgTruth(dsn: string): { kind: string; host: string; port: string; datab
  * separator, which is what a lastIndexOf would do to
  * `database "db port 9999 database other"`.
  */
-function fieldsOf(report: string): { kind: string; host: string; port: string; database: string } {
+interface ReportField {
+  value: string;
+  /** The parenthesised provenance, "" when the field carried none. */
+  note: string;
+}
+
+function fieldsOf(report: string): {
+  kind: string;
+  host: ReportField;
+  port: ReportField;
+  database: ReportField;
+} {
   let at = 0;
   const eat = (literal: string): void => {
     expect(report.slice(at, at + literal.length), `expected ${literal} at ${at} in ${report}`).toBe(
@@ -84,7 +95,7 @@ function fieldsOf(report: string): { kind: string; host: string; port: string; d
     );
     at += literal.length;
   };
-  const value = (): string => {
+  const value = (): ReportField => {
     let raw: string;
     if (report[at] === '"') {
       // A JSON string, honouring escapes so an escaped quote does not end it.
@@ -97,15 +108,25 @@ function fieldsOf(report: string): { kind: string; host: string; port: string; d
       raw = report.slice(at, end === -1 ? report.length : end);
       at = end === -1 ? report.length : end;
     }
-    // An annotation such as ` (from PGPORT)` belongs to this field, not the next.
+    // The annotation belongs to THIS field, and is RETURNED rather than
+    // discarded. Round 10: throwing it away made provenance invisible to the
+    // oracle, so the round 7 defect (naming PGUSER for a value the DSN
+    // supplied) would have passed here unseen.
+    let note = "";
     if (report.startsWith(" (", at)) {
       const close = report.indexOf(")", at);
-      at = close === -1 ? report.length : close + 1;
+      const stop = close === -1 ? report.length : close + 1;
+      // INSIDE the parentheses. Slicing them in made every note fail the
+      // `^from PGX$` test silently, so the provenance oracle below never fired
+      // even once. Caught only because a mutation that should have tripped it
+      // was instead caught by an outer literal.
+      note = report.slice(at + 2, stop - 1);
+      at = stop;
     }
-    return raw.startsWith('"') ? (JSON.parse(raw) as string) : raw;
+    return { value: raw.startsWith('"') ? (JSON.parse(raw) as string) : raw, note };
   };
   eat("postgresql ");
-  const kind = value();
+  const kind = value().value;
   eat(" ");
   const host = value();
   eat(" port ");
@@ -114,6 +135,60 @@ function fieldsOf(report: string): { kind: string; host: string; port: string; d
   const database = value();
   expect(at, `trailing text in ${report}`).toBe(report.length);
   return { kind, host, port, database };
+}
+
+/**
+ * An annotation must name an input that ACTUALLY decided the value.
+ *
+ * Measured differentially, not by re-deriving pg's precedence: if the report
+ * says `(from PGPORT)`, then deleting PGPORT must CHANGE what pg resolves. If
+ * it says `(default)`, then deleting any of them must change NOTHING.
+ *
+ * That is a real oracle rather than a copy of the production rule, and it is
+ * aimed at a defect that actually happened: round 7 reported
+ * `database bob (from PGUSER)` for a value pg had taken from the DSN, with
+ * PGUSER set but ignored. Round 10 found the helper was discarding the
+ * annotation entirely, so that defect would have passed unseen here.
+ */
+function expectProvenanceIsReal(
+  dsn: string,
+  got: { host: ReportField; port: ReportField; database: ReportField }
+): void {
+  const resolvedNow = pgTruth(dsn);
+  const withoutVariable = (name: string): { host: string; port: string; database: string } => {
+    const had = process.env[name];
+    delete process.env[name];
+    try {
+      return pgTruth(dsn);
+    } finally {
+      if (had !== undefined) process.env[name] = had;
+    }
+  };
+  const fields: [keyof typeof resolvedNow & ("host" | "port" | "database"), ReportField][] = [
+    ["host", got.host],
+    ["port", got.port],
+    ["database", got.database],
+  ];
+  for (const [field, reported] of fields) {
+    const named = /^from (PG[A-Z]+)$/.exec(reported.note);
+    if (named !== null) {
+      const without = withoutVariable(named[1]);
+      expect(
+        without[field],
+        `${dsn}: report credits ${named[1]} for ${field}, but removing it changes nothing`
+      ).not.toBe(resolvedNow[field]);
+      continue;
+    }
+    if (reported.note === "") {
+      // Claimed explicit: no ambient variable may be able to move it.
+      for (const name of AMBIENT) {
+        expect(
+          withoutVariable(name)[field],
+          `${dsn}: ${field} is reported as stated, but ${name} moves it`
+        ).toBe(resolvedNow[field]);
+      }
+    }
+  }
 }
 
 /** Each field pg resolved must be THAT field in the report, not merely present. */
@@ -132,13 +207,14 @@ function expectAgreesWithPg(dsn: string): string {
   // missing with the check still green. Found by auditing this helper rather
   // than the production code.
   const got = fieldsOf(report);
+  expectProvenanceIsReal(dsn, got);
   // KIND too. Round 9, both reviewers: fieldsOf returned it and this ignored
   // it, so replacing socket detection with a constant `"host"` passed the
   // oracle outright and failed only two hand-written string literals.
   expect(got.kind, `kind for ${dsn}`).toBe(truth.kind);
-  expect(got.host, `host for ${dsn}`).toBe(truth.host);
-  expect(got.port, `port for ${dsn}`).toBe(truth.port);
-  expect(got.database, `database for ${dsn}`).toBe(truth.database);
+  expect(got.host.value, `host for ${dsn}`).toBe(truth.host);
+  expect(got.port.value, `port for ${dsn}`).toBe(truth.port);
+  expect(got.database.value, `database for ${dsn}`).toBe(truth.database);
   return report;
 }
 
@@ -660,20 +736,48 @@ describe("redactDsn names the server pg will actually reach", () => {
   });
 
   it("escapes every invisible or controlling character, by property", () => {
-    // Round 10: naming Bidi_Control fixed CSI and ALM and still passed
-    // U+00AD, U+034F, U+070F, U+2060, U+FE0F and U+E0061. The class is
-    // `Cf` plus `Default_Ignorable_Code_Point`, plus C1 and DEL which JSON
-    // leaves raw. Asserted on the RAW report: the oracle JSON-parses and
-    // therefore cannot see escaping at all.
+    // ITERATES THE PROPERTY, rather than sampling a list of code points.
+    //
+    // Round 10, grok: the previous version listed eight characters, so
+    // dropping a whole RANGE from production would have left it green. The
+    // same shape as the missing `kind`: a helper claiming more than it checks.
+    //
+    // Every contiguous RUN of matching code points is enumerated here and its
+    // two boundaries are exercised, which is what actually pins the ranges.
     const UNSAFE = /[\u0080-\u009F\u007F\u2028\u2029]|\p{Cf}|\p{Default_Ignorable_Code_Point}/u;
-    for (const cp of [
-      0x00ad, 0x034f, 0x070f, 0x2060, 0xfe0f, 0xe0061, 0x009b, 0x061c, 0x202e, 0x2028,
-    ]) {
+    const runs: Array<[number, number]> = [];
+    for (let cp = 0; cp <= 0x10ffff; cp++) {
+      // Surrogates are not characters and cannot appear in a parsed value.
+      if (cp >= 0xd800 && cp <= 0xdfff) continue;
+      if (!UNSAFE.test(String.fromCodePoint(cp))) continue;
+      const last = runs[runs.length - 1];
+      if (last !== undefined && last[1] === cp - 1) last[1] = cp;
+      else runs.push([cp, cp]);
+    }
+    // A guard on the guard: if the property ever matched nothing, every
+    // assertion below would pass vacuously.
+    expect(runs.length, "the property matched no code points at all").toBeGreaterThan(20);
+
+    const boundaries = new Set<number>();
+    for (const [lo, hi] of runs) {
+      boundaries.add(lo);
+      boundaries.add(hi);
+    }
+    for (const cp of boundaries) {
       ambient();
       const name = encodeURIComponent(String.fromCodePoint(cp));
       const report = redactDsn(`postgresql://u:p@127.0.0.1:5433/db${name}x`);
-      expect(UNSAFE.test(report), `U+${cp.toString(16)}`).toBe(false);
-      expect(report.split("\n"), `U+${cp.toString(16)}`).toHaveLength(1);
+      const label = `U+${cp.toString(16).toUpperCase().padStart(4, "0")}`;
+      expect(UNSAFE.test(report), `${label} survived raw`).toBe(false);
+      expect(report.split("\n"), `${label} split the line`).toHaveLength(1);
+    }
+
+    // And the characters the property must NOT touch, or every accented or
+    // CJK database name would be rendered unreadable.
+    for (const legitimate of ["\u00e9t\u00e9", "\u6570\u636e\u5e93", "db-1_2.3", "caf\u00e9"]) {
+      ambient();
+      const report = redactDsn(`postgresql://u:p@127.0.0.1:5433/${encodeURIComponent(legitimate)}`);
+      expect(report, legitimate).toContain(legitimate);
     }
   });
 
