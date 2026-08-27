@@ -1,3 +1,4 @@
+import { execFileSync } from "node:child_process";
 import { describe, expect, it } from "vitest";
 import { Client } from "pg";
 // @ts-expect-error -- plain ESM script, no type declarations by design.
@@ -7,6 +8,7 @@ import {
   canonicalDsn,
   describeFixture,
   printEnv,
+  shellQuote,
 } from "../../scripts/pg-fixture.mjs";
 
 /**
@@ -225,17 +227,26 @@ describe("the fixture DSN guard", () => {
       expect(admin.port).not.toBe(5432);
     });
 
-    it("survives a password containing characters that break naive parsing", () => {
-      // The removed shell redactor used [^@/]*, which stopped at a slash. A
-      // password is not required to be URL-safe, so round-trip it properly.
-      const awkward = "postgresql://test:p%2Fa%40ss@127.0.0.1:5433/llm_gateway_test";
-      const fixture = assertFixtureDsn(awkward);
-      expect(fixture.password).toBe("p/a@ss");
+    it("round-trips a credential containing characters that break naive parsing", () => {
+      // This used to feed an awkward password THROUGH assertFixtureDsn. The
+      // guard now pins the password to FIXTURE.password, so that DSN is
+      // correctly refused and the old test was asserting a path that no longer
+      // exists. The property still matters and belongs to canonicalDsn, which
+      // is what has to survive a value that is not URL-safe: the shell redactor
+      // this replaced used [^@/]*, which stopped at a slash and printed such a
+      // password intact.
+      const awkward = { ...FIXTURE, password: "p/a@ss", user: "us:er" };
+      const dsn = canonicalDsn(awkward);
+      const client = new Client({ connectionString: dsn });
 
-      const client = new Client({ connectionString: canonicalDsn(fixture) });
       expect(client.password).toBe("p/a@ss");
-      expect(client.port).toBe(5433);
-      expect(describeFixture(fixture)).not.toContain("p/a@ss");
+      expect(client.user).toBe("us:er");
+      expect(client.host).toBe(FIXTURE.host);
+      expect(client.port).toBe(FIXTURE.port);
+      expect(client.database).toBe(FIXTURE.database);
+      // The printable identity must never carry the credential.
+      expect(describeFixture(awkward)).not.toContain("p/a@ss");
+      expect(describeFixture(awkward)).not.toContain("us:er");
     });
   });
 });
@@ -271,13 +282,30 @@ describe("printEnv, which a shell evaluates", () => {
     }
   });
 
-  it("quotes a value containing an apostrophe so the shell sees it intact", () => {
-    // FIXTURE holds no such value today. This pins the ESCAPING, so a future
-    // value cannot silently break out of the quoting into executable text.
-    const q = (v: string): string => `'${String(v).replace(/'/g, `'\\''`)}'`;
-    expect(q("a'b")).toBe(`'a'\\''b'`);
-    expect(q("a; echo pwned")).toBe("'a; echo pwned'");
-    expect(q("$(id)")).toBe("'$(id)'");
+  it("escapes an apostrophe in the PRODUCTION quoting function", () => {
+    // Calls shellQuote itself. The previous version of this test defined its
+    // own copy of the quoting and asserted on that, so breaking the real
+    // escaping left every test green. FIXTURE holds no apostrophe, so the shape
+    // check above cannot see it either: this is the only cover on the escape.
+    expect(shellQuote("a'b")).toBe(`'a'\\''b'`);
+    expect(shellQuote("abc")).toBe("'abc'");
+    expect(shellQuote("a; echo pwned")).toBe("'a; echo pwned'");
+    expect(shellQuote("$(id)")).toBe("'$(id)'");
+  });
+
+  it("quotes so a shell recovers the value intact, apostrophe included", () => {
+    // The property that matters is not the string shape, it is what `eval`
+    // reconstructs. Asserting the shape alone would accept any consistent but
+    // wrong escaping.
+    const value = "a'b; echo pwned";
+    const recovered = execFileSync(
+      "bash",
+      ["-c", `eval "X=${shellQuote(value)}"; printf %s "$X"`],
+      {
+        encoding: "utf8",
+      }
+    );
+    expect(recovered).toBe(value);
   });
 
   it("never emits a newline inside a value", () => {

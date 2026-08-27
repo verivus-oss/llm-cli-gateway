@@ -131,11 +131,16 @@ export function assertFixtureDsn(raw, fail = die) {
     );
   }
 
-  // `pg` resolves EVERY field with a truthy test (`config[key] || env || default`),
+  // `pg` resolves each field with a truthy test (`config[key] || env || default`),
   // so any falsy value is silently replaced by ambient state. Round 3 closed
-  // that for port, round 4 found user and password still open. Each field is
-  // pinned to what FIXTURE declares rather than merely non-empty, so the
-  // accepted DSN and the connected one cannot differ in ANY component.
+  // that for port, round 4 for user and password.
+  //
+  // SCOPE, stated precisely because an earlier version of this comment
+  // overclaimed. What is pinned is the five IDENTITY fields: host, port, user,
+  // password and database. pg's `val()` also reads PGOPTIONS, PGAPPNAME,
+  // PGSSLMODE, client_encoding, replication and the timeouts, and those remain
+  // ambient for a field-wise client. They cannot retarget the connection, which
+  // is what this guard is for, but "every field pg resolves" would be false.
   const user = decodeURIComponent(url.username);
   if (user !== FIXTURE.user) {
     return fail(
@@ -149,10 +154,15 @@ export function assertFixtureDsn(raw, fail = die) {
   // environment, so the reset would authenticate with a secret the DSN never
   // stated. Refuse it rather than let ambient state decide.
   const password = decodeURIComponent(url.password);
-  if (password === "") {
+  if (password !== FIXTURE.password) {
     return fail(
-      "refusing a DSN with an empty password. pg replaces a falsy password with " +
-        "PGPASSWORD, so the connection would use a credential the DSN did not state."
+      password === ""
+        ? "refusing a DSN with an empty password. pg replaces a falsy password " +
+            "with PGPASSWORD, so the connection would use a credential the DSN " +
+            "did not state."
+        : "refusing a password the fixture does not use. Every identity field is " +
+            "pinned to FIXTURE so the accepted DSN and the connected one cannot " +
+            "differ in any component."
     );
   }
 
@@ -194,8 +204,21 @@ export function defaultFixtureDsn() {
  * single quotes, which shellcheck flags (SC2016) and which put the escaping
  * rules somewhere nothing could test.
  */
+/**
+ * POSIX single-quote a value for `eval`.
+ *
+ * EXPORTED so a test can call THIS function. Round 5 found the previous test
+ * defined its own copy of the quoting and asserted on that, so breaking the
+ * real escaping left every test green: FIXTURE holds no apostrophe today, so
+ * the shape check could not see it either. A test that reimplements the code it
+ * is testing proves the test, not the code.
+ */
+export function shellQuote(value) {
+  return `'${String(value).replace(/'/g, `'\\''`)}'`;
+}
+
 export function printEnv() {
-  const q = v => `'${String(v).replace(/'/g, `'\\''`)}'`;
+  const q = shellQuote;
   return [
     `FIXTURE_HOST=${q(FIXTURE.host)}`,
     `FIXTURE_PORT=${q(FIXTURE.port)}`,

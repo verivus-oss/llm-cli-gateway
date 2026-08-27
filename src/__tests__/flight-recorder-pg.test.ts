@@ -366,6 +366,29 @@ describe("a whole transcript round trip", () => {
     expect(redactDsn("postgresql://u:p@[::1]:5433/db")).toBe("postgresql://[::1]:5433/db");
   });
 
+  it("follows the ambient PG* variables pg would actually use", () => {
+    // The reported "default" was a lie whenever PGPORT or PGDATABASE was set:
+    // pg resolves `config[key] || process.env.PG* || default`, so an absent
+    // field does NOT mean the libpq default. Measured: PGPORT=6543 wins.
+    const prevPort = process.env.PGPORT;
+    const prevDb = process.env.PGDATABASE;
+    try {
+      process.env.PGPORT = "6543";
+      process.env.PGDATABASE = "ambient_db";
+      expect(redactDsn("postgresql://u:p@127.0.0.1/db")).toBe(
+        "postgresql://127.0.0.1:6543 (from PGPORT)/db"
+      );
+      expect(redactDsn("postgresql://u:p@127.0.0.1:5433")).toBe(
+        "postgresql://127.0.0.1:5433/ambient_db (from PGDATABASE)"
+      );
+    } finally {
+      if (prevPort === undefined) delete process.env.PGPORT;
+      else process.env.PGPORT = prevPort;
+      if (prevDb === undefined) delete process.env.PGDATABASE;
+      else process.env.PGDATABASE = prevDb;
+    }
+  });
+
   it("names the default pg substitutes rather than reporting a blank", () => {
     // An absent port means 5432 to pg and an absent database means the
     // connecting user. Reporting either as empty is what made the old no-query
@@ -374,7 +397,7 @@ describe("a whole transcript round trip", () => {
       "postgresql://127.0.0.1:5432 (default)/db"
     );
     expect(redactDsn("postgresql://u:p@127.0.0.1:5432")).toBe(
-      "postgresql://127.0.0.1:5432/(pg default: the connecting user)"
+      "postgresql://127.0.0.1:5432/(default: the connecting user)"
     );
   });
 });

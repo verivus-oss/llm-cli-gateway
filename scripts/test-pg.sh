@@ -48,6 +48,12 @@ set -euo pipefail
 # inherited from the environment it carried on with STALE values, and any
 # unexpected stdout was executed as shell code before anything validated it.
 # Capture, check the status, check the SHAPE, then evaluate.
+# UNSET FIRST. Round 5 found the `:?` guards below prove nothing on their own:
+# if the producer omits a name but the shell already inherited it, the stale
+# value survives and every check passes. Clearing them means the guards test the
+# producer's output rather than the ambient environment.
+unset FIXTURE_HOST FIXTURE_PORT FIXTURE_DB FIXTURE_USER FIXTURE_PASSWORD FIXTURE_IMAGE FIXTURE_DSN
+
 fixture_env="$(node scripts/pg-fixture.mjs --print-env)" || {
   echo "FATAL: could not read the fixture definition from scripts/pg-fixture.mjs" >&2
   exit 1
@@ -56,11 +62,25 @@ if [ -z "${fixture_env}" ]; then
   echo "FATAL: scripts/pg-fixture.mjs --print-env produced no output" >&2
   exit 1
 fi
-# Only FIXTURE_<NAME>='...' lines are allowed to reach eval. Anything else, a
-# stray warning or a deliberate injection, is refused rather than executed.
+# Only FIXTURE_<NAME>='...' lines reach eval. A stray warning or an injected
+# command is refused rather than executed.
 if printf '%s\n' "${fixture_env}" | grep -qvE "^FIXTURE_[A-Z_]+='([^']|'\\\\'')*'$"; then
   echo "FATAL: unexpected output from --print-env; refusing to evaluate it:" >&2
   printf '%s\n' "${fixture_env}" >&2
+  exit 1
+fi
+# EXACTLY the expected names, once each. A syntactically valid but unexpected
+# name, or a duplicate that silently overrides the canonical value, is refused:
+# shape alone does not make output correct.
+fixture_names="$(printf '%s\n' "${fixture_env}" | sed "s/=.*//" | LC_ALL=C sort)"
+fixture_expected="$(printf '%s\n' FIXTURE_DB FIXTURE_DSN FIXTURE_HOST FIXTURE_IMAGE \
+  FIXTURE_PASSWORD FIXTURE_PORT FIXTURE_USER | LC_ALL=C sort)"
+if [ "${fixture_names}" != "${fixture_expected}" ]; then
+  echo "FATAL: --print-env did not emit exactly the expected assignments." >&2
+  echo "got:" >&2
+  printf '%s\n' "${fixture_names}" >&2
+  echo "expected:" >&2
+  printf '%s\n' "${fixture_expected}" >&2
   exit 1
 fi
 eval "${fixture_env}"

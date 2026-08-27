@@ -192,16 +192,42 @@ const SQL_BOOTSTRAP = `
  * actually use rather than left blank.
  */
 function describeTarget(host: string, port: string | number, database: string): string {
-  const db = database === "" ? "(pg default: the connecting user)" : database;
-  // libpq's default, which is what pg falls back to for an absent port.
-  const p = String(port) === "" ? "5432 (default)" : String(port);
+  // pg resolves each field as `config[key] || process.env.PG* || default`, so
+  // an absent field does NOT mean the libpq default: with PGPORT set, a DSN
+  // with no port connects to PGPORT. Round 5 measured PGPORT=6543 winning while
+  // this function reported "5432 (default)". Reporting a default pg may not use
+  // is the same lie the function exists to prevent, so the same precedence is
+  // applied here and the substituted value is marked as such.
+  const resolved = (
+    explicit: string,
+    envName: "PGHOST" | "PGPORT" | "PGDATABASE",
+    fallback: string
+  ): string => {
+    if (explicit !== "") return explicit;
+    const ambient = process.env[envName];
+    if (ambient !== undefined && ambient !== "") return `${ambient} (from ${envName})`;
+    return `${fallback} (default)`;
+  };
+
+  const p = resolved(String(port), "PGPORT", "5432");
+  const db =
+    database === ""
+      ? (() => {
+          const ambient = process.env.PGDATABASE;
+          return ambient !== undefined && ambient !== ""
+            ? `${ambient} (from PGDATABASE)`
+            : "(default: the connecting user)";
+        })()
+      : database;
+
+  // A unix socket is not a TCP URI, so it is not dressed as one.
   if (host.startsWith("/")) {
     return `postgresql socket ${host} port ${p} database ${db}`;
   }
   if (host === "") {
-    return `postgresql host (pg default) port ${p} database ${db}`;
+    return `postgresql host ${resolved("", "PGHOST", "localhost")} port ${p} database ${db}`;
   }
-  // Bracket IPv6 unless the caller already did. `url.host` brackets; the
+  // Bracket IPv6 unless the caller already did: `url.hostname` brackets, the
   // connection-string parser returns the bare form.
   const h = host.includes(":") && !host.startsWith("[") ? `[${host}]` : host;
   return `postgresql://${h}:${p}/${db}`;
