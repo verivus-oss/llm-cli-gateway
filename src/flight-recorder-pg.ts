@@ -270,45 +270,95 @@ function loadPgTargetResolvers(): {
 const SSL_FILE_PARAMS = new Set(["sslcert", "sslkey", "sslrootcert"]);
 
 /**
- * Exported for its own tests. Two of its branches are deliberately BROADER
- * than pg and therefore invisible from `redactDsn`'s output: pg does not read
- * a file for an UPPERCASE `SSLCERT` (measured), and pg ignores fragments
- * entirely, so neither branch changes what `redactDsn` returns. Mutating them
- * failed nothing until this function could be called directly. An untestable
- * branch is a liability whether or not it is correct.
+ * pg's OWN preprocessing, copied because the alternative is a second one.
+ *
+ * `pg-connection-string` does not hand the caller's string to `new URL`. It
+ * first rewrites the WHOLE string when it contains a space or a malformed
+ * escape, and `encodeURI` encodes `[` and `]` while doing so:
+ *
+ *   if (/ |%[^a-f0-9]|%[a-f0-9][^a-f0-9]/i.test(str))
+ *     str = encodeURI(str).replace(/%25(\d\d)/g, '%$1')
+ *
+ * Round 9 BLOCKER, measured. Editing the query as TEXT changed which branch
+ * that test takes, so removing a space along with `?sslcert=/tmp/foo bar` made
+ * `postgresql://u:p@[::1]:5433/db?...` parse here and throw `Invalid URL` in
+ * pg, and the report named a host pg never reached. The reverse also held.
+ * The old comment "removing them cannot change the answer" was false.
+ *
+ * That is the FOURTH time a different representation was compared from the one
+ * that acts (r3 authority vs `?host=`, r6 `new URL` vs pg's parser, r8 raw vs
+ * decoded query keys). So this no longer edits the DSN as text at all: it runs
+ * pg's pipeline, deletes the parameters through `searchParams` (which sees the
+ * same DECODED keys pg iterates), and serialises back. One parser, one string.
  */
 /**
- * The key as pg sees it. `pg-connection-string` reads the query with
- * `URLSearchParams`, which PERCENT-DECODES keys and treats `+` as a space.
+ * Does this string carry a PostgreSQL scheme, as the parser pg uses sees it?
  *
- * Round 8 BLOCKER: this compared raw bytes, so `?ssl%63ert=/etc/hosts` decoded
- * to `sslcert` for pg and read the file, while the stripper saw a key it did
- * not recognise. Four encodings got through, which is the whole guarantee gone.
- * Comparing anything other than the decoded key is comparing a different
- * representation from the one that acts, which is this module's oldest defect.
+ * Round 9 BLOCKER, both reviewers: this tested the RAW string, so a leading
+ * tab, LF, CR, NUL or ESC made it answer no while pg answered yes. WHATWG
+ * strips leading and trailing C0 controls and spaces before looking at the
+ * scheme, so `\tpostgresql://h/db` IS `postgresql://h/db` to pg, and calling
+ * it unparseable was the same mistake in its last corner: testing a
+ * representation the parser does not use.
+ *
+ * The test stays NARROWER than pg on purpose. pg treats any scheme but
+ * `socket:` as TCP, so `pg://h/db` and a bare `/path` resolve there; the DSNs
+ * that reach this function come from gateway config, which admits these two
+ * spellings, and anything else is likelier a mistake than a target. What it
+ * must not do is disagree with pg about the SAME DSN.
  */
-function queryKeyOf(pair: string): string {
-  const raw = pair.split("=")[0].replace(/\+/g, " ");
+function carriesPostgresScheme(dsn: string): boolean {
+  // The exact trim WHATWG performs before it looks at the scheme: leading and
+  // trailing C0 control or space. The control characters ARE the subject here,
+  // which is why the rule is disabled rather than the range narrowed.
+  // eslint-disable-next-line no-control-regex
+  const trimmed = dsn.replace(/^[\u0000-\u0020]+/, "").replace(/[\u0000-\u0020]+$/, "");
+  return /^postgres(ql)?:\/\//i.test(trimmed);
+}
+
+function pgPreprocess(dsn: string): string {
+  return / |%[^a-f0-9]|%[a-f0-9][^a-f0-9]/i.test(dsn)
+    ? encodeURI(dsn).replace(/%25(\d\d)/g, "%$1")
+    : dsn;
+}
+
+/** `new URL` exactly as pg calls it, dummy base, dummy host and all. */
+function pgUrl(dsn: string): URL | null {
+  const str = pgPreprocess(dsn);
   try {
-    return decodeURIComponent(raw).toLowerCase();
+    return new URL(str, "postgres://base");
   } catch {
-    // Malformed escapes: URLSearchParams keeps them literal rather than throwing.
-    return raw.toLowerCase();
+    try {
+      return new URL(str.replace("@/", "@___DUMMY___/"), "postgres://base");
+    } catch {
+      return null;
+    }
   }
 }
 
+/**
+ * The DSN pg would parse, with only the three disk-reading parameters removed.
+ *
+ * Exported for its own tests: the deletion happens on a URL object, so nothing
+ * about it is observable from `redactDsn` beyond the absence of a file read.
+ */
 export function withoutSslFileParams(dsn: string): string {
-  const start = dsn.indexOf("?");
-  if (start < 0) return dsn;
-  // Split the fragment off first: `?a=1#frag` must not fold the fragment into
-  // the last parameter. Not `new URL`, which rejects DSNs pg accepts.
-  const hash = dsn.indexOf("#", start);
-  const head = dsn.slice(0, start);
-  const query = hash < 0 ? dsn.slice(start + 1) : dsn.slice(start + 1, hash);
-  const fragment = hash < 0 ? "" : dsn.slice(hash);
-  const kept = query.split("&").filter(pair => !SSL_FILE_PARAMS.has(queryKeyOf(pair)));
-  if (kept.length === query.split("&").length) return dsn;
-  return kept.length > 0 ? `${head}?${kept.join("&")}${fragment}` : `${head}${fragment}`;
+  const url = pgUrl(dsn);
+  if (url === null) return dsn;
+  // `searchParams` yields DECODED keys, which is what pg iterates, so an
+  // encoded `ssl%63ert` and a tab-bearing `ssl<TAB>cert` (WHATWG strips tabs)
+  // both arrive here as `sslcert`. Round 8 and round 9 each found one of those
+  // getting past a comparison done on the raw text.
+  let removed = false;
+  for (const key of [...url.searchParams.keys()]) {
+    if (SSL_FILE_PARAMS.has(key.toLowerCase())) {
+      url.searchParams.delete(key);
+      removed = true;
+    }
+  }
+  // Unchanged input, unchanged output: serialising even when nothing matched
+  // would hand pg a re-encoded string for no reason.
+  return removed ? url.href : dsn;
 }
 
 /**
@@ -335,9 +385,18 @@ export function withoutSslFileParams(dsn: string): string {
 const MAX_FIELD_CHARS = 120;
 
 /**
- * Characters that BREAK or REORDER a log line: the Unicode line separators
- * (U+0085 NEL, U+2028 LS, U+2029 PS) and the bidi overrides, embeddings,
- * isolates, zero-width marks and byte-order mark.
+ * Characters that BREAK, REORDER or COMMAND when a log line is rendered.
+ *
+ * Defined by PROPERTY, not by enumeration. Round 9 found the enumerated set
+ * missing four, and an enumerated set will always be missing the next one:
+ *   U+009B  CSI. This string goes to stderr, and `CSI 2J` ERASES the screen.
+ *   U+061C  Arabic Letter Mark, the one Bidi_Control the range missed.
+ *   U+007F  DEL.
+ *   U+2060  word joiner.
+ * So: the whole C1 block (U+0080..U+009F, which contains NEL and CSI), DEL,
+ * the line and paragraph separators, the zero-width and invisible-operator
+ * ranges, the byte-order mark, and `\p{Bidi_Control}` for every character
+ * Unicode itself says reorders text.
  *
  * JSON quoting escapes NONE of them. A bidi override survived it and still
  * reverses everything after it on the line, and round 8 measured U+2028
@@ -346,7 +405,8 @@ const MAX_FIELD_CHARS = 120;
  * which is why the set is defined by WHAT THEY DO rather than extended one
  * character at a time.
  */
-const UNSAFE_IN_A_LOG_LINE = /[\u0085\u2028\u2029\u200B-\u200F\u202A-\u202E\u2066-\u2069\uFEFF]/g;
+const UNSAFE_IN_A_LOG_LINE =
+  /[\u0080-\u009F\u007F\u2028\u2029\u200B-\u200F\u2060-\u2064\u2066-\u206F\uFEFF]|\p{Bidi_Control}/gu;
 
 /**
  * Words this format uses as STRUCTURE. A value equal to one of them reads as a
@@ -354,7 +414,17 @@ const UNSAFE_IN_A_LOG_LINE = /[\u0085\u2028\u2029\u200B-\u200F\u202A-\u202E\u206
  * `postgresql host port port 5433 database db`, which agrees with pg and is
  * unreadable. Quoting the collision is enough; the value is still named.
  */
-const FORMAT_KEYWORDS = new Set(["host", "socket", "port", "database", "postgresql"]);
+const FORMAT_KEYWORDS = new Set([
+  "host",
+  "socket",
+  "port",
+  "database",
+  "postgresql",
+  // The words an ANNOTATION is written in: `(from PGHOST)`, `(default)`.
+  // Round 9: `?host=from` printed `postgresql host from port 5433`.
+  "from",
+  "default",
+]);
 
 /** A field value, quoted unless it is plainly a host, path, port or name. */
 function show(value: string): string {
@@ -384,7 +454,7 @@ function resolveTarget(dsn: string): ResolvedTarget | null {
   // also resolve there. This is deliberately narrower than pg, because the only
   // DSNs that reach here come from gateway config, which admits exactly these
   // two spellings. Anything else is likelier a mistake than a target.
-  if (!/^postgres(ql)?:\/\//i.test(dsn)) return null;
+  if (!carriesPostgresScheme(dsn)) return null;
 
   let parse: ReturnType<typeof loadPgTargetResolvers>["parse"];
   let Client: ReturnType<typeof loadPgTargetResolvers>["Client"];

@@ -54,10 +54,14 @@ afterEach(() => {
 });
 
 /** The target pg would actually use, read off a constructed, unconnected client. */
-function pgTruth(dsn: string): { host: string; port: string; database: string } {
+function pgTruth(dsn: string): { kind: string; host: string; port: string; database: string } {
   const c = new Client({ connectionString: dsn });
+  const host = String(c.host ?? "");
+  // pg opens a unix socket when the resolved host is a path (node-pg's own
+  // test is `indexOf("/") === 0`), so the KIND is derived from pg, not chosen.
   return {
-    host: String(c.host ?? ""),
+    kind: host.startsWith("/") ? "socket" : "host",
+    host,
     port: String(c.port ?? ""),
     database: String(c.database ?? ""),
   };
@@ -128,11 +132,27 @@ function expectAgreesWithPg(dsn: string): string {
   // missing with the check still green. Found by auditing this helper rather
   // than the production code.
   const got = fieldsOf(report);
+  // KIND too. Round 9, both reviewers: fieldsOf returned it and this ignored
+  // it, so replacing socket detection with a constant `"host"` passed the
+  // oracle outright and failed only two hand-written string literals.
+  expect(got.kind, `kind for ${dsn}`).toBe(truth.kind);
   expect(got.host, `host for ${dsn}`).toBe(truth.host);
   expect(got.port, `port for ${dsn}`).toBe(truth.port);
   expect(got.database, `database for ${dsn}`).toBe(truth.database);
   return report;
 }
+
+/**
+ * WHAT THIS ORACLE CANNOT SEE, stated so nobody relies on it for these.
+ *
+ * `fieldsOf` JSON.parses a quoted field, which UNDOES both `JSON.stringify`
+ * and the `\uXXXX` pass in `show()`. So a report carrying a RAW U+2028 and one
+ * carrying `\u2028` decode to the same value and both agree with pg. Round 9
+ * found that: reverting the escape set entirely leaves this helper green.
+ *
+ * Escaping, quoting and truncation are RENDERING properties. They are asserted
+ * against the raw report string in their own tests below, never through here.
+ */
 
 /** Runs `fn` with fs.readFileSync watched, and reports what it read. */
 function readsDuring(fn: () => string): { reads: string[]; result: string } {
@@ -509,6 +529,103 @@ describe("redactDsn names the server pg will actually reach", () => {
       const report = redactDsn(`postgresql://u:p@127.0.0.1:5433/db${encoded}x`);
       expect(SEPARATORS.test(report), encoded).toBe(false);
       expect(BIDI.test(report), encoded).toBe(false);
+    }
+  });
+
+  it("does not change which encodeURI branch pg takes", () => {
+    // Round 9 BLOCKER. pg-connection-string rewrites the WHOLE string with
+    // encodeURI when it contains a space, and encodeURI encodes `[` and `]`.
+    // Editing the query as TEXT changed which branch that test took: removing
+    // the space along with `?sslcert=...` made this DSN parse here and throw
+    // `Invalid URL` in pg, and the report named a host pg never reached.
+    ambient();
+    const ipv6 = "postgresql://u:p@[::1]:5433/db?sslcert=/tmp/foo bar";
+    expect(() => new Client({ connectionString: ipv6 }), "pg must still reject this").toThrow();
+    expect(redactDsn(ipv6)).toBe("postgresql (dsn not parseable)");
+    // The reverse direction: pg PARSES this one (it fails later, on the
+    // missing cert file), so the target must still be named.
+    const ipv4 = "postgresql://u:p@[127.0.0.1]:5433/db?sslcert=/tmp/foo bar";
+    let code = "";
+    try {
+      new Client({ connectionString: ipv4 });
+    } catch (error) {
+      code = String((error as { code?: string }).code ?? "");
+    }
+    expect(code, "pg parses this and fails on the file, not the URL").toBe("ENOENT");
+    expect(redactDsn(ipv4)).toBe("postgresql host [127.0.0.1] port 5433 database db");
+  });
+
+  it("strips SSL parameters whose keys carry characters WHATWG removes", () => {
+    // Round 9 BLOCKER. `new URL` strips TAB, LF and CR from a URL before
+    // parsing, so `?ssl<TAB>cert=` is `sslcert` to pg. A comparison done on
+    // the raw text saw a key it did not recognise, and read the file.
+    ambient();
+    for (const code of [9, 10, 13]) {
+      const key = `ssl${String.fromCharCode(code)}cert`;
+      const { reads } = readsDuring(() =>
+        redactDsn(`postgresql://u:p@127.0.0.1:5433/db?${key}=/etc/hosts`)
+      );
+      expect(
+        reads.filter(r => r.includes("/etc/hosts")),
+        `U+${code}`
+      ).toEqual([]);
+    }
+  });
+
+  it("agrees with pg about a DSN that begins with a character WHATWG trims", () => {
+    // Round 9 BLOCKER, both reviewers. The scheme gate tested the RAW string,
+    // so a leading tab made it answer "not parseable" while pg resolved the
+    // DSN perfectly. WHATWG trims leading C0 controls and spaces first.
+    for (const code of [9, 10, 13, 0, 27]) {
+      ambient();
+      const dsn = String.fromCharCode(code) + "postgresql://u:p@127.0.0.1:5433/db";
+      expect(expectAgreesWithPg(dsn), `U+${code}`).toBe(
+        "postgresql host 127.0.0.1 port 5433 database db"
+      );
+    }
+    // A leading SPACE is different and must NOT be trimmed away: it triggers
+    // pg's encodeURI branch, so pg resolves the dummy base host on port 5432.
+    // Reporting that truthfully is the point; it is a loud signal.
+    ambient();
+    expect(expectAgreesWithPg(" postgresql://u:p@127.0.0.1:5433/db")).toContain(
+      "host base port 5432"
+    );
+  });
+
+  it("escapes every character that breaks, reorders or COMMANDS a terminal", () => {
+    // Asserted on the RAW report, never through fieldsOf, which JSON.parses a
+    // quoted value and so cannot see escaping at all.
+    //
+    // Round 9: the enumerated set missed four. U+009B is the 8-bit CSI and this
+    // string goes to stderr, where `CSI 2J` ERASES THE SCREEN. U+061C was the
+    // one Bidi_Control the range missed. Hence a property test, not a list.
+    const UNSAFE =
+      /[\u0000-\u001F\u007F-\u009F\u2028\u2029\u2060-\u2064\uFEFF\u200B-\u200F]|\p{Bidi_Control}/u;
+    for (const encoded of [
+      "%C2%9B", // CSI
+      "%D8%9C", // Arabic Letter Mark
+      "%7F", // DEL
+      "%E2%81%A0", // word joiner
+      "%E2%80%A8", // line separator
+      "%E2%80%8E", // left-to-right mark
+      "%E2%80%AE", // right-to-left override
+      "%0A", // the round 7 case
+    ]) {
+      ambient();
+      const report = redactDsn(`postgresql://u:p@127.0.0.1:5433/db${encoded}x`);
+      expect(UNSAFE.test(report), encoded).toBe(false);
+      expect(report.split("\n"), encoded).toHaveLength(1);
+    }
+  });
+
+  it("quotes the words an annotation is written in", () => {
+    // Round 9: `?host=from` printed `postgresql host from port 5433`, and
+    // `(from PGHOST)` is how provenance is written. Same class as `?host=port`.
+    for (const word of ["from", "default"]) {
+      ambient();
+      expect(redactDsn(`postgresql://u:p@127.0.0.1:5433/db?host=${word}`), word).toBe(
+        `postgresql host "${word}" port 5433 database db`
+      );
     }
   });
 
