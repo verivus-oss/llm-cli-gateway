@@ -63,7 +63,56 @@ function pgTruth(dsn: string): { host: string; port: string; database: string } 
   };
 }
 
-/** The report must NAME each field pg resolved, whatever prose surrounds it. */
+/**
+ * Split a report into its labelled fields.
+ *
+ * Values are either a bare run of non-space characters or a JSON string, since
+ * `show()` quotes anything containing a space. So the delimiters can be walked
+ * left to right without a ` port ` INSIDE a quoted value being mistaken for the
+ * separator, which is what a lastIndexOf would do to
+ * `database "db port 9999 database other"`.
+ */
+function fieldsOf(report: string): { kind: string; host: string; port: string; database: string } {
+  let at = 0;
+  const eat = (literal: string): void => {
+    expect(report.slice(at, at + literal.length), `expected ${literal} at ${at} in ${report}`).toBe(
+      literal
+    );
+    at += literal.length;
+  };
+  const value = (): string => {
+    let raw: string;
+    if (report[at] === '"') {
+      // A JSON string, honouring escapes so an escaped quote does not end it.
+      let end = at + 1;
+      while (end < report.length && report[end] !== '"') end += report[end] === "\\" ? 2 : 1;
+      raw = report.slice(at, end + 1);
+      at = end + 1;
+    } else {
+      const end = report.indexOf(" ", at);
+      raw = report.slice(at, end === -1 ? report.length : end);
+      at = end === -1 ? report.length : end;
+    }
+    // An annotation such as ` (from PGPORT)` belongs to this field, not the next.
+    if (report.startsWith(" (", at)) {
+      const close = report.indexOf(")", at);
+      at = close === -1 ? report.length : close + 1;
+    }
+    return raw.startsWith('"') ? (JSON.parse(raw) as string) : raw;
+  };
+  eat("postgresql ");
+  const kind = value();
+  eat(" ");
+  const host = value();
+  eat(" port ");
+  const port = value();
+  eat(" database ");
+  const database = value();
+  expect(at, `trailing text in ${report}`).toBe(report.length);
+  return { kind, host, port, database };
+}
+
+/** Each field pg resolved must be THAT field in the report, not merely present. */
 function expectAgreesWithPg(dsn: string): string {
   const report = redactDsn(dsn);
   const truth = pgTruth(dsn);
@@ -72,9 +121,16 @@ function expectAgreesWithPg(dsn: string): string {
   // used `[foo]` passed. An oracle that edits the truth to match the answer is
   // not an oracle. For `[]` it was worse: the bare form was "" and
   // `toContain("")` is tautologically true, so that case asserted nothing.
-  expect(report, `host for ${dsn}`).toContain(truth.host);
-  expect(report, `port for ${dsn}`).toContain(truth.port);
-  expect(report, `database for ${dsn}`).toContain(truth.database);
+  //
+  // POSITIONAL, not substring. `toContain` searched the whole report, so one
+  // field could satisfy another's assertion: for `/db5433` the database name
+  // alone satisfied `toContain(port)`, and the port could have been wrong or
+  // missing with the check still green. Found by auditing this helper rather
+  // than the production code.
+  const got = fieldsOf(report);
+  expect(got.host, `host for ${dsn}`).toBe(truth.host);
+  expect(got.port, `port for ${dsn}`).toBe(truth.port);
+  expect(got.database, `database for ${dsn}`).toBe(truth.database);
   return report;
 }
 
