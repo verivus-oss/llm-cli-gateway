@@ -15,7 +15,7 @@
 import fs from "fs";
 import { createRequire } from "module";
 import { afterEach, describe, expect, it } from "vitest";
-import { redactDsn } from "../flight-recorder-pg.js";
+import { redactDsn, withoutSslFileParams } from "../flight-recorder-pg.js";
 
 const require = createRequire(import.meta.url);
 const { Client } = require("pg") as {
@@ -72,6 +72,22 @@ function expectAgreesWithPg(dsn: string): string {
   return report;
 }
 
+/** Runs `fn` with fs.readFileSync watched, and reports what it read. */
+function readsDuring(fn: () => string): { reads: string[]; result: string } {
+  const reads: string[] = [];
+  const real = fs.readFileSync;
+  const spy = ((path: unknown, ...rest: unknown[]) => {
+    reads.push(String(path));
+    return (real as (...a: unknown[]) => unknown)(path, ...rest);
+  }) as typeof fs.readFileSync;
+  (fs as { readFileSync: typeof fs.readFileSync }).readFileSync = spy;
+  try {
+    return { reads, result: fn() };
+  } finally {
+    (fs as { readFileSync: typeof fs.readFileSync }).readFileSync = real;
+  }
+}
+
 describe("redactDsn names the server pg will actually reach", () => {
   it("never emits a URI-SHAPED report, so none can be pasted back as a DSN", () => {
     // Round 6's defect: the round 5 fix annotated provenance INSIDE a URI.
@@ -111,21 +127,11 @@ describe("redactDsn names the server pg will actually reach", () => {
     // /dev/zero on one of those parameters would hang or exhaust the process
     // before anything connected. None of the three can move the target.
     ambient();
-    const reads: string[] = [];
-    const real = fs.readFileSync;
-    const spy = ((path: unknown, ...rest: unknown[]) => {
-      reads.push(String(path));
-      return (real as (...a: unknown[]) => unknown)(path, ...rest);
-    }) as typeof fs.readFileSync;
-    (fs as { readFileSync: typeof fs.readFileSync }).readFileSync = spy;
-    let report: string;
-    try {
-      report = redactDsn(
+    const { reads, result: report } = readsDuring(() =>
+      redactDsn(
         "postgresql://u:p@127.0.0.1:5433/db?sslcert=/etc/hosts&sslkey=/etc/hosts&sslrootcert=/etc/hosts&host=elsewhere"
-      );
-    } finally {
-      (fs as { readFileSync: typeof fs.readFileSync }).readFileSync = real;
-    }
+      )
+    );
     expect(reads.filter(r => r.includes("/etc/hosts"))).toEqual([]);
     // Stripping those parameters must not lose the ones that MOVE the target.
     expect(report).toBe("postgresql host elsewhere port 5433 database db");
@@ -311,6 +317,55 @@ describe("redactDsn names the server pg will actually reach", () => {
     );
   });
 
+  it("still names the target when the DSN points at SSL material that is missing", () => {
+    // Deliberate divergence from `new Client({connectionString})`, pinned here
+    // so it is not mistaken for the target disagreement this file exists to
+    // prevent. pg's constructor ALSO validates SSL material and throws ENOENT
+    // for a cert that does not exist; this function strips those parameters, so
+    // it answers where the connection was going. That is what makes it useful
+    // in the error message about the failure. Measured: with a cert file that
+    // DOES exist, pg resolves host `good`, exactly what is reported here.
+    ambient();
+    expect(
+      redactDsn("postgresql://u:p@127.0.0.1:5433/db?sslcert=/nonexistent/cert.pem&host=good")
+    ).toBe("postgresql host good port 5433 database db");
+  });
+
+  it("strips SSL file parameters in every form without moving the target", () => {
+    // A stripper that dropped the wrong parameter would change the reported
+    // target, which is worse than the disk read it exists to prevent.
+    ambient();
+    const withOverride = "postgresql host elsewhere port 5433 database db";
+    for (const query of [
+      "sslcert=/etc/hosts&host=elsewhere",
+      "SSLCERT=/etc/hosts&host=elsewhere",
+      "sslcert=/etc/hosts&sslcert=/etc/hosts&host=elsewhere",
+      "sslcert&host=elsewhere",
+      "host=elsewhere&sslkey=/etc/hosts",
+      "host=elsewhere&sslrootcert=/etc/hosts",
+      "sslcert=/etc/hosts&host=elsewhere#frag",
+    ]) {
+      const { reads, result } = readsDuring(() =>
+        redactDsn(`postgresql://u:p@127.0.0.1:5433/db?${query}`)
+      );
+      // BOTH properties. Asserting only the target made this blind: a stripper
+      // that missed the uppercase form still reported `elsewhere`, because
+      // /etc/hosts EXISTS so the read succeeds and moves nothing. The read is
+      // the harm, so the read is what has to be asserted. Three mutations
+      // applied cleanly against the target-only version and failed nothing.
+      expect(
+        reads.filter(r => r.includes("/etc/hosts")),
+        query
+      ).toEqual([]);
+      expect(result, query).toBe(withOverride);
+    }
+    // A key that merely STARTS with a stripped name must survive, or an
+    // unrelated parameter would be silently dropped.
+    expect(redactDsn("postgresql://u:p@127.0.0.1:5433/db?sslcertificate=x&host=elsewhere")).toBe(
+      withOverride
+    );
+  });
+
   it("refuses a string that is not a PostgreSQL DSN rather than inventing a target", () => {
     // pg's parser does not throw on garbage: parse("not a dsn") returns
     // { host: "base", database: "not a dsn" }, so it cannot decide whether the
@@ -329,5 +384,64 @@ describe("redactDsn names the server pg will actually reach", () => {
     expect(expectAgreesWithPg("postgres://u:p@127.0.0.1:5432/db")).toBe(
       "postgresql host 127.0.0.1 port 5432 database db"
     );
+  });
+});
+
+describe("the SSL-parameter stripper itself", () => {
+  // Called directly. Two of its branches are broader than pg and so cannot be
+  // seen through redactDsn: pg does not read a file for an uppercase SSLCERT,
+  // and pg ignores fragments. Mutating either failed nothing until this
+  // describe existed, which is the whole reason it exists.
+  it("removes exactly the three file-reading parameters, whatever their case", () => {
+    expect(withoutSslFileParams("postgresql://h/db?sslcert=/x&host=e")).toBe(
+      "postgresql://h/db?host=e"
+    );
+    expect(withoutSslFileParams("postgresql://h/db?SSLCERT=/x&host=e")).toBe(
+      "postgresql://h/db?host=e"
+    );
+    expect(withoutSslFileParams("postgresql://h/db?SslKey=/x&host=e")).toBe(
+      "postgresql://h/db?host=e"
+    );
+    expect(withoutSslFileParams("postgresql://h/db?sslrootcert=/x&host=e")).toBe(
+      "postgresql://h/db?host=e"
+    );
+    expect(withoutSslFileParams("postgresql://h/db?sslcert=/x&sslkey=/y&sslrootcert=/z")).toBe(
+      "postgresql://h/db"
+    );
+  });
+
+  it("keeps a parameter that merely STARTS with one of the three names", () => {
+    // A prefix match here would silently drop an unrelated parameter, and if
+    // that parameter were `host` or `port` it would move the reported target.
+    expect(withoutSslFileParams("postgresql://h/db?sslcertificate=x&host=e")).toBe(
+      "postgresql://h/db?sslcertificate=x&host=e"
+    );
+    expect(withoutSslFileParams("postgresql://h/db?sslmode=require")).toBe(
+      "postgresql://h/db?sslmode=require"
+    );
+  });
+
+  it("keeps the fragment, wherever the stripped parameter sits", () => {
+    // With the stripped parameter LAST, a naive split takes the fragment with
+    // it. pg ignores fragments, so redactDsn cannot see this; the stripper's
+    // contract is still to return the same DSN minus those parameters.
+    expect(withoutSslFileParams("postgresql://h/db?host=e&sslcert=/x#frag")).toBe(
+      "postgresql://h/db?host=e#frag"
+    );
+    expect(withoutSslFileParams("postgresql://h/db?sslcert=/x#frag")).toBe(
+      "postgresql://h/db#frag"
+    );
+  });
+
+  it("leaves a DSN it has no business touching exactly as it found it", () => {
+    for (const dsn of [
+      "postgresql://h/db",
+      "postgresql://h/db?",
+      "postgresql://h/db?host=e",
+      "postgresql://h/db#frag",
+      "postgresql://h/sslcert=x",
+    ]) {
+      expect(withoutSslFileParams(dsn), dsn).toBe(dsn);
+    }
   });
 });

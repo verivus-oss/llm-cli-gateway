@@ -269,7 +269,15 @@ function loadPgTargetResolvers(): {
  */
 const SSL_FILE_PARAMS = new Set(["sslcert", "sslkey", "sslrootcert"]);
 
-function withoutSslFileParams(dsn: string): string {
+/**
+ * Exported for its own tests. Two of its branches are deliberately BROADER
+ * than pg and therefore invisible from `redactDsn`'s output: pg does not read
+ * a file for an UPPERCASE `SSLCERT` (measured), and pg ignores fragments
+ * entirely, so neither branch changes what `redactDsn` returns. Mutating them
+ * failed nothing until this function could be called directly. An untestable
+ * branch is a liability whether or not it is correct.
+ */
+export function withoutSslFileParams(dsn: string): string {
   const start = dsn.indexOf("?");
   if (start < 0) return dsn;
   // Split the fragment off first: `?a=1#frag` must not fold the fragment into
