@@ -18,11 +18,8 @@ import {
 import { noopLogger } from "../logger.js";
 import type { KitExecutionRef } from "../personal-config-types.js";
 import { FileSessionManager } from "../session-manager.js";
-import { cleanTestDatabase, setupTestDatabase } from "./setup.js";
+import { TEST_DATABASE_URL, cleanTestDatabase, setupTestDatabase } from "./setup.js";
 import { eagerMintFromJobId } from "../validation-receipt.js";
-
-const TEST_DATABASE_URL =
-  process.env.TEST_DATABASE_URL || "postgresql://test:test@localhost:5433/llm_gateway_test";
 
 function kitExecution(overrides: Partial<KitExecutionRef> = {}): KitExecutionRef {
   return {

@@ -15,9 +15,7 @@ import {
 } from "../storage/drivers/postgres.js";
 import { StorageTransactionDeadlineError } from "../storage/deadline.js";
 import type { StorageRole } from "../storage/roles.js";
-
-const TEST_DATABASE_URL =
-  process.env.TEST_DATABASE_URL || "postgresql://test:test@localhost:5433/llm_gateway_test";
+import { TEST_DATABASE_URL } from "./setup.js";
 
 /** Several backends, so "which connection ran this" is a real question. */
 const POOL_MAX = 6;

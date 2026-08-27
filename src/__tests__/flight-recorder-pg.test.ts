@@ -14,11 +14,11 @@ import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
 import { readdirSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { Pool } from "pg";
-import { PostgresFlightRecorder, redactDsn } from "../flight-recorder-pg.js";
+import { PostgresFlightRecorder } from "../flight-recorder-pg.js";
 import type { FlightLogResult, FlightLogStart } from "../flight-recorder.js";
+import { TEST_DATABASE_URL } from "./setup.js";
 
-const BASE_DSN =
-  process.env.TEST_DATABASE_URL || "postgresql://test:test@localhost:5433/llm_gateway_test";
+const BASE_DSN = TEST_DATABASE_URL;
 const SCHEMA = `flight_pg_${process.pid}`;
 const MIRROR = `${SCHEMA}_mirror`;
 
@@ -321,9 +321,10 @@ describe("a whole transcript round trip", () => {
   });
 
   it("does not put a password on a health surface", () => {
-    expect(redactDsn("postgresql://u:sup3rsecret@127.0.0.1:5432/gw")).toBe(
-      "postgresql://127.0.0.1:5432/gw"
-    );
+    // redactDsn itself is unit-tested in dsn-target-report.test.ts, which is
+    // NOT gated on PG_TESTS. Round 6 found every assertion about it living
+    // here, so `npm test` was green for four rounds while the function
+    // reported a server pg does not connect to.
     expect(recorder.health().path).not.toContain("test:test");
   });
 });

@@ -47,6 +47,17 @@ jobs:
     # runner-split expression AND keep a linux self-hosted runner online for PRs.
     runs-on: ${{ github.repository == 'verivus-oss/llm-cli-gateway' && 'ubuntu-latest' || fromJSON('["self-hosted","Linux","X64","x86_64","workhorse3","gateway"]') }}
     steps:
+      # ONE fence per job, not one per step. Node's tmpdir() is /tmp unless
+      # TMPDIR says otherwise, and on the self-hosted host /tmp is a single
+      # 8 GB tmpfs SHARED by twelve runner units; filling it has already failed
+      # 220 unrelated suites. $GITHUB_ENV applies to every LATER step, so a new
+      # step inherits this instead of needing its own `env:`. RUNNER_TEMP
+      # rather than ${{ runner.temp }}: that context is unavailable in a
+      # job-level `env:` and expands to the empty string there.
+      - name: Keep temporary files off the shared /tmp
+        run: |
+          printf 'TMPDIR=%s\nTMP=%s\nTEMP=%s\n' \
+            "$RUNNER_TEMP" "$RUNNER_TEMP" "$RUNNER_TEMP" >> "$GITHUB_ENV"
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
         with:
           # Drop the auth token from .git/config after checkout so it cannot be

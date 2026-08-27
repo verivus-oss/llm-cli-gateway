@@ -1,5 +1,12 @@
-node_modules/
-dist/
+# NO TRAILING SLASHES on plain directory names, deliberately.
+# `foo/` matches a DIRECTORY only. A SYMLINK named `foo` is not matched, so
+# `git add -A` commits it. That happened twice on one branch: a `node_modules`
+# symlink pointing at the main checkout broke every npm job in CI, and the
+# `.scratch/` entry added to prevent a repeat had a trailing slash and did not.
+# A bare name matches a file, a directory and a symlink alike, which is what
+# every entry below actually wants. Globs and the `!` negation keep their form.
+node_modules
+dist
 
 # Prod-only shrinkwrap: GENERATED at pack/publish time by
 # scripts/make-prod-shrinkwrap.mjs and shipped in the npm tarball only.
@@ -13,18 +20,18 @@ mcp-publisher
 server.json
 
 # Python build artifacts
-__pycache__/
+__pycache__
 *.py[cod]
 *.egg-info/
 *.egg
-.eggs/
-build/
+.eggs
+build
 *.dist-info/
 
 # sqry tool cache (generated per-index; not source)
-.sqry/
-.sqry-cache/
-.sqry-index/
+.sqry
+.sqry-cache
+.sqry-index
 .preexisting-doctor-index.patch.bak
 .review-unit-*-prompt.md
 docs/personal-mcp/socket-release-assessment-prompt.md
@@ -34,12 +41,12 @@ docs/personal-mcp/socket-release-assessment-prompt.md
 # Track internal skills (e.g. supply-chain-guard) while ignoring local .claude state.
 !.claude/skills/
 !.claude/skills/**
-.gateway/
-.worktrees/
+.gateway
+.worktrees
 .r3-poll.mjs
 
 # Host-specific restart/deployment notes for this private checkout.
-.agents/skills/gateway-restart-surfaces/
+.agents/skills/gateway-restart-surfaces
 docs/plans/hybrid-multi-agent-playbook-evolution.dag.toml
 
 # Internal agent working guide — internal repo/release context, must not ship
@@ -51,11 +58,11 @@ windows-mcp-config-with-gateway.json
 # Stray pnpm artifacts (this repo uses npm; reject reviewer-tool drift)
 pnpm-lock.yaml
 pnpm-workspace.yaml
-.playwright-mcp/
-.supply-chain/
+.playwright-mcp
+.supply-chain
 
 # Reviewer/agent scratch: vibe writes .vibe/tmp when run with workingDir here
-.vibe/
+.vibe
 
 # Host-local records, never committed. This repo mirrors to a public GitHub
 # repo, and internal process is not product. Plans stay public and carry the
@@ -67,6 +74,18 @@ pnpm-workspace.yaml
 docs/audits
 docs/evidence
 
-# Review briefs: process, not product. Same reason as docs/audits.
+# Review briefs and their verification records: process, not product, and they
+# must never reach the public mirror. Same reason as docs/audits.
+#
+# The two patterns below were written for the exact filenames in front of me at
+# the time and matched nothing since: VERIFICATION-R6.md and BRIEF-R6.md both
+# sat untracked-but-VISIBLE for a whole round. Untracked is not safe here, it
+# is one `git add -A` away from published, and this session has already swept
+# up a node_modules symlink, .scratch and a .msg file that way. Match the
+# PREFIX, so the next round's filename is covered before it is invented.
 REVIEW-SPEC-*.md
+VERIFICATION-*.md
+BRIEF-*.md
 *-VERIFICATION-REPORT.md
+.scratch
+.msg

@@ -1,0 +1,366 @@
+#!/usr/bin/env node
+//
+// Guards and prepares the PostgreSQL test fixture.
+//
+// This exists because the reset is DESTRUCTIVE. `cleanTestDatabase` issues
+// `DELETE FROM` across nine tables and this script issues `DROP DATABASE`, and
+// the operator's live gateway database listens on the neighbouring port on the
+// same loopback address. A transposed digit is the whole distance between a
+// test fixture and data loss, so the destination is proved to be a fixture
+// before anything destructive runs, and refusal is the default.
+//
+// THE PARSER TRAP, and why this file no longer forwards the caller's string.
+// A first version validated the WHATWG `URL` authority and then handed the
+// ORIGINAL string to `pg`. Those are two different parsers.
+// `pg-connection-string` copies query parameters FIRST and only falls back to
+// the authority when `host`/`port` are absent, so
+//     postgresql://test:x@127.0.0.1:5433/llm_gateway_test?port=5432
+// passed a guard reading 5433 and connected to 5432. Validating one
+// representation and using another is not a fence.
+//
+// So: query strings and fragments are refused outright, and every consumer
+// downstream is handed a DSN this file REBUILDS from the validated fields. The
+// string that was checked is the string that gets used.
+//
+// stdout is exactly one line, the canonical DSN, so callers can capture it.
+// All progress goes to stderr.
+//
+// `psql` and `pg_isready` are not installed for the CI user, so readiness and
+// reset both go through `pg` rather than shell tools.
+import process from "node:process";
+
+/**
+ * THE fixture, declared once.
+ *
+ * Host, port, database and credentials were previously spelled out separately
+ * in this file, in `scripts/test-pg.sh` twice, in `ci.yml`, and in
+ * `src/__tests__/setup.ts`. Changing the port meant four edits with nothing
+ * catching a miss. Everything that needs to name the fixture now derives it
+ * from here.
+ *
+ * 127.0.0.1 only: `localhost` is a name whose resolution is not pinned, and
+ * `[::1]` parses cleanly but neither `pg` nor `dns.lookup` accepts the
+ * bracketed form, so allowing it advertised a route that does not exist.
+ */
+export const FIXTURE = Object.freeze({
+  host: "127.0.0.1",
+  port: 5433,
+  database: "llm_gateway_test",
+  user: "test",
+  password: "test",
+  container: "llm-gateway-pg-ci",
+  volume: "llm-gateway-pg-ci-data",
+  image: "postgres:17-alpine",
+});
+
+const FIXTURE_DATABASE = FIXTURE.database;
+const FIXTURE_HOST = FIXTURE.host;
+// The operator's live database. Never a valid fixture, on any host, ever.
+// Deliberately NOT derived from FIXTURE: it is a different thing, and tying
+// the two together would let a change to one silently move the other.
+const FORBIDDEN_PORT = "5432";
+const ALLOWED_PROTOCOLS = new Set(["postgres:", "postgresql:"]);
+
+function die(message) {
+  process.stderr.write(`pg-fixture: ${message}\n`);
+  process.exit(1);
+}
+
+/**
+ * Proves a DSN addresses a disposable test fixture, and returns the pieces to
+ * rebuild it from. Every check is a refusal, not a warning: anything
+ * unexpected fails closed.
+ */
+export function assertFixtureDsn(raw, fail = die) {
+  let url;
+  try {
+    url = new URL(raw);
+  } catch {
+    return fail("TEST_DATABASE_URL is not a parseable URL. Refusing to touch it.");
+  }
+
+  if (!ALLOWED_PROTOCOLS.has(url.protocol)) {
+    return fail(`refusing protocol ${url.protocol}. Expected postgres: or postgresql:.`);
+  }
+
+  // The bypass that round 2 found. `?host=` and `?port=` override the authority
+  // inside pg's parser, so a DSN carrying ANY of them is refused rather than
+  // sanitised: there is no legitimate reason for a fixture DSN to have one.
+  if (url.search !== "") {
+    return fail(
+      `refusing a DSN with query parameters (${url.search}). ` +
+        "pg reads host and port from those in preference to the URL authority, " +
+        "so they can redirect a DROP DATABASE past every check here."
+    );
+  }
+  if (url.hash !== "") {
+    return fail("refusing a DSN with a fragment.");
+  }
+
+  if (url.hostname !== FIXTURE_HOST) {
+    return fail(
+      `refusing host ${url.hostname}. The fixture is at ${FIXTURE_HOST} and ` +
+        "nothing else is disposable."
+    );
+  }
+
+  // Explicit, because an absent port means 5432 to every PostgreSQL client.
+  if (url.port === "") {
+    return fail(
+      "refusing a DSN with no port. An absent port means 5432, which is the " +
+        "operator's live database. State the fixture port."
+    );
+  }
+  if (url.port === FORBIDDEN_PORT) {
+    return fail(
+      `refusing port ${FORBIDDEN_PORT}. That is the operator's live gateway ` +
+        "database, not a test fixture."
+    );
+  }
+  // Round 3's blocker. `pg` resolves its config with a TRUTHY test, so a
+  // field-wise `port: 0` reads as absent and falls back to 5432. Port zero
+  // therefore MEANS the operator's live database exactly as an omitted port
+  // does, while looking like a stated one. Anything outside a real TCP port is
+  // refused rather than just zero, so no other falsy or nonsense value can
+  // reach the same fallback.
+  const port = Number(url.port);
+  if (!Number.isInteger(port) || port < 1 || port > 65535) {
+    return fail(
+      `refusing port ${JSON.stringify(url.port)}. A port pg treats as absent ` +
+        "falls back to 5432, which is the operator's live database."
+    );
+  }
+
+  // `pg` resolves each field with a truthy test (`config[key] || env || default`),
+  // so any falsy value is silently replaced by ambient state. Round 3 closed
+  // that for port, round 4 for user and password.
+  //
+  // SCOPE, stated precisely because an earlier version of this comment
+  // overclaimed. What is pinned is the five IDENTITY fields: host, port, user,
+  // password and database. pg's `val()` also reads PGOPTIONS, PGAPPNAME,
+  // PGSSLMODE, client_encoding, replication and the timeouts, and those remain
+  // ambient for a field-wise client. They cannot retarget the connection, which
+  // is what this guard is for, but "every field pg resolves" would be false.
+  const user = decodeURIComponent(url.username);
+  if (user !== FIXTURE.user) {
+    return fail(
+      `refusing user ${JSON.stringify(user)}. The fixture connects as ` +
+        `${JSON.stringify(FIXTURE.user)}; an empty or different user is replaced by ` +
+        "PGUSER or the OS user."
+    );
+  }
+
+  // An empty password is NOT "no password": pg substitutes PGPASSWORD from the
+  // environment, so the reset would authenticate with a secret the DSN never
+  // stated. Refuse it rather than let ambient state decide.
+  const password = decodeURIComponent(url.password);
+  if (password !== FIXTURE.password) {
+    return fail(
+      password === ""
+        ? "refusing a DSN with an empty password. pg replaces a falsy password " +
+            "with PGPASSWORD, so the connection would use a credential the DSN " +
+            "did not state."
+        : "refusing a password the fixture does not use. The credential, user " +
+            "and database are pinned to FIXTURE; the PORT deliberately is not, " +
+            "so that PG_TEST_PORT can start a second throwaway server. Anything " +
+            "answering on another port with another password is not the fixture."
+    );
+  }
+
+  const database = decodeURIComponent(url.pathname.replace(/^\//, ""));
+  if (database !== FIXTURE_DATABASE) {
+    return fail(
+      `refusing database ${JSON.stringify(database)}. The fixture is ` +
+        `${JSON.stringify(FIXTURE_DATABASE)} and nothing else is disposable.`
+    );
+  }
+
+  return {
+    host: FIXTURE_HOST,
+    port,
+    user,
+    password,
+    database,
+  };
+}
+
+/** Rebuilds a DSN from validated fields. Never echoes the caller's string. */
+export function canonicalDsn(f, database = f.database) {
+  const user = encodeURIComponent(f.user);
+  const password = encodeURIComponent(f.password);
+  const auth = password === "" ? user : `${user}:${password}`;
+  return `postgresql://${auth}@${f.host}:${f.port}/${encodeURIComponent(database)}`;
+}
+
+/** The fixture DSN every caller defaults to. Built from FIXTURE, never typed out. */
+export function defaultFixtureDsn() {
+  return canonicalDsn(FIXTURE);
+}
+
+/**
+ * FIXTURE as shell assignments, for `eval "$(node scripts/pg-fixture.mjs --print-env)"`.
+ *
+ * The quoting lives here rather than in an embedded `node -e` inside the shell
+ * script: that form made the script carry JavaScript template syntax inside
+ * single quotes, which shellcheck flags (SC2016) and which put the escaping
+ * rules somewhere nothing could test.
+ */
+/**
+ * POSIX single-quote a value for `eval`.
+ *
+ * EXPORTED so a test can call THIS function. Round 5 found the previous test
+ * defined its own copy of the quoting and asserted on that, so breaking the
+ * real escaping left every test green: FIXTURE holds no apostrophe today, so
+ * the shape check could not see it either. A test that reimplements the code it
+ * is testing proves the test, not the code.
+ */
+export function shellQuote(value) {
+  return `'${String(value).replace(/'/g, `'\\''`)}'`;
+}
+
+export function printEnv() {
+  const q = shellQuote;
+  return [
+    `FIXTURE_HOST=${q(FIXTURE.host)}`,
+    `FIXTURE_PORT=${q(FIXTURE.port)}`,
+    `FIXTURE_DB=${q(FIXTURE.database)}`,
+    `FIXTURE_USER=${q(FIXTURE.user)}`,
+    `FIXTURE_PASSWORD=${q(FIXTURE.password)}`,
+    `FIXTURE_IMAGE=${q(FIXTURE.image)}`,
+    `FIXTURE_DSN=${q(defaultFixtureDsn())}`,
+  ].join("\n");
+}
+
+/** The command that recreates the fixture, generated so it cannot drift from FIXTURE. */
+export function recreateCommand() {
+  return [
+    `  podman run -d --name ${FIXTURE.container} --restart=always \\`,
+    `    -e POSTGRES_DB=${FIXTURE.database} -e POSTGRES_USER=${FIXTURE.user}` +
+      ` -e POSTGRES_PASSWORD=${FIXTURE.password} \\`,
+    `    -p ${FIXTURE.host}:${FIXTURE.port}:5432 -v ${FIXTURE.volume}:/var/lib/postgresql/data \\`,
+    `    ${FIXTURE.image}`,
+  ].join("\n");
+}
+
+/** Safe to print: identity only, never credentials. */
+export function describeFixture(f) {
+  return `${f.host}:${f.port}/${f.database}`;
+}
+
+/**
+ * Three consecutive successes, not one. The postgres entrypoint runs a local
+ * server for initdb and restarts it before listening for real, so a single
+ * probe can pass against a server that is about to go away.
+ */
+async function waitReady(Client, config, timeoutSeconds) {
+  let consecutive = 0;
+  let lastError;
+  for (let attempt = 0; attempt < timeoutSeconds; attempt += 1) {
+    const client = new Client({ ...config, connectionTimeoutMillis: 2000 });
+    try {
+      await client.connect();
+      await client.query("SELECT 1");
+      consecutive += 1;
+      if (consecutive >= 3) return { ready: true };
+    } catch (error) {
+      consecutive = 0;
+      lastError = error;
+    } finally {
+      await client.end().catch(() => {});
+    }
+    await new Promise(resolve => setTimeout(resolve, 1000));
+  }
+  return { ready: false, lastError };
+}
+
+async function main() {
+  const raw = process.argv[2];
+  if (raw === "--print-env") {
+    process.stdout.write(`${printEnv()}\n`);
+    return;
+  }
+  if (!raw) die("usage: pg-fixture.mjs <dsn> | --print-env");
+
+  const fixture = assertFixtureDsn(raw);
+
+  let Client;
+  try {
+    ({ Client } = await import("pg"));
+  } catch {
+    die("the optional `pg` dependency is not installed.");
+  }
+
+  // Field-wise config, never a connection string: this is what makes the
+  // validated target and the connected target the same thing. Reset runs
+  // against the maintenance database, because a session connected to the
+  // fixture would block its own DROP.
+  const admin = { ...fixture, database: "postgres" };
+
+  const timeoutSeconds = Number(process.env.PG_TEST_READY_TIMEOUT || "120");
+  process.stderr.write(`pg-fixture: waiting for ${describeFixture(fixture)}\n`);
+  const { ready, lastError } = await waitReady(Client, admin, timeoutSeconds);
+  if (!ready) {
+    // Distinguish "nothing is listening" from "it answered and refused us".
+    // Reporting an auth or configuration fault as a missing server sends the
+    // reader to the wrong place entirely.
+    const code = lastError && lastError.code;
+    const reason =
+      code === "ECONNREFUSED" || code === "ENOTFOUND" || code === "EHOSTUNREACH"
+        ? "The fixture server is not running. This is a MISSING FIXTURE, not a " +
+          "test failure. It is a long-lived container the CI job deliberately " +
+          "does not own, so recreate it on the runner host as the operator user:\n" +
+          recreateCommand()
+        : `The server answered but the connection failed: ${lastError ? lastError.message : "unknown"}`;
+    die(`${describeFixture(fixture)} unreachable after ${timeoutSeconds}s. ${reason}`);
+  }
+
+  const client = new Client(admin);
+  await client.connect();
+  try {
+    // WITH (FORCE) terminates other backends. Without it an abandoned
+    // connection from a killed run makes the drop hang rather than fail.
+    await client.query(`DROP DATABASE IF EXISTS ${fixture.database} WITH (FORCE)`);
+    await client.query(`CREATE DATABASE ${fixture.database}`);
+
+    // `DROP DATABASE` does not remove cluster-wide ROLES, and both
+    // migration-pg.test.ts and job-store-pg.test.ts create login roles whose
+    // `finally` a cancelled run can skip. Schemas need no such sweep: they live
+    // INSIDE the fixture database and die with it.
+    //
+    // ESCAPE the underscores. In LIKE, `_` is a single-character wildcard, so
+    // an unescaped `migration_runtime_%` also matches `migrationXruntimeY`.
+    // The action here is a cluster-wide DROP ROLE, so the pattern is written to
+    // match exactly the two prefixes these suites build and nothing else.
+    const stale = await client.query(
+      `SELECT rolname FROM pg_roles
+        WHERE rolname LIKE 'migration\\_runtime\\_%' ESCAPE '\\'
+           OR rolname LIKE 'job\\_store\\_runtime\\_%' ESCAPE '\\'`
+    );
+    for (const row of stale.rows) {
+      await client.query(`DROP ROLE IF EXISTS "${row.rolname.replace(/"/g, '""')}"`);
+    }
+    if (stale.rowCount > 0) {
+      process.stderr.write(`pg-fixture: dropped ${stale.rowCount} stale test role(s)\n`);
+    }
+  } finally {
+    await client.end().catch(() => {});
+  }
+
+  process.stderr.write(`pg-fixture: ${describeFixture(fixture)} reset\n`);
+
+  // The ONLY thing on stdout: the DSN rebuilt from validated fields. The
+  // caller captures this with $(...), which strips ONE trailing newline and
+  // keeps any others, and pg then removes an embedded newline and honours what
+  // follows. So a second line beginning `?port=5432` would be a bypass wearing
+  // the shape of a formatting bug. Enforced rather than left to a comment.
+  const emitted = canonicalDsn(fixture);
+  if (/[\r\n]/.test(emitted)) {
+    die("refusing to emit a multi-line DSN; the caller would capture both lines.");
+  }
+  process.stdout.write(`${emitted}\n`);
+}
+
+// Only run when invoked directly, so the validator can be unit tested.
+if (process.argv[1] && import.meta.url === `file://${process.argv[1]}`) {
+  main().catch(error => die(error instanceof Error ? error.message : String(error)));
+}

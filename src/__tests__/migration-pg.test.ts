@@ -23,15 +23,18 @@ import {
   type KitSessionBinding,
 } from "../personal-config-types.js";
 import { runWithRequestContext } from "../request-context.js";
-import { setupTestDatabase, setupTestStorageDriver, cleanTestDatabase } from "./setup.js";
+import {
+  TEST_DATABASE_URL,
+  cleanTestDatabase,
+  setupTestDatabase,
+  setupTestStorageDriver,
+} from "./setup.js";
 import { readdirSync, readFileSync, writeFileSync, mkdirSync, rmSync } from "fs";
 import { join } from "path";
 import { tmpdir } from "os";
 import { promisify } from "util";
 
 const execFileAsync = promisify(execFile);
-const TEST_DATABASE_URL =
-  process.env.TEST_DATABASE_URL || "postgresql://test:test@localhost:5433/llm_gateway_test";
 
 /**
  * The migration set, DERIVED from the directory rather than transcribed.
