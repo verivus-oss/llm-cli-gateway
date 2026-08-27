@@ -26,6 +26,8 @@ const { Client } = require("pg") as {
   };
 };
 
+const BS = String.fromCharCode(92);
+
 const AMBIENT = ["PGHOST", "PGPORT", "PGDATABASE", "PGUSER"] as const;
 const saved = new Map<string, string | undefined>();
 
@@ -65,8 +67,12 @@ function pgTruth(dsn: string): { host: string; port: string; database: string } 
 function expectAgreesWithPg(dsn: string): string {
   const report = redactDsn(dsn);
   const truth = pgTruth(dsn);
-  const bare = truth.host.startsWith("[") ? truth.host.slice(1, -1) : truth.host;
-  expect(report, `host for ${dsn}`).toContain(bare);
+  // NO normalisation of the truth. Round 8: this stripped brackets from the
+  // expected host before comparing, so `?host=[foo]` reporting `foo` while pg
+  // used `[foo]` passed. An oracle that edits the truth to match the answer is
+  // not an oracle. For `[]` it was worse: the bare form was "" and
+  // `toContain("")` is tautologically true, so that case asserted nothing.
+  expect(report, `host for ${dsn}`).toContain(truth.host);
   expect(report, `port for ${dsn}`).toContain(truth.port);
   expect(report, `database for ${dsn}`).toContain(truth.database);
   return report;
@@ -174,16 +180,44 @@ describe("redactDsn names the server pg will actually reach", () => {
     );
   });
 
-  it("brackets IPv6 whichever side it arrives from", () => {
-    // The authority form arrives bracketed; ?host= arrives bare. Unbracketed
-    // output read as `::1:5433`, which is ambiguous about where the port is.
+  it("reports the host EXACTLY as pg resolved it, adding and removing nothing", () => {
+    // There used to be bracket normalisation here, to disambiguate `::1:5433`
+    // in the old URI-shaped report. The report has not been URI-shaped since
+    // round 7: host and port are separate labelled fields, so there is nothing
+    // to disambiguate, and the rule had become a pure source of disagreement.
+    // Round 8 measured four, including `?host=[foo]` reported as `foo`.
     ambient();
+    // Bare from ?host=, bracketed from the authority. Both pass through.
     expect(expectAgreesWithPg("postgresql://u:p@127.0.0.1:5432/db?host=::1")).toBe(
-      "postgresql host [::1] port 5432 database db"
+      "postgresql host ::1 port 5432 database db"
     );
     expect(expectAgreesWithPg("postgresql://u:p@[::1]:5433/db")).toBe(
       "postgresql host [::1] port 5433 database db"
     );
+    // The four round-8 disagreements, each now identical to pg.
+    for (const [query, expected] of [
+      ["%5Bfoo%5D", "[foo]"],
+      ["%5B%5D", "[]"],
+      ["%5B127.0.0.1%5D", "[127.0.0.1]"],
+      [":", ":"],
+    ]) {
+      const dsn = `postgresql://u:p@127.0.0.1:5433/db?host=${query}`;
+      expect(pgTruth(dsn).host, `pg host for ${query}`).toBe(expected);
+      expect(expectAgreesWithPg(dsn), query).toBe(
+        `postgresql host ${expected} port 5433 database db`
+      );
+    }
+  });
+
+  it("quotes a value that collides with the format's own keywords", () => {
+    // Round 8: `?host=port` printed `postgresql host port port 5433 database
+    // db`. It agreed with pg and was unreadable. The value is still named.
+    ambient();
+    for (const word of ["host", "port", "database", "socket"]) {
+      const dsn = `postgresql://u:p@127.0.0.1:5433/db?host=${word}`;
+      expect(pgTruth(dsn).host).toBe(word);
+      expect(redactDsn(dsn), word).toBe(`postgresql host "${word}" port 5433 database db`);
+    }
   });
 
   it("follows the ambient PG* variables rather than reporting a default pg will not use", () => {
@@ -364,6 +398,62 @@ describe("redactDsn names the server pg will actually reach", () => {
     expect(redactDsn("postgresql://u:p@127.0.0.1:5433/db?sslcertificate=x&host=elsewhere")).toBe(
       withOverride
     );
+  });
+
+  it("strips SSL file parameters whose names are percent-encoded", () => {
+    // Round 8 BLOCKER. pg-connection-string reads the query with
+    // URLSearchParams, which DECODES keys, so `?ssl%63ert=/etc/hosts` is
+    // `sslcert` to pg and the file was read. The stripper compared raw bytes.
+    // Comparing a different representation from the one that acts is this
+    // module's oldest defect, and it had reappeared inside the fix for it.
+    ambient();
+    for (const query of [
+      "ssl%63ert=/etc/hosts",
+      "%73slcert=/etc/hosts",
+      "ssl%6bey=/etc/hosts",
+      "sslroot%63ert=/etc/hosts",
+      "SSL%43ERT=/etc/hosts",
+    ]) {
+      const { reads } = readsDuring(() => redactDsn(`postgresql://u:p@127.0.0.1:5433/db?${query}`));
+      expect(
+        reads.filter(r => r.includes("/etc/hosts")),
+        query
+      ).toEqual([]);
+    }
+  });
+
+  it("neutralises every character that can break or reorder the line", () => {
+    // U+2028 split the report in two while a /[CR LF]/ assertion passed, which
+    // is why the set is defined by WHAT THESE DO rather than grown one code
+    // point at a time. %0A was round 7; these are the same class.
+    const SEPARATORS = new RegExp(
+      "[" + BS + "r" + BS + "n" + BS + "u0085" + BS + "u2028" + BS + "u2029]",
+      "u"
+    );
+    const BIDI = new RegExp(
+      "[" +
+        BS +
+        "u200B-" +
+        BS +
+        "u200F" +
+        BS +
+        "u202A-" +
+        BS +
+        "u202E" +
+        BS +
+        "u2066-" +
+        BS +
+        "u2069" +
+        BS +
+        "uFEFF]",
+      "u"
+    );
+    ambient();
+    for (const encoded of ["%E2%80%A8", "%E2%80%A9", "%C2%85", "%E2%80%AE", "%E2%81%A6", "%0A"]) {
+      const report = redactDsn(`postgresql://u:p@127.0.0.1:5433/db${encoded}x`);
+      expect(SEPARATORS.test(report), encoded).toBe(false);
+      expect(BIDI.test(report), encoded).toBe(false);
+    }
   });
 
   it("refuses a string that is not a PostgreSQL DSN rather than inventing a target", () => {

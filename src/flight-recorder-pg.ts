@@ -277,6 +277,26 @@ const SSL_FILE_PARAMS = new Set(["sslcert", "sslkey", "sslrootcert"]);
  * failed nothing until this function could be called directly. An untestable
  * branch is a liability whether or not it is correct.
  */
+/**
+ * The key as pg sees it. `pg-connection-string` reads the query with
+ * `URLSearchParams`, which PERCENT-DECODES keys and treats `+` as a space.
+ *
+ * Round 8 BLOCKER: this compared raw bytes, so `?ssl%63ert=/etc/hosts` decoded
+ * to `sslcert` for pg and read the file, while the stripper saw a key it did
+ * not recognise. Four encodings got through, which is the whole guarantee gone.
+ * Comparing anything other than the decoded key is comparing a different
+ * representation from the one that acts, which is this module's oldest defect.
+ */
+function queryKeyOf(pair: string): string {
+  const raw = pair.split("=")[0].replace(/\+/g, " ");
+  try {
+    return decodeURIComponent(raw).toLowerCase();
+  } catch {
+    // Malformed escapes: URLSearchParams keeps them literal rather than throwing.
+    return raw.toLowerCase();
+  }
+}
+
 export function withoutSslFileParams(dsn: string): string {
   const start = dsn.indexOf("?");
   if (start < 0) return dsn;
@@ -286,53 +306,57 @@ export function withoutSslFileParams(dsn: string): string {
   const head = dsn.slice(0, start);
   const query = hash < 0 ? dsn.slice(start + 1) : dsn.slice(start + 1, hash);
   const fragment = hash < 0 ? "" : dsn.slice(hash);
-  const kept = query
-    .split("&")
-    .filter(pair => !SSL_FILE_PARAMS.has(pair.split("=")[0].toLowerCase()));
+  const kept = query.split("&").filter(pair => !SSL_FILE_PARAMS.has(queryKeyOf(pair)));
   if (kept.length === query.split("&").length) return dsn;
   return kept.length > 0 ? `${head}?${kept.join("&")}${fragment}` : `${head}${fragment}`;
 }
 
 /**
- * IPv6 arrives bracketed from the authority and bare from `?host=`. Pick one.
+ * The host is reported EXACTLY as pg resolved it. There is no normalisation.
  *
- * TCP HOSTS ONLY. Round 7: this ran on every host, so a socket DIRECTORY with a
- * colon in it (`?host=/tmp/pg:socket`, which pg accepts) came out as
- * `socket [/tmp/pg:socket]`. A path is not an address and never wants brackets.
+ * There used to be. `normaliseTcpHost` stripped a leading `[` and trailing `]`
+ * and re-added them when the remainder held a colon, because the old URI-shaped
+ * report made `postgresql://::1:5433/db` ambiguous about where the port began.
+ *
+ * The report has not been URI-shaped since round 7. Host and port are separate
+ * LABELLED fields, so nothing is ambiguous, and the normalisation had become a
+ * pure source of disagreement. Round 8 measured four:
+ *
+ *   ?host=[foo]        pg "[foo]"       reported "foo"
+ *   ?host=[]           pg "[]"          reported ""
+ *   ?host=[127.0.0.1]  pg "[127.0.0.1]" reported "127.0.0.1"
+ *   ?host=:            pg ":"           reported "[:]"
+ *
+ * pg keeps brackets it was given and adds none. So does this now. Deleting the
+ * function was the fix; rewriting its bracket rule would have been the fourth
+ * attempt at a rule that exists only to serve a format that is gone.
  */
-function normaliseTcpHost(host: string): string {
-  const bare = host.startsWith("[") && host.endsWith("]") ? host.slice(1, -1) : host;
-  return bare.includes(":") ? `[${bare}]` : bare;
-}
 
-/**
- * A field value, quoted unless it is plainly a host, path, port or name.
- *
- * Round 7, measured: every value here is DECODED by pg's parser, and both a
- * newline and the report's own delimiters survive that. `/db%0AINJECTED` became
- * a literal newline in the startup log line, and
- * `/db%20port%209999%20database%20other` produced
- * `database db port 9999 database other`, which reads as structure it is not.
- * The parent implementation happened to be safe because the WHATWG path kept
- * the value encoded; decoding is correct, so the escaping has to be explicit.
- *
- * JSON quoting is used because it escapes control characters as well as quotes,
- * and because a reader already knows how to read it.
- */
 const MAX_FIELD_CHARS = 120;
 
 /**
- * Characters that REORDER or hide the text around them when a log line is
- * rendered: bidi overrides and embeddings, isolates, zero-width marks and the
- * byte-order mark. JSON quoting does NOT escape these, so `db\u202Egnirts`
- * survived it and still reverses everything that follows it on the line.
+ * Characters that BREAK or REORDER a log line: the Unicode line separators
+ * (U+0085 NEL, U+2028 LS, U+2029 PS) and the bidi overrides, embeddings,
+ * isolates, zero-width marks and byte-order mark.
  *
- * That is the same failure as the newline: a value from the input deciding how
- * the REST of the line reads. Escaping the whole non-ASCII range instead would
- * mangle every legitimate accented database name, so only these are escaped.
+ * JSON quoting escapes NONE of them. A bidi override survived it and still
+ * reverses everything after it on the line, and round 8 measured U+2028
+ * splitting the report into two lines while a /[\ur\un]/ assertion passed.
+ * `%0A` was the round 7 case; these are the same class in other code points,
+ * which is why the set is defined by WHAT THEY DO rather than extended one
+ * character at a time.
  */
-const TEXT_DIRECTION_CONTROLS = /[\u200B-\u200F\u202A-\u202E\u2066-\u2069\uFEFF]/g;
+const UNSAFE_IN_A_LOG_LINE = /[\u0085\u2028\u2029\u200B-\u200F\u202A-\u202E\u2066-\u2069\uFEFF]/g;
 
+/**
+ * Words this format uses as STRUCTURE. A value equal to one of them reads as a
+ * delimiter: round 8 measured `?host=port` printing
+ * `postgresql host port port 5433 database db`, which agrees with pg and is
+ * unreadable. Quoting the collision is enough; the value is still named.
+ */
+const FORMAT_KEYWORDS = new Set(["host", "socket", "port", "database", "postgresql"]);
+
+/** A field value, quoted unless it is plainly a host, path, port or name. */
 function show(value: string): string {
   // A long value is truncated BEFORE quoting: pg imposes no length limit worth
   // relying on here, and a health line is read by a human, not parsed.
@@ -340,9 +364,11 @@ function show(value: string): string {
     value.length > MAX_FIELD_CHARS
       ? `${value.slice(0, MAX_FIELD_CHARS)}... (${value.length} chars)`
       : value;
-  if (/^[A-Za-z0-9._:/[\]-]+$/.test(bounded)) return bounded;
+  if (/^[A-Za-z0-9._:/[\]-]+$/.test(bounded) && !FORMAT_KEYWORDS.has(bounded.toLowerCase())) {
+    return bounded;
+  }
   return JSON.stringify(bounded).replace(
-    TEXT_DIRECTION_CONTROLS,
+    UNSAFE_IN_A_LOG_LINE,
     c => `\\u${c.charCodeAt(0).toString(16).padStart(4, "0")}`
   );
 }
@@ -417,10 +443,9 @@ function resolveTarget(dsn: string): ResolvedTarget | null {
           : " (default: the connecting user)";
 
   const host = String(resolved.host ?? "");
-  // Decide socket-ness FIRST, then bracket only what is an address.
   const isSocket = host.startsWith("/");
   return {
-    host: isSocket ? host : normaliseTcpHost(host),
+    host,
     hostSource: sourceOf(stated.host, "PGHOST"),
     isSocket,
     port: String(resolved.port ?? ""),
