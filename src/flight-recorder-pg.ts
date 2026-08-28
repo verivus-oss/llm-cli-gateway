@@ -34,6 +34,7 @@ import {
   type PgPoolFactory,
   type PostgresRoleDsns,
 } from "./storage/drivers/postgres.js";
+import { carriesPostgresDsnScheme } from "./storage/roles.js";
 import type { StorageConnection } from "./storage/store.js";
 import { FlightRecorderRuntime, truncateThinkingBlocks } from "./flight-recorder-runtime.js";
 import type {
@@ -284,11 +285,21 @@ function loadPgTargetResolvers(): {
  * READ is suppressed rather than the STRING rewritten.
  *
  * `parse` is synchronous and `finally` restores the real function even when it
- * throws. The window is NOT free of other JavaScript, which an earlier version
- * of this comment claimed: `parse` calls `process.emitWarning` for the
- * deprecated SSL modes, so a synchronous `warning` listener runs inside it and
- * would see the substitute. Narrowing it further means editing the DSN again,
- * which is the defect class this module spent five rounds removing.
+ * throws, so the window is narrow. Two claims about it have now been wrong in
+ * OPPOSITE directions, so this states only what was measured.
+ *
+ * Round 11 corrected "no other JavaScript can run" to "a synchronous `warning`
+ * listener runs inside it". Round 13 measured that too: `parse` does call
+ * `process.emitWarning` for the deprecated SSL modes, but an ordinary
+ * `process.on("warning")` listener fires on a LATER tick, after `finally` has
+ * restored the real function. Measured order: stubbed, parse returns, restored,
+ * listener runs.
+ *
+ * What is true is narrower. Code that replaces `process.emitWarning` itself
+ * runs synchronously inside the window and would observe the substitute, as
+ * would anything else that reaches `require("fs").readFileSync` during it.
+ * That is a real if small hole, and narrowing it further means editing the DSN
+ * again, which is the defect class this module spent five rounds removing.
  */
 
 /**
@@ -321,44 +332,52 @@ function parseWithoutReadingFiles(
   }
 }
 
-const POSTGRES_SCHEME = /^postgres(ql)?:$/i;
-
 /**
  * Does this string carry a PostgreSQL scheme?
  *
- * This is a SAFETY policy, not a model of pg, and it is deliberately narrower
- * than pg. pg treats every scheme but `socket:` as TCP, and resolves a string
- * with NO scheme against its own base URL, which puts the whole input in the
- * path: `parse("u:secret@host/db")` returns that credential as the database.
- * This function's output is read aloud, so a string that is not recognisably a
- * DSN is refused rather than echoed.
+ * It defers to `carriesPostgresDsnScheme`, the SAME predicate `config.ts` uses
+ * to decide what it will accept as a connection string. That is the whole
+ * design: this function reports a target only for strings the gateway would
+ * accept as a DSN, so the gate cannot be narrower or wider than the validator.
  *
- * Neither clause SANITISES the string, which is what rounds 9 and 10 got wrong.
- * The previous version stripped TAB, LF and CR itself and trimmed C0 itself,
- * which is a hand-maintained copy of WHATWG preprocessing that drifts when
- * WHATWG changes. WHATWG now does its own:
+ * ROUND 13 BLOCKER, both reviewers, and the most serious defect in this series.
+ * Round 12 replaced a hand-rolled sanitiser with `new URL(dsn).protocol` on the
+ * argument that WHATWG should do its own preprocessing. WHATWG trims a leading
+ * space, so ` postgresql://u:secret@h/db` passed the gate. pg does NOT trim it:
+ * the space triggers pg's `encodeURI` branch, pg resolves its own base host,
+ * and the whole credential-bearing string becomes the DATABASE. Measured:
  *
- *   1. `new URL(dsn)` performs that removal and trimming and reports the scheme
- *      it actually saw, so ` postgresql://h/db` and `post<TAB>gresql://h/db`
- *      pass here with nothing copied.
- *   2. A plain prefix test on the RAW string, for the DSNs `new URL` rejects
- *      for a reason that is not the scheme. `postgresql://u:p@/db` has an empty
- *      authority and throws, while pg retries it with a dummy host and resolves
- *      localhost, which is the round 6 case.
+ *   redactDsn(" postgresql://u:sup3rsecret@127.0.0.1:5433/db")
+ *     -> database " postgresql://u:sup3rsecret@127.0.0.1:5433/db"
+ *   redactDsn("postgres:/user:sup3rsecret@host/db")
+ *     -> database "user:sup3rsecret@host/db"
  *
- * Round 11, both reviewers: `postgres:/db` is accepted now, and reported as the
- * `localhost/db` that pg resolves. What stays refused is a scheme broken by a
- * character WHATWG does NOT strip, an interior vertical tab for example: pg
- * reads that as a host literally named `base`, which is nobody's configured
- * target, and refusing says so more usefully than naming it.
+ * and that value goes to the startup log line in `createFlightRecorder`. The
+ * gate had been kept in round 12 specifically to prevent credential echo, and
+ * the clause added for correctness was the clause that opened it.
+ *
+ * The lesson is not "pick a better URL parser". Faithfully reporting what pg
+ * resolves is INCOMPATIBLE with never printing a password, because when pg
+ * misparses a DSN what it resolves CONTAINS the password. So the input is
+ * required to be the authority form, where pg puts credentials in the userinfo
+ * and they never reach a reported field.
+ *
+ * WHAT THIS REFUSES, stated rather than discovered later. Every one of these is
+ * a string pg would resolve to something:
+ *
+ *   ` postgresql://h/db`     leading whitespace (round 9, and the leak above)
+ *   `post<TAB>gresql://h/db` a control character inside the scheme (round 10)
+ *   `postgres:/db`           single slash, no authority (round 12)
+ *   `pg://h/db`, `socket:/p` schemes pg accepts and this gateway does not
+ *   `/var/run/postgresql db` a bare socket path
+ *
+ * Round 10 treated the TAB case as a defect and round 12 the single-slash case,
+ * both on the principle that this must agree with pg. That principle is now
+ * subordinate to not printing secrets, and `config.ts` rejects all of these
+ * before they can reach a live connection anyway.
  */
 function carriesPostgresScheme(dsn: string): boolean {
-  try {
-    if (POSTGRES_SCHEME.test(new URL(dsn).protocol)) return true;
-  } catch {
-    // Not a URL on its own terms. The prefix test decides.
-  }
-  return /^postgres(ql)?:\/\//i.test(dsn);
+  return carriesPostgresDsnScheme(dsn);
 }
 
 /**
