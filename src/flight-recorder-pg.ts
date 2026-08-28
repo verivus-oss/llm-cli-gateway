@@ -283,10 +283,29 @@ function loadPgTargetResolvers(): {
  * named in its input, where a FIFO would hang the process at startup. So the
  * READ is suppressed rather than the STRING rewritten.
  *
- * Suppressing it is safe because `parse` is SYNCHRONOUS: no other JavaScript
- * can run between installing the guard and removing it, and `finally` restores
- * it even if `parse` throws.
+ * `parse` is synchronous and `finally` restores the real function even when it
+ * throws. The window is NOT free of other JavaScript, which an earlier version
+ * of this comment claimed: `parse` calls `process.emitWarning` for the
+ * deprecated SSL modes, so a synchronous `warning` listener runs inside it and
+ * would see the substitute. Narrowing it further means editing the DSN again,
+ * which is the defect class this module spent five rounds removing.
  */
+
+/**
+ * What `parse` does with the bytes, measured in the installed
+ * `pg-connection-string`: it assigns `config.ssl.cert|key|ca` from
+ * `<bytes>.toString()` and then INSPECTS exactly one of them, `if
+ * (!config.ssl.ca)`, in the `uselibpqcompat=true` + `sslmode=verify-ca` branch,
+ * where an empty CA throws. Nothing parses the content.
+ *
+ * So the substitute must be NON-EMPTY. Round 11 BLOCKER, both reviewers:
+ * `Buffer.alloc(0)` made that branch throw for a DSN whose real, non-empty
+ * `sslrootcert` satisfies it, so the report said "not parseable" for a target
+ * pg resolves. Truthiness is the whole contract; any non-empty value is
+ * neutral for every decision `parse` makes about the target.
+ */
+const UNREAD_FILE_SUBSTITUTE = Buffer.from("unread");
+
 function parseWithoutReadingFiles(
   parse: (s: string) => Record<string, string | null | undefined>,
   dsn: string
@@ -294,9 +313,7 @@ function parseWithoutReadingFiles(
   const require = createRequire(import.meta.url);
   const fs = require("fs") as { readFileSync: (...args: unknown[]) => unknown };
   const real = fs.readFileSync;
-  // An empty buffer satisfies `.toString()` on the other side. The value is
-  // never used: only host, port, database and user are read from the result.
-  fs.readFileSync = () => Buffer.alloc(0);
+  fs.readFileSync = () => UNREAD_FILE_SUBSTITUTE;
   try {
     return parse(dsn);
   } finally {
@@ -304,30 +321,44 @@ function parseWithoutReadingFiles(
   }
 }
 
+const POSTGRES_SCHEME = /^postgres(ql)?:$/i;
+
 /**
- * Does this string carry a PostgreSQL scheme, as the parser pg uses sees it?
+ * Does this string carry a PostgreSQL scheme?
  *
- * Round 9 fixed the ENDS of the string; round 10 measured 24 disagreements
- * remaining in the MIDDLE. WHATWG removes TAB, LF and CR from ANYWHERE in a
- * URL before looking at the scheme, so `post<TAB>gresql://h/db` is
- * `postgresql://h/db` to pg while this answered "not parseable".
+ * This is a SAFETY policy, not a model of pg, and it is deliberately narrower
+ * than pg. pg treats every scheme but `socket:` as TCP, and resolves a string
+ * with NO scheme against its own base URL, which puts the whole input in the
+ * path: `parse("u:secret@host/db")` returns that credential as the database.
+ * This function's output is read aloud, so a string that is not recognisably a
+ * DSN is refused rather than echoed.
  *
- * The test stays NARROWER than pg on purpose. pg treats any scheme but
- * `socket:` as TCP, so `pg://h/db` and a bare `/path` resolve there; the DSNs
- * that reach here come from gateway config, which admits these two spellings.
- * What it must not do is disagree with pg about the SAME DSN.
+ * Neither clause SANITISES the string, which is what rounds 9 and 10 got wrong.
+ * The previous version stripped TAB, LF and CR itself and trimmed C0 itself,
+ * which is a hand-maintained copy of WHATWG preprocessing that drifts when
+ * WHATWG changes. WHATWG now does its own:
+ *
+ *   1. `new URL(dsn)` performs that removal and trimming and reports the scheme
+ *      it actually saw, so ` postgresql://h/db` and `post<TAB>gresql://h/db`
+ *      pass here with nothing copied.
+ *   2. A plain prefix test on the RAW string, for the DSNs `new URL` rejects
+ *      for a reason that is not the scheme. `postgresql://u:p@/db` has an empty
+ *      authority and throws, while pg retries it with a dummy host and resolves
+ *      localhost, which is the round 6 case.
+ *
+ * Round 11, both reviewers: `postgres:/db` is accepted now, and reported as the
+ * `localhost/db` that pg resolves. What stays refused is a scheme broken by a
+ * character WHATWG does NOT strip, an interior vertical tab for example: pg
+ * reads that as a host literally named `base`, which is nobody's configured
+ * target, and refusing says so more usefully than naming it.
  */
 function carriesPostgresScheme(dsn: string): boolean {
-  const sanitised = dsn
-    // Removed from ANYWHERE, which is the part round 9 missed.
-    // eslint-disable-next-line no-control-regex
-    .replace(/[\u0009\u000A\u000D]/g, "")
-    // Then leading and trailing C0-control-or-space, which WHATWG also trims.
-    // eslint-disable-next-line no-control-regex
-    .replace(/^[\u0000-\u0020]+/, "")
-    // eslint-disable-next-line no-control-regex
-    .replace(/[\u0000-\u0020]+$/, "");
-  return /^postgres(ql)?:\/\//i.test(sanitised);
+  try {
+    if (POSTGRES_SCHEME.test(new URL(dsn).protocol)) return true;
+  } catch {
+    // Not a URL on its own terms. The prefix test decides.
+  }
+  return /^postgres(ql)?:\/\//i.test(dsn);
 }
 
 /**
@@ -410,10 +441,17 @@ function show(value: string): string {
   if (/^[A-Za-z0-9._:/[\]-]+$/.test(bounded) && !FORMAT_KEYWORDS.has(bounded.toLowerCase())) {
     return bounded;
   }
-  return JSON.stringify(bounded).replace(
-    UNSAFE_IN_A_LOG_LINE,
-    c => `\\u${c.charCodeAt(0).toString(16).padStart(4, "0")}`
-  );
+  return JSON.stringify(bounded).replace(UNSAFE_IN_A_LOG_LINE, c => {
+    // codePointAt, not charCodeAt. Round 11 BLOCKER, codex: the pattern matches
+    // a whole code point but this emitted only its HIGH SURROGATE, so U+E0061
+    // and U+E0062 both rendered as `\udb40` and two different databases
+    // produced identical reports. A line whose job is to name the target must
+    // not collapse two targets into one string.
+    const point = c.codePointAt(0) ?? 0;
+    return point > 0xffff
+      ? `\\u{${point.toString(16).padStart(5, "0")}}`
+      : `\\u${point.toString(16).padStart(4, "0")}`;
+  });
 }
 
 function resolveTarget(dsn: string): ResolvedTarget | null {
