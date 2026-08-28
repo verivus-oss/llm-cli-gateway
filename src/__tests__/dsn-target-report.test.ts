@@ -26,6 +26,13 @@ const { Client } = require("pg") as {
   };
 };
 
+/**
+ * Captured through the SAME property production patches, before any test has
+ * run, so the restore check compares against a known reference rather than
+ * against whatever happens to be installed at the time.
+ */
+const pristineReadFileSync = (require("fs") as { readFileSync: typeof readFileSync }).readFileSync;
+
 const BS = String.fromCharCode(92);
 
 const AMBIENT = ["PGHOST", "PGPORT", "PGDATABASE", "PGUSER"] as const;
@@ -140,54 +147,132 @@ function fieldsOf(report: string): {
 /**
  * An annotation must name an input that ACTUALLY decided the value.
  *
- * Measured differentially, not by re-deriving pg's precedence: if the report
- * says `(from PGPORT)`, then deleting PGPORT must CHANGE what pg resolves. If
- * it says `(default)`, then deleting any of them must change NOTHING.
- *
- * That is a real oracle rather than a copy of the production rule, and it is
- * aimed at a defect that actually happened: round 7 reported
- * `database bob (from PGUSER)` for a value pg had taken from the DSN, with
- * PGUSER set but ignored. Round 10 found the helper was discarding the
- * annotation entirely, so that defect would have passed unseen here.
+ * Measured differentially, not by re-deriving pg's precedence, and EXHAUSTIVELY
+ * over the note shapes production emits. Round 11 BLOCKER, both reviewers: the
+ * previous version handled `from PGX` and the empty note and silently ignored
+ * everything else, which is every `(default)` and every
+ * `(default: the connecting user, ...)` note. Its own comment claimed it
+ * checked `(default)` differentially. It did not, so round 7's defect in its
+ * CURRENT wording would still have passed here unseen. That is the second time
+ * this helper claimed more than it checked, so the unknown-shape branch below
+ * FAILS rather than falling through: a note this helper does not understand is
+ * a hole in the oracle, not a pass.
  */
+const PROVENANCE_PROBE: Record<string, string> = {
+  PGHOST: "provenance.invalid",
+  PGPORT: "65432",
+  PGDATABASE: "provenance_db",
+  PGUSER: "provenance_user",
+};
+
 function expectProvenanceIsReal(
   dsn: string,
   got: { host: ReportField; port: ReportField; database: ReportField }
 ): void {
   const resolvedNow = pgTruth(dsn);
-  const withoutVariable = (name: string): { host: string; port: string; database: string } => {
+  const withEnv = (
+    name: string,
+    value: string | undefined
+  ): { host: string; port: string; database: string } => {
     const had = process.env[name];
-    delete process.env[name];
+    if (value === undefined) delete process.env[name];
+    else process.env[name] = value;
     try {
       return pgTruth(dsn);
     } finally {
-      if (had !== undefined) process.env[name] = had;
+      if (had === undefined) delete process.env[name];
+      else process.env[name] = had;
     }
   };
+  const withoutVariable = (name: string): { host: string; port: string; database: string } =>
+    withEnv(name, undefined);
+  const withProbeFor = (name: string): { host: string; port: string; database: string } =>
+    withEnv(name, PROVENANCE_PROBE[name]);
+
   const fields: [keyof typeof resolvedNow & ("host" | "port" | "database"), ReportField][] = [
     ["host", got.host],
     ["port", got.port],
     ["database", got.database],
   ];
+  const variableFor = { host: "PGHOST", port: "PGPORT", database: "PGDATABASE" } as const;
+
   for (const [field, reported] of fields) {
-    const named = /^from (PG[A-Z]+)$/.exec(reported.note);
+    const note = reported.note;
+
+    // Credited to an ambient variable: removing it must CHANGE pg's answer.
+    const named = /^from (PG[A-Z]+)$/.exec(note);
     if (named !== null) {
-      const without = withoutVariable(named[1]);
       expect(
-        without[field],
+        withoutVariable(named[1])[field],
         `${dsn}: report credits ${named[1]} for ${field}, but removing it changes nothing`
       ).not.toBe(resolvedNow[field]);
       continue;
     }
-    if (reported.note === "") {
-      // Claimed explicit: no ambient variable may be able to move it.
+
+    // Claimed explicit: no ambient variable may be able to move it.
+    if (note === "") {
       for (const name of AMBIENT) {
         expect(
           withoutVariable(name)[field],
           `${dsn}: ${field} is reported as stated, but ${name} moves it`
         ).toBe(resolvedNow[field]);
       }
+      continue;
     }
+
+    // Claimed a pg built-in default: the field's own variable must be unset,
+    // so SETTING it has to move the value. Deleting anything must not.
+    if (note === "default") {
+      const name = variableFor[field];
+      expect(
+        withProbeFor(name)[field],
+        `${dsn}: ${field} is reported as pg's default, but setting ${name} does not move it`
+      ).not.toBe(resolvedNow[field]);
+      for (const other of AMBIENT) {
+        expect(
+          withoutVariable(other)[field],
+          `${dsn}: ${field} is reported as a default, but removing ${other} moves it`
+        ).toBe(resolvedNow[field]);
+      }
+      continue;
+    }
+
+    // The database only. pg substitutes the CONNECTING USER for an absent
+    // database name, and the note names where that user came from. Round 7's
+    // defect was crediting PGUSER for a user pg took from the DSN, so each of
+    // these three is checked against PGUSER differentially.
+    if (field === "database" && note.startsWith("default: the connecting user")) {
+      if (note === "default: the connecting user, from PGUSER") {
+        expect(
+          withoutVariable("PGUSER").database,
+          `${dsn}: database is credited to PGUSER, but removing it changes nothing`
+        ).not.toBe(resolvedNow.database);
+        continue;
+      }
+      if (note === "default: the connecting user, from the DSN") {
+        expect(
+          withoutVariable("PGUSER").database,
+          `${dsn}: database is credited to the DSN's user, but PGUSER moves it`
+        ).toBe(resolvedNow.database);
+        expect(
+          withProbeFor("PGUSER").database,
+          `${dsn}: database is credited to the DSN's user, but PGUSER overrides it`
+        ).toBe(resolvedNow.database);
+        continue;
+      }
+      if (note === "default: the connecting user") {
+        expect(
+          withProbeFor("PGUSER").database,
+          `${dsn}: database is credited to no named source, but setting PGUSER moves it`
+        ).not.toBe(resolvedNow.database);
+        continue;
+      }
+    }
+
+    throw new Error(
+      `${dsn}: ${field} carries the annotation "${note}", which this oracle does ` +
+        `not check. Add a differential for it rather than letting it pass.`
+    );
   }
 }
 
@@ -291,7 +376,7 @@ describe("redactDsn names the server pg will actually reach", () => {
       )
     );
     expect(reads.filter(r => r.includes("/etc/hosts"))).toEqual([]);
-    // Stripping those parameters must not lose the ones that MOVE the target.
+    // Suppressing the READ must not lose the parameters that MOVE the target.
     expect(report).toBe("postgresql host elsewhere port 5433 database db");
   });
 
@@ -507,19 +592,24 @@ describe("redactDsn names the server pg will actually reach", () => {
     // Deliberate divergence from `new Client({connectionString})`, pinned here
     // so it is not mistaken for the target disagreement this file exists to
     // prevent. pg's constructor ALSO validates SSL material and throws ENOENT
-    // for a cert that does not exist; this function strips those parameters, so
+    // for a cert that does not exist; this function never READS the file, so
     // it answers where the connection was going. That is what makes it useful
     // in the error message about the failure. Measured: with a cert file that
     // DOES exist, pg resolves host `good`, exactly what is reported here.
+    //
+    // Round 11: the title and this comment used to say the parameters were
+    // STRIPPED. Nothing has been stripped since round 10 deleted the rewriting;
+    // pg is handed the original string with the read suppressed underneath it.
     ambient();
     expect(
       redactDsn("postgresql://u:p@127.0.0.1:5433/db?sslcert=/nonexistent/cert.pem&host=good")
     ).toBe("postgresql host good port 5433 database db");
   });
 
-  it("strips SSL file parameters in every form without moving the target", () => {
-    // A stripper that dropped the wrong parameter would change the reported
-    // target, which is worse than the disk read it exists to prevent.
+  it("reads no SSL file in any form, and moves no target doing it", () => {
+    // These spellings were the STRIPPER's edge cases, kept as target-agreement
+    // cases after the stripper was deleted: whatever pg reads them as, the
+    // reported target must still be the one pg resolves.
     ambient();
     const withOverride = "postgresql host elsewhere port 5433 database db";
     for (const query of [
@@ -552,7 +642,7 @@ describe("redactDsn names the server pg will actually reach", () => {
     );
   });
 
-  it("strips SSL file parameters whose names are percent-encoded", () => {
+  it("reads no SSL file whose parameter name is percent-encoded", () => {
     // Round 8 BLOCKER. pg-connection-string reads the query with
     // URLSearchParams, which DECODES keys, so `?ssl%63ert=/etc/hosts` is
     // `sslcert` to pg and the file was read. The stripper compared raw bytes.
@@ -736,40 +826,58 @@ describe("redactDsn names the server pg will actually reach", () => {
   });
 
   it("escapes every invisible or controlling character, by property", () => {
-    // ITERATES THE PROPERTY, rather than sampling a list of code points.
+    // EVERY matching code point, not a sample of them.
     //
-    // Round 10, grok: the previous version listed eight characters, so
-    // dropping a whole RANGE from production would have left it green. The
-    // same shape as the missing `kind`: a helper claiming more than it checks.
+    // Round 10 replaced a list of eight characters with the two BOUNDARIES
+    // of every contiguous run. Round 11 BLOCKER, codex: that is still a
+    // sample. Leaving ONE interior code point raw in production, U+E0061,
+    // left all 31 tests green, because no run boundary touches it.
+    // Boundary sampling pins where a range starts and ends, never that the
+    // range has no holes.
     //
-    // Every contiguous RUN of matching code points is enumerated here and its
-    // two boundaries are exercised, which is what actually pins the ranges.
+    // So every matching scalar goes through production here. They are
+    // batched into database names because 4,000-odd separate calls would be
+    // slow, and each batch stays under the truncation limit so that no
+    // character is cut before it is checked.
     const UNSAFE = /[\u0080-\u009F\u007F\u2028\u2029]|\p{Cf}|\p{Default_Ignorable_Code_Point}/u;
-    const runs: Array<[number, number]> = [];
+    const unsafe: number[] = [];
     for (let cp = 0; cp <= 0x10ffff; cp++) {
       // Surrogates are not characters and cannot appear in a parsed value.
       if (cp >= 0xd800 && cp <= 0xdfff) continue;
-      if (!UNSAFE.test(String.fromCodePoint(cp))) continue;
-      const last = runs[runs.length - 1];
-      if (last !== undefined && last[1] === cp - 1) last[1] = cp;
-      else runs.push([cp, cp]);
+      if (UNSAFE.test(String.fromCodePoint(cp))) unsafe.push(cp);
     }
-    // A guard on the guard: if the property ever matched nothing, every
-    // assertion below would pass vacuously.
-    expect(runs.length, "the property matched no code points at all").toBeGreaterThan(20);
+    // A guard on the guard: if the property ever matched nothing, or only a
+    // handful, every assertion below would pass while checking almost none.
+    expect(unsafe.length, "the property matched too few code points").toBeGreaterThan(4000);
 
-    const boundaries = new Set<number>();
-    for (const [lo, hi] of runs) {
-      boundaries.add(lo);
-      boundaries.add(hi);
-    }
-    for (const cp of boundaries) {
+    const BATCH = 100;
+    for (let at = 0; at < unsafe.length; at += BATCH) {
+      const batch = unsafe.slice(at, at + BATCH);
+      const first = batch[0].toString(16).toUpperCase();
+      const last = batch[batch.length - 1].toString(16).toUpperCase();
+      const label = `U+${first}..U+${last}`;
       ambient();
-      const name = encodeURIComponent(String.fromCodePoint(cp));
-      const report = redactDsn(`postgresql://u:p@127.0.0.1:5433/db${name}x`);
-      const label = `U+${cp.toString(16).toUpperCase().padStart(4, "0")}`;
-      expect(UNSAFE.test(report), `${label} survived raw`).toBe(false);
+      const name = String.fromCodePoint(...batch);
+      const report = redactDsn(`postgresql://u:p@127.0.0.1:5433/db${encodeURIComponent(name)}x`);
+      expect(report, `${label} was truncated, so it was not fully exercised`).not.toContain(
+        "chars)"
+      );
+      expect(UNSAFE.test(report), `${label}: one of these survived raw`).toBe(false);
       expect(report.split("\n"), `${label} split the line`).toHaveLength(1);
+      // Each one keeps its OWN identity. Round 11 BLOCKER, codex: the
+      // escape emitted charCodeAt(0), the HIGH SURROGATE, so every tag
+      // character rendered the same and two different databases produced
+      // byte-identical reports.
+      for (const cp of batch) {
+        const escape =
+          cp > 0xffff
+            ? `${BS}u{${cp.toString(16).padStart(5, "0")}}`
+            : `${BS}u${cp.toString(16).padStart(4, "0")}`;
+        expect(
+          report,
+          `U+${cp.toString(16).toUpperCase()} is not named uniquely in the report`
+        ).toContain(escape);
+      }
     }
 
     // And the characters the property must NOT touch, or every accented or
@@ -813,7 +921,16 @@ describe("redactDsn names the server pg will actually reach", () => {
     );
     expect(reads.filter(r => r.includes("/etc/hosts"))).toEqual([]);
     // The guard must not survive the call: a later read has to work normally.
-    expect(readFileSync("package.json", "utf8").length).toBeGreaterThan(0);
+    //
+    // Round 11 BLOCKER, grok: this used the NAMED import `readFileSync`, which
+    // is not a live binding, so it read the original function no matter what
+    // was left installed on the module object. With the guard deliberately not
+    // restored the assertion still passed, and it was the only check on the
+    // restore. Production patches `require("fs").readFileSync`, so the check
+    // has to go through that same property.
+    const fsModule = require("fs") as { readFileSync: typeof readFileSync };
+    expect(fsModule.readFileSync, "the guard was left installed").toBe(pristineReadFileSync);
+    expect(fsModule.readFileSync("package.json", "utf8").length).toBeGreaterThan(0);
   });
 
   it("refuses a string that is not a PostgreSQL DSN rather than inventing a target", () => {
@@ -827,6 +944,65 @@ describe("redactDsn names the server pg will actually reach", () => {
     // Genuinely malformed: pg throws on this one too, so refusing agrees.
     expect(() => new Client({ connectionString: "postgresql://u:p@:5433/db" })).toThrow();
     expect(redactDsn("postgresql://u:p@:5433/db")).toBe("postgresql (dsn not parseable)");
+  });
+
+  it("agrees with pg when the SSL material is real, present and inspected", () => {
+    // Round 11 BLOCKER, both reviewers. The read guard returned an EMPTY
+    // buffer, on a comment claiming the contents were never used. They are:
+    // pg-connection-string assigns `config.ssl.ca` from the bytes and then
+    // tests `if (!config.ssl.ca)` in the `uselibpqcompat=true` +
+    // `sslmode=verify-ca` branch. An empty CA made that branch THROW for a DSN
+    // whose real, non-empty CA satisfies it, so this reported "not parseable"
+    // for a target pg resolves and connects to.
+    //
+    // A real file is used deliberately: pg reads it, this does not, and the two
+    // must still agree. That is the whole contract of the guard.
+    ambient();
+    const realFile = `${process.cwd()}/package.json`;
+    expect(pristineReadFileSync(realFile, "utf8").length).toBeGreaterThan(0);
+    const dsn =
+      `postgresql://u:p@127.0.0.1:5433/db?sslrootcert=${realFile}` +
+      "&sslmode=verify-ca&uselibpqcompat=true";
+    // pg parses this one: it is a documented libpq-compatible configuration,
+    // and pg's own error tells operators to use it.
+    expect(expectAgreesWithPg(dsn)).toBe("postgresql host 127.0.0.1 port 5433 database db");
+    // And still without reading it.
+    const { reads } = readsDuring(() => redactDsn(dsn));
+    expect(reads.filter(r => r.includes("package.json"))).toEqual([]);
+  });
+
+  it("reads the scheme the way WHATWG does, without copying how WHATWG does it", () => {
+    // Round 11 BLOCKER, both reviewers. The gate sanitised a COPY of the string
+    // (strip TAB/LF/CR, trim C0) and then applied a `://` regex, which is a
+    // hand-maintained reimplementation of WHATWG preprocessing and the sixth
+    // instance of this module's defect class. `new URL` performs that
+    // preprocessing itself, so these now resolve exactly as pg resolves them
+    // instead of being refused.
+    for (const dsn of ["postgres:/db", "postgresql:dbname", "postgres:///db"]) {
+      ambient();
+      expect(() => new Client({ connectionString: dsn }), `pg resolves ${dsn}`).not.toThrow();
+      expectAgreesWithPg(dsn);
+    }
+    // The prefix clause still carries the DSNs `new URL` rejects for a reason
+    // that is NOT the scheme: an empty authority throws there while pg retries
+    // it with a dummy host. Round 6.
+    ambient();
+    expect(() => new URL("postgresql://u:p@/db"), "new URL alone cannot gate this").toThrow();
+    expect(expectAgreesWithPg("postgresql://u:p@/db")).toBe(
+      "postgresql host localhost (default) port 5432 (default) database db"
+    );
+  });
+
+  it("refuses a scheme broken by a character WHATWG does not strip", () => {
+    // The remaining NARROWNESS, stated rather than discovered. WHATWG removes
+    // TAB, LF and CR from anywhere, so those agree with pg. A vertical tab is
+    // not removed, and pg then resolves a host literally named `base`, its own
+    // base URL. Nobody configured that host, so refusing is the more useful
+    // answer than naming it, and this pins the choice as a decision.
+    ambient();
+    const dsn = `post${String.fromCharCode(11)}gresql://u:p@127.0.0.1:5433/db`;
+    expect(pgTruth(dsn).host, "pg resolves its own base URL for this").toBe("base");
+    expect(redactDsn(dsn)).toBe("postgresql (dsn not parseable)");
   });
 
   it("accepts both spellings of the scheme", () => {
