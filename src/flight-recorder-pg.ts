@@ -231,6 +231,8 @@ interface ResolvedTarget {
   database: string;
   /** Prebuilt because an unstated database is the USER, whose own origin varies. */
   databaseNote: string;
+  /** The same three fields resolved from the DSN with its PASSWORD blanked. */
+  withoutPassword: { host: string; port: string; database: string };
 }
 
 /** `pg` is an optional peer, but redactDsn is only reached where it must exist. */
@@ -494,8 +496,27 @@ function resolveTarget(dsn: string): ResolvedTarget | null {
     return null;
   }
 
+  const resolveFields = (
+    candidate: string
+  ): {
+    stated: Record<string, string | null | undefined>;
+    resolved: { host?: string; port?: number; database?: string; user?: string };
+  } => {
+    const parsed = parseWithoutReadingFiles(parse, candidate);
+    return {
+      stated: parsed,
+      resolved: new Client({
+        host: parsed.host || undefined,
+        port: parsed.port || undefined,
+        database: parsed.database || undefined,
+        user: parsed.user || undefined,
+      }),
+    };
+  };
+
   let stated: Record<string, string | null | undefined>;
   let resolved: { host?: string; port?: number; database?: string; user?: string };
+  let withoutPassword: { host: string; port: string; database: string };
   try {
     stated = parseWithoutReadingFiles(parse, dsn);
     // FIELDS, not the connection string. Handing Client the string makes it
@@ -509,6 +530,15 @@ function resolveTarget(dsn: string): ResolvedTarget | null {
       database: stated.database || undefined,
       user: stated.user || undefined,
     });
+    // The SAME resolution over a DSN whose password bytes are blanked. A field
+    // that moves when only the password moved was built out of credential text,
+    // however innocent the value it ended up holding looks.
+    const blanked = resolveFields(scrubPassword(dsn)).resolved;
+    withoutPassword = {
+      host: String(blanked.host ?? ""),
+      port: String(blanked.port ?? ""),
+      database: String(blanked.database ?? ""),
+    };
   } catch {
     return null;
   }
@@ -552,6 +582,7 @@ function resolveTarget(dsn: string): ResolvedTarget | null {
     portSource: sourceOf(stated.port, "PGPORT"),
     database: String(resolved.database ?? ""),
     databaseNote,
+    withoutPassword,
   };
 }
 
@@ -577,44 +608,144 @@ function resolveTarget(dsn: string): ResolvedTarget | null {
  * two, because the parser's dummy-host retry replaces only the FIRST "@/".
  */
 /**
- * A DATABASE name is ONE component, and reaching it meant crossing the
- * authority, so any delimiter in it means pg carried text over that boundary.
+ * ROUND 18. Two independent mechanisms, because neither closes the other's
+ * class and round 17 falsified the single-mechanism design with both.
  *
- * Whitespace and control characters are deliberately absent. They make a value
- * unsafe to PRINT, which is `show`'s job and which it already does by quoting
- * and escaping; they are not evidence that pg moved text between components.
- * Including them withheld `db name` parsed from `/db%20name`, a correct name
- * with a space in it, buying no secrecy and costing the operator their answer.
+ * Round 16 classified the VALUE pg resolved: withhold it if it holds a URI
+ * delimiter it could not have held had it come from one component. Two
+ * reviewers broke that within minutes, from opposite directions:
  *
- * `%` is present and must be. `parse` decodes the path with decodeURI, which
- * leaves RESERVED characters encoded, so a relocated userinfo spelled in
- * escapes carries no literal delimiter at all:
+ *   postgres://host=localhost,user=u,password=PW,dbname=db
+ *     No `@` and no `/`, so the WHOLE string is an opaque host. The delimiters
+ *     organising it are `=` and `,`, from libpq's keyword grammar, which the
+ *     URI parser never treated as boundaries. Nothing crossed anything, so a
+ *     delimiter test cannot see it. The value simply is not a hostname.
  *
- *   postgres://host/u%3APW%40gw   database "u%3APW%40gw"
+ *   postgres://u:?host=PW&user=reporter&@real/db
+ *     `?` ENDS the authority, so what reads as the password span is parsed as
+ *     query parameters and `?host=` assigns the host. Here the resolved value
+ *     is `PW`, which is a perfectly well formed hostname. Shape cannot see it.
+ *
+ * The second case also proves no rule over (field, value) alone can work.
+ * These two inputs hand the reporter the identical pair ("host", "PW"):
+ *
+ *   postgres://u:p@real/db?host=PW     the operator's real target, MUST print
+ *   postgres://u:?host=PW&@real/db     credential text, MUST NOT print
+ *
+ * Parsing has destroyed what separates them. So one mechanism recovers it.
  */
-const RELOCATED_INTO_A_NAME = /[@:/?#%]/;
 
 /**
- * A HOST is classified separately, because two of those delimiters are
- * LEGITIMATE there and withholding them costs faithfulness for no secrecy:
- * `:` because an IPv6 literal is made of them, and `/` because a unix socket
- * directory IS a path. Neither can carry a password across a boundary: the
- * password precedes the `@` that ENDS userinfo, and the host is what follows
- * it. Only `@`, and the `%` that can spell one, say the authority was not what
- * it appeared to be.
+ * MECHANISM 1, PROVENANCE. The password span under the NAIVE reading.
+ *
+ * A human, and libpq's documented `user[:password]@` grammar, take userinfo up
+ * to the LAST `@` before the first `/`, and do not let `?` or `#` end the
+ * authority early. WHATWG does let them. That DISAGREEMENT is the whole second
+ * class above, so this deliberately reads the string the way an OPERATOR does,
+ * not the way the parser does. It is not a competing parse of the target: its
+ * only output is a span to blank out.
+ *
+ * Returns null when there is no password component, which keeps
+ * `postgres://alice@host` intact: a colon-less userinfo is a USERNAME.
  */
-const RELOCATED_INTO_A_HOST = /[@%]/;
+function passwordSpan(dsn: string): { start: number; end: number } | null {
+  const marker = dsn.indexOf("//");
+  if (marker < 0) return null;
+  const start = marker + 2;
+  const slash = dsn.indexOf("/", start);
+  const authorityEnd = slash < 0 ? dsn.length : slash;
+  const at = dsn.lastIndexOf("@", authorityEnd);
+  if (at < start) return null;
+  const colon = dsn.indexOf(":", start);
+  if (colon < 0 || colon > at) return null;
+  return { start: colon + 1, end: at };
+}
+
+/** Substituted for the password so a second resolution can be compared. */
+const SCRUBBED_PASSWORD = "redacted";
+
+function scrubPassword(dsn: string): string {
+  const span = passwordSpan(dsn);
+  if (span === null) return dsn;
+  return dsn.slice(0, span.start) + SCRUBBED_PASSWORD + dsn.slice(span.end);
+}
 
 /**
- * Said INSTEAD of a value, never about one. It must not be confusable with
- * "(default)": a withheld field was stated and is being kept back, a defaulted
- * field was never stated at all, and telling an operator the second when the
- * first is true sends them to fix a DSN that is already correct.
+ * MECHANISM 2, SHAPE. A reported value must LOOK like the thing it claims to
+ * be. This is an allowlist on purpose: round 9 through 16 were all denylists,
+ * and each one admitted the next spelling nobody had thought of. A hostname is
+ * a closed grammar; "not a hostname" is not.
  */
-const WITHHELD = "(withheld: carries DSN syntax, so it may carry credentials)";
+const DNS_LABEL = "[A-Za-z0-9_]([A-Za-z0-9_-]{0,61}[A-Za-z0-9_])?";
+const DNS_NAME = new RegExp(
+  "^(?=.{1,253}$)" + DNS_LABEL + "(" + "\\." + DNS_LABEL + ")*" + "\\." + "?$"
+);
+const IPV4 = /^(25[0-5]|2[0-4]\d|1\d\d|[1-9]?\d)(\.(25[0-5]|2[0-4]\d|1\d\d|[1-9]?\d)){3}$/;
+const IPV6_BODY = /^[0-9A-Fa-f:]+$/;
+const IPV6_ZONE = /^[A-Za-z0-9_.-]+$/;
+/** sun_path is 108 bytes, and `@` is an ordinary character in a path. */
+const SOCKET_PATH_LIMIT = 107;
+const UNPRINTABLE_IN_A_PATH = /\s|\p{Cc}/u;
 
-function reportValue(value: string, relocated: RegExp): string {
-  return relocated.test(value) ? WITHHELD : show(value);
+function looksLikeHost(value: string): boolean {
+  if (value.length === 0) return false;
+  if (value.startsWith("/")) {
+    // sun_path is a BYTE budget, not a count of UTF-16 units, and a database
+    // name is 63 BYTES for the same reason. Measuring `.length` called a
+    // 106 emoji path over-long and a 60 emoji name short enough, both wrong.
+    return (
+      Buffer.byteLength(value, "utf8") <= SOCKET_PATH_LIMIT && !UNPRINTABLE_IN_A_PATH.test(value)
+    );
+  }
+  const bracketed = value.startsWith("[") && value.endsWith("]");
+  const bare = bracketed ? value.slice(1, -1) : value;
+  const parts = bare.split("%");
+  if (parts.length <= 2 && parts[0].includes(":")) {
+    const zoneOk = parts.length === 1 || IPV6_ZONE.test(parts[1]);
+    return IPV6_BODY.test(parts[0]) && parts[0].split(":").length <= 9 && zoneOk;
+  }
+  // Brackets hold an ADDRESS, never a name. pg passes `[127.0.0.1]` through
+  // unchanged, so the report must too, but only after validating the inside.
+  if (bracketed) return IPV4.test(bare);
+  return IPV4.test(value) || DNS_NAME.test(value);
+}
+
+/**
+ * PostgreSQL truncates an identifier at 63 bytes, so a longer string is not a
+ * database it could open. `%` is excluded because `parse` decodes the path with
+ * decodeURI, which leaves RESERVED bytes encoded, so `u%3APW%40gw` reaches here
+ * with its delimiters still spelled as escapes.
+ *
+ * `:` is excluded, and round 17 asked for it to be allowed so that a database
+ * honestly named `v2:prod` would print. Allowing it reopened a leak the same
+ * hour, caught by this file's own generated corpus:
+ *
+ *   postgres://usr%3APW@/   user "usr:PW", and an unstated database is the USER
+ *
+ * The `%3A` means passwordSpan sees no colon and cannot scrub, so provenance is
+ * blind here and shape is the only mechanism left. `v2:prod` stays withheld.
+ */
+const DATABASE_NAME = /^[\p{L}\p{N}_][\p{L}\p{N}_\-.+~$!]*$/u;
+const DATABASE_NAME_BYTES = 63;
+function looksLikeDatabase(value: string): boolean {
+  return Buffer.byteLength(value, "utf8") <= DATABASE_NAME_BYTES && DATABASE_NAME.test(value);
+}
+
+function looksLikePort(value: string): boolean {
+  if (!/^[0-9]{1,5}$/.test(value)) return false;
+  const port = Number(value);
+  return port >= 1 && port <= 65535;
+}
+
+/**
+ * The two refusals say DIFFERENT things and must never be merged, nor confused
+ * with "(default)". A defaulted field was never stated; a withheld field was
+ * stated and is being kept back; and WHICH of the two mechanisms refused it
+ * tells the operator whether to fix their DSN or to stop worrying.
+ */
+const WITHHELD_BY_PROVENANCE = "(withheld: derived from the DSN's credential text)";
+function withheldByShape(field: string): string {
+  return `(withheld: not a well-formed ${field})`;
 }
 
 function annotate(source: FieldSource): string {
@@ -636,12 +767,24 @@ function annotate(source: FieldSource): string {
 export function redactDsn(dsn: string): string {
   const target = resolveTarget(dsn);
   if (target === null) return "postgresql (dsn not parseable)";
+  // PROVENANCE first, then SHAPE. A value can be a flawless hostname and still
+  // have been built from the password, so passing the shape test proves nothing
+  // until the field is known not to have moved when the password was blanked.
+  const reportField = (
+    field: "host" | "port" | "database",
+    value: string,
+    wellFormed: (candidate: string) => boolean
+  ): string => {
+    if (value !== target.withoutPassword[field]) return WITHHELD_BY_PROVENANCE;
+    return wellFormed(value) ? show(value) : withheldByShape(field);
+  };
+
   const where = target.isSocket ? "socket" : "host";
-  // The provenance annotation survives withholding on purpose: WHERE a field
-  // came from is not a secret, and an operator chasing a wrong target needs it.
-  const host = `${reportValue(target.host, RELOCATED_INTO_A_HOST)}${annotate(target.hostSource)}`;
-  const port = `${show(target.port)}${annotate(target.portSource)}`;
-  const database = `${reportValue(target.database, RELOCATED_INTO_A_NAME)}${target.databaseNote}`;
+  // The source annotation survives withholding on purpose: WHERE a field came
+  // from is not a secret, and an operator chasing a wrong target needs it.
+  const host = `${reportField("host", target.host, looksLikeHost)}${annotate(target.hostSource)}`;
+  const port = `${reportField("port", target.port, looksLikePort)}${annotate(target.portSource)}`;
+  const database = `${reportField("database", target.database, looksLikeDatabase)}${target.databaseNote}`;
   return `postgresql ${where} ${host} port ${port} database ${database}`;
 }
 
