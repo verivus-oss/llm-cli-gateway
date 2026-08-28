@@ -454,10 +454,40 @@ describe("loadConfig: [persistence] is the single session-store selector", () =>
   });
 
   it("rejects a malformed persistence dsn rather than passing it to pg", () => {
-    vi.stubEnv("LLM_GATEWAY_CONFIG", pgConfig("mysql://nope/db"));
-    vi.stubEnv("DATABASE_URL", "");
-    expect(() => loadConfig(loadPersistenceConfig(noopLogger), noopLogger)).toThrow(
-      /Invalid database URL/
-    );
+    // The rejection moved EARLIER in round 14, from `loadConfig` to
+    // `loadPersistenceConfig`, so the message changed with it.
+    //
+    // `loadConfig` validated the dsn for the SESSION store only, and `doctor`
+    // never calls it: `doctor.ts` goes `loadPersistenceConfig` ->
+    // `createFlightRecorder` -> `health()` -> `block.flight_recorder.path`,
+    // which is `redactDsn(roleDsns.app)`. So a dsn that `loadConfig` would have
+    // refused still reached a reported surface on that path, and round 13
+    // measured `redactDsn` printing the password for exactly the shapes this
+    // field failed to constrain. Rejecting at parse time covers both callers.
+    for (const bad of ["mysql://nope/db", " postgresql://u:p@h/db", "postgres:/u:p@h/db"]) {
+      vi.stubEnv("LLM_GATEWAY_CONFIG", pgConfig(bad));
+      vi.stubEnv("DATABASE_URL", "");
+      expect(() => loadPersistenceConfig(noopLogger), bad).toThrow(
+        /must start with postgresql:\/\/ or postgres:\/\//
+      );
+    }
+  });
+
+  it("accepts the dsn spellings the flight recorder will report a target for", () => {
+    // The other half of the same predicate. `carriesPostgresDsnScheme` decides
+    // BOTH what this accepts and what `redactDsn` will name a target for, so a
+    // spelling accepted here must not be one the reporter refuses, and neither
+    // half can drift from the other.
+    for (const good of [
+      "postgresql://u:p@127.0.0.1:5433/db",
+      "postgres://u:p@127.0.0.1:5433/db",
+      "POSTGRESQL://u:p@127.0.0.1:5433/db",
+      "postgresql://u:p@/db",
+      "postgresql:///db",
+    ]) {
+      vi.stubEnv("LLM_GATEWAY_CONFIG", pgConfig(good));
+      vi.stubEnv("DATABASE_URL", "");
+      expect(() => loadPersistenceConfig(noopLogger), good).not.toThrow();
+    }
   });
 });

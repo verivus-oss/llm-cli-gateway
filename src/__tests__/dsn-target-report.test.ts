@@ -89,6 +89,19 @@ interface ReportField {
   note: string;
 }
 
+/**
+ * `JSON.parse`, after folding `show()`'s astral escape into a real character.
+ * `\u{e0061}` is valid JavaScript and NOT valid JSON, so parsing the report
+ * verbatim threw. Folding keeps this helper's existing, documented inability to
+ * see escaping, without turning it into an exception.
+ */
+function decodeReportedValue(raw: string): string {
+  const folded = raw.replace(/\\u\{([0-9a-f]{1,6})\}/gi, (_match, hex: string) =>
+    JSON.stringify(String.fromCodePoint(Number.parseInt(hex, 16))).slice(1, -1)
+  );
+  return JSON.parse(folded) as string;
+}
+
 function fieldsOf(report: string): {
   kind: string;
   host: ReportField;
@@ -130,7 +143,7 @@ function fieldsOf(report: string): {
       note = report.slice(at + 2, stop - 1);
       at = stop;
     }
-    return { value: raw.startsWith('"') ? (JSON.parse(raw) as string) : raw, note };
+    return { value: raw.startsWith('"') ? decodeReportedValue(raw) : raw, note };
   };
   eat("postgresql ");
   const kind = value().value;
@@ -210,11 +223,21 @@ function expectProvenanceIsReal(
     }
 
     // Claimed explicit: no ambient variable may be able to move it.
+    //
+    // ROUND 13 BLOCKER, both reviewers. This used to only DELETE variables, and
+    // every test here runs with all four already cleared, so it compared a
+    // value against itself. Dropping the `(default)` annotation from production
+    // entirely stayed green. SETTING each variable is the check that can fail:
+    // an explicitly stated field must survive a probe, a defaulted one must not.
     if (note === "") {
       for (const name of AMBIENT) {
         expect(
+          withProbeFor(name)[field],
+          `${dsn}: ${field} is reported as stated, but setting ${name} moves it`
+        ).toBe(resolvedNow[field]);
+        expect(
           withoutVariable(name)[field],
-          `${dsn}: ${field} is reported as stated, but ${name} moves it`
+          `${dsn}: ${field} is reported as stated, but removing ${name} moves it`
         ).toBe(resolvedNow[field]);
       }
       continue;
@@ -306,6 +329,12 @@ function expectAgreesWithPg(dsn: string): string {
 /**
  * WHAT THIS ORACLE CANNOT SEE, stated so nobody relies on it for these.
  *
+ * Round 13, codex: it also used to THROW on the astral form. `\u{e0061}` is
+ * not valid JSON, so `JSON.parse` failed with "Bad Unicode escape" and a test
+ * routing such a value through `expectAgreesWithPg` died on the ORACLE rather
+ * than on the code. It is folded to a real character before parsing now, which
+ * keeps the documented blindness rather than adding a crash on top of it.
+ *
  * `fieldsOf` JSON.parses a quoted field, which UNDOES both `JSON.stringify`
  * and the `\uXXXX` pass in `show()`. So a report carrying a RAW U+2028 and one
  * carrying `\u2028` decode to the same value and both agree with pg. Round 9
@@ -316,18 +345,41 @@ function expectAgreesWithPg(dsn: string): string {
  */
 
 /** Runs `fn` with fs.readFileSync watched, and reports what it read. */
-function readsDuring(fn: () => string): { reads: string[]; result: string } {
+interface ReadsDuring {
+  reads: string[];
+  result: string;
+  /**
+   * What was installed on the fs module the instant `fn` RETURNED, before this
+   * helper put the original back.
+   *
+   * ROUND 13 BLOCKER, codex. The restore assertion used to run after this
+   * helper's own `finally` had already restored the function, so disabling
+   * production's `finally` outright left the test green: the helper was
+   * repairing the very thing the test claimed to measure. Round 12 tried to fix
+   * this by changing WHICH reference the assertion read. That was the wrong
+   * half. The problem is WHEN it reads.
+   *
+   * Production restores whatever it found, which is `spy`, so a test can assert
+   * `installedAfter === spy` and actually fail when production leaks its stub.
+   */
+  installedAfter: unknown;
+  spy: unknown;
+}
+
+function readsDuring(fn: () => string): ReadsDuring {
   const reads: string[] = [];
-  const real = fs.readFileSync;
+  const target = require("fs") as { readFileSync: typeof fs.readFileSync };
+  const real = target.readFileSync;
   const spy = ((path: unknown, ...rest: unknown[]) => {
     reads.push(String(path));
     return (real as (...a: unknown[]) => unknown)(path, ...rest);
   }) as typeof fs.readFileSync;
-  (fs as { readFileSync: typeof fs.readFileSync }).readFileSync = spy;
+  target.readFileSync = spy;
   try {
-    return { reads, result: fn() };
+    const result = fn();
+    return { reads, result, installedAfter: target.readFileSync, spy };
   } finally {
-    (fs as { readFileSync: typeof fs.readFileSync }).readFileSync = real;
+    target.readFileSync = real;
   }
 }
 
@@ -378,6 +430,75 @@ describe("redactDsn names the server pg will actually reach", () => {
     expect(reads.filter(r => r.includes("/etc/hosts"))).toEqual([]);
     // Suppressing the READ must not lose the parameters that MOVE the target.
     expect(report).toBe("postgresql host elsewhere port 5433 database db");
+  });
+
+  it("never prints the password, for any DSN shape, well formed or not", () => {
+    // THE ASSERTION THIS FILE NEVER HAD, and the reason round 13 blocked.
+    //
+    // Twelve rounds asserted that the report AGREES WITH PG. None asserted that
+    // it withholds the secret. Those are different properties, and when pg
+    // misparses a DSN they are in direct conflict: what pg resolves CONTAINS
+    // the credential, so a faithful report leaks it. Three shapes did:
+    //
+    //   " postgresql://u:S@h/db"        database " postgresql://u:S@h/db"
+    //   "postgres:/user:S@host/db"      database "user:S@host/db"
+    //   "postgresql:u:S@host/db"        database ":S@host/db"
+    //
+    // and `redactDsn(roleDsns.app)` feeds the startup log line, with
+    // `[persistence].dsn` unvalidated, so this reached an operator's stderr.
+    //
+    // Stated as a property over shapes rather than a list of the three that
+    // were found, because a list of known-bad inputs is what rounds 9 and 12
+    // widened the gate against one case at a time.
+    const SECRET = "pw-3f9a2c-DO-NOT-PRINT";
+    const shapes = [
+      `postgresql://u:${SECRET}@127.0.0.1:5433/db`,
+      `postgres://u:${SECRET}@127.0.0.1:5433/db`,
+      `POSTGRESQL://u:${SECRET}@127.0.0.1:5433/db`,
+      `postgresql://u:${SECRET}@/db`,
+      `postgresql://u:${SECRET}@127.0.0.1:5433/db?host=elsewhere`,
+      `postgresql://u:${SECRET}@127.0.0.1:5433/db?password=${SECRET}`,
+      `postgresql://127.0.0.1:5433/db?password=${SECRET}`,
+      `postgresql://${SECRET}:${SECRET}@127.0.0.1:5433/db`,
+      `postgres:/user:${SECRET}@host/db`,
+      `postgres:user:${SECRET}@host/db`,
+      `postgresql:u:${SECRET}@host/db`,
+      `postgresql:/${SECRET}`,
+      `postgres:${SECRET}`,
+      `u:${SECRET}@host/db`,
+      `${SECRET}`,
+      `/var/run/postgresql ${SECRET}`,
+      `socket:/var/run/pg?db=${SECRET}`,
+      `postgresql://u:${encodeURIComponent(SECRET)}@127.0.0.1:5433/db`,
+    ];
+    // Every leading-junk variant of every shape, which is how the worst one
+    // arrived: a single space changed which branch pg took.
+    const prefixed: string[] = [];
+    for (const shape of shapes) {
+      for (const code of [32, 9, 10, 13, 0, 27, 11]) {
+        prefixed.push(String.fromCharCode(code) + shape);
+      }
+    }
+    const corpus = [...shapes, ...prefixed];
+
+    let named = 0;
+    for (const dsn of corpus) {
+      ambient();
+      const report = redactDsn(dsn);
+      expect(report, `report leaked the password for ${JSON.stringify(dsn)}`).not.toContain(SECRET);
+      // The percent-encoded spelling too: pg decodes, so a decoded leak and an
+      // encoded one are the same disclosure.
+      expect(report, `report leaked the encoded password for ${JSON.stringify(dsn)}`).not.toContain(
+        encodeURIComponent(SECRET)
+      );
+      if (!report.includes("not parseable")) named += 1;
+    }
+
+    // A GUARD ON THE GUARD. If every DSN here were refused, the assertions
+    // above would all pass while proving nothing about a function that reports
+    // targets. Some of this corpus must actually produce a report.
+    expect(named, "every DSN was refused, so this test proved nothing").toBeGreaterThan(5);
+    expect(corpus.length).toBeGreaterThan(100);
   });
 
   it("does not put a password on a surface that is read aloud", () => {
@@ -721,7 +842,7 @@ describe("redactDsn names the server pg will actually reach", () => {
     expect(redactDsn(ipv4)).toBe("postgresql host [127.0.0.1] port 5433 database db");
   });
 
-  it("strips SSL parameters whose keys carry characters WHATWG removes", () => {
+  it("reads no SSL file whose key carries characters WHATWG removes", () => {
     // Round 9 BLOCKER. `new URL` strips TAB, LF and CR from a URL before
     // parsing, so `?ssl<TAB>cert=` is `sslcert` to pg. A comparison done on
     // the raw text saw a key it did not recognise, and read the file.
@@ -738,24 +859,28 @@ describe("redactDsn names the server pg will actually reach", () => {
     }
   });
 
-  it("agrees with pg about a DSN that begins with a character WHATWG trims", () => {
-    // Round 9 BLOCKER, both reviewers. The scheme gate tested the RAW string,
-    // so a leading tab made it answer "not parseable" while pg resolved the
-    // DSN perfectly. WHATWG trims leading C0 controls and spaces first.
-    for (const code of [9, 10, 13, 0, 27]) {
+  it("refuses a DSN whose scheme is only a scheme after preprocessing", () => {
+    // ROUND 13 BLOCKER, and a REVERSAL of rounds 9, 10 and 12.
+    //
+    // Those rounds each treated "this disagrees with pg" as the defect and
+    // widened the gate until it matched what pg resolves. Round 13 measured the
+    // cost. pg resolves a string with no authority by putting the INPUT IN THE
+    // PATH, so widening the gate to accept these made redactDsn print the
+    // password:
+    //
+    //   " postgresql://u:sup3rsecret@h/db" -> database " postgresql://u:sup3r..."
+    //
+    // The previous version of this test asserted exactly that and called it "a
+    // loud signal", using toContain("host base port 5432"), which never looks
+    // at the database field where the password sits.
+    //
+    // Agreeing with pg is now subordinate to not printing secrets. Every string
+    // below is one pg WOULD resolve to something. All are refused.
+    for (const code of [32, 9, 10, 13, 0, 27]) {
       ambient();
       const dsn = String.fromCharCode(code) + "postgresql://u:p@127.0.0.1:5433/db";
-      expect(expectAgreesWithPg(dsn), `U+${code}`).toBe(
-        "postgresql host 127.0.0.1 port 5433 database db"
-      );
+      expect(redactDsn(dsn), `leading U+${code}`).toBe("postgresql (dsn not parseable)");
     }
-    // A leading SPACE is different and must NOT be trimmed away: it triggers
-    // pg's encodeURI branch, so pg resolves the dummy base host on port 5432.
-    // Reporting that truthfully is the point; it is a loud signal.
-    ambient();
-    expect(expectAgreesWithPg(" postgresql://u:p@127.0.0.1:5433/db")).toContain(
-      "host base port 5432"
-    );
   });
 
   it("escapes every character that breaks, reorders or COMMANDS a terminal", () => {
@@ -812,17 +937,26 @@ describe("redactDsn names the server pg will actually reach", () => {
     }
   });
 
-  it("agrees with pg when TAB, LF or CR sit INSIDE the scheme", () => {
-    // Round 10 BLOCKER. Round 9 trimmed only the ends. WHATWG removes these
-    // from ANYWHERE in a URL before reading the scheme, so `post<TAB>gresql://`
-    // is the same DSN to pg and 24 cases disagreed.
-    for (const code of [9, 10, 13]) {
+  it("refuses a scheme broken by a control character, wherever it sits", () => {
+    // ROUND 13, reversing round 10. Round 10 blocked because a TAB inside the
+    // scheme made this answer "not parseable" while pg resolved the real host,
+    // and its fix was a sanitiser; round 12 replaced that with `new URL`, whose
+    // trimming is what let a credential through. The gate is a prefix test on
+    // the raw string now, so an interior control character refuses again.
+    //
+    // Pinned deliberately, not discovered: `config.ts` rejects the same string,
+    // so a DSN in this shape cannot reach a live connection either.
+    for (const code of [9, 10, 13, 11, 12]) {
       ambient();
       const dsn = `post${String.fromCharCode(code)}gresql://u:p@127.0.0.1:5433/db`;
-      expect(expectAgreesWithPg(dsn), `U+${code}`).toBe(
-        "postgresql host 127.0.0.1 port 5433 database db"
-      );
+      expect(redactDsn(dsn), `interior U+${code}`).toBe("postgresql (dsn not parseable)");
     }
+    // What pg does with one of them, so the cost of refusing is on the record
+    // rather than implied: it resolves a host literally named `base`, its own
+    // base URL, which is nobody's configured target.
+    ambient();
+    const vertical = `post${String.fromCharCode(11)}gresql://u:p@127.0.0.1:5433/db`;
+    expect(pgTruth(vertical).host, "pg resolves its own base URL for this").toBe("base");
   });
 
   it("escapes every invisible or controlling character, by property", () => {
@@ -864,20 +998,21 @@ describe("redactDsn names the server pg will actually reach", () => {
       );
       expect(UNSAFE.test(report), `${label}: one of these survived raw`).toBe(false);
       expect(report.split("\n"), `${label} split the line`).toHaveLength(1);
-      // Each one keeps its OWN identity. Round 11 BLOCKER, codex: the
-      // escape emitted charCodeAt(0), the HIGH SURROGATE, so every tag
-      // character rendered the same and two different databases produced
+      // Each one keeps its OWN identity, IN ORDER. Round 11 BLOCKER, codex:
+      // the escape emitted charCodeAt(0), the HIGH SURROGATE, so every tag
+      // character rendered identically and two different databases produced
       // byte-identical reports.
-      for (const cp of batch) {
-        const escape =
-          cp > 0xffff
-            ? `${BS}u{${cp.toString(16).padStart(5, "0")}}`
-            : `${BS}u${cp.toString(16).padStart(4, "0")}`;
-        expect(
-          report,
-          `U+${cp.toString(16).toUpperCase()} is not named uniquely in the report`
-        ).toContain(escape);
-      }
+      //
+      // ROUND 13, codex: asserting that each escape appeared SOMEWHERE let a
+      // batch be reversed and stay green, so it checked the set and not the
+      // sequence. A report naming the right characters in the wrong order names
+      // a different database. The run is built and compared as one string.
+      const escapes = batch.map(cp =>
+        cp > 0xffff
+          ? `${BS}u{${cp.toString(16).padStart(5, "0")}}`
+          : `${BS}u${cp.toString(16).padStart(4, "0")}`
+      );
+      expect(report, `${label} is not rendered in order`).toContain(`db${escapes.join("")}x`);
     }
 
     // And the characters the property must NOT touch, or every accented or
@@ -914,22 +1049,25 @@ describe("redactDsn names the server pg will actually reach", () => {
     // The read is suppressed rather than the string rewritten, which is what
     // let every rewriting bug through. Also proves the guard is REMOVED again.
     ambient();
-    const { reads } = readsDuring(() =>
+    const { reads, installedAfter, spy } = readsDuring(() =>
       redactDsn(
         "postgresql://u:p@127.0.0.1:5433/db?sslcert=/etc/hosts&sslkey=/etc/hosts&sslrootcert=/etc/hosts"
       )
     );
     expect(reads.filter(r => r.includes("/etc/hosts"))).toEqual([]);
-    // The guard must not survive the call: a later read has to work normally.
+    // The guard must not survive the call. Checked at the only instant that
+    // can fail: what production left installed when it RETURNED, captured
+    // by `readsDuring` before that helper restored anything.
     //
-    // Round 11 BLOCKER, grok: this used the NAMED import `readFileSync`, which
-    // is not a live binding, so it read the original function no matter what
-    // was left installed on the module object. With the guard deliberately not
-    // restored the assertion still passed, and it was the only check on the
-    // restore. Production patches `require("fs").readFileSync`, so the check
-    // has to go through that same property.
+    // Two earlier versions of this assertion could not fail at all. Round
+    // 11 read a named import, which is not a live binding. Round 12 moved
+    // it to the module property but still read it AFTER `readsDuring` had
+    // put the original back, so production skipping its own `finally`
+    // stayed green. Round 13, codex.
+    expect(installedAfter, "production left its own stub installed").toBe(spy);
+    // And nothing outlived the helper either, through the same property.
     const fsModule = require("fs") as { readFileSync: typeof readFileSync };
-    expect(fsModule.readFileSync, "the guard was left installed").toBe(pristineReadFileSync);
+    expect(fsModule.readFileSync, "the guard outlived the helper").toBe(pristineReadFileSync);
     expect(fsModule.readFileSync("package.json", "utf8").length).toBeGreaterThan(0);
   });
 
@@ -971,38 +1109,44 @@ describe("redactDsn names the server pg will actually reach", () => {
     expect(reads.filter(r => r.includes("package.json"))).toEqual([]);
   });
 
-  it("reads the scheme the way WHATWG does, without copying how WHATWG does it", () => {
-    // Round 11 BLOCKER, both reviewers. The gate sanitised a COPY of the string
-    // (strip TAB/LF/CR, trim C0) and then applied a `://` regex, which is a
-    // hand-maintained reimplementation of WHATWG preprocessing and the sixth
-    // instance of this module's defect class. `new URL` performs that
-    // preprocessing itself, so these now resolve exactly as pg resolves them
-    // instead of being refused.
-    for (const dsn of ["postgres:/db", "postgresql:dbname", "postgres:///db"]) {
+  it("refuses every scheme spelling that is not the authority form", () => {
+    // ROUND 13 BLOCKER, reversing round 12. `new URL(dsn).protocol` accepted an
+    // opaque path, and pg then resolved the credential into the database:
+    //
+    //   redactDsn("postgres:/user:sup3rsecret@host/db")
+    //     -> database "user:sup3rsecret@host/db"
+    //
+    // pg resolves all of these to something. None is a spelling this gateway
+    // admits, and `carriesPostgresDsnScheme` is the same predicate `config.ts`
+    // validates with, so the gate and the validator cannot drift apart.
+    for (const dsn of [
+      "postgres:/db",
+      "postgresql:dbname",
+      "pg://127.0.0.1/db",
+      "socket:/var/run/postgresql?db=gw",
+      "/var/run/postgresql gw",
+    ]) {
       ambient();
-      expect(() => new Client({ connectionString: dsn }), `pg resolves ${dsn}`).not.toThrow();
-      expectAgreesWithPg(dsn);
+      expect(redactDsn(dsn), dsn).toBe("postgresql (dsn not parseable)");
     }
-    // The prefix clause still carries the DSNs `new URL` rejects for a reason
-    // that is NOT the scheme: an empty authority throws there while pg retries
-    // it with a dummy host. Round 6.
+    // The authority form still works, including the two empty-authority
+    // spellings. `postgres:///db` is `postgres://` plus an empty host, and
+    // `postgresql://u:p@/db` is the one pg retries with a dummy host, which is
+    // round 6 and must not regress. Neither can echo a credential, because the
+    // authority delimiter is what makes pg parse userinfo AS userinfo.
     ambient();
-    expect(() => new URL("postgresql://u:p@/db"), "new URL alone cannot gate this").toThrow();
+    expect(expectAgreesWithPg("postgres:///db")).toBe(
+      "postgresql host localhost (default) port 5432 (default) database db"
+    );
+    ambient();
     expect(expectAgreesWithPg("postgresql://u:p@/db")).toBe(
       "postgresql host localhost (default) port 5432 (default) database db"
     );
-  });
-
-  it("refuses a scheme broken by a character WHATWG does not strip", () => {
-    // The remaining NARROWNESS, stated rather than discovered. WHATWG removes
-    // TAB, LF and CR from anywhere, so those agree with pg. A vertical tab is
-    // not removed, and pg then resolves a host literally named `base`, its own
-    // base URL. Nobody configured that host, so refusing is the more useful
-    // answer than naming it, and this pins the choice as a decision.
+    // Case-insensitive, because pg lowercases the scheme and this one connects.
     ambient();
-    const dsn = `post${String.fromCharCode(11)}gresql://u:p@127.0.0.1:5433/db`;
-    expect(pgTruth(dsn).host, "pg resolves its own base URL for this").toBe("base");
-    expect(redactDsn(dsn)).toBe("postgresql (dsn not parseable)");
+    expect(expectAgreesWithPg("POSTGRESQL://u:p@127.0.0.1:5433/db")).toBe(
+      "postgresql host 127.0.0.1 port 5433 database db"
+    );
   });
 
   it("accepts both spellings of the scheme", () => {
