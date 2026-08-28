@@ -555,6 +555,68 @@ function resolveTarget(dsn: string): ResolvedTarget | null {
   };
 }
 
+/**
+ * Characters that DELIMIT DSN components, plus the escape that can spell one.
+ *
+ * `postgres:` is not a WHATWG special scheme (URL Standard, "special scheme"),
+ * so an empty authority is legal and everything after it is PATH, which pg
+ * reports as the database. That is the whole leak family: pg relocates text
+ * ACROSS a component boundary, and the text it carries over may be the
+ * password. Text cannot cross that boundary without bringing the delimiter
+ * that misplaced it, so a value holding one did not come from one component.
+ *
+ * This tests the SHAPE of what pg resolved, not its equality with the parsed
+ * password, because in every relocating shape the parsed password is the empty
+ * string and the secret is somewhere else entirely:
+ *
+ *   postgres:///u:PW@host/db   password ""   database "u:PW@host/db"
+ *   postgres://host/u:PW@gw    password ""   database "u:PW@gw"
+ *   postgres://u:S@/CRET@/db   password "S"  database "CRET@/db"
+ *
+ * A containment rule catches NONE of those. The third splits the secret in
+ * two, because the parser's dummy-host retry replaces only the FIRST "@/".
+ */
+/**
+ * A DATABASE name is ONE component, and reaching it meant crossing the
+ * authority, so any delimiter in it means pg carried text over that boundary.
+ *
+ * Whitespace and control characters are deliberately absent. They make a value
+ * unsafe to PRINT, which is `show`'s job and which it already does by quoting
+ * and escaping; they are not evidence that pg moved text between components.
+ * Including them withheld `db name` parsed from `/db%20name`, a correct name
+ * with a space in it, buying no secrecy and costing the operator their answer.
+ *
+ * `%` is present and must be. `parse` decodes the path with decodeURI, which
+ * leaves RESERVED characters encoded, so a relocated userinfo spelled in
+ * escapes carries no literal delimiter at all:
+ *
+ *   postgres://host/u%3APW%40gw   database "u%3APW%40gw"
+ */
+const RELOCATED_INTO_A_NAME = /[@:/?#%]/;
+
+/**
+ * A HOST is classified separately, because two of those delimiters are
+ * LEGITIMATE there and withholding them costs faithfulness for no secrecy:
+ * `:` because an IPv6 literal is made of them, and `/` because a unix socket
+ * directory IS a path. Neither can carry a password across a boundary: the
+ * password precedes the `@` that ENDS userinfo, and the host is what follows
+ * it. Only `@`, and the `%` that can spell one, say the authority was not what
+ * it appeared to be.
+ */
+const RELOCATED_INTO_A_HOST = /[@%]/;
+
+/**
+ * Said INSTEAD of a value, never about one. It must not be confusable with
+ * "(default)": a withheld field was stated and is being kept back, a defaulted
+ * field was never stated at all, and telling an operator the second when the
+ * first is true sends them to fix a DSN that is already correct.
+ */
+const WITHHELD = "(withheld: carries DSN syntax, so it may carry credentials)";
+
+function reportValue(value: string, relocated: RegExp): string {
+  return relocated.test(value) ? WITHHELD : show(value);
+}
+
 function annotate(source: FieldSource): string {
   if (source === "explicit") return "";
   if (source === "default") return " (default)";
@@ -575,9 +637,11 @@ export function redactDsn(dsn: string): string {
   const target = resolveTarget(dsn);
   if (target === null) return "postgresql (dsn not parseable)";
   const where = target.isSocket ? "socket" : "host";
-  const host = `${show(target.host)}${annotate(target.hostSource)}`;
+  // The provenance annotation survives withholding on purpose: WHERE a field
+  // came from is not a secret, and an operator chasing a wrong target needs it.
+  const host = `${reportValue(target.host, RELOCATED_INTO_A_HOST)}${annotate(target.hostSource)}`;
   const port = `${show(target.port)}${annotate(target.portSource)}`;
-  const database = `${show(target.database)}${target.databaseNote}`;
+  const database = `${reportValue(target.database, RELOCATED_INTO_A_NAME)}${target.databaseNote}`;
   return `postgresql ${where} ${host} port ${port} database ${database}`;
 }
 

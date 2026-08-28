@@ -410,9 +410,25 @@ describe("redactDsn names the server pg will actually reach", () => {
       expect(report, dsn).not.toMatch(/^\w+:\/\//);
       expect(report, dsn).toMatch(/^postgresql (host|socket) /);
     }
-    // The value-bearing cases still NAME what pg resolved, `://` and all.
+    // A HOST still NAMES what pg resolved, `://` and all. This is round 7's
+    // case and it still holds: `?host=` takes its value verbatim, the password
+    // precedes the `@` that ends userinfo, and a host is what follows, so
+    // nothing can have been carried into it across that boundary.
     ambient();
-    expect(redactDsn("postgresql://u:p@127.0.0.1:5432/foo://bar")).toContain("foo://bar");
+    expect(redactDsn("postgresql://u:p@127.0.0.1:5432/db?host=evil://host")).toContain(
+      "evil://host"
+    );
+
+    // A DATABASE no longer does, and round 16 gave that up ON PURPOSE. A name
+    // holding `://` is indistinguishable from userinfo pg relocated into the
+    // path, which is how five spellings of the password reached this report in
+    // round 15. Being wrong one way discloses a credential; being wrong the
+    // other way tells an operator a database nobody names this way is withheld.
+    // This is the ONLY faithfulness the withholding rule costs, and it is
+    // asserted here so a later round cannot restore it without reading why.
+    expect(redactDsn("postgresql://u:p@127.0.0.1:5432/foo://bar")).toContain(
+      "(withheld: carries DSN syntax, so it may carry credentials)"
+    );
   });
 
   it("does not read a file named in the DSN just to print a host", () => {
@@ -432,73 +448,123 @@ describe("redactDsn names the server pg will actually reach", () => {
     expect(report).toBe("postgresql host elsewhere port 5433 database db");
   });
 
-  it("never prints the password, for any DSN shape, well formed or not", () => {
-    // THE ASSERTION THIS FILE NEVER HAD, and the reason round 13 blocked.
+  it("never prints the password, over a GENERATED cross product of DSN shapes", () => {
+    // The corpus is BUILT, not listed. Round 14's was 18 shapes I typed out
+    // from the previous incident, and it passed while five isomorphic spellings
+    // of the same defect leaked, because a list can only contain the failures
+    // already known. This enumerates a grammar instead, so a shape nobody
+    // thought of is still generated.
     //
-    // Twelve rounds asserted that the report AGREES WITH PG. None asserted that
-    // it withholds the secret. Those are different properties, and when pg
-    // misparses a DSN they are in direct conflict: what pg resolves CONTAINS
-    // the credential, so a faithful report leaks it. Three shapes did:
-    //
-    //   " postgresql://u:S@h/db"        database " postgresql://u:S@h/db"
-    //   "postgres:/user:S@host/db"      database "user:S@host/db"
-    //   "postgresql:u:S@host/db"        database ":S@host/db"
-    //
-    // and `redactDsn(roleDsns.app)` feeds the startup log line, with
-    // `[persistence].dsn` unvalidated, so this reached an operator's stderr.
-    //
-    // Stated as a property over shapes rather than a list of the three that
-    // were found, because a list of known-bad inputs is what rounds 9 and 12
-    // widened the gate against one case at a time.
+    // The secret sits in the PASSWORD position only. A single userinfo token
+    // with no colon is a USERNAME by the URL Standard's authority state and by
+    // libpq's `user[:password]` grammar, pg parses it to `password: ""`, and
+    // reporting it is correct; that case is pinned by its own test below.
     const SECRET = "pw-3f9a2c-DO-NOT-PRINT";
-    const shapes = [
-      `postgresql://u:${SECRET}@127.0.0.1:5433/db`,
-      `postgres://u:${SECRET}@127.0.0.1:5433/db`,
-      `POSTGRESQL://u:${SECRET}@127.0.0.1:5433/db`,
-      `postgresql://u:${SECRET}@/db`,
-      `postgresql://u:${SECRET}@127.0.0.1:5433/db?host=elsewhere`,
-      `postgresql://u:${SECRET}@127.0.0.1:5433/db?password=${SECRET}`,
-      `postgresql://127.0.0.1:5433/db?password=${SECRET}`,
-      `postgresql://${SECRET}:${SECRET}@127.0.0.1:5433/db`,
-      `postgres:/user:${SECRET}@host/db`,
-      `postgres:user:${SECRET}@host/db`,
-      `postgresql:u:${SECRET}@host/db`,
-      `postgresql:/${SECRET}`,
-      `postgres:${SECRET}`,
-      `u:${SECRET}@host/db`,
-      `${SECRET}`,
-      `/var/run/postgresql ${SECRET}`,
-      `socket:/var/run/pg?db=${SECRET}`,
-      `postgresql://u:${encodeURIComponent(SECRET)}@127.0.0.1:5433/db`,
+    const USER = "usr-not-a-secret";
+    const schemes = ["postgres:", "postgresql:", "POSTGRES:", "PostgreSQL:"];
+    const slashes = ["", "/", "//", "///", "////"];
+    const userinfos = [
+      "",
+      `${USER}:${SECRET}@`,
+      `${USER}%3A${SECRET}@`,
+      `${USER}:${encodeURIComponent(SECRET)}@`,
+      `:${SECRET}@`,
+      `${USER}:${SECRET}@@`,
+      `${USER}:${SECRET}/x@`,
     ];
-    // Every leading-junk variant of every shape, which is how the worst one
-    // arrived: a single space changed which branch pg took.
-    const prefixed: string[] = [];
-    for (const shape of shapes) {
-      for (const code of [32, 9, 10, 13, 0, 27, 11]) {
-        prefixed.push(String.fromCharCode(code) + shape);
+    const authorities = ["", "host", "127.0.0.1", "[::1]:5433", "host:5433", "/"];
+    // The marker sits ONLY where a password can sit. `/${SECRET}` was here and
+    // was wrong: it names a DATABASE `pw-...`, and reporting a database by its
+    // real name is the function working, not leaking. A generator that plants
+    // the marker in a faithful position manufactures its own failures.
+    const paths = ["", "/", "/db", `/${USER}:${SECRET}@gw`, `/${USER}%3A${SECRET}%40gw`];
+    const queries = ["", "?host=elsewhere", `?password=${SECRET}`, `?application_name=${SECRET}`];
+
+    const corpus: string[] = [];
+    for (const scheme of schemes) {
+      for (const slash of slashes) {
+        for (const userinfo of userinfos) {
+          for (const authority of authorities) {
+            for (const path of paths) {
+              for (const query of queries) {
+                corpus.push(`${scheme}${slash}${userinfo}${authority}${path}${query}`);
+              }
+            }
+          }
+        }
       }
     }
-    const corpus = [...shapes, ...prefixed];
+    // Leading junk is a SEPARATE axis, not a shape: one space changes which
+    // branch pg's parser takes, because it triggers the encodeURI rewrite.
+    const junked: string[] = [];
+    for (const code of [32, 9, 10, 13, 0, 27, 11]) {
+      for (const dsn of corpus) junked.push(String.fromCharCode(code) + dsn);
+    }
+    const all = [...corpus, ...junked];
 
     let named = 0;
-    for (const dsn of corpus) {
+    let withheld = 0;
+    for (const dsn of all) {
       ambient();
-      const report = redactDsn(dsn);
+      let report: string;
+      try {
+        report = redactDsn(dsn);
+      } catch (error) {
+        throw new Error(`redactDsn THREW on ${JSON.stringify(dsn)}: ${String(error)}`);
+      }
       expect(report, `report leaked the password for ${JSON.stringify(dsn)}`).not.toContain(SECRET);
-      // The percent-encoded spelling too: pg decodes, so a decoded leak and an
-      // encoded one are the same disclosure.
+      // pg percent-DECODES, so an encoded leak and a decoded one are the same
+      // disclosure. Asserted separately because the two spellings differ.
       expect(report, `report leaked the encoded password for ${JSON.stringify(dsn)}`).not.toContain(
         encodeURIComponent(SECRET)
       );
       if (!report.includes("not parseable")) named += 1;
+      if (report.includes("withheld")) withheld += 1;
     }
 
-    // A GUARD ON THE GUARD. If every DSN here were refused, the assertions
-    // above would all pass while proving nothing about a function that reports
-    // targets. Some of this corpus must actually produce a report.
-    expect(named, "every DSN was refused, so this test proved nothing").toBeGreaterThan(5);
-    expect(corpus.length).toBeGreaterThan(100);
+    // GUARDS ON THE GUARD, both of which this test would otherwise satisfy by
+    // doing nothing. If every DSN were refused, or none ever tripped the
+    // withholding rule, the assertions above would pass over an empty subject.
+    expect(all.length, "the generator produced too small a corpus").toBeGreaterThan(2000);
+    expect(named, "every DSN was refused, so this test proved nothing").toBeGreaterThan(500);
+    expect(withheld, "nothing was ever withheld, so the rule never ran").toBeGreaterThan(100);
+  });
+
+  it("refuses a keyword/value DSN, which the withholding rule alone would NOT catch", () => {
+    // The scheme gate is SECURITY, not input hygiene, and this test exists so
+    // it cannot be relaxed by someone who reads it as the latter.
+    //
+    // node-postgres is not libpq. It does not reject a keyword/value string, it
+    // MISPARSES it, putting the entire string, password included, into the
+    // database:
+    //
+    //   host=localhost user=u password=PW dbname=db
+    //     host      "base"
+    //     database  "host=localhost user=u password=PW dbname=db"
+    //
+    // The withholding rule cannot save this. Its delimiters are the ones that
+    // separate URI components, and that string contains none of them: `=` and
+    // the spaces are not boundaries a URI parser could have carried text over.
+    // Refusing the DSN outright is what keeps the password out of the report.
+    ambient();
+    const SECRET = "pw-kv-DO-NOT-PRINT";
+    const report = redactDsn(`host=localhost user=u password=${SECRET} dbname=db`);
+    expect(report).toBe("postgresql (dsn not parseable)");
+    expect(report).not.toContain(SECRET);
+  });
+
+  it("reports a lone userinfo token, because that is a USERNAME and not a password", () => {
+    // NOT a leak, and round 15 recorded it as one. The URL Standard's authority
+    // state assigns a colon-less userinfo buffer to username, which is libpq's
+    // `user[:password]` grammar; pg parses `password` to the empty string, and
+    // then applies its dbname-defaults-to-user rule. Withholding here would
+    // break every ordinary `postgres://alice@host`, where alice IS the database
+    // pg opens. libpq agrees: its PQconninfoOption table marks `user` with the
+    // displayable dispchar "" and only `password`/`sslpassword` with "*".
+    ambient();
+    expect(redactDsn("postgres://alice@db.invalid")).toBe(
+      "postgresql host db.invalid port 5432 (default) database alice (default: the connecting user, from the DSN)"
+    );
   });
 
   it("does not put a password on a surface that is read aloud", () => {
