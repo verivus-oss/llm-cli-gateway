@@ -388,6 +388,9 @@ function readsDuring(fn: () => string): ReadsDuring {
  * see a given input. Kept deliberately dumb: it asserts only that there is no
  * `user:password@` to scrub, which is the condition being claimed.
  */
+/** Mirrors the filler the module uses, so inertness has a subject here. */
+const SCRUBBED_PASSWORD_IN_USE = "redacted";
+
 function passwordSpanIsBlind(dsn: string): boolean {
   const marker = dsn.indexOf("//");
   if (marker < 0) return true;
@@ -599,6 +602,32 @@ describe("redactDsn names the server pg will actually reach", () => {
       "postgresql host (withheld: derived from the DSN's credential text)" +
         " port 5432 (default) database (withheld: derived from the DSN's credential text)" +
         " (default: the connecting user)"
+    );
+  });
+
+  it("substitutes an INERT password, which is what makes ONE substitute enough", () => {
+    // The differential compares a resolution against one taken with the password
+    // blanked, so what gets substituted must be incapable of steering the parse
+    // itself. A filler containing `?`, `&`, `=`, `@`, `:`, `/` or `%` could make
+    // the scrubbed resolution differ for reasons having nothing to do with the
+    // credential, and every field would then be withheld for no reason at all.
+    //
+    // It also records why there is ONE filler. Round 19 argued that a password
+    // equal to the filler makes the scrub a no-op and blinds the comparison,
+    // added a second filler, and a mutation probe then showed the SINGLE filler
+    // code passing that same test: the filler replaces the whole SPAN, not the
+    // password value, and a span that can reach a reported field has to carry
+    // query syntax, which is exactly what stops it equalling an inert filler.
+    // The second filler was removed again as unearned complexity.
+    expect(SCRUBBED_PASSWORD_IN_USE).not.toMatch(/[?&=@:/%#]/);
+    ambient();
+    // A password that IS the filler still reports its real target.
+    expect(redactDsn("postgresql://u:redacted@127.0.0.1:5433/db")).toBe(
+      "postgresql host 127.0.0.1 port 5433 database db"
+    );
+    // A span carrying query syntax is still caught, filler-shaped or not.
+    expect(redactDsn("postgres://u:?host=redacted&@real/db")).toContain(
+      "(withheld: derived from the DSN's credential text)"
     );
   });
 

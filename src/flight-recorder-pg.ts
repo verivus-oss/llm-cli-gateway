@@ -661,7 +661,20 @@ function passwordSpan(dsn: string): { start: number; end: number } | null {
   return { start: colon + 1, end: at };
 }
 
-/** Substituted for the password so a second resolution can be compared. */
+/**
+ * Substituted for the password so a second resolution can be compared.
+ *
+ * It must be INERT: no character that a URI parser reads as structure, so that
+ * substituting it can only ever REMOVE the influence of the credential text and
+ * never add influence of its own. Round 19 nearly replaced this with a pair of
+ * substitutes, on the theory that a password equal to the filler would make the
+ * scrub a no-op and blind the comparison. A mutation probe refuted that: the
+ * filler replaces the whole SPAN, not the password value, and for the password
+ * to reach a reported field the span must contain `?host=` or the like, which
+ * is exactly what stops it equalling an inert filler. One filler suffices, and
+ * the property that makes it suffice is inertness, which is asserted in the
+ * tests rather than assumed here.
+ */
 const SCRUBBED_PASSWORD = "redacted";
 
 function scrubPassword(dsn: string): string {
