@@ -20,6 +20,7 @@
  * that cannot be proven is refused rather than assumed.
  */
 import { readFileSync, statSync } from "node:fs";
+import { resolvePgDsnTarget } from "./pg-dsn-target.js";
 import { join } from "node:path";
 
 export type TranscriptDeploymentShape = "unix-socket" | "loopback-tcp";
@@ -65,81 +66,20 @@ interface DsnTarget {
   port: number;
 }
 
-const DEFAULT_PORT = 5432;
-
 /**
- * Where a libpq connection string actually points.
+ * The target pg will use, resolved BY pg.
  *
- * Both accepted forms, because `pg` accepts both and a checker that understood
- * only URIs would silently refuse (or worse, mis-read) a keyword/value DSN.
- * `host=` in the query string wins over the URI authority, which is how libpq
- * expresses a unix socket in URI form.
+ * This used to be a hand-written parser: trim, `new URL`, `searchParams.get`,
+ * a manual authority slice, plus a separate keyword/value reader. Every one of
+ * those was a second answer to a question `pg` had already decided, and they
+ * disagreed with it in three measured ways (duplicate query keys, ambient
+ * `PGHOST`/`PGPORT`, and keyword/value strings pg does not accept at all).
+ *
+ * A gate that admits transcript BODIES cannot afford to be reporting on a
+ * different host from the one the driver opens. See `pg-dsn-target.ts`.
  */
 export function parseDsnTarget(dsn: string): DsnTarget | null {
-  const trimmed = dsn.trim();
-  if (trimmed.length === 0) return null;
-  if (!/^postgres(ql)?:\/\//i.test(trimmed)) return parseKeywordValueDsn(trimmed);
-
-  let url: URL;
-  try {
-    url = new URL(trimmed);
-  } catch {
-    return null;
-  }
-  const params = url.searchParams;
-  const portText = params.get("port") ?? (url.port.length > 0 ? url.port : null);
-  const port = portText === null ? DEFAULT_PORT : Number(portText);
-  if (!Number.isInteger(port) || port <= 0 || port > 65535) return null;
-
-  const queryHost = params.get("host");
-  if (queryHost !== null && queryHost.length > 0) {
-    return queryHost.startsWith("/")
-      ? { socketDirectory: queryHost, host: null, port }
-      : { socketDirectory: null, host: queryHost, port };
-  }
-  // `postgresql://%2Fvar%2Frun%2Fpostgresql/db` is libpq's percent-encoded
-  // socket directory. URL leaves it encoded in `hostname` and lowercases it,
-  // which is harmless for a path but means the raw authority is the honest
-  // source. An empty authority is the `postgresql:///db` form, which libpq
-  // resolves to a default socket directory this checker cannot name.
-  const authority = trimmed.slice(trimmed.indexOf("//") + 2).split("/")[0] ?? "";
-  const afterCredentials = authority.includes("@")
-    ? authority.slice(authority.lastIndexOf("@") + 1)
-    : authority;
-  const decoded = safeDecode(afterCredentials.replace(/:\d+$/, ""));
-  if (decoded === null) return null;
-  if (decoded.startsWith("/")) return { socketDirectory: decoded, host: null, port };
-  if (decoded.length === 0) return null;
-  return { socketDirectory: null, host: url.hostname, port };
-}
-
-function safeDecode(value: string): string | null {
-  try {
-    return decodeURIComponent(value);
-  } catch {
-    return null;
-  }
-}
-
-/** `host=/var/run/postgresql port=5432 dbname=x`, libpq's other accepted form. */
-function parseKeywordValueDsn(dsn: string): DsnTarget | null {
-  if (!/(^|\s)(host|hostaddr|dbname|user|port)\s*=/.test(dsn)) return null;
-  const pairs = new Map<string, string>();
-  for (const match of dsn.matchAll(/(\w+)\s*=\s*('(?:[^'\\]|\\.)*'|\S+)/g)) {
-    const raw = match[2];
-    pairs.set(
-      match[1].toLowerCase(),
-      raw.startsWith("'") ? raw.slice(1, -1).replace(/\\(.)/g, "$1") : raw
-    );
-  }
-  const portText = pairs.get("port");
-  const port = portText === undefined ? DEFAULT_PORT : Number(portText);
-  if (!Number.isInteger(port) || port <= 0 || port > 65535) return null;
-  const host = pairs.get("hostaddr") ?? pairs.get("host");
-  if (host === undefined || host.length === 0) return null;
-  return host.startsWith("/")
-    ? { socketDirectory: host, host: null, port }
-    : { socketDirectory: null, host, port };
+  return resolvePgDsnTarget(dsn);
 }
 
 /** The effective uid, or null where the platform has none (Windows). */

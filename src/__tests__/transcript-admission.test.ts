@@ -111,13 +111,60 @@ describe("the admission matrix", () => {
     expect(verdict.shape).toBe("unix-socket");
   });
 
-  it("ADMITS the keyword/value DSN form libpq also accepts", () => {
+  it("REFUSES the keyword/value DSN form, because node-postgres is not libpq", () => {
+    // This test used to assert the opposite, on the premise that the driver
+    // accepts what libpq accepts. Measured against the installed pg, it does
+    // not:
+    //
+    //   new Client({ connectionString: "host=/var/run/postgresql dbname=gw" })
+    //     -> host "base", port 5432, database "host=/var/run/postgresql dbname=gw"
+    //
+    // So the gate was proving a unix-socket shape for a connection the driver
+    // would open to a bare NAME. `base` is pg-connection-string's own base URL
+    // host, and a DNS search domain can make a bare name resolve, which is the
+    // one thing this gate exists to refuse. Proving the wrong shape is worse
+    // than proving none.
     const dir = socketDir(5432);
     const verdict = evaluateTranscriptAdmission(`host=${dir} dbname=gw user=llmgw`, {
       uid: process.getuid?.() ?? 0,
     });
-    expect(verdict.admitted).toBe(true);
-    expect(verdict.shape).toBe("unix-socket");
+    expect(verdict.admitted).toBe(false);
+    expect(verdict.shape).toBeNull();
+  });
+
+  it("resolves the host pg resolves when the query names it twice", () => {
+    // THE BYPASS THIS BRANCH EXISTS TO CLOSE, measured.
+    //
+    // The gate read the host with `URLSearchParams.get("host")`, the FIRST
+    // value. `pg-connection-string` iterates the query and assigns each one, so
+    // the LAST wins. A DSN naming loopback first and a remote host second was
+    // admitted as loopback while the driver opened the remote host, which sends
+    // prompt and response bodies somewhere this gate proved nothing about.
+    const procDir = procWith(row(V4_LOOPBACK, 5432, uid), "");
+    const verdict = evaluateTranscriptAdmission(
+      "postgresql://u@127.0.0.1:5432/gw?host=127.0.0.1&host=db.remote.invalid",
+      { procDir, uid }
+    );
+    expect(verdict.admitted).toBe(false);
+    expect(verdict.reason).toContain("db.remote.invalid");
+  });
+
+  it("follows PGHOST, which the driver follows and the old parser ignored", () => {
+    // Same class: the gate answered from the DSN text while pg applies
+    // `config.host || process.env.PGHOST || default`. An empty authority plus
+    // an ambient PGHOST resolved to a remote host in the driver and to nothing
+    // resolvable in the gate.
+    const procDir = procWith(row(V4_LOOPBACK, 5432, uid), "");
+    const previous = process.env.PGHOST;
+    process.env.PGHOST = "db.remote.invalid";
+    try {
+      const verdict = evaluateTranscriptAdmission("postgresql:///gw", { procDir, uid });
+      expect(verdict.admitted).toBe(false);
+      expect(verdict.reason).toContain("db.remote.invalid");
+    } finally {
+      if (previous === undefined) delete process.env.PGHOST;
+      else process.env.PGHOST = previous;
+    }
   });
 
   it("REFUSES a remote host", () => {
