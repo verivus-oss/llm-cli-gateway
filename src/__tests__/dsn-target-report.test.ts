@@ -448,12 +448,19 @@ describe("redactDsn names the server pg will actually reach", () => {
     // other way tells an operator a database nobody names this way is withheld.
     // This is the ONLY faithfulness the withholding rule costs, and it is
     // asserted here so a later round cannot restore it without reading why.
-    // ROUND 16 REVERSED. That round withheld a database named `foo://bar` on
-    // the grounds it was indistinguishable from relocated userinfo. Round 21
-    // does not need to guess: the parse either produced a target or refused,
-    // and a name holding `:` and `/` but no `@` or keyword syntax is a name
-    // PostgreSQL can open. It is named, and quoting keeps the line readable.
-    expect(redactDsn("postgresql://u:p@127.0.0.1:5432/foo://bar")).toContain("foo://bar");
+    // ROUND 16 REVERSED, THEN ROUND 22 REVERSED BACK. Round 21 argued that a
+    // strict parse does not need to guess, so a database named `foo://bar`
+    // could be named faithfully. Round 22 measured the cost of that: the colon
+    // it re-admitted is the opening of an apparent `user:password`, and the
+    // corpus found a disclosure through a colon in PATH position that no
+    // authority rule sees. The colon is now constrained everywhere except the
+    // host:port separator, and this name goes back to being refused.
+    //
+    // This is the faithfulness the rule costs, recorded so a later round
+    // reverses it a third time only after reading what it buys.
+    expect(redactDsn("postgresql://u:p@127.0.0.1:5432/foo://bar")).toBe(
+      "postgresql (dsn not parseable)"
+    );
   });
 
   it("does not read a file named in the DSN just to print a host", () => {
@@ -484,110 +491,145 @@ describe("redactDsn names the server pg will actually reach", () => {
     // with no colon is a USERNAME by the URL Standard's authority state and by
     // libpq's `user[:password]` grammar, pg parses it to `password: ""`, and
     // reporting it is correct; that case is pinned by its own test below.
-    const SECRET = "pw/3f9a2c+DO-NOT-PRINT";
-    const USER = "usr-not-a-secret";
-    const schemes = ["postgres:", "postgresql:", "POSTGRES:", "PostgreSQL:"];
-    const slashes = ["", "/", "//", "///", "////"];
-    // Round 17 axis. The old list held only URI userinfo, so it explored one
-    // grammar thoroughly and never emitted a `?` BEFORE the `@`, which ends the
-    // authority and turns the whole apparent password span into query
-    // parameters. Both reviewers found that class; the generator could not.
-    const userinfos = [
-      "",
-      `${USER}:${SECRET}@`,
-      `${USER}%3A${SECRET}@`,
-      `${USER}:${encodeURIComponent(SECRET)}@`,
-      `:${SECRET}@`,
-      `${USER}:${SECRET}@@`,
-      `${USER}:${SECRET}/x@`,
-      `${USER}:?host=${SECRET}&@`,
-      `${USER}:?user=${SECRET}&@`,
-      `${USER}:?port=6543&host=${SECRET}&@`,
-      `${USER}:#${SECRET}@`,
-    ];
-    // Round 17 axis. libpq keyword and JDBC property grammars, whose delimiters
-    // (`=`, `,`, `;`, `&`, space) the URI parser never treats as boundaries, so
-    // the whole run lands in one field intact and no delimiter test can see it.
-    const authorities = [
-      "",
-      "host",
-      "127.0.0.1",
-      "[::1]:5433",
-      "host:5433",
-      "/",
-      `host=localhost,user=u,password=${SECRET},dbname=db`,
-    ];
-    // The marker sits ONLY where a password can sit. `/${SECRET}` was here and
-    // was wrong: it names a DATABASE `pw-...`, and reporting a database by its
-    // real name is the function working, not leaking. A generator that plants
-    // the marker in a faithful position manufactures its own failures.
-    const paths = [
-      "",
-      "/",
-      "/db",
-      `/${USER}:${SECRET}@gw`,
-      `/${USER}%3A${SECRET}%40gw`,
-      `/db;password=${SECRET}`,
-      `/db&password=${SECRET}`,
-      `/db%20password=${SECRET}`,
-    ];
-    const queries = ["", "?host=elsewhere", `?password=${SECRET}`, `?application_name=${SECRET}`];
+    // Round 22. One marker is not enough. `pw/3f9a2c+DO-NOT-PRINT` holds `/`
+    // and `+`, and BOTH are refused in a hostname before any leak can be
+    // observed: `/` ends the authority and `+` is outside REG_NAME. So every
+    // shape that plants the marker in host position self-refused, and the
+    // corpus scored that as a pass. The round-22 disclosure used a marker made
+    // only of unreserved characters, which is exactly what this second one is.
+    const MARKERS = ["pw/3f9a2c+DO-NOT-PRINT", "pw3f9a2cDO-NOT-PRINT"];
+    expect(
+      MARKERS.some(marker => encodeURIComponent(marker) !== marker),
+      "no marker has an encoded spelling that differs, so the encoded assertion is dead"
+    ).toBe(true);
+    let namedTotal = 0;
+    let refusedTotal = 0;
+    let corpusTotal = 0;
+    for (const SECRET of MARKERS) {
+      const USER = "usr-not-a-secret";
+      const schemes = ["postgres:", "postgresql:", "POSTGRES:", "PostgreSQL:"];
+      const slashes = ["", "/", "//", "///", "////"];
+      // Round 17 axis. The old list held only URI userinfo, so it explored one
+      // grammar thoroughly and never emitted a `?` BEFORE the `@`, which ends the
+      // authority and turns the whole apparent password span into query
+      // parameters. Both reviewers found that class; the generator could not.
+      const userinfos = [
+        "",
+        `${USER}:${SECRET}@`,
+        `${USER}%3A${SECRET}@`,
+        `${USER}:${encodeURIComponent(SECRET)}@`,
+        `:${SECRET}@`,
+        `${USER}:${SECRET}@@`,
+        `${USER}:${SECRET}/x@`,
+        `${USER}:?host=${SECRET}&@`,
+        `${USER}:?user=${SECRET}&@`,
+        `${USER}:?port=6543&host=${SECRET}&@`,
+        `${USER}:#${SECRET}@`,
+        // Round 22 axes. The list above emits `?` before the `@` and it emits a
+        // `#`, but it never emitted the `@` AFTER the `#`, nor `@` in its
+        // percent-encoded spelling, and those were the two shapes that got out.
+        `${USER}:?host=${SECRET}&user=r#@`,
+        `${USER}:?host=${SECRET}&x=%40`,
+        `${USER}:?host=${SECRET}&user=r#`,
+        `${USER}:?host=${SECRET}#@`,
+        `${USER}:${SECRET}#@`,
+        `${USER}:${SECRET}%40`,
+      ];
+      // Round 17 axis. libpq keyword and JDBC property grammars, whose delimiters
+      // (`=`, `,`, `;`, `&`, space) the URI parser never treats as boundaries, so
+      // the whole run lands in one field intact and no delimiter test can see it.
+      const authorities = [
+        "",
+        "host",
+        "127.0.0.1",
+        "[::1]:5433",
+        "host:5433",
+        "/",
+        `host=localhost,user=u,password=${SECRET},dbname=db`,
+      ];
+      // The marker sits ONLY where a password can sit. `/${SECRET}` was here and
+      // was wrong: it names a DATABASE `pw-...`, and reporting a database by its
+      // real name is the function working, not leaking. A generator that plants
+      // the marker in a faithful position manufactures its own failures.
+      const paths = [
+        "",
+        "/",
+        "/db",
+        `/${USER}:${SECRET}@gw`,
+        `/${USER}%3A${SECRET}%40gw`,
+        `/db;password=${SECRET}`,
+        `/db&password=${SECRET}`,
+        `/db%20password=${SECRET}`,
+      ];
+      const queries = ["", "?host=elsewhere", `?password=${SECRET}`, `?application_name=${SECRET}`];
 
-    const corpus: string[] = [];
-    for (const scheme of schemes) {
-      for (const slash of slashes) {
-        for (const userinfo of userinfos) {
-          for (const authority of authorities) {
-            for (const path of paths) {
-              for (const query of queries) {
-                corpus.push(`${scheme}${slash}${userinfo}${authority}${path}${query}`);
+      const corpus: string[] = [];
+      for (const scheme of schemes) {
+        for (const slash of slashes) {
+          for (const userinfo of userinfos) {
+            for (const authority of authorities) {
+              for (const path of paths) {
+                for (const query of queries) {
+                  corpus.push(`${scheme}${slash}${userinfo}${authority}${path}${query}`);
+                }
               }
             }
           }
         }
       }
-    }
-    // Leading junk is a SEPARATE axis, not a shape: one space changes which
-    // branch pg's parser takes, because it triggers the encodeURI rewrite.
-    const junked: string[] = [];
-    for (const code of [32, 9, 10, 13, 0, 27, 11]) {
-      for (const dsn of corpus) junked.push(String.fromCharCode(code) + dsn);
-    }
-    const all = [...corpus, ...junked];
-
-    let named = 0;
-    let refused = 0;
-    for (const dsn of all) {
-      ambient();
-      let report: string;
-      try {
-        report = redactDsn(dsn);
-      } catch (error) {
-        throw new Error(`redactDsn THREW on ${JSON.stringify(dsn)}: ${String(error)}`);
+      // Leading junk is a SEPARATE axis, not a shape: one space changes which
+      // branch pg's parser takes, because it triggers the encodeURI rewrite.
+      const junked: string[] = [];
+      for (const code of [32, 9, 10, 13, 0, 27, 11]) {
+        for (const dsn of corpus) junked.push(String.fromCharCode(code) + dsn);
       }
-      expect(report, `report leaked the password for ${JSON.stringify(dsn)}`).not.toContain(SECRET);
-      // pg percent-DECODES, so an encoded leak and a decoded one are the same
-      // disclosure. Asserted separately because the two spellings differ.
-      expect(report, `report leaked the encoded password for ${JSON.stringify(dsn)}`).not.toContain(
-        encodeURIComponent(SECRET)
-      );
-      if (!report.includes("not parseable")) named += 1;
-      else refused += 1;
+      const all = [...corpus, ...junked];
+
+      let named = 0;
+      let refused = 0;
+      for (const dsn of all) {
+        ambient();
+        let report: string;
+        try {
+          report = redactDsn(dsn);
+        } catch (error) {
+          throw new Error(`redactDsn THREW on ${JSON.stringify(dsn)}: ${String(error)}`);
+        }
+        expect(report, `report leaked the password for ${JSON.stringify(dsn)}`).not.toContain(
+          SECRET
+        );
+        // pg percent-DECODES, so an encoded leak and a decoded one are the same
+        // disclosure. Asserted separately because the two spellings differ.
+        expect(
+          report,
+          `report leaked the encoded password for ${JSON.stringify(dsn)}`
+        ).not.toContain(encodeURIComponent(SECRET));
+        if (!report.includes("not parseable")) named += 1;
+        else refused += 1;
+      }
+
+      // GUARDS ON THE GUARD, both of which this test would otherwise satisfy by
+      // doing nothing. If every DSN were refused, or none ever tripped the
+      // withholding rule, the assertions above would pass over an empty subject.
+      // Round 17: `encodeURIComponent(SECRET) === SECRET` for a marker made only
+      // of unreserved characters, which made the encoded assertion a duplicate of
+      // the plain one and hid the fact that nothing tested the encoded spelling.
+      // PER MARKER. A marker whose every shape self-refuses proves nothing, and
+      // that is precisely how the first marker hid round 22.
+      expect(
+        named,
+        `every DSN carrying ${SECRET} was refused, so that marker proved nothing`
+      ).toBeGreaterThan(200);
+      namedTotal += named;
+      refusedTotal += refused;
+      corpusTotal += all.length;
     }
 
-    // GUARDS ON THE GUARD, both of which this test would otherwise satisfy by
-    // doing nothing. If every DSN were refused, or none ever tripped the
-    // withholding rule, the assertions above would pass over an empty subject.
-    // Round 17: `encodeURIComponent(SECRET) === SECRET` for a marker made only
-    // of unreserved characters, which made the encoded assertion a duplicate of
-    // the plain one and hid the fact that nothing tested the encoded spelling.
-    expect(
-      encodeURIComponent(SECRET),
-      "the marker must have an encoded spelling that DIFFERS, or one assertion above is dead"
-    ).not.toBe(SECRET);
-    expect(all.length, "the generator produced too small a corpus").toBeGreaterThan(2000);
-    expect(named, "every DSN was refused, so this test proved nothing").toBeGreaterThan(500);
-    expect(refused, "nothing was ever refused, so the parser never rejected").toBeGreaterThan(100);
+    expect(corpusTotal, "the generator produced too small a corpus").toBeGreaterThan(4000);
+    expect(namedTotal, "every DSN was refused, so this test proved nothing").toBeGreaterThan(500);
+    expect(refusedTotal, "nothing was ever refused, so the parser never rejected").toBeGreaterThan(
+      100
+    );
   });
 
   it("separates the pair that PROVES no rule over (field, value) can work", () => {
@@ -654,9 +696,73 @@ describe("redactDsn names the server pg will actually reach", () => {
       "holds a character RFC 3986 requires to be percent-encoded"
     );
 
-    // Decoding may carry data, never structure.
-    expect(why(`postgres://host/u%3A${S}%40gw`)).toBe(
+    // Decoding may carry data, never structure. This case deliberately holds
+    // NO `@` in either spelling: the ambiguity rule below would otherwise
+    // refuse it first and this control would stop being executed.
+    expect(why(`postgres://host/db%3D${S}`)).toBe(
       "the database name holds URI or keyword structure"
+    );
+
+    // The prefix rule. Round 22 found it had no pinned reason of its own.
+    expect(why(`postgres:/u:${S}@host/db`)).toBe("not a postgresql:// or postgres:// URI");
+
+    // THE AMBIGUITY RULE, in all three spellings round 22 escaped through.
+    const ambiguous = "an @ after the authority is ambiguous; it may be relocated userinfo";
+    expect(why(`postgres://u:?host=${S}&user=reporter#@real.invalid/db`)).toBe(ambiguous);
+    expect(why(`postgres://u:?host=${S}&x=%40real.invalid/db`)).toBe(ambiguous);
+    expect(why(`postgres://u:?host=${S}&user=r%40real#@real/db`)).toBe(ambiguous);
+    // `#` must end the authority for the rule that follows it. If it does not,
+    // the `@` before `evil` is read as the userinfo terminator and everything
+    // after it looks clean.
+    expect(why(`postgres://u:${S}@host#@evil.invalid/db`)).toBe(ambiguous);
+
+    // Its companion, for the shape that carries no `@` at all.
+    expect(why(`postgres://u:?host=${S}&user=reporter#`)).toBe(
+      "a colon with no port is an apparent password truncated by ? or /"
+    );
+
+    // THE COLON RULES. These two overlap heavily, so each is pinned by a case
+    // the OTHER does not catch. A mutation probe that disabled either one
+    // alone left all 40 tests passing until these were written.
+    //
+    // Only the raw-path rule sees this: the database comes from the query, so
+    // the name check never inspects the path segment holding the colon.
+    expect(why(`postgres:///usr:?host=h.invalid&dbname=safe`)).toBe(
+      "a colon outside the authority opens an apparent password"
+    );
+    // Only the name rule sees this: the path holds `%3A`, not a raw colon.
+    expect(why(`postgres://host/db%3A${S}`)).toBe(
+      "the database name holds URI or keyword structure"
+    );
+  });
+
+  it("keeps the ambiguity rule from eating the DSNs it is supposed to allow", () => {
+    // A password containing `@` is spelled with `%40` INSIDE the userinfo, and
+    // that is the correct spelling, not an attack. The rule scans only what
+    // follows the userinfo terminator, so this must still be reported in full.
+    // Without this test the cheapest way to pass the round-22 cases is to
+    // refuse every `%40`, which would refuse a large share of real DSNs.
+    expect(redactDsn("postgres://u:p%40ss@db.invalid:5433/app")).toBe(
+      "postgresql host db.invalid port 5433 database app"
+    );
+    expect(redactDsn("postgresql:///db?host=/var/run/postgresql")).toBe(
+      "postgresql socket /var/run/postgresql port 5432 (default) database db"
+    );
+    expect(redactDsn("postgresql://u:p@[::1]:5433/db")).toBe(
+      "postgresql host [::1] port 5433 database db"
+    );
+  });
+
+  it("records the price the ambiguity rule charges, so it is a decision and not a surprise", () => {
+    // KNOWN COST, accepted deliberately in round 22. An `@` percent-encoded in
+    // a QUERY value is refused even though pg connects with it, because the
+    // rule cannot tell it from a relocated userinfo without re-introducing the
+    // per-component reasoning that this class escaped three times.
+    //
+    // The report degrades to the unparseable line. Nothing about the
+    // CONNECTION changes: db.ts hands pg the original string.
+    expect(redactDsn("postgresql://host/db?user=alice%40srv")).toBe(
+      "postgresql (dsn not parseable)"
     );
   });
 

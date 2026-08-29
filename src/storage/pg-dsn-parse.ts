@@ -156,7 +156,7 @@ const STRUCTURE_IN_A_USER = [":", "@", "/", "?", "#"] as const;
  * NOT here: `db name` is a database PostgreSQL can open, and reporting it is
  * this function's job.
  */
-const STRUCTURE_IN_A_NAME = ["@", "?", "#", "=", "&", ";"] as const;
+const STRUCTURE_IN_A_NAME = [":", "@", "?", "#", "=", "&", ";"] as const;
 
 /**
  * Every character RFC 3986 allows in a URI: unreserved, reserved, and `%`.
@@ -172,6 +172,24 @@ const URI_CHARACTERS = /^[A-Za-z0-9\-._~:/?#[\]@!$&'()*+,;=%]*$/;
 
 const PREFIXES = ["postgresql://", "postgres://"];
 
+/**
+ * The two spellings of `@` that still mean `@` to pg after its single round of
+ * decoding. `%2540` is NOT one of them: it decodes to the literal text `%40`,
+ * so treating it as a delimiter would refuse a DSN that connects. Non-global,
+ * so `.test` carries no lastIndex between calls.
+ */
+const AT_TOKEN = /@|%40/i;
+
+/**
+ * The end of the authority: the first `/`, `?` or `#`. All three end it, and
+ * computing that boundary in one place is the point. Round 22's fragment
+ * bypass existed because two places computed it and only one counted `#`.
+ */
+function endOfAuthority(rest: string): number {
+  const ends = ["/", "?", "#"].map(delimiter => rest.indexOf(delimiter)).filter(at => at >= 0);
+  return ends.length === 0 ? rest.length : Math.min(...ends);
+}
+
 export function parsePgDsn(dsn: string, env: NodeJS.ProcessEnv = process.env): PgDsnParse {
   const lower = dsn.toLowerCase();
   const prefix = PREFIXES.find(candidate => lower.startsWith(candidate));
@@ -179,39 +197,65 @@ export function parsePgDsn(dsn: string, env: NodeJS.ProcessEnv = process.env): P
   // parser takes, so accepting one here would re-open round 9.
   if (prefix === undefined) return refuse("not a postgresql:// or postgres:// URI");
 
+  // THE AMBIGUITY RULE, on the RAW string, before anything is split off it.
+  //
+  // RFC 3986 permits `@` after the authority; a human, and libpq's
+  // `user[:password]@` grammar, read the LAST `@` as the end of userinfo. When
+  // those readings disagree the same bytes mean two things:
+  //
+  //   postgres://u:?host=X&@real/db    `?` ended the authority, so `X` becomes
+  //                                    the host while a reader sees a password
+  //
+  // Round 22 broke the previous version of this rule three times. Every break
+  // was somewhere the rule did not LOOK, not a case it judged wrongly: a
+  // fragment cut off before the scan ran, a percent-encoded `@`, and the two
+  // together. So this version reads every byte after the userinfo, in both
+  // spellings of `@` that survive pg's single decode, and it runs before the
+  // fragment is discarded.
+  //
+  // An `@` token inside the userinfo is deliberately not scanned:
+  // `postgres://u:p%40ss@host/db` is how a password containing `@` is spelled
+  // correctly, and it is accepted.
+  //
+  // Starting the scan after the USERINFO rather than after the whole authority
+  // is defence in depth, not a proven control. A mutation probe swapping the
+  // two left all 40 tests passing, because an `@` token in the hostport is
+  // already refused by the second-`@` rule or by the host structure check. The
+  // wider scan is kept so a future change to either of those cannot open a
+  // hole here, but do not read it as something the suite pins.
+  const afterPrefix = dsn.slice(prefix.length);
+  const userinfoEnd = afterPrefix.slice(0, endOfAuthority(afterPrefix)).lastIndexOf("@");
+  if (AT_TOKEN.test(afterPrefix.slice(userinfoEnd + 1))) {
+    return refuse("an @ after the authority is ambiguous; it may be relocated userinfo");
+  }
+
   // A fragment is discarded, exactly as pg discards it. Refusing one would
-  // refuse a DSN that connects. The route a fragment offered for smuggling
-  // credential text is closed by the no-unencoded-@-after-the-authority rule
-  // below, which is the rule that actually addresses it.
+  // refuse a DSN that connects.
   const hash = dsn.indexOf("#", prefix.length);
   const rest = hash < 0 ? dsn.slice(prefix.length) : dsn.slice(prefix.length, hash);
   if (!URI_CHARACTERS.test(rest)) {
     return refuse("holds a character RFC 3986 requires to be percent-encoded");
   }
 
-  const authorityEnd = ((): number => {
-    const slash = rest.indexOf("/");
-    const query = rest.indexOf("?");
-    const ends = [slash, query].filter(at => at >= 0);
-    return ends.length === 0 ? rest.length : Math.min(...ends);
-  })();
-  const authority = rest.slice(0, authorityEnd);
-  const remainder = rest.slice(authorityEnd);
+  const authority = rest.slice(0, endOfAuthority(rest));
+  const remainder = rest.slice(endOfAuthority(rest));
   const queryAt = remainder.indexOf("?");
   const rawPath = queryAt < 0 ? remainder : remainder.slice(0, queryAt);
   const rawQuery = queryAt < 0 ? "" : remainder.slice(queryAt + 1);
 
-  // THE AMBIGUITY RULE. RFC 3986 permits `@` in a path or query; a human, and
-  // libpq's `user[:password]@` grammar, read the LAST `@` as the end of
-  // userinfo. When those readings disagree the same bytes mean two things:
+  // A colon has exactly ONE legitimate job in this grammar: separating host
+  // from port inside the authority. Everywhere else it is the opening of an
+  // apparent `user:password`, and round 22's second disclosure used a colon in
+  // the PATH, which the authority rules never see:
   //
-  //   postgres://u:?host=X&@real/db   authority is `u:`, and `?` already
-  //                                   ended it, so `X` becomes the host while
-  //                                   a reader thinks it is the password
+  //   postgres:///usr:?host=SECRET&user=r#    empty authority, so `usr:` is a
+  //                                           path segment and `?` ate what a
+  //                                           reader sees as the password
   //
-  // Refusing is the only answer that is right under both readings.
-  if (rawPath.includes("@") || rawQuery.includes("@")) {
-    return refuse("unencoded @ after the authority is ambiguous; percent-encode it");
+  // Constraining the character totally is what stops the next positional
+  // variant of this from needing a fourth rule.
+  if (rawPath.includes(":")) {
+    return refuse("a colon outside the authority opens an apparent password");
   }
 
   let userinfo = "";
@@ -233,6 +277,7 @@ export function parsePgDsn(dsn: string, env: NodeJS.ProcessEnv = process.env): P
 
   let hostText = hostport;
   let portText = "";
+  let portDeclared = false;
   if (hostport.startsWith("[")) {
     const close = hostport.indexOf("]");
     if (close < 0) return refuse("unterminated IP literal");
@@ -240,6 +285,7 @@ export function parsePgDsn(dsn: string, env: NodeJS.ProcessEnv = process.env): P
     const tail = hostport.slice(close + 1);
     if (tail.length > 0) {
       if (!tail.startsWith(":")) return refuse("junk after the IP literal");
+      portDeclared = true;
       portText = tail.slice(1);
     }
   } else {
@@ -248,6 +294,7 @@ export function parsePgDsn(dsn: string, env: NodeJS.ProcessEnv = process.env): P
       if (hostport.indexOf(":", portColon + 1) >= 0) {
         return refuse("more than one colon in the authority");
       }
+      portDeclared = true;
       hostText = hostport.slice(0, portColon);
       portText = hostport.slice(portColon + 1);
     }
@@ -256,6 +303,15 @@ export function parsePgDsn(dsn: string, env: NodeJS.ProcessEnv = process.env): P
   const bracketed = hostText.startsWith("[") && hostText.endsWith("]");
   if (!bracketed && !REG_NAME.test(hostText)) {
     return refuse("host holds a character no hostname or socket path contains");
+  }
+  // A colon with nothing after it is the SECOND half of the ambiguity above,
+  // for the case where the DSN carries no `@` at all. `postgres://u:?host=X`
+  // parses as host `u` with an empty port, because `?` ended the authority.
+  // A reader parses it as user `u` with password `?host=X`. The empty span is
+  // the tell that a delimiter truncated something, and it costs nothing to
+  // refuse: pg needs no colon to reach its default port.
+  if (portDeclared && portText.length === 0) {
+    return refuse("a colon with no port is an apparent password truncated by ? or /");
   }
   if (portText.length > 0 && !PORT.test(portText)) return refuse("port is not 1 to 5 digits");
   // An explicit port with no host is malformed, and pg THROWS on it. Filling
