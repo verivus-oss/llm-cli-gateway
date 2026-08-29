@@ -20,7 +20,6 @@
  * cutover that moves them. `llm_process_health` reports the split so an
  * operator is never guessing where their history is.
  */
-import { createRequire } from "module";
 import { derivePromptSignals } from "./token-estimator.js";
 import { getRequestContext, principalScopeSql, resolveOwnerPrincipal } from "./request-context.js";
 import { isRedactionEnabled, redactSecrets } from "./secret-redaction.js";
@@ -34,7 +33,7 @@ import {
   type PgPoolFactory,
   type PostgresRoleDsns,
 } from "./storage/drivers/postgres.js";
-import { carriesPostgresDsnScheme } from "./storage/roles.js";
+import { parsePgDsn, type TargetFieldSource } from "./storage/pg-dsn-parse.js";
 import type { StorageConnection } from "./storage/store.js";
 import { FlightRecorderRuntime, truncateThinkingBlocks } from "./flight-recorder-runtime.js";
 import type {
@@ -179,208 +178,22 @@ const SQL_BOOTSTRAP = `
   `;
 
 /**
- * One place that turns a DSN into a printable identity: host, port and
- * database, never the password, and never a place the connection does not go.
+ * ROUND 21 removed this module's DSN handling entirely, and with it the reason
+ * it ever touched `fs`.
  *
- * THE DEFECT CLASS THIS EXISTS TO CLOSE is reporting a target in a
- * representation other than the one `pg` resolves. Four rounds produced four
- * variants of it, each fixed at the site and each reappearing a layer out:
+ * `pg-connection-string`'s `parse` reads `sslcert`, `sslkey` and `sslrootcert`
+ * from disk (measured), so a function whose job is to PRINT a host could be
+ * made to read a file named in its input, where a FIFO would hang startup.
+ * Rounds 10 to 13 handled that by monkeypatching `require("fs").readFileSync`
+ * around the call and restoring it in `finally`, and documented the residual
+ * hole: anything reaching `readFileSync` inside that synchronous window sees
+ * the substitute.
  *
- *   r3  the URL authority was reported while `?host=` moved the connection.
- *   r4  `?host=/var/run/postgresql` became `postgresql:///var/run/postgresql:5433/db`,
- *       which re-parses as an empty host and a database named `var/run/...`.
- *   r4  `?host=::1` became `postgresql://::1:5433/db`, unbracketed and ambiguous.
- *   r5  an absent port was reported as `5432 (default)` while PGPORT won.
- *   r6  the r5 fix annotated provenance INSIDE a URI, so PGPORT=6543 produced
- *       `postgresql://127.0.0.1:6543 (from PGPORT)/db` (not a URI at all) and
- *       PGDATABASE produced `postgresql://127.0.0.1:5433/ambient_db (from PGDATABASE)`,
- *       which IS a valid URI naming a database that does not exist.
- *
- * Every one of those came from the same two mistakes, so both are removed here
- * rather than patched again.
- *
- * ONE PARSER. `pg` resolves a DSN through `pg-connection-string` and then
- * layers `config[key] || process.env.PG* || default` on top. Re-implementing
- * either half is what produced r3 and r5, so neither is re-implemented: the
- * resolved target is read off a `pg.Client` constructed and never connected,
- * which IS the code that decides where the connection goes. `parse` is
- * consulted only to learn which fields the DSN stated explicitly, so that a
- * substituted value can be marked as substituted.
- *
- * ONE SHAPE. Never a URI. A URI-shaped report has to be abandoned for sockets,
- * for IPv6 and for any annotated field, and every abandonment was a chance to
- * emit something that still looked like a DSN and was not. A reader cannot
- * paste this form into a client by accident, which is the point.
+ * There is no window now. The report is built by `parsePgDsn`, which is string
+ * work only and never loads `pg` at all, so no disk read has to be suppressed
+ * and no global has to be replaced. The hazard is gone by construction rather
+ * than by being guarded.
  */
-/** The four target fields, the only ones this module hands to `pg`. */
-interface PgTargetConfig {
-  host?: string;
-  port?: string;
-  database?: string;
-  user?: string;
-}
-
-type FieldSource = "explicit" | "PGHOST" | "PGPORT" | "PGDATABASE" | "default";
-
-interface ResolvedTarget {
-  host: string;
-  hostSource: FieldSource;
-  isSocket: boolean;
-  port: string;
-  portSource: FieldSource;
-  database: string;
-  /** Prebuilt because an unstated database is the USER, whose own origin varies. */
-  databaseNote: string;
-  /** The same three fields resolved from the DSN with its PASSWORD blanked. */
-  withoutPassword: { host: string; port: string; database: string };
-}
-
-/** `pg` is an optional peer, but redactDsn is only reached where it must exist. */
-function loadPgTargetResolvers(): {
-  parse: (s: string) => Record<string, string | null | undefined>;
-  Client: new (config: PgTargetConfig) => {
-    host?: string;
-    port?: number;
-    database?: string;
-    user?: string;
-  };
-} {
-  const require = createRequire(import.meta.url);
-  const { parse } = require("pg-connection-string") as {
-    parse: (s: string) => Record<string, string | null | undefined>;
-  };
-  const { Client } = require("pg") as {
-    Client: new (config: PgTargetConfig) => {
-      host?: string;
-      port?: number;
-      database?: string;
-      user?: string;
-    };
-  };
-  return { parse, Client };
-}
-/**
- * Run pg's parser on the CALLER'S EXACT STRING, with disk reads disabled.
- *
- * THE HISTORY THIS ENDS. Five rounds produced five versions of one defect:
- * something here compared, validated or rewrote one representation while pg
- * acted on another.
- *   r3  the URL authority reported while `?host=` moved the connection.
- *   r6  `new URL` decided well-formedness while pg used its own parser.
- *   r8  the stripper compared RAW query keys while pg compared DECODED ones.
- *   r9  editing the query as TEXT changed which `encodeURI` branch pg took.
- *   r10 rebuilding the URL leaked pg's INTERNAL `___DUMMY___` sentinel, so
- *       `postgresql://u:p@/db?sslcert=/etc/hosts` reported host `___DUMMY___`
- *       while pg used `localhost`. pg rewrites `@/` to `@___DUMMY___/` and
- *       sets a private flag that turns the hostname back into ""; copying the
- *       rewrite without the flag is half a parser.
- *
- * Every one of those was introduced by the fix for the one before it, because
- * each fix still handled the DSN itself somewhere. So this one does not. There
- * is no preprocessing copy, no query editing, no re-serialisation and no
- * second parse: pg's `parse` is handed the ORIGINAL string.
- *
- * The only reason this module ever touched the string was to avoid disk reads.
- * `parse` calls `fs.readFileSync` on `sslcert`, `sslkey` and `sslrootcert`
- * (measured), and a function whose job is to PRINT a host must not read a file
- * named in its input, where a FIFO would hang the process at startup. So the
- * READ is suppressed rather than the STRING rewritten.
- *
- * `parse` is synchronous and `finally` restores the real function even when it
- * throws, so the window is narrow. Two claims about it have now been wrong in
- * OPPOSITE directions, so this states only what was measured.
- *
- * Round 11 corrected "no other JavaScript can run" to "a synchronous `warning`
- * listener runs inside it". Round 13 measured that too: `parse` does call
- * `process.emitWarning` for the deprecated SSL modes, but an ordinary
- * `process.on("warning")` listener fires on a LATER tick, after `finally` has
- * restored the real function. Measured order: stubbed, parse returns, restored,
- * listener runs.
- *
- * What is true is narrower. Code that replaces `process.emitWarning` itself
- * runs synchronously inside the window and would observe the substitute, as
- * would anything else that reaches `require("fs").readFileSync` during it.
- * That is a real if small hole, and narrowing it further means editing the DSN
- * again, which is the defect class this module spent five rounds removing.
- */
-
-/**
- * What `parse` does with the bytes, measured in the installed
- * `pg-connection-string`: it assigns `config.ssl.cert|key|ca` from
- * `<bytes>.toString()` and then INSPECTS exactly one of them, `if
- * (!config.ssl.ca)`, in the `uselibpqcompat=true` + `sslmode=verify-ca` branch,
- * where an empty CA throws. Nothing parses the content.
- *
- * So the substitute must be NON-EMPTY. Round 11 BLOCKER, both reviewers:
- * `Buffer.alloc(0)` made that branch throw for a DSN whose real, non-empty
- * `sslrootcert` satisfies it, so the report said "not parseable" for a target
- * pg resolves. Truthiness is the whole contract; any non-empty value is
- * neutral for every decision `parse` makes about the target.
- */
-const UNREAD_FILE_SUBSTITUTE = Buffer.from("unread");
-
-function parseWithoutReadingFiles(
-  parse: (s: string) => Record<string, string | null | undefined>,
-  dsn: string
-): Record<string, string | null | undefined> {
-  const require = createRequire(import.meta.url);
-  const fs = require("fs") as { readFileSync: (...args: unknown[]) => unknown };
-  const real = fs.readFileSync;
-  fs.readFileSync = () => UNREAD_FILE_SUBSTITUTE;
-  try {
-    return parse(dsn);
-  } finally {
-    fs.readFileSync = real;
-  }
-}
-
-/**
- * Does this string carry a PostgreSQL scheme?
- *
- * It defers to `carriesPostgresDsnScheme`, the SAME predicate `config.ts` uses
- * to decide what it will accept as a connection string. That is the whole
- * design: this function reports a target only for strings the gateway would
- * accept as a DSN, so the gate cannot be narrower or wider than the validator.
- *
- * ROUND 13 BLOCKER, both reviewers, and the most serious defect in this series.
- * Round 12 replaced a hand-rolled sanitiser with `new URL(dsn).protocol` on the
- * argument that WHATWG should do its own preprocessing. WHATWG trims a leading
- * space, so ` postgresql://u:secret@h/db` passed the gate. pg does NOT trim it:
- * the space triggers pg's `encodeURI` branch, pg resolves its own base host,
- * and the whole credential-bearing string becomes the DATABASE. Measured:
- *
- *   redactDsn(" postgresql://u:sup3rsecret@127.0.0.1:5433/db")
- *     -> database " postgresql://u:sup3rsecret@127.0.0.1:5433/db"
- *   redactDsn("postgres:/user:sup3rsecret@host/db")
- *     -> database "user:sup3rsecret@host/db"
- *
- * and that value goes to the startup log line in `createFlightRecorder`. The
- * gate had been kept in round 12 specifically to prevent credential echo, and
- * the clause added for correctness was the clause that opened it.
- *
- * The lesson is not "pick a better URL parser". Faithfully reporting what pg
- * resolves is INCOMPATIBLE with never printing a password, because when pg
- * misparses a DSN what it resolves CONTAINS the password. So the input is
- * required to be the authority form, where pg puts credentials in the userinfo
- * and they never reach a reported field.
- *
- * WHAT THIS REFUSES, stated rather than discovered later. Every one of these is
- * a string pg would resolve to something:
- *
- *   ` postgresql://h/db`     leading whitespace (round 9, and the leak above)
- *   `post<TAB>gresql://h/db` a control character inside the scheme (round 10)
- *   `postgres:/db`           single slash, no authority (round 12)
- *   `pg://h/db`, `socket:/p` schemes pg accepts and this gateway does not
- *   `/var/run/postgresql db` a bare socket path
- *
- * Round 10 treated the TAB case as a defect and round 12 the single-slash case,
- * both on the principle that this must agree with pg. That principle is now
- * subordinate to not printing secrets, and `config.ts` rejects all of these
- * before they can reach a live connection anyway.
- */
-function carriesPostgresScheme(dsn: string): boolean {
-  return carriesPostgresDsnScheme(dsn);
-}
 
 /**
  * The host is reported EXACTLY as pg resolved it. There is no normalisation.
@@ -475,329 +288,71 @@ function show(value: string): string {
   });
 }
 
-function resolveTarget(dsn: string): ResolvedTarget | null {
-  // pg's parser does NOT throw on garbage: `parse("not a dsn")` returns
-  // `{ host: "base", database: "not a dsn" }`, so it cannot decide whether the
-  // input was a DSN.
-  //
-  // Requiring the scheme is that decision. It is NOT "pg's own test", which an
-  // earlier version of this comment claimed and round 7 falsified: pg-connection-string
-  // treats ANY scheme but `socket:` as TCP, so `pg://h/db` and a bare `/path`
-  // also resolve there. This is deliberately narrower than pg, because the only
-  // DSNs that reach here come from gateway config, which admits exactly these
-  // two spellings. Anything else is likelier a mistake than a target.
-  if (!carriesPostgresScheme(dsn)) return null;
-
-  let parse: ReturnType<typeof loadPgTargetResolvers>["parse"];
-  let Client: ReturnType<typeof loadPgTargetResolvers>["Client"];
-  try {
-    ({ parse, Client } = loadPgTargetResolvers());
-  } catch {
-    return null;
+/**
+ * ROUND 21. The report is built from a projection that HAS no password field.
+ *
+ * Rounds 9 to 19 each tried to make a resolved value safe to print, by gating
+ * the input, then by classifying the value, then by a provenance differential.
+ * Every one was falsified, and round 19 showed why the whole family must be:
+ * these two make pg resolve the same host, so any rule over the resolved
+ * (field, value) pair must treat them identically, yet one must print and one
+ * must not.
+ *
+ *   postgres://u:p@real/db?host=X     the operator's real target
+ *   postgres://u:?host=X&@real/db     credential text
+ *
+ * The goal itself was also wrong. "The output never contains the password
+ * bytes" is unachievable: an operator may name a host equal to their password.
+ * What IS achievable is NONINTERFERENCE, and it is nearly free: parse once,
+ * strictly, into a `PgPublicTarget` with no password field, and format only
+ * that. No byte of this line can be derived from a secret because the value it
+ * is built from cannot hold one.
+ *
+ * A string that two readings disagree about is refused rather than reported.
+ * See `parsePgDsn` for the rules and for why each exists.
+ */
+function annotate(source: TargetFieldSource): string {
+  switch (source) {
+    case "dsn":
+      return "";
+    // A query parameter IS stated in the DSN, so it is not annotated. The
+    // annotation exists to separate what the operator wrote from what an
+    // environment variable or a default supplied; `?host=` is the first.
+    case "query":
+      return "";
+    case "PGHOST":
+    case "PGPORT":
+    case "PGDATABASE":
+    case "PGUSER":
+      return ` (from ${source})`;
+    case "user-from-dsn":
+      return " (default: the connecting user, from the DSN)";
+    case "user-from-query":
+      return " (default: the connecting user, from the DSN)";
+    case "user-from-PGUSER":
+      return " (default: the connecting user, from PGUSER)";
+    case "user-default":
+      return " (default: the connecting user)";
+    default:
+      return " (default)";
   }
-
-  const resolveFields = (
-    candidate: string
-  ): {
-    stated: Record<string, string | null | undefined>;
-    resolved: { host?: string; port?: number; database?: string; user?: string };
-  } => {
-    const parsed = parseWithoutReadingFiles(parse, candidate);
-    return {
-      stated: parsed,
-      resolved: new Client({
-        host: parsed.host || undefined,
-        port: parsed.port || undefined,
-        database: parsed.database || undefined,
-        user: parsed.user || undefined,
-      }),
-    };
-  };
-
-  let stated: Record<string, string | null | undefined>;
-  let resolved: { host?: string; port?: number; database?: string; user?: string };
-  let withoutPassword: { host: string; port: string; database: string };
-  try {
-    stated = parseWithoutReadingFiles(parse, dsn);
-    // FIELDS, not the connection string. Handing Client the string makes it
-    // re-parse and read the SSL files again; handing it the four target fields
-    // applies the SAME `config[key] || process.env.PG* || default` resolution
-    // (measured identical) and touches no disk. This object is what the driver
-    // hands to the socket, so reading it cannot disagree with the connection.
-    resolved = new Client({
-      host: stated.host || undefined,
-      port: stated.port || undefined,
-      database: stated.database || undefined,
-      user: stated.user || undefined,
-    });
-    // The SAME resolution over a DSN whose password bytes are blanked. A field
-    // that moves when only the password moved was built out of credential text,
-    // however innocent the value it ended up holding looks.
-    const blanked = resolveFields(scrubPassword(dsn)).resolved;
-    withoutPassword = {
-      host: String(blanked.host ?? ""),
-      port: String(blanked.port ?? ""),
-      database: String(blanked.database ?? ""),
-    };
-  } catch {
-    return null;
-  }
-
-  const wasStated = (value: string | null | undefined): boolean =>
-    value !== null && value !== undefined && value !== "";
-  const ambient = (name: string): boolean => {
-    const value = process.env[name];
-    return value !== undefined && value !== "";
-  };
-  const sourceOf = (
-    statedValue: string | null | undefined,
-    envName: "PGHOST" | "PGPORT" | "PGDATABASE"
-  ): FieldSource => (wasStated(statedValue) ? "explicit" : ambient(envName) ? envName : "default");
-
-  // An unstated database is not a default NAME: pg substitutes the connecting
-  // USER, whose own origin is the DSN, PGUSER, or the OS account.
-  //
-  // Round 7 BLOCKER: this used to report `(from PGUSER)` whenever PGUSER was
-  // merely SET, so `postgresql://bob@host` with PGUSER=alice printed
-  // `database bob (from PGUSER)`. pg had taken `bob` from the DSN and ignored
-  // PGUSER entirely, and the annotation sent the reader to the wrong variable.
-  // The user's provenance decides the note, not the presence of the variable.
-  const databaseNote = wasStated(stated.database)
-    ? ""
-    : ambient("PGDATABASE")
-      ? " (from PGDATABASE)"
-      : wasStated(stated.user)
-        ? " (default: the connecting user, from the DSN)"
-        : ambient("PGUSER")
-          ? " (default: the connecting user, from PGUSER)"
-          : " (default: the connecting user)";
-
-  const host = String(resolved.host ?? "");
-  const isSocket = host.startsWith("/");
-  return {
-    host,
-    hostSource: sourceOf(stated.host, "PGHOST"),
-    isSocket,
-    port: String(resolved.port ?? ""),
-    portSource: sourceOf(stated.port, "PGPORT"),
-    database: String(resolved.database ?? ""),
-    databaseNote,
-    withoutPassword,
-  };
 }
 
 /**
- * Characters that DELIMIT DSN components, plus the escape that can spell one.
+ * Names the PostgreSQL server a DSN will reach, for operator logs and doctor.
  *
- * `postgres:` is not a WHATWG special scheme (URL Standard, "special scheme"),
- * so an empty authority is legal and everything after it is PATH, which pg
- * reports as the database. That is the whole leak family: pg relocates text
- * ACROSS a component boundary, and the text it carries over may be the
- * password. Text cannot cross that boundary without bringing the delimiter
- * that misplaced it, so a value holding one did not come from one component.
- *
- * This tests the SHAPE of what pg resolved, not its equality with the parsed
- * password, because in every relocating shape the parsed password is the empty
- * string and the secret is somewhere else entirely:
- *
- *   postgres:///u:PW@host/db   password ""   database "u:PW@host/db"
- *   postgres://host/u:PW@gw    password ""   database "u:PW@gw"
- *   postgres://u:S@/CRET@/db   password "S"  database "CRET@/db"
- *
- * A containment rule catches NONE of those. The third splits the secret in
- * two, because the parser's dummy-host retry replaces only the FIRST "@/".
- */
-/**
- * ROUND 18. Two independent mechanisms, because neither closes the other's
- * class and round 17 falsified the single-mechanism design with both.
- *
- * Round 16 classified the VALUE pg resolved: withhold it if it holds a URI
- * delimiter it could not have held had it come from one component. Two
- * reviewers broke that within minutes, from opposite directions:
- *
- *   postgres://host=localhost,user=u,password=PW,dbname=db
- *     No `@` and no `/`, so the WHOLE string is an opaque host. The delimiters
- *     organising it are `=` and `,`, from libpq's keyword grammar, which the
- *     URI parser never treated as boundaries. Nothing crossed anything, so a
- *     delimiter test cannot see it. The value simply is not a hostname.
- *
- *   postgres://u:?host=PW&user=reporter&@real/db
- *     `?` ENDS the authority, so what reads as the password span is parsed as
- *     query parameters and `?host=` assigns the host. Here the resolved value
- *     is `PW`, which is a perfectly well formed hostname. Shape cannot see it.
- *
- * The second case also proves no rule over (field, value) alone can work.
- * These two inputs hand the reporter the identical pair ("host", "PW"):
- *
- *   postgres://u:p@real/db?host=PW     the operator's real target, MUST print
- *   postgres://u:?host=PW&@real/db     credential text, MUST NOT print
- *
- * Parsing has destroyed what separates them. So one mechanism recovers it.
- */
-
-/**
- * MECHANISM 1, PROVENANCE. The password span under the NAIVE reading.
- *
- * A human, and libpq's documented `user[:password]@` grammar, take userinfo up
- * to the LAST `@` before the first `/`, and do not let `?` or `#` end the
- * authority early. WHATWG does let them. That DISAGREEMENT is the whole second
- * class above, so this deliberately reads the string the way an OPERATOR does,
- * not the way the parser does. It is not a competing parse of the target: its
- * only output is a span to blank out.
- *
- * Returns null when there is no password component, which keeps
- * `postgres://alice@host` intact: a colon-less userinfo is a USERNAME.
- */
-function passwordSpan(dsn: string): { start: number; end: number } | null {
-  const marker = dsn.indexOf("//");
-  if (marker < 0) return null;
-  const start = marker + 2;
-  const slash = dsn.indexOf("/", start);
-  const authorityEnd = slash < 0 ? dsn.length : slash;
-  const at = dsn.lastIndexOf("@", authorityEnd);
-  if (at < start) return null;
-  const colon = dsn.indexOf(":", start);
-  if (colon < 0 || colon > at) return null;
-  return { start: colon + 1, end: at };
-}
-
-/**
- * Substituted for the password so a second resolution can be compared.
- *
- * It must be INERT: no character that a URI parser reads as structure, so that
- * substituting it can only ever REMOVE the influence of the credential text and
- * never add influence of its own. Round 19 nearly replaced this with a pair of
- * substitutes, on the theory that a password equal to the filler would make the
- * scrub a no-op and blind the comparison. A mutation probe refuted that: the
- * filler replaces the whole SPAN, not the password value, and for the password
- * to reach a reported field the span must contain `?host=` or the like, which
- * is exactly what stops it equalling an inert filler. One filler suffices, and
- * the property that makes it suffice is inertness, which is asserted in the
- * tests rather than assumed here.
- */
-const SCRUBBED_PASSWORD = "redacted";
-
-function scrubPassword(dsn: string): string {
-  const span = passwordSpan(dsn);
-  if (span === null) return dsn;
-  return dsn.slice(0, span.start) + SCRUBBED_PASSWORD + dsn.slice(span.end);
-}
-
-/**
- * MECHANISM 2, SHAPE. A reported value must LOOK like the thing it claims to
- * be. This is an allowlist on purpose: round 9 through 16 were all denylists,
- * and each one admitted the next spelling nobody had thought of. A hostname is
- * a closed grammar; "not a hostname" is not.
- */
-const DNS_LABEL = "[A-Za-z0-9_]([A-Za-z0-9_-]{0,61}[A-Za-z0-9_])?";
-const DNS_NAME = new RegExp(
-  "^(?=.{1,253}$)" + DNS_LABEL + "(" + "\\." + DNS_LABEL + ")*" + "\\." + "?$"
-);
-const IPV4 = /^(25[0-5]|2[0-4]\d|1\d\d|[1-9]?\d)(\.(25[0-5]|2[0-4]\d|1\d\d|[1-9]?\d)){3}$/;
-const IPV6_BODY = /^[0-9A-Fa-f:]+$/;
-const IPV6_ZONE = /^[A-Za-z0-9_.-]+$/;
-/** sun_path is 108 bytes, and `@` is an ordinary character in a path. */
-const SOCKET_PATH_LIMIT = 107;
-const UNPRINTABLE_IN_A_PATH = /\s|\p{Cc}/u;
-
-function looksLikeHost(value: string): boolean {
-  if (value.length === 0) return false;
-  if (value.startsWith("/")) {
-    // sun_path is a BYTE budget, not a count of UTF-16 units, and a database
-    // name is 63 BYTES for the same reason. Measuring `.length` called a
-    // 106 emoji path over-long and a 60 emoji name short enough, both wrong.
-    return (
-      Buffer.byteLength(value, "utf8") <= SOCKET_PATH_LIMIT && !UNPRINTABLE_IN_A_PATH.test(value)
-    );
-  }
-  const bracketed = value.startsWith("[") && value.endsWith("]");
-  const bare = bracketed ? value.slice(1, -1) : value;
-  const parts = bare.split("%");
-  if (parts.length <= 2 && parts[0].includes(":")) {
-    const zoneOk = parts.length === 1 || IPV6_ZONE.test(parts[1]);
-    return IPV6_BODY.test(parts[0]) && parts[0].split(":").length <= 9 && zoneOk;
-  }
-  // Brackets hold an ADDRESS, never a name. pg passes `[127.0.0.1]` through
-  // unchanged, so the report must too, but only after validating the inside.
-  if (bracketed) return IPV4.test(bare);
-  return IPV4.test(value) || DNS_NAME.test(value);
-}
-
-/**
- * PostgreSQL truncates an identifier at 63 bytes, so a longer string is not a
- * database it could open. `%` is excluded because `parse` decodes the path with
- * decodeURI, which leaves RESERVED bytes encoded, so `u%3APW%40gw` reaches here
- * with its delimiters still spelled as escapes.
- *
- * `:` is excluded, and round 17 asked for it to be allowed so that a database
- * honestly named `v2:prod` would print. Allowing it reopened a leak the same
- * hour, caught by this file's own generated corpus:
- *
- *   postgres://usr%3APW@/   user "usr:PW", and an unstated database is the USER
- *
- * The `%3A` means passwordSpan sees no colon and cannot scrub, so provenance is
- * blind here and shape is the only mechanism left. `v2:prod` stays withheld.
- */
-const DATABASE_NAME = /^[\p{L}\p{N}_][\p{L}\p{N}_\-.+~$!]*$/u;
-const DATABASE_NAME_BYTES = 63;
-function looksLikeDatabase(value: string): boolean {
-  return Buffer.byteLength(value, "utf8") <= DATABASE_NAME_BYTES && DATABASE_NAME.test(value);
-}
-
-function looksLikePort(value: string): boolean {
-  if (!/^[0-9]{1,5}$/.test(value)) return false;
-  const port = Number(value);
-  return port >= 1 && port <= 65535;
-}
-
-/**
- * The two refusals say DIFFERENT things and must never be merged, nor confused
- * with "(default)". A defaulted field was never stated; a withheld field was
- * stated and is being kept back; and WHICH of the two mechanisms refused it
- * tells the operator whether to fix their DSN or to stop worrying.
- */
-const WITHHELD_BY_PROVENANCE = "(withheld: derived from the DSN's credential text)";
-function withheldByShape(field: string): string {
-  return `(withheld: not a well-formed ${field})`;
-}
-
-function annotate(source: FieldSource): string {
-  if (source === "explicit") return "";
-  if (source === "default") return " (default)";
-  return ` (from ${source})`;
-}
-
-/**
- * Host, port and database only. A DSN carries a password and health output is
- * read aloud.
- *
- * The guarantee is that the result is never URI-SHAPED, NOT that it contains no
- * `://` anywhere. Round 7 falsified the stronger claim: pg accepts
- * `?host=evil://host`, and naming the host pg resolved is the whole point, so
- * the substring can appear INSIDE a value. What must never happen is a result a
- * reader could paste back as a DSN.
+ * There is deliberately no sibling that renders the DSN itself. SQLAlchemy
+ * removed `URL.__str__` for the same reason, accepting a downstream break
+ * rather than leave an unsafe default rendering reachable.
  */
 export function redactDsn(dsn: string): string {
-  const target = resolveTarget(dsn);
-  if (target === null) return "postgresql (dsn not parseable)";
-  // PROVENANCE first, then SHAPE. A value can be a flawless hostname and still
-  // have been built from the password, so passing the shape test proves nothing
-  // until the field is known not to have moved when the password was blanked.
-  const reportField = (
-    field: "host" | "port" | "database",
-    value: string,
-    wellFormed: (candidate: string) => boolean
-  ): string => {
-    if (value !== target.withoutPassword[field]) return WITHHELD_BY_PROVENANCE;
-    return wellFormed(value) ? show(value) : withheldByShape(field);
-  };
-
-  const where = target.isSocket ? "socket" : "host";
-  // The source annotation survives withholding on purpose: WHERE a field came
-  // from is not a secret, and an operator chasing a wrong target needs it.
-  const host = `${reportField("host", target.host, looksLikeHost)}${annotate(target.hostSource)}`;
-  const port = `${reportField("port", target.port, looksLikePort)}${annotate(target.portSource)}`;
-  const database = `${reportField("database", target.database, looksLikeDatabase)}${target.databaseNote}`;
+  const parsed = parsePgDsn(dsn);
+  if (!parsed.ok) return "postgresql (dsn not parseable)";
+  const { target } = parsed;
+  const where = target.transport === "unix" ? "socket" : "host";
+  const host = `${show(target.hostOrDirectory)}${annotate(target.sources.host)}`;
+  const port = `${show(target.port)}${annotate(target.sources.port)}`;
+  const database = `${show(target.database)}${annotate(target.sources.database)}`;
   return `postgresql ${where} ${host} port ${port} database ${database}`;
 }
 

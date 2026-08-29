@@ -16,6 +16,7 @@ import fs, { readFileSync } from "fs";
 import { createRequire } from "module";
 import { afterEach, describe, expect, it } from "vitest";
 import { redactDsn } from "../flight-recorder-pg.js";
+import { parsePgDsn } from "../storage/pg-dsn-parse.js";
 
 const require = createRequire(import.meta.url);
 const { Client } = require("pg") as {
@@ -427,7 +428,7 @@ describe("redactDsn names the server pg will actually reach", () => {
     for (const dsn of dsns) {
       const report = redactDsn(dsn);
       expect(report, dsn).not.toMatch(/^\w+:\/\//);
-      expect(report, dsn).toMatch(/^postgresql (host|socket) /);
+      expect(report, dsn).toMatch(/^postgresql (host |socket |\(dsn not parseable\))/);
     }
     // ROUND 7 REVERSED, deliberately. That round required a host to be NAMED
     // `://` and all, on the reasoning that nothing could be carried across the
@@ -436,8 +437,8 @@ describe("redactDsn names the server pg will actually reach", () => {
     // authority before the `@` ever arrives. Under an allowlist `evil://host`
     // is simply not a hostname, and pg could not resolve it either.
     ambient();
-    expect(redactDsn("postgresql://u:p@127.0.0.1:5432/db?host=evil://host")).toContain(
-      "(withheld: not a well-formed host)"
+    expect(redactDsn("postgresql://u:p@127.0.0.1:5432/db?host=evil://host")).toBe(
+      "postgresql (dsn not parseable)"
     );
 
     // A DATABASE no longer does, and round 16 gave that up ON PURPOSE. A name
@@ -447,9 +448,12 @@ describe("redactDsn names the server pg will actually reach", () => {
     // other way tells an operator a database nobody names this way is withheld.
     // This is the ONLY faithfulness the withholding rule costs, and it is
     // asserted here so a later round cannot restore it without reading why.
-    expect(redactDsn("postgresql://u:p@127.0.0.1:5432/foo://bar")).toContain(
-      "(withheld: not a well-formed database)"
-    );
+    // ROUND 16 REVERSED. That round withheld a database named `foo://bar` on
+    // the grounds it was indistinguishable from relocated userinfo. Round 21
+    // does not need to guess: the parse either produced a target or refused,
+    // and a name holding `:` and `/` but no `@` or keyword syntax is a name
+    // PostgreSQL can open. It is named, and quoting keeps the line readable.
+    expect(redactDsn("postgresql://u:p@127.0.0.1:5432/foo://bar")).toContain("foo://bar");
   });
 
   it("does not read a file named in the DSN just to print a host", () => {
@@ -552,7 +556,7 @@ describe("redactDsn names the server pg will actually reach", () => {
     const all = [...corpus, ...junked];
 
     let named = 0;
-    let withheld = 0;
+    let refused = 0;
     for (const dsn of all) {
       ambient();
       let report: string;
@@ -568,7 +572,7 @@ describe("redactDsn names the server pg will actually reach", () => {
         encodeURIComponent(SECRET)
       );
       if (!report.includes("not parseable")) named += 1;
-      if (report.includes("withheld")) withheld += 1;
+      else refused += 1;
     }
 
     // GUARDS ON THE GUARD, both of which this test would otherwise satisfy by
@@ -583,7 +587,7 @@ describe("redactDsn names the server pg will actually reach", () => {
     ).not.toBe(SECRET);
     expect(all.length, "the generator produced too small a corpus").toBeGreaterThan(2000);
     expect(named, "every DSN was refused, so this test proved nothing").toBeGreaterThan(500);
-    expect(withheld, "nothing was ever withheld, so the rule never ran").toBeGreaterThan(100);
+    expect(refused, "nothing was ever refused, so the parser never rejected").toBeGreaterThan(100);
   });
 
   it("separates the pair that PROVES no rule over (field, value) can work", () => {
@@ -598,59 +602,62 @@ describe("redactDsn names the server pg will actually reach", () => {
     expect(redactDsn("postgres://u:p@real/db?host=reporter-host")).toBe(
       "postgresql host reporter-host port 5432 (default) database db"
     );
+    // Round 21 answers it by REFUSING rather than withholding. The two
+    // readings of these bytes disagree about where userinfo ends, so there is
+    // no honest target to name, and inventing one is what rounds 15 to 19 did.
     expect(redactDsn("postgres://u:?host=reporter-host&@real/db")).toBe(
-      "postgresql host (withheld: derived from the DSN's credential text)" +
-        " port 5432 (default) database (withheld: derived from the DSN's credential text)" +
-        " (default: the connecting user)"
+      "postgresql (dsn not parseable)"
     );
   });
 
-  it("substitutes an INERT password, which is what makes ONE substitute enough", () => {
-    // The differential compares a resolution against one taken with the password
-    // blanked, so what gets substituted must be incapable of steering the parse
-    // itself. A filler containing `?`, `&`, `=`, `@`, `:`, `/` or `%` could make
-    // the scrubbed resolution differ for reasons having nothing to do with the
-    // credential, and every field would then be withheld for no reason at all.
-    //
-    // It also records why there is ONE filler. Round 19 argued that a password
-    // equal to the filler makes the scrub a no-op and blinds the comparison,
-    // added a second filler, and a mutation probe then showed the SINGLE filler
-    // code passing that same test: the filler replaces the whole SPAN, not the
-    // password value, and a span that can reach a reported field has to carry
-    // query syntax, which is exactly what stops it equalling an inert filler.
-    // The second filler was removed again as unearned complexity.
-    expect(SCRUBBED_PASSWORD_IN_USE).not.toMatch(/[?&=@:/%#]/);
+  it("refuses each reject rule's own case, naming WHICH rule fired", () => {
+    // A mutation probe showed three rules could be deleted with every test
+    // still green, because a later rule caught the same input. Asserting the
+    // REASON rather than just the refusal makes each rule a real control: if
+    // one is removed, the input is still refused but by a different rule, and
+    // that is what these assertions notice.
     ambient();
-    // A password that IS the filler still reports its real target.
-    expect(redactDsn("postgresql://u:redacted@127.0.0.1:5433/db")).toBe(
-      "postgresql host 127.0.0.1 port 5433 database db"
+    const S = "pw-rules-DO-NOT-PRINT";
+    const why = (dsn: string): string => {
+      const parsed = parsePgDsn(dsn, {});
+      if (parsed.ok) throw new Error(`expected a refusal for ${JSON.stringify(dsn)}`);
+      return parsed.reason;
+    };
+
+    // The SCHEMED keyword/value string. The unschemed spelling never reaches
+    // here: the prefix check refuses it first. RFC 3986 admits `=` and `,` in a
+    // reg-name as sub-delims, so the generic grammar takes a whole libpq
+    // keyword string as one opaque hostname.
+    expect(why(`postgres://host=localhost,user=u,password=${S},dbname=db`)).toBe(
+      "host holds a character no hostname or socket path contains"
     );
-    // A span carrying query syntax is still caught, filler-shaped or not.
-    expect(redactDsn("postgres://u:?host=redacted&@real/db")).toContain(
-      "(withheld: derived from the DSN's credential text)"
+    expect(redactDsn(`postgres://host=localhost,password=${S}`)).not.toContain(S);
+
+    // More than one unencoded `@`. RFC 3986 allows exactly one, so a second
+    // means the userinfo boundary is not where it looks.
+    expect(why(`postgres://u:${S}@@host/db`)).toBe("more than one unencoded @ in the authority");
+
+    // The userinfo grammar. Its unique contribution is narrow and worth saying
+    // so: `/`, `?` and `#` never appear inside userinfo because each ends the
+    // authority first, and `@` is the rule above. What is left is brackets.
+    expect(why("postgres://u[1]:p@host/db")).toBe(
+      "userinfo holds a character RFC 3986 requires to be encoded"
     );
-  });
 
-  it("needs BOTH mechanisms, because each one alone misses the other's class", () => {
-    // Round 16 shipped one mechanism and two reviewers broke it from opposite
-    // sides within minutes. These two inputs are why there are now two.
-    ambient();
-    const SECRET = "pw-both-DO-NOT-PRINT";
+    // A port with no host: pg throws on this, so filling the host from PGHOST
+    // or a default would invent a target pg never reaches.
+    expect(why("postgresql://u:p@:5433/db")).toBe("a port with no host is malformed");
 
-    // SHAPE only. The value is credential text but arrives with no `@` and no
-    // `/`, so the WHOLE string is an opaque host; the delimiters organising it
-    // are `=` and `,` from libpq's keyword grammar, which the URI parser never
-    // treated as boundaries. Nothing crossed anything, and passwordSpan finds
-    // no `@`, so provenance is blind. Only "that is not a hostname" catches it.
-    const opaque = `postgres://host=localhost,user=u,password=${SECRET},dbname=db`;
-    expect(passwordSpanIsBlind(opaque), "provenance should have nothing to scrub").toBe(true);
-    expect(redactDsn(opaque)).toContain("(withheld: not a well-formed host)");
+    // A raw space is not a URI character, and its presence makes pg rewrite
+    // the whole string, changing which characters are structural.
+    expect(why("postgresql://u:p@[::1]:5433/db?sslcert=/tmp/foo bar")).toBe(
+      "holds a character RFC 3986 requires to be percent-encoded"
+    );
 
-    // PROVENANCE only. Here the resolved host is `pw-only-DO-NOT-PRINT`, which
-    // is a flawless DNS name, so shape has no objection whatever. Only noticing
-    // that the field MOVED when the password was blanked catches it.
-    const viaQuery = "postgres://u:?host=pw-only-DO-NOT-PRINT&@real/db";
-    expect(redactDsn(viaQuery)).toContain("(withheld: derived from the DSN's credential text)");
+    // Decoding may carry data, never structure.
+    expect(why(`postgres://host/u%3A${S}%40gw`)).toBe(
+      "the database name holds URI or keyword structure"
+    );
   });
 
   it("refuses a keyword/value DSN, which the withholding rule alone would NOT catch", () => {
@@ -742,14 +749,15 @@ describe("redactDsn names the server pg will actually reach", () => {
       "postgresql host [::1] port 5433 database db"
     );
     // The four round-8 disagreements, each now identical to pg.
-    // Round 18 splits these. Brackets hold an ADDRESS, so `[127.0.0.1]` still
-    // prints and `[foo]` and `[]` are withheld: neither is an address, and pg
-    // would not resolve either. Withholding is NOT the round-8 defect, which
-    // was naming `foo` when pg held `[foo]`. Declining to name a host asserts
-    // nothing false; renaming it did.
+    // Round 21 names all four again. There is no host allowlist: the parse
+    // either produced a target or refused the string, so a value that reached
+    // here IS what pg resolved, and round 8's rule holds unchanged. Round 18
+    // withheld `[foo]` and `[]` on the theory that neither is an address; that
+    // was a guess layered on a parse it did not trust, and both reviewers said
+    // so.
     for (const [query, pgHost, reported] of [
-      ["%5Bfoo%5D", "[foo]", "(withheld: not a well-formed host)"],
-      ["%5B%5D", "[]", "(withheld: not a well-formed host)"],
+      ["%5Bfoo%5D", "[foo]", "[foo]"],
+      ["%5B%5D", "[]", "[]"],
       ["%5B127.0.0.1%5D", "[127.0.0.1]", "[127.0.0.1]"],
       [":", ":", ":"],
     ]) {
@@ -862,8 +870,12 @@ describe("redactDsn names the server pg will actually reach", () => {
     // would open, and the shape allowlist reaches it before `show` does. The
     // quoting still exists for values that pass the allowlist, such as a socket
     // path containing `@`, which the faithfulness cases below exercise.
+    // Round 21 names it again, QUOTED. There is no database allowlist any more:
+    // `db port 9999 database other` is a database PostgreSQL can open, and the
+    // reviewers were right that refusing it bought no secrecy. Quoting is the
+    // CWE-117 output-neutralisation control, and it is enough.
     expect(redactDsn("postgresql://u:p@127.0.0.1:5433/db%20port%209999%20database%20other")).toBe(
-      "postgresql host 127.0.0.1 port 5433 database (withheld: not a well-formed database)"
+      'postgresql host 127.0.0.1 port 5433 database "db port 9999 database other"'
     );
     // An ordinary name is NOT quoted, or every report would be noisy.
     expect(redactDsn("postgresql://u:p@127.0.0.1:5433/llm_gateway_test")).toBe(
@@ -898,21 +910,14 @@ describe("redactDsn names the server pg will actually reach", () => {
     const long = "a".repeat(300);
     const report = redactDsn(`postgresql://u:p@127.0.0.1:5433/${long}`);
     expect(report.length).toBeLessThan(200);
-    // PostgreSQL truncates an identifier at 63 bytes, so a 300 byte string is
-    // not a database it could open, and the allowlist refuses it by that fact
-    // rather than by trimming it. Recorded honestly: `show`'s OWN truncation no
-    // longer runs for any reported field, because every field is bounded before
-    // it (63 for a database, 253 for a host, 107 for a socket). It is therefore
-    // NOT a control this file can claim; it is unreachable code kept only
-    // because `show` is shared.
-    expect(report).toContain("(withheld: not a well-formed database)");
-    // A name at PostgreSQL's real limit is untouched.
-    const atLimit = "b".repeat(63);
-    expect(redactDsn(`postgresql://u:p@127.0.0.1:5433/${atLimit}`)).toBe(
-      `postgresql host 127.0.0.1 port 5433 database ${atLimit}`
-    );
-    expect(redactDsn(`postgresql://u:p@127.0.0.1:5433/${"b".repeat(64)}`)).toContain(
-      "(withheld: not a well-formed database)"
+    // Round 21 removed the database allowlist, so `show`'s own bound is the
+    // control again and it is reachable. It must SAY it truncated, and say the
+    // real length, or the report quietly names a database pg did not open.
+    expect(report).toContain("... (300 chars)");
+    // A name inside the bound is untouched.
+    const short = "b".repeat(120);
+    expect(redactDsn(`postgresql://u:p@127.0.0.1:5433/${short}`)).toBe(
+      `postgresql host 127.0.0.1 port 5433 database ${short}`
     );
   });
 
@@ -1046,7 +1051,12 @@ describe("redactDsn names the server pg will actually reach", () => {
       code = String((error as { code?: string }).code ?? "");
     }
     expect(code, "pg parses this and fails on the file, not the URL").toBe("ENOENT");
-    expect(redactDsn(ipv4)).toBe("postgresql host [127.0.0.1] port 5433 database db");
+    // Round 21 REFUSES both, and this direction is a deliberate faithfulness
+    // loss: pg accepts this one. A raw space is not a URI character, and its
+    // presence makes pg rewrite the WHOLE string with encodeURI, so the same
+    // bytes mean different things with and without it. Refusing the character
+    // refuses the divergence rather than betting on which reading wins.
+    expect(redactDsn(ipv4)).toBe("postgresql (dsn not parseable)");
   });
 
   it("reads no SSL file whose key carries characters WHATWG removes", () => {
@@ -1193,10 +1203,10 @@ describe("redactDsn names the server pg will actually reach", () => {
     // Asserted after the loop: both arms must actually run, or one of the two
     // safe outcomes is being claimed without ever having been exercised.
 
-    // 30, not 100: the batch now rides in a socket path bounded at 107 BYTES,
-    // and these code points cost two or three bytes each in UTF-8. Every code
-    // point is still visited; only the grouping changed.
-    const BATCH = 30;
+    // Back to 100 with the DATABASE as the carrier. Round 18 had to move this
+    // into a byte-bounded socket path because its allowlist refused any
+    // database holding these code points; round 21 removed that allowlist.
+    const BATCH = 100;
     let escaped = 0;
     let refused = 0;
     for (let at = 0; at < unsafe.length; at += BATCH) {
@@ -1206,9 +1216,7 @@ describe("redactDsn names the server pg will actually reach", () => {
       const label = `U+${first}..U+${last}`;
       ambient();
       const name = String.fromCodePoint(...batch);
-      const report = redactDsn(
-        `postgresql://u:p@127.0.0.1:5433/db?host=${encodeURIComponent(`/${name}x`)}`
-      );
+      const report = redactDsn(`postgresql://u:p@127.0.0.1:5433/db${encodeURIComponent(name)}x`);
       expect(report, `${label} was truncated, so it was not fully exercised`).not.toContain(
         "chars)"
       );
@@ -1234,15 +1242,14 @@ describe("redactDsn names the server pg will actually reach", () => {
       // come back escaped. Refusing is at least as safe as escaping, so the
       // invariant asserted above (no raw unsafe code point, one line) is what
       // binds, and this only records which arm ran.
-      if (report.includes("withheld")) refused += 1;
+      if (report.includes("not parseable")) refused += 1;
       else {
         escaped += 1;
-        expect(report, `${label} is not rendered in order`).toContain(`/${escapes.join("")}x`);
+        expect(report, `${label} is not rendered in order`).toContain(`db${escapes.join("")}x`);
       }
     }
 
     expect(escaped, "no batch ever reached `show`, so escaping went untested").toBeGreaterThan(0);
-    expect(refused, "no batch was ever refused, so that arm went untested").toBeGreaterThan(0);
 
     // And the characters the property must NOT touch, or every accented or
     // CJK database name would be rendered unreadable.
@@ -1260,26 +1267,20 @@ describe("redactDsn names the server pg will actually reach", () => {
     // Round 18: the bound that acts is the allowlist's BYTE budget, not show's
     // code-point trim, which no reported field can now reach. The property that
     // still matters is that no bound ever leaves half a surrogate pair behind.
-    const fits = "a".repeat(99) + String.fromCodePoint(0x1f600);
-    expect(Buffer.byteLength(fits, "utf8"), "103 bytes, inside the socket budget").toBe(103);
-    const report = redactDsn(
-      `postgresql://u:p@127.0.0.1:5433/db?host=${encodeURIComponent(`/${fits}`)}`
-    );
+    const atLimit = "a".repeat(119) + String.fromCodePoint(0x1f600);
+    expect([...atLimit]).toHaveLength(120);
+    expect(atLimit.length, "121 UTF-16 units, which is what used to be cut").toBe(121);
+    const report = redactDsn(`postgresql://u:p@127.0.0.1:5433/${encodeURIComponent(atLimit)}`);
     // Exactly at the limit by code point, so it is NOT truncated at all.
     expect(report).not.toContain("chars)");
     expect(report).toContain(String.fromCodePoint(0x1f600));
     // No lone surrogate anywhere in the output.
     expect(/[\uD800-\uDBFF](?![\uDC00-\uDFFF])/.test(report)).toBe(false);
-    // A value over the budget is refused whole, so there is no cut to make and
-    // no half pair to leave. Measured in BYTES: 130 emoji are 130 code points
-    // but 520 bytes, and counting units would have called this 260.
+    // And the count reported for a genuinely long value is in CODE POINTS.
     ambient();
     const long = String.fromCodePoint(0x1f600).repeat(130);
-    expect(Buffer.byteLength(long, "utf8")).toBe(520);
-    const over = redactDsn(
-      `postgresql://u:p@127.0.0.1:5433/db?host=${encodeURIComponent(`/${long}`)}`
-    );
-    expect(over).toContain("(withheld: not a well-formed host)");
+    const over = redactDsn(`postgresql://u:p@127.0.0.1:5433/${encodeURIComponent(long)}`);
+    expect(over).toContain("... (130 chars)");
     expect(/[\uD800-\uDBFF](?![\uDC00-\uDFFF])/.test(over)).toBe(false);
   });
 
