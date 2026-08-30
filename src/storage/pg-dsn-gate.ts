@@ -32,6 +32,19 @@ const URI_CHARACTERS = /^[A-Za-z0-9\-._~:/?#[\]@!$&'()*+,;=%]*$/;
  *  listed anyway so a pg that starts honouring it cannot open a hole quietly. */
 const TARGET_KEYS = new Set(["host", "port", "user", "dbname"]);
 /**
+ * A query value that carries a WHOLE DSN. `pg-connection-string` copies every
+ * query key onto the config, and `ConnectionParameters` then does
+ * `if (config.connectionString) config = { ...config, ...parse(config.connectionString) }`.
+ * So one nesting level re-enters pg's parser BEHIND this gate, carrying any
+ * shape the rules below refuse. Round 24, codex: it re-admitted round 23's
+ * falsifier and made the reporter open a file it had just refused to open.
+ *
+ * Matched case-insensitively although pg's property is case-sensitive. The
+ * over-refusal is a spelling nobody puts in a DSN, and the alternative is a
+ * rule that depends on pg never normalising its own key.
+ */
+const NESTED_DSN_KEYS = new Set(["connectionstring"]);
+/**
  * `parse()` reads these off disk. That is a hazard for the REPORTER, which runs
  * synchronously in a constructor and would block on a fifo, and it is ordinary
  * for the CONNECTOR, which is about to read the same file anyway. So this is
@@ -125,7 +138,13 @@ export function admitPgDsn(dsn: string): DsnAdmission {
     return refuse("holds a character RFC 3986 requires to be percent-encoded");
   }
 
-  const targets = queryKeys(afterPrefix).filter(key => TARGET_KEYS.has(key));
+  const keys = queryKeys(afterPrefix);
+  for (const key of keys) {
+    if (NESTED_DSN_KEYS.has(key.toLowerCase())) {
+      return refuse("a query parameter carrying a whole DSN re-enters the parser behind this gate");
+    }
+  }
+  const targets = keys.filter(key => TARGET_KEYS.has(key));
   if (new Set(targets).size !== targets.length) {
     return refuse("a target parameter is given more than once");
   }
@@ -138,8 +157,16 @@ export function admitPgDsn(dsn: string): DsnAdmission {
     return refuse("an @ after the authority is ambiguous; it may be relocated userinfo");
   }
 
-  if (ats === 1 && ENCODED_COLON.test(authority.slice(0, userinfoEnd))) {
-    return refuse("an encoded colon in the userinfo hides a password inside the user");
+  // AN ENCODED COLON ANYWHERE IN THE AUTHORITY. No hostname holds a colon and
+  // an IPv6 literal spells its own raw, so `%3A` here is always a delimiter in
+  // hiding. With an `@` it buries the password inside the USER, which pg then
+  // also uses as the database. Without one it decodes straight into the host.
+  //
+  // Round 24 shipped only the first half, keyed on `ats === 1`, and grok found
+  // the sibling sitting next to it: `postgres://u%3ASECRET` prints the secret
+  // as the host. Stating it over the whole authority is the class.
+  if (ENCODED_COLON.test(authority)) {
+    return refuse("an encoded colon in the authority is a delimiter in hiding");
   }
 
   // THE CLASS round 23 escaped through. When the authority carries no `@`, its

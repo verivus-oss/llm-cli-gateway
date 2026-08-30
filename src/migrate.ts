@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 
 import type { PoolClient } from "pg";
-import { parsePgDsn } from "./storage/pg-dsn-parse.js";
+import { admitPgDsn } from "./storage/pg-dsn-gate.js";
 import { createHash } from "crypto";
 import { readFileSync, readdirSync } from "fs";
 import { join, dirname } from "path";
@@ -546,20 +546,21 @@ async function main(): Promise<void> {
     process.exit(1);
   }
 
-  // THE SAME GATE the reporter and the session store consult. This path had
-  // none at all, not even the prefix test config.ts applies, so it would dial
-  // any string DATABASE_URL held. `connect` is pg's OWN parse of that string:
-  // ConnectionParameters does `Object.assign({}, config, parse(dsn))`, so
-  // handing it the object is what handing it the string already did, minus the
-  // second parse.
-  const admitted = parsePgDsn(databaseUrl);
-  if (!admitted.ok) {
+  // THE CORE GATE, and only the core gate. This path had none at all, not even
+  // the prefix test config.ts applies, so it would dial any string DATABASE_URL
+  // held. It must NOT use `parsePgDsn`: that is the reporter's stricter verdict,
+  // which refuses a DSN naming an ssl file, and round 24 measured that wiring
+  // rejecting an ordinary client-certificate TLS DSN before the pool was built.
+  // Reportable is a SUBSET of connectable, so a connector asking the reporter
+  // is asking the wrong question.
+  const admitted = admitPgDsn(databaseUrl);
+  if (!admitted.admitted) {
     console.error(`ERROR: refusing to migrate with this DATABASE_URL: ${admitted.reason}`);
     process.exit(1);
   }
 
   const { Pool } = await importOptionalPg();
-  const pool = new Pool(admitted.connect);
+  const pool = new Pool({ connectionString: databaseUrl });
 
   try {
     // Load migrations

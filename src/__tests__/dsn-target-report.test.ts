@@ -736,6 +736,41 @@ describe("redactDsn names the server pg will actually reach", () => {
     // empty span, so `u:?host=X` was refused and `u:1?host=X` was not: one
     // digit walked past it, which grok found and which is why this is now
     // stated over the shape. All four are the same DSN to a reader.
+    // ROUND 24, codex. A query value carrying a WHOLE DSN. pg copies every
+    // query key onto its config and `ConnectionParameters` re-parses
+    // `connectionString`, so one nesting level re-enters pg's parser BEHIND
+    // every rule here. It re-admitted round 23's falsifier and made the
+    // reporter open a file it had just refused to open.
+    expect(why(`postgres://safe/db?connectionString=postgres://u:1?host=${S}`)).toBe(
+      "a query parameter carrying a whole DSN re-enters the parser behind this gate"
+    );
+
+    // ROUND 24, grok. An encoded colon ANYWHERE in the authority. Round 24
+    // shipped this keyed on there being an `@`, and the sibling next to it
+    // printed the secret as the host.
+    const hidden = "an encoded colon in the authority is a delimiter in hiding";
+    expect(why(`postgres://u%3A${S}`)).toBe(hidden);
+    expect(why(`postgres://u%3A${S}/db`)).toBe(hidden);
+    expect(why(`postgres://%3A${S}/db`)).toBe(hidden);
+    expect(why(`postgres://usr%3A${S}@host/db`)).toBe(hidden);
+
+    // MEMBER-WISE, not rule-wise. Round 24's matrix mutated whole rules and
+    // called fourteen kills coverage; codex showed removing a single MEMBER of
+    // either enumerated set kills nothing, because every pinned case also
+    // carried another member. A check that enumerates the set it governs has
+    // that enumeration inside its own blast radius, so each member gets a case
+    // no other member catches.
+    for (const key of ["host", "port", "user", "dbname"]) {
+      expect(why(`postgres://u:1?${key}=${S}`), key).toBe(
+        "a colon in the authority with a target parameter is an apparent password"
+      );
+    }
+    for (const separator of [";", "=", "&"]) {
+      expect(why(`postgres:///db${separator}x`), separator).toBe(
+        "the database name holds URI or keyword structure"
+      );
+    }
+
     // A target parameter given twice. pg takes the LAST silently, so the string
     // means two different targets to two readers of it. The authority here
     // holds no colon, so this is the case ONLY this rule catches: a mutation
