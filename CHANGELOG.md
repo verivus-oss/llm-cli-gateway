@@ -4,6 +4,20 @@ All notable changes to the llm-cli-gateway project.
 
 ## [Unreleased]
 
+### Changed
+
+- **`pg` peer dependency raised from `^8.12.0` to `^8.22.0`** (optional peer;
+  only PostgreSQL-backed installs are affected). The DSN admission gate's
+  correctness is a property of `pg-connection-string`, not of `pg`, and pg
+  selects that package through its own caret range: `pg@8.12` resolves
+  `^2.6.4`, while every behaviour the gate relies on was verified against
+  `2.14.0`. `pg@8.22.0` is the first release that guarantees `^2.14.0`, so the
+  old floor was a range over a parser nobody had measured. Installs on pg 8.12
+  through 8.21 must upgrade pg.
+- `src/__tests__/pg-parser-contract.test.ts` pins the ten parser behaviours the
+  gate depends on. A caret cannot pin a minor, so an upgrade that moves any of
+  them fails this file by name rather than making the gate quietly unsound.
+
 ## [3.2.0-rc.1] - 2026-08-23: provider contracts that maintain themselves, one storage port under all three subsystems
 
 The entries below were verified against the code, not against the candidate
@@ -12,7 +26,6 @@ behaviour by probing the installed CLIs with a control that proves the probe
 can detect what it looks for, storage claims against `src/storage/`,
 `migrations/022_flight_recorder_transcripts.sql` and `setup/status.schema.json`
 rather than against the programme's own summary.
-
 
 516 commits since 3.0.0. The gateway now notices when a provider CLI has moved
 underneath it, applies the upstream deprecation instead of queueing it for a
@@ -38,7 +51,6 @@ will be no 3.1.0 stable; the first candidate under the new number is
 3.2.0-rc.1, and anyone on any 3.1.0 candidate should move to it.
 
 ### Added
-
 
 - **Retention over the transcript and over wedged validation runs, opt-in.**
   `[persistence].retentionDays` has always bounded exactly one table, `jobs`,
@@ -114,7 +126,6 @@ will be no 3.1.0 stable; the first candidate under the new number is
   cannot be reached from a joined string at all.
 
   All seven providers, sync and async.
-
 
 - **A storage port, with a SQLite driver and a PostgreSQL driver, under all
   three durable subsystems.** `src/storage/` defines one `StorageDriver`
@@ -486,7 +497,7 @@ will be no 3.1.0 stable; the first candidate under the new number is
 
 - **The idle timeout is derived from the registry, and terminal-burst providers
   get a total-runtime bound instead.** A hand-maintained table gave gemini,
-  mistral and cursor a 600,000 ms *idle* timeout with comments asserting they
+  mistral and cursor a 600,000 ms _idle_ timeout with comments asserting they
   "stream in real-time", which their own probed evidence contradicts. The timer
   never reset, so healthy work was killed at ten minutes: a real cross-LLM
   review job was terminated at exactly 600000 ms of "inactivity" having produced
@@ -561,7 +572,7 @@ will be no 3.1.0 stable; the first candidate under the new number is
   child that cannot succeed.** `codex fork` is an interactive subcommand
   requiring a controlling terminal, and provider children are spawned with
   pipes, so every call failed with `exit code 1: Error: stdin is not a
-  terminal`. Codex exposes no non-interactive equivalent. The tool now names the
+terminal`. Codex exposes no non-interactive equivalent. The tool now names the
   route that works (`codex_request` with a session UUID or `resumeLatest`). The
   availability check is deliberately evaluated after workspace resolution and
   argv admission, so a remote caller without a registered workspace still gets
