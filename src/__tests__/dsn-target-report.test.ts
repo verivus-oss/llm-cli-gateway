@@ -437,8 +437,12 @@ describe("redactDsn names the server pg will actually reach", () => {
     // authority before the `@` ever arrives. Under an allowlist `evil://host`
     // is simply not a hostname, and pg could not resolve it either.
     ambient();
+    // ROUND 24. Round 16 withheld this; the host now comes from pg's own
+    // resolution and pg resolves it to exactly this string, so naming it is
+    // correct. The SHAPE property is held by quoting instead of by withholding,
+    // which is why `show` refuses the bare-word form for anything holding `://`.
     expect(redactDsn("postgresql://u:p@127.0.0.1:5432/db?host=evil://host")).toBe(
-      "postgresql (dsn not parseable)"
+      'postgresql host "evil://host" port 5432 database db'
     );
 
     // A DATABASE no longer does, and round 16 gave that up ON PURPOSE. A name
@@ -476,8 +480,14 @@ describe("redactDsn names the server pg will actually reach", () => {
       )
     );
     expect(reads.filter(r => r.includes("/etc/hosts"))).toEqual([]);
-    // Suppressing the READ must not lose the parameters that MOVE the target.
-    expect(report).toBe("postgresql host elsewhere port 5433 database db");
+    // ROUND 24 CHANGED THE SECOND HALF. The target used to be named alongside
+    // the suppressed read, because this module had its own parser. It now uses
+    // pg's, and pg's parse IS the read, so the only way to keep the file shut
+    // is to decline to name the target. The connection is unaffected: the core
+    // gate carries no ssl rule, so pg still dials it and reads the file itself.
+    expect(report).toBe(
+      "postgresql (target not named: the dsn names an ssl file this reporter will not open)"
+    );
   });
 
   it("never prints the password, over a GENERATED cross product of DSN shapes", () => {
@@ -671,7 +681,7 @@ describe("redactDsn names the server pg will actually reach", () => {
     // reg-name as sub-delims, so the generic grammar takes a whole libpq
     // keyword string as one opaque hostname.
     expect(why(`postgres://host=localhost,user=u,password=${S},dbname=db`)).toBe(
-      "host holds a character no hostname or socket path contains"
+      "a keyword-shaped authority is not a URI authority"
     );
     expect(redactDsn(`postgres://host=localhost,password=${S}`)).not.toContain(S);
 
@@ -679,16 +689,18 @@ describe("redactDsn names the server pg will actually reach", () => {
     // means the userinfo boundary is not where it looks.
     expect(why(`postgres://u:${S}@@host/db`)).toBe("more than one unencoded @ in the authority");
 
-    // The userinfo grammar. Its unique contribution is narrow and worth saying
-    // so: `/`, `?` and `#` never appear inside userinfo because each ends the
-    // authority first, and `@` is the rule above. What is left is brackets.
-    expect(why("postgres://u[1]:p@host/db")).toBe(
-      "userinfo holds a character RFC 3986 requires to be encoded"
+    // ROUND 24 DELETED THE USERINFO GRAMMAR RULE, and this records the measured
+    // reason rather than the rule. pg accepts `u[1]` and resolves host `host`,
+    // so refusing it was our grammar disagreeing with the one that connects.
+    // Naming what pg reaches is the job, so it is now named.
+    expect(redactDsn("postgres://u[1]:p@host/db")).toBe(
+      'postgresql host "host" port 5432 (default) database db'
     );
 
-    // A port with no host: pg throws on this, so filling the host from PGHOST
-    // or a default would invent a target pg never reaches.
-    expect(why("postgresql://u:p@:5433/db")).toBe("a port with no host is malformed");
+    // A port with no host is still refused, but by pg rather than by us: pg
+    // THROWS on it, and inheriting that is strictly better than a second rule
+    // that has to be kept in agreement with it.
+    expect(why("postgresql://u:p@:5433/db")).toBe("pg refused the connection string");
 
     // A raw space is not a URI character, and its presence makes pg rewrite
     // the whole string, changing which characters are structural.
@@ -699,9 +711,13 @@ describe("redactDsn names the server pg will actually reach", () => {
     // Decoding may carry data, never structure. This case deliberately holds
     // NO `@` in either spelling: the ambiguity rule below would otherwise
     // refuse it first and this control would stop being executed.
-    expect(why(`postgres://host/db%3D${S}`)).toBe(
-      "the database name holds URI or keyword structure"
-    );
+    expect(why(`postgres://host/db=${S}`)).toBe("the database name holds URI or keyword structure");
+    // ROUND 24: the ENCODED spelling is named, not refused, and that is pg
+    // agreement rather than a gap. pg decodes the path with decodeURI, which
+    // leaves every reserved character encoded, so the database pg opens is
+    // literally `db%3D...`. No delimiter is reintroduced and no apparent
+    // password position exists in this string, so naming it is the job.
+    expect(redactDsn(`postgres://host/db%3D${S}`)).toContain(`db%3D${S}`);
 
     // The prefix rule. Round 22 found it had no pinned reason of its own.
     expect(why(`postgres:/u:${S}@host/db`)).toBe("not a postgresql:// or postgres:// URI");
@@ -716,9 +732,27 @@ describe("redactDsn names the server pg will actually reach", () => {
     // after it looks clean.
     expect(why(`postgres://u:${S}@host#@evil.invalid/db`)).toBe(ambiguous);
 
-    // Its companion, for the shape that carries no `@` at all.
-    expect(why(`postgres://u:?host=${S}&user=reporter#`)).toBe(
-      "a colon with no port is an apparent password truncated by ? or /"
+    // ROUND 24 REPLACED THE EMPTY-PORT RULE WITH ITS CLASS. Round 23 named the
+    // empty span, so `u:?host=X` was refused and `u:1?host=X` was not: one
+    // digit walked past it, which grok found and which is why this is now
+    // stated over the shape. All four are the same DSN to a reader.
+    // A target parameter given twice. pg takes the LAST silently, so the string
+    // means two different targets to two readers of it. The authority here
+    // holds no colon, so this is the case ONLY this rule catches: a mutation
+    // probe removing it left all 40 tests passing until this was written.
+    expect(why("postgres://h.invalid/db?host=first&host=second")).toBe(
+      "a target parameter is given more than once"
+    );
+
+    const apparent = "a colon in the authority with a target parameter is an apparent password";
+    expect(why(`postgres://u:?host=${S}&user=reporter#`)).toBe(apparent);
+    expect(why(`postgres://u:1?host=${S}`)).toBe(apparent);
+    expect(why(`postgres://u:65535?host=${S}`)).toBe(apparent);
+    expect(why(`postgres://u:5432?host=${S}&user=r`)).toBe(apparent);
+    // And the shape it must NOT eat: an ordinary host:port with no parameter
+    // moving the target is the commonest DSN there is.
+    expect(redactDsn("postgres://h.invalid:5433/db")).toBe(
+      "postgresql host h.invalid port 5433 database db"
     );
 
     // THE COLON RULES. These two overlap heavily, so each is pinned by a case
@@ -730,10 +764,11 @@ describe("redactDsn names the server pg will actually reach", () => {
     expect(why(`postgres:///usr:?host=h.invalid&dbname=safe`)).toBe(
       "a colon outside the authority opens an apparent password"
     );
-    // Only the name rule sees this: the path holds `%3A`, not a raw colon.
-    expect(why(`postgres://host/db%3A${S}`)).toBe(
-      "the database name holds URI or keyword structure"
-    );
+    // ROUND 24: same reasoning as the encoded `=` above. pg leaves `%3A`
+    // encoded, so no colon exists in the database it opens, and this string
+    // holds no apparent password position at all. The RAW colon is what is
+    // refused, and it is pinned by the empty-authority case above.
+    expect(redactDsn(`postgres://host/db%3A${S}`)).toContain(`db%3A${S}`);
   });
 
   it("keeps the ambiguity rule from eating the DSNs it is supposed to allow", () => {
@@ -1040,9 +1075,13 @@ describe("redactDsn names the server pg will actually reach", () => {
     // STRIPPED. Nothing has been stripped since round 10 deleted the rewriting;
     // pg is handed the original string with the read suppressed underneath it.
     ambient();
+    // ROUND 24. The point survives in a weaker form: a cert that does not exist
+    // must not make this THROW or hang, and it does not, because the file is
+    // never opened. What it no longer does is name the target, since naming it
+    // now requires pg's parse and pg's parse is what opens the file.
     expect(
       redactDsn("postgresql://u:p@127.0.0.1:5433/db?sslcert=/nonexistent/cert.pem&host=good")
-    ).toBe("postgresql host good port 5433 database db");
+    ).toBe("postgresql (target not named: the dsn names an ssl file this reporter will not open)");
   });
 
   it("reads no SSL file in any form, and moves no target doing it", () => {
@@ -1051,15 +1090,22 @@ describe("redactDsn names the server pg will actually reach", () => {
     // reported target must still be the one pg resolves.
     ambient();
     const withOverride = "postgresql host elsewhere port 5433 database db";
-    for (const query of [
-      "sslcert=/etc/hosts&host=elsewhere",
-      "SSLCERT=/etc/hosts&host=elsewhere",
-      "sslcert=/etc/hosts&sslcert=/etc/hosts&host=elsewhere",
-      "sslcert&host=elsewhere",
-      "host=elsewhere&sslkey=/etc/hosts",
-      "host=elsewhere&sslrootcert=/etc/hosts",
-      "sslcert=/etc/hosts&host=elsewhere#frag",
-    ]) {
+    // ROUND 24 SPLIT THIS TABLE. The reporter declines exactly the spellings pg
+    // would OPEN, and no more: pg reads under `if (config.sslcert)` with
+    // case-sensitive keys, so an uppercase key and a valueless key open nothing
+    // and must still be named. Refusing those would be a refusal pg's own
+    // behaviour does not earn, and it is how an over-broad guard hides.
+    const declined =
+      "postgresql (target not named: the dsn names an ssl file this reporter will not open)";
+    for (const [query, expected] of [
+      ["sslcert=/etc/hosts&host=elsewhere", declined],
+      ["SSLCERT=/etc/hosts&host=elsewhere", withOverride],
+      ["sslcert=/etc/hosts&sslcert=/etc/hosts&host=elsewhere", declined],
+      ["sslcert&host=elsewhere", withOverride],
+      ["host=elsewhere&sslkey=/etc/hosts", declined],
+      ["host=elsewhere&sslrootcert=/etc/hosts", declined],
+      ["sslcert=/etc/hosts&host=elsewhere#frag", declined],
+    ] as const) {
       const { reads, result } = readsDuring(() =>
         redactDsn(`postgresql://u:p@127.0.0.1:5433/db?${query}`)
       );
@@ -1072,7 +1118,7 @@ describe("redactDsn names the server pg will actually reach", () => {
         reads.filter(r => r.includes("/etc/hosts")),
         query
       ).toEqual([]);
-      expect(result, query).toBe(withOverride);
+      expect(result, query).toBe(expected);
     }
     // A key that merely STARTS with a stripped name must survive, or an
     // unrelated parameter would be silently dropped.
@@ -1249,13 +1295,25 @@ describe("redactDsn names the server pg will actually reach", () => {
     // code copied the rewrite, not the flag, then serialised the URL, so
     // adding a cert parameter to an empty-authority DSN reported host
     // `___DUMMY___` while pg used localhost. Nothing is serialised now.
-    for (const query of ["", "?sslcert=/etc/hosts", "?SSLCERT=/etc/hosts", "?sslkey=/etc/hosts"]) {
+    // ROUND 24. Two of these spellings are now declined for naming an ssl file,
+    // so they are asserted on the refusal line. The other two still exercise
+    // the round-10 property against pg, which is the point of the test: pg's
+    // own `connectionParameters` resolves the rewrite back to localhost, so the
+    // defect is gone at its source rather than guarded against here.
+    for (const query of ["", "?SSLCERT=/etc/hosts"]) {
       ambient();
-      const dsn = `postgresql://u:p@/db${query}`;
-      const report = expectAgreesWithPg(dsn);
+      const report = expectAgreesWithPg(`postgresql://u:p@/db${query}`);
       expect(report, query).not.toContain("DUMMY");
       expect(report, query).toBe(
         "postgresql host localhost (default) port 5432 (default) database db"
+      );
+    }
+    for (const query of ["?sslcert=/etc/hosts", "?sslkey=/etc/hosts"]) {
+      ambient();
+      const report = redactDsn(`postgresql://u:p@/db${query}`);
+      expect(report, query).not.toContain("DUMMY");
+      expect(report, query).toBe(
+        "postgresql (target not named: the dsn names an ssl file this reporter will not open)"
       );
     }
   });
@@ -1446,11 +1504,19 @@ describe("redactDsn names the server pg will actually reach", () => {
     const dsn =
       `postgresql://u:p@127.0.0.1:5433/db?sslrootcert=${realFile}` +
       "&sslmode=verify-ca&uselibpqcompat=true";
-    // pg parses this one: it is a documented libpq-compatible configuration,
-    // and pg's own error tells operators to use it.
-    expect(expectAgreesWithPg(dsn)).toBe("postgresql host 127.0.0.1 port 5433 database db");
-    // And still without reading it.
-    const { reads } = readsDuring(() => redactDsn(dsn));
+    // ROUND 24 RETIRED THE AGREEMENT HALF OF THIS TEST, and the round-11 defect
+    // it was built for went with it. That defect was a read guard returning an
+    // EMPTY buffer, which made pg's own `if (!config.ssl.ca)` branch throw for a
+    // DSN whose real CA satisfies it. There is no read guard now: the reporter
+    // does not call pg's parse at all when an ssl file is named, so there is no
+    // half-read state left to disagree about.
+    //
+    // What must still hold, and is the reason this keeps a REAL file: the
+    // reporter opens nothing, even when the file is present and readable.
+    const { reads, result } = readsDuring(() => redactDsn(dsn));
+    expect(result).toBe(
+      "postgresql (target not named: the dsn names an ssl file this reporter will not open)"
+    );
     expect(reads.filter(r => r.includes("package.json"))).toEqual([]);
   });
 

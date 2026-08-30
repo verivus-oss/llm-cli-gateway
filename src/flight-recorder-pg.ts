@@ -33,7 +33,7 @@ import {
   type PgPoolFactory,
   type PostgresRoleDsns,
 } from "./storage/drivers/postgres.js";
-import { parsePgDsn, type TargetFieldSource } from "./storage/pg-dsn-parse.js";
+import { parsePgDsn, SSL_FILE_REFUSAL, type TargetFieldSource } from "./storage/pg-dsn-parse.js";
 import type { StorageConnection } from "./storage/store.js";
 import { FlightRecorderRuntime, truncateThinkingBlocks } from "./flight-recorder-runtime.js";
 import type {
@@ -272,7 +272,16 @@ function show(value: string): string {
     points.length > MAX_FIELD_CHARS
       ? `${points.slice(0, MAX_FIELD_CHARS).join("")}... (${points.length} chars)`
       : value;
-  if (/^[A-Za-z0-9._:/[\]-]+$/.test(bounded) && !FORMAT_KEYWORDS.has(bounded.toLowerCase())) {
+  // `://` is quoted even though every character in it is bare-word legal. Round
+  // 24 moved the host from a shape allowlist to pg's own resolution, and pg
+  // resolves `?host=evil://host` to exactly that. Naming it is correct; letting
+  // it out UNQUOTED would emit a line shaped like a DSN, which is the property
+  // this function is here to hold.
+  if (
+    /^[A-Za-z0-9._:/[\]-]+$/.test(bounded) &&
+    !bounded.includes("://") &&
+    !FORMAT_KEYWORDS.has(bounded.toLowerCase())
+  ) {
     return bounded;
   }
   return JSON.stringify(bounded).replace(UNSAFE_IN_A_LOG_LINE, c => {
@@ -311,23 +320,21 @@ function show(value: string): string {
  * A string that two readings disagree about is refused rather than reported.
  * See `parsePgDsn` for the rules and for why each exists.
  */
+/**
+ * The annotation separates what the operator WROTE from what an environment
+ * variable or a default supplied. A query parameter is written, so `?host=` is
+ * "dsn" here: pg merges searchParams into its config before resolving, and
+ * this projection reads that config, so the two are one source by then.
+ */
 function annotate(source: TargetFieldSource): string {
   switch (source) {
     case "dsn":
       return "";
-    // A query parameter IS stated in the DSN, so it is not annotated. The
-    // annotation exists to separate what the operator wrote from what an
-    // environment variable or a default supplied; `?host=` is the first.
-    case "query":
-      return "";
     case "PGHOST":
     case "PGPORT":
     case "PGDATABASE":
-    case "PGUSER":
       return ` (from ${source})`;
     case "user-from-dsn":
-      return " (default: the connecting user, from the DSN)";
-    case "user-from-query":
       return " (default: the connecting user, from the DSN)";
     case "user-from-PGUSER":
       return " (default: the connecting user, from PGUSER)";
@@ -347,7 +354,14 @@ function annotate(source: TargetFieldSource): string {
  */
 export function redactDsn(dsn: string): string {
   const parsed = parsePgDsn(dsn);
-  if (!parsed.ok) return "postgresql (dsn not parseable)";
+  if (!parsed.ok) {
+    // The ssl refusal is not a malformed DSN and must not be reported as one:
+    // pg will connect with that string perfectly well, and only this reporter
+    // declines to open the file it names.
+    return parsed.reason === SSL_FILE_REFUSAL
+      ? "postgresql (target not named: the dsn names an ssl file this reporter will not open)"
+      : "postgresql (dsn not parseable)";
+  }
   const { target } = parsed;
   const where = target.transport === "unix" ? "socket" : "host";
   const host = `${show(target.hostOrDirectory)}${annotate(target.sources.host)}`;

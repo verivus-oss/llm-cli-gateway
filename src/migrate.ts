@@ -1,6 +1,7 @@
 #!/usr/bin/env node
 
 import type { PoolClient } from "pg";
+import { parsePgDsn } from "./storage/pg-dsn-parse.js";
 import { createHash } from "crypto";
 import { readFileSync, readdirSync } from "fs";
 import { join, dirname } from "path";
@@ -545,8 +546,20 @@ async function main(): Promise<void> {
     process.exit(1);
   }
 
+  // THE SAME GATE the reporter and the session store consult. This path had
+  // none at all, not even the prefix test config.ts applies, so it would dial
+  // any string DATABASE_URL held. `connect` is pg's OWN parse of that string:
+  // ConnectionParameters does `Object.assign({}, config, parse(dsn))`, so
+  // handing it the object is what handing it the string already did, minus the
+  // second parse.
+  const admitted = parsePgDsn(databaseUrl);
+  if (!admitted.ok) {
+    console.error(`ERROR: refusing to migrate with this DATABASE_URL: ${admitted.reason}`);
+    process.exit(1);
+  }
+
   const { Pool } = await importOptionalPg();
-  const pool = new Pool({ connectionString: databaseUrl });
+  const pool = new Pool(admitted.connect);
 
   try {
     // Load migrations

@@ -6,6 +6,7 @@ import {
   PostgresStorageDriver,
   SESSION_POOL_SETTINGS,
 } from "./storage/drivers/postgres.js";
+import { assertAdmissiblePgDsn } from "./storage/pg-dsn-gate.js";
 
 export interface HealthCheckResult {
   postgres: { connected: boolean; latency: number };
@@ -44,6 +45,13 @@ export class DatabaseConnection {
    */
   async connect(): Promise<void> {
     const createPool = await sessionPoolFactory(this.logger);
+    const dsns = { ...this.config.roleDsns, app: this.config.database!.connectionString };
+    // THE SAME GATE THE REPORTER CONSULTS. A DSN `redactDsn` will not name is a
+    // DSN this must not dial: until round 24 the reporter refused ambiguous
+    // strings while pg went on resolving `?host=` to wherever they pointed.
+    for (const [role, dsn] of Object.entries(dsns)) {
+      if (typeof dsn === "string") assertAdmissiblePgDsn(dsn, role);
+    }
     const driver = new PostgresStorageDriver(
       // Every credential `[persistence.roles]` configured, with `app` taken
       // from the selected connection string so there is one source for it.
@@ -54,7 +62,7 @@ export class DatabaseConnection {
       // and because an unused pool costs nothing: pg-pool's constructor creates
       // no clients and defaults `min` to 0, so a pool nothing queries opens no
       // connection (verified in node_modules/pg-pool/index.js:89-108).
-      { ...this.config.roleDsns, app: this.config.database!.connectionString },
+      dsns,
       createPool
     );
 
