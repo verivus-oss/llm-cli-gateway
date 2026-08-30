@@ -771,6 +771,30 @@ describe("redactDsn names the server pg will actually reach", () => {
       );
     }
 
+    // ROUND 25. Both reviewers reached ONE class from two different components,
+    // which is what showed the rule had only ever been true of the path.
+    // codex, through the authority percent-encoded:
+    expect(why(`postgres://host%3Bpassword%3D${S}/db`)).toBe(
+      "the authority decodes to keyword structure"
+    );
+    expect(why(`postgres://host%3Dlocalhost%2Cpassword%3D${S}/db`)).toBe(
+      "the authority decodes to keyword structure"
+    );
+    // grok, through a target parameter's value, raw and encoded and space-run:
+    const inAValue = "a target parameter's value holds keyword structure";
+    expect(why(`postgres://u:p@h.invalid/db?host=x;password=${S}`)).toBe(inAValue);
+    expect(why(`postgres://u:p@h.invalid/db?host=x%3Bpassword%3D${S}`)).toBe(inAValue);
+    expect(why(`postgres://u:p@h.invalid/db?host=password=${S}`)).toBe(inAValue);
+    expect(why(`postgres://u:p@h.invalid/db?host=x%20password%3D${S}`)).toBe(inAValue);
+    expect(why(`postgres://h.invalid?user=alice;password=${S}`)).toBe(inAValue);
+
+    // And the shape the rule must NOT eat. A space is deliberately absent from
+    // the keyword set: `db name` is a database PostgreSQL opens, and every
+    // keyword run carries an `=` that is caught anyway.
+    expect(redactDsn("postgresql://u:p@h.invalid/db%20name")).toBe(
+      'postgresql host h.invalid port 5432 (default) database "db name"'
+    );
+
     // A target parameter given twice. pg takes the LAST silently, so the string
     // means two different targets to two readers of it. The authority here
     // holds no colon, so this is the case ONLY this rule catches: a mutation

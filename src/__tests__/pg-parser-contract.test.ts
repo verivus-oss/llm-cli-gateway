@@ -121,6 +121,17 @@ describe("the pg parser contract the DSN gate depends on", () => {
     expect(target.host).not.toContain("DUMMY");
   });
 
+  it("BACKSTOP: a resolved target holding keyword structure is refused even from the environment", async () => {
+    // The gate inspects its INPUTS; this inspects the printed OUTPUT. Only the
+    // output placement covers a value that never appeared in the DSN, which is
+    // what makes it a distinct control rather than a duplicate of the gate.
+    const { parsePgDsn } = await import("../storage/pg-dsn-parse.js");
+    process.env.PGHOST = "h.invalid;password=pwCONTRACT-DO-NOT-PRINT";
+    const parsed = parsePgDsn("postgresql:///db");
+    expect(parsed.ok).toBe(false);
+    if (!parsed.ok) expect(parsed.reason).toBe("the resolved target holds keyword structure");
+  });
+
   it("falls back to the environment for an unstated field", () => {
     // The reporter reads the RESOLVED value, so pg's fallback is what gets
     // printed. `parse` alone returns "" here and would print a blank target.

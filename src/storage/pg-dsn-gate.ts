@@ -56,6 +56,33 @@ const SSL_FILE_KEYS = new Set(["sslcert", "sslkey", "sslrootcert"]);
 const KEYWORD_SEPARATORS = [";", "=", "&"] as const;
 
 /**
+ * The same class, asked of a VALUE rather than of a raw span.
+ *
+ * Round 25 found this rule was true of the path and of nothing else. Codex
+ * reached it through the authority percent-encoded
+ * (`postgres://host%3Bpassword%3DS/db`) and grok through a query value both raw
+ * and encoded (`?host=x;password=S`, `?user=alice;password=S`). Different
+ * inputs, one output: the printed field ends up holding `;password=`.
+ *
+ * Checking raw bytes per input position is what made each spelling a separate
+ * hole, so this is asked of the decoded value instead, and of the RESOLVED
+ * projection in `parsePgDsn`, which is the only place that sees every spelling
+ * at once. A space is not listed: `db name` is a database PostgreSQL opens and
+ * naming it is the job, and every keyword run carries an `=` anyway.
+ */
+export function holdsKeywordStructure(value: string): boolean {
+  return KEYWORD_SEPARATORS.some(separator => value.includes(separator));
+}
+
+function decodedOrRaw(value: string): string {
+  try {
+    return decodeURIComponent(value);
+  } catch {
+    return value;
+  }
+}
+
+/**
  * Does this DSN name a file the parser would OPEN? Asked by the reporter only.
  *
  * Matched exactly as pg matches it, and no wider. pg reads under
@@ -183,6 +210,19 @@ export function admitPgDsn(dsn: string): DsnAdmission {
 
   if (authority.includes("=") || authority.includes(",")) {
     return refuse("a keyword-shaped authority is not a URI authority");
+  }
+  // Round 25, codex: the check above reads RAW bytes, so `%3D` walked past it
+  // and pg decoded it back into the host.
+  if (holdsKeywordStructure(decodedOrRaw(authority))) {
+    return refuse("the authority decodes to keyword structure");
+  }
+  // Round 25, grok: a target parameter's VALUE was never inspected at all, so
+  // `?host=x;password=S` and `?user=alice;password=S` were printed intact.
+  for (const [key, value] of queryPairs(afterPrefix)) {
+    if (!TARGET_KEYS.has(key)) continue;
+    if (holdsKeywordStructure(decodedOrRaw(value))) {
+      return refuse("a target parameter's value holds keyword structure");
+    }
   }
 
   const path = rest.slice(endOfAuthority(rest)).split("?")[0] ?? "";

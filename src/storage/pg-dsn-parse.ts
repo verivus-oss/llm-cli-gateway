@@ -15,7 +15,7 @@
  */
 
 import { createRequire } from "node:module";
-import { admitPgDsn, namesSslFileParameter } from "./pg-dsn-gate.js";
+import { admitPgDsn, holdsKeywordStructure, namesSslFileParameter } from "./pg-dsn-gate.js";
 
 export type TargetFieldSource =
   | "dsn"
@@ -113,6 +113,18 @@ export function parsePgDsn(dsn: string, env: NodeJS.ProcessEnv = process.env): P
   const host = String(resolved.host ?? "");
   const port = String(resolved.port ?? "");
   const database = String(resolved.database ?? "");
+
+  // THE BACKSTOP, on the values that will actually be PRINTED.
+  //
+  // The gate asks this of its inputs; this asks it of the output. Round 25
+  // found the input-side version true of the path and of nothing else, and it
+  // took two reviewers approaching from two components to show that. This
+  // placement is immune to the spelling, because pg has already collapsed
+  // every spelling by the time it runs, and it also covers values that never
+  // appeared in the DSN at all, such as a PGHOST carrying keyword structure.
+  if (holdsKeywordStructure(host) || holdsKeywordStructure(database)) {
+    return { ok: false, reason: "the resolved target holds keyword structure" };
+  }
 
   return {
     ok: true,
