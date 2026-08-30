@@ -121,14 +121,25 @@ describe("the pg parser contract the DSN gate depends on", () => {
     expect(target.host).not.toContain("DUMMY");
   });
 
-  it("BACKSTOP: a resolved target holding keyword structure is refused even from the environment", async () => {
-    // The gate inspects its INPUTS; this inspects the printed OUTPUT. Only the
-    // output placement covers a value that never appeared in the DSN, which is
-    // what makes it a distinct control rather than a duplicate of the gate.
+  // BACKSTOP, ONE ARM PER CASE. The gate inspects its INPUTS; this inspects the
+  // printed OUTPUT, which is what makes it a distinct control rather than a
+  // duplicate: only the output placement covers a value that never appeared in
+  // the DSN at all.
+  //
+  // Split deliberately. Round 26, codex: the condition is two arms and the
+  // single test exercised only the host. Deleting the database arm left all 51
+  // tests passing while `PGDATABASE=db;password=S` printed in full. A control
+  // with N arms needs N cases, exactly as an enumerated set needs one per
+  // member, and this is the third time in this series that lesson has cost a
+  // round.
+  it.each([
+    ["PGHOST", "h.invalid;password=pwCONTRACT-DO-NOT-PRINT"],
+    ["PGDATABASE", "db;password=pwCONTRACT-DO-NOT-PRINT"],
+  ])("BACKSTOP: refuses keyword structure arriving through %s", async (name, value) => {
     const { parsePgDsn } = await import("../storage/pg-dsn-parse.js");
-    process.env.PGHOST = "h.invalid;password=pwCONTRACT-DO-NOT-PRINT";
-    const parsed = parsePgDsn("postgresql:///db");
-    expect(parsed.ok).toBe(false);
+    process.env[name] = value;
+    const parsed = parsePgDsn("postgresql:///");
+    expect(parsed.ok, name).toBe(false);
     if (!parsed.ok) expect(parsed.reason).toBe("the resolved target holds keyword structure");
   });
 
