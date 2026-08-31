@@ -8,7 +8,6 @@
 # this is INPUT VALIDATION, not redaction, and the gate guards both consumers.
 # Before adding a rule, find the node and follow `affects`; a rule that cannot
 # answer `pins` is not a control yet.
-#
 # EVIDENCE  docs/evidence/dsn-single-parser-2026-08-{30,31}.md (not mirrored).
 
 [meta]
@@ -157,8 +156,9 @@ affects = ["report.allowlist", "report.second_printer"]
 [[node]]
 id = "instrument.derived_mutations"
 kind = "test_defect"
+file = "scripts/mutation-sweep.mjs"
 status = "open"
-role = "D7 (a case per arm, a case per member) was asserted and falsified in four consecutive rounds, because which controls have tests was decided by READING. The set is now DERIVED from the tree by AST over five shapes, scoped to the diff under review. Every survivor is a control with no test. The enumerator is itself in the blast radius: its first pass missed two real gates by listing the spellings already in use rather than the shape."
+role = "D7 (a case per arm, a case per member) was asserted and falsified in four consecutive rounds, because which controls have tests was decided by READING. The set is now DERIVED from the tree by AST over five shapes, scoped to the diff. A survivor is a control with no test, though not always a defect: some are equivalent and some unreachable, and each needs the measurement that says which."
 pins = "A must-survive and a must-be-killed control run before any mutation, and a run with no summary line is `invalid`, never a verdict: the first version scored a suite that never started as 48 of 48 killed."
 affects = ["gate.shared", "instrument.liveness"]
 critical = true
