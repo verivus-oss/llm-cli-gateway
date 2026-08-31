@@ -65,6 +65,7 @@ import {
   type FlightRecorderLike,
   type FlightRecorderState,
 } from "./flight-recorder.js";
+import { postgresFailureMessage } from "./storage/postgres-diagnostics.js";
 import {
   buildUpstreamContractReport,
   type InstalledCliContractProbe,
@@ -1665,9 +1666,12 @@ export async function collectStorageHealth(
     // Reached the file and could not read it. The health snapshot below is
     // already `degraded` because every operation records its own failure; this
     // catch exists so doctor still emits a report rather than throwing.
-    block.warnings.push(
-      `Reading flight-recorder storage statistics FAILED: ${error instanceof Error ? error.message : String(error)}`
-    );
+    const detail = onSqliteFile
+      ? error instanceof Error
+        ? error.message
+        : String(error)
+      : postgresFailureMessage(error);
+    block.warnings.push(`Reading flight-recorder storage statistics FAILED: ${detail}`);
   }
 
   const health = flightRecorderHealth(recorder);

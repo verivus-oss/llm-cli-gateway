@@ -51,14 +51,23 @@ export interface RetentionSweeperOptions {
   now?: () => number;
   batchRows?: number;
   maxBatches?: number;
+  /** Optional health-safe formatter for backend errors. */
+  failureMessage?: (error: unknown) => string;
 }
 
-function failed(error: unknown): RetentionSubsystemOutcome {
+function failed(
+  error: unknown,
+  failureMessage?: (error: unknown) => string
+): RetentionSubsystemOutcome {
   return {
     eligible: null,
     deleted: 0,
     budgetExhausted: false,
-    error: error instanceof Error ? error.message : String(error),
+    error: failureMessage
+      ? failureMessage(error)
+      : error instanceof Error
+        ? error.message
+        : String(error),
   };
 }
 
@@ -187,7 +196,7 @@ export class RetentionSweeper {
         error: null,
       };
     } catch (error) {
-      return failed(error);
+      return failed(error, this.options.failureMessage);
     }
   }
 
@@ -196,7 +205,7 @@ export class RetentionSweeper {
     destructive: boolean
   ): Promise<RetentionSubsystemOutcome> {
     const store = this.options.validationRuns;
-    if (!store) return failed(new Error("no validation run store"));
+    if (!store) return failed(new Error("no validation run store"), this.options.failureMessage);
     try {
       const eligible = await store.countWedgedValidationRuns(cutoffIso);
       if (!destructive) return { eligible, deleted: 0, budgetExhausted: false, error: null };
@@ -209,7 +218,7 @@ export class RetentionSweeper {
       }
       return { eligible, deleted, budgetExhausted: batches >= this.maxBatches, error: null };
     } catch (error) {
-      return failed(error);
+      return failed(error, this.options.failureMessage);
     }
   }
 

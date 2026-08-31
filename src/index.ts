@@ -291,7 +291,10 @@ import {
 } from "./flight-recorder.js";
 import { FlightOwnership } from "./flight-ownership.js";
 import { formatStorageDisposition, storageDisposition } from "./storage-disposition.js";
-import { POSTGRES_RECORDER_TARGET } from "./storage/postgres-diagnostics.js";
+import {
+  POSTGRES_RECORDER_TARGET,
+  postgresFailureMessage,
+} from "./storage/postgres-diagnostics.js";
 import {
   resolvePromptInput,
   PromptPartsSchema,
@@ -24712,6 +24715,7 @@ async function main() {
     validationRuns: retentionStore && isValidationRunStore(retentionStore) ? retentionStore : null,
     policy: persistenceRetentionPolicy(persistence),
     logger,
+    failureMessage: persistence.backend === "postgres" ? postgresFailureMessage : undefined,
   });
   const sweepInterval = persistence.retentionSweepIntervalMs ?? DEFAULT_RETENTION_SWEEP_INTERVAL_MS;
   // The return value is READ. `start()` declines when every destructive bound

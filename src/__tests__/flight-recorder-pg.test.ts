@@ -11,11 +11,13 @@
  * it neither sees nor leaves anything in `public` where the other -pg suites live.
  */
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
-import { readdirSync, readFileSync } from "node:fs";
+import { mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { Pool } from "pg";
 import { PostgresFlightRecorder } from "../flight-recorder-pg.js";
 import type { FlightLogResult, FlightLogStart } from "../flight-recorder.js";
+import { collectStorageHealth } from "../doctor.js";
 import { TEST_DATABASE_URL } from "./setup.js";
 
 const BASE_DSN = TEST_DATABASE_URL;
@@ -362,6 +364,38 @@ describe("the five states", () => {
       expect(health.failureCount).toBeGreaterThan(0);
     } finally {
       await broken.close();
+    }
+  });
+
+  it("keeps doctor warnings opaque when its configured PostgreSQL recorder fails", async () => {
+    const marker = "doctor-dsn-health-secret";
+    const url = new URL(BASE_DSN);
+    url.searchParams.set("host", `/tmp/${marker}`);
+    const dir = mkdtempSync(join(tmpdir(), "doctor-pg-health-"));
+    const configPath = join(dir, "config.toml");
+    writeFileSync(
+      configPath,
+      ["[persistence]", 'backend = "postgres"', `dsn = ${JSON.stringify(url.toString())}`, ""].join(
+        "\n"
+      )
+    );
+    const savedConfig = process.env.LLM_GATEWAY_CONFIG;
+    const savedLogs = process.env.LLM_GATEWAY_LOGS_DB;
+    process.env.LLM_GATEWAY_CONFIG = configPath;
+    process.env.LLM_GATEWAY_LOGS_DB = join(dir, "unused-sqlite.db");
+    try {
+      const storage = await collectStorageHealth();
+      expect(storage.job_store.backend).toBe("postgres");
+      expect(storage.flight_recorder.path).toBe("postgresql");
+      expect(storage.flight_recorder.error).toBe("PostgreSQL operation failed");
+      expect(storage.warnings.join(" ")).not.toContain(marker);
+      expect(storage.warnings.join(" ")).toContain("PostgreSQL operation failed");
+    } finally {
+      if (savedConfig === undefined) delete process.env.LLM_GATEWAY_CONFIG;
+      else process.env.LLM_GATEWAY_CONFIG = savedConfig;
+      if (savedLogs === undefined) delete process.env.LLM_GATEWAY_LOGS_DB;
+      else process.env.LLM_GATEWAY_LOGS_DB = savedLogs;
+      rmSync(dir, { recursive: true, force: true });
     }
   });
 });
