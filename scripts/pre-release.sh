@@ -73,6 +73,11 @@ echo "==> installed provider CLI contract drift"
 npm run upstream:drift
 
 echo "==> release gate"
+# STRICT for the release path. `npm run check` is runnable by hand, so the audit
+# inside it generates a missing shrinkwrap and removes it again; that keeps the
+# developer gate honest but would also mask the shrinkwrap step above having
+# been removed or having failed. Here it must already exist.
+export LLM_GATEWAY_REQUIRE_SHRINKWRAP=1
 npm run check
 
 echo "==> registry-fidelity verification (verdaccio publish + fresh consumer install)"

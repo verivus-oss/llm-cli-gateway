@@ -144,6 +144,11 @@ jobs:
       # (never committed) prod-only npm-shrinkwrap.json being present.
       - run: node scripts/make-prod-shrinkwrap.mjs
       - run: npm run check
+        # STRICT: the step above must have produced the file. A hand-run
+        # `npm run check` generates a missing one and removes it again, which
+        # would hide that step having been dropped from a RELEASE.
+        env:
+          LLM_GATEWAY_REQUIRE_SHRINKWRAP: "1"
 
       - name: Create GitHub release (published)
         env:
