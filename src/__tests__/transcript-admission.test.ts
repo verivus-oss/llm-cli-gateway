@@ -389,28 +389,31 @@ describe("an unconfigured dsn is reported as unconfigured", () => {
 });
 
 describe("the port bounds pg's own resolution does not enforce", () => {
-  // `resolvePgDsnTarget` refuses a port outside 1..65535. Each arm of that
-  // three-way test was deleted separately with the suite green, so the bound
-  // was carried by nothing. A target the checker cannot bound is a target it
-  // reports on without having proven anything about it.
-  it("refuses a port above 65535", () => {
-    expect(parseDsnTarget("postgresql://127.0.0.1:70000/gw")).toBeNull();
+  // Through the QUERY spelling, which is where the bound is actually reachable.
+  // `:70000` in the authority never gets there, because WHATWG rejects it and
+  // the parse throws; `?port=70000` and `?port=-1` are resolved by pg without
+  // complaint and arrive here as the value a syscall would be handed. Measured
+  // with the line removed: both then come back as a target.
+  it.each([
+    ["above 65535", "postgresql://127.0.0.1/gw?port=70000"],
+    ["negative", "postgresql://127.0.0.1/gw?port=-1"],
+  ])("refuses a port that is %s", (_name, dsn) => {
+    expect(parseDsnTarget(dsn)).toBeNull();
   });
 
-  it("records which arms of that bound are reachable, and which are not", () => {
-    // MEASURED, so the next sweep reads this as a decision and not a gap. Only
-    // the upper bound is reachable through a URI: pg reads `:0` as NO port and
-    // substitutes its default, and WHATWG rejects a non-numeric port before pg
-    // sees it, so `port <= 0` and `!Number.isInteger(port)` cannot be provoked
-    // from this direction. They are kept as a bound on pg's output rather than
-    // deleted as dead, because the caller passes the result to a syscall.
-    expect(parseDsnTarget("postgresql://127.0.0.1:0/gw")?.port).toBe(5432);
-    expect(parseDsnTarget("postgresql://127.0.0.1:abc/gw")).toBeNull();
-  });
-
-  it("still accepts the edges of the range", () => {
+  it("leaves the ports pg does resolve alone", () => {
     expect(parseDsnTarget("postgresql://127.0.0.1:1/gw")?.port).toBe(1);
     expect(parseDsnTarget("postgresql://127.0.0.1:65535/gw")?.port).toBe(65535);
+    expect(parseDsnTarget("postgresql://127.0.0.1/gw?port=65535")?.port).toBe(65535);
+  });
+
+  it("records the spellings that never reach the bound at all", () => {
+    // Not a gap: pg substitutes its default for both, so the value handed on is
+    // already in range. Written down so the next sweep reads the surviving
+    // `Number.isInteger` arm as a measurement rather than as a missing case.
+    expect(parseDsnTarget("postgresql://127.0.0.1/gw?port=abc")?.port).toBe(5432);
+    expect(parseDsnTarget("postgresql://127.0.0.1:0/gw")?.port).toBe(5432);
+    expect(parseDsnTarget("postgresql://127.0.0.1:70000/gw")).toBeNull();
   });
 });
 

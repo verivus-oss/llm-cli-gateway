@@ -107,10 +107,12 @@ export function resolvePgDsnTarget(dsn: string): PgDsnTarget | null {
   const host = String(resolved.host ?? "");
   if (host.length === 0) return null;
   // A bound on PG'S OUTPUT, not on the input, because the caller turns this
-  // into a syscall. Only the upper arm is reachable from a URI: pg reads `:0`
-  // as no port at all and substitutes its default, and WHATWG rejects a
-  // non-numeric port before pg sees it. The other two are kept anyway and are
-  // recorded as unreachable in the suite, so a sweep reads them as a decision.
+  // into a syscall. It is reached through the QUERY spelling and not through
+  // the authority, which is the opposite of what an earlier comment here
+  // claimed: WHATWG rejects `:70000` before pg sees it, while `?port=70000`
+  // and `?port=-1` walk straight through pg and land on this line. Measured
+  // both ways with the line removed. `!Number.isInteger` is the one arm no
+  // spelling reaches, since `?port=abc` resolves to pg's default instead.
   const port = Number(resolved.port);
   if (!Number.isInteger(port) || port <= 0 || port > 65535) return null;
 
