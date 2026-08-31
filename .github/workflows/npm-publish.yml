@@ -99,6 +99,12 @@ jobs:
       - run: node scripts/make-prod-shrinkwrap.mjs
 
       - run: npm run security:audit
+        # STRICT: the generate step above must have produced the file. Without
+        # this the audit would generate a missing one itself, which is right for
+        # a hand-run `npm run check` and wrong here, where it would hide that
+        # step having been dropped.
+        env:
+          LLM_GATEWAY_REQUIRE_SHRINKWRAP: "1"
 
       # Strip internal MCP server names from the build, THEN verify the packed
       # tarball is clean. This runs as an explicit step (NOT a package.json

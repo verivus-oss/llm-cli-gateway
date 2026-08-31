@@ -38,9 +38,10 @@ npm run test:coverage      # v8 coverage (70% lines/functions/statements, 60% br
 # Watch mode for development
 npm run test:watch
 
-# Full gate, 12 steps in order: build, lint, format:check, provider:surfaces:check,
-# dag:launch-surface:check, upstream:contracts, site:version:check,
-# site:generate:check, site:validate, test, security:audit, verify:no-internal-mcp:check
+# Full gate. 22 steps, &&-chained, ending build, lint, format:check, ...,
+# test, security:audit, verify:no-internal-mcp:check. Read the `check` script in
+# package.json for the current list rather than trusting a copy here: this
+# comment said 12 for long enough that the last ten were nobody's business.
 npm run check
 ```
 
@@ -51,6 +52,8 @@ npm run check
 - `npm run provider:surfaces:check` - the DRY ratchet for the provider registry: fails on any hand-maintained provider-name array or literal `sessions://` / `models://` resource URI outside the sanctioned files (everything must derive from `src/provider-definitions.ts` / `CLI_TYPES`).
 - `npm run site:generate:check` + `npm run site:validate` - `scripts/generate-site-discovery.mjs` generates `site/agent.json`, `.well-known/api-catalog`, `.well-known/ai-catalog.json`, `.well-known/mcp/server-card.json`, `.well-known/mcp.json`, `tools.md`, and `tools.fixture.json` from the live MCP tool surface. Regenerate those artifacts with `npm run site:generate`. `llms.txt`, `DISCOVERY.md`, `sitemap.*`, `openapi.json`, `agents.md`, and `.well-known/agent.json` are maintained separately and validated for discovery consistency.
 - `scripts/release-security-audit.sh` (`npm run security:audit`), which enforces release invariants. For example, `node:sqlite` must not be referenced outside `src/sqlite-driver.ts`, and packed `dist/**/*.js` and `dist/**/*.d.ts` must contain no unapproved `fetch` token. Run it before any release.
+
+  **It has two modes, and the default is the developer one.** The prod-only `npm-shrinkwrap.json` is generated at pack time and never committed, so a clean checkout does not have it. The audit used to exit 1 on that, which made `npm run check` permanently red on every developer tree and, because the steps are `&&`-chained, meant `verify:no-internal-mcp:check` never ran at all. By default the audit now generates the shrinkwrap for the duration of the run and removes it again, so the steps that pack and install a tarball audit the same artifact a release ships; it prints that parity against a committed file is not checked in that mode, because there is no committed file. Set `LLM_GATEWAY_REQUIRE_SHRINKWRAP=1` to restore the strict behaviour where absence is a failure. `pre-release.sh` and every workflow that runs the audit or the gate set it, and `scripts/check-gate-reachability.test.mjs` fails if a caller is added that does not.
 
 ### Linting and Formatting
 
