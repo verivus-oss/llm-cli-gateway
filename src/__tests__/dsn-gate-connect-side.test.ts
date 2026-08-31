@@ -25,6 +25,7 @@ import { existsSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { dirname, join } from "node:path";
 import { nodePostgresPoolFactory } from "../storage/drivers/postgres.js";
+import { namesSslFileParameter } from "../storage/pg-dsn-gate.js";
 import { DatabaseConnection } from "../db.js";
 import { loadConfig } from "../config.js";
 import type { Config, PersistenceConfig } from "../config.js";
@@ -149,5 +150,27 @@ describe("migrate refuses before it builds a pool", () => {
     expect(status).toBe(1);
     expect(output).toContain("refusing to migrate with this DATABASE_URL");
     expect(output).not.toContain("NOT-A-REAL-SECRET");
+  });
+});
+
+describe("the ssl-file question is asked of PostgreSQL DSNs only", () => {
+  // `namesSslFileParameter` is exported and asked BEFORE anything opens a file.
+  // Inside `parsePgDsn` the gate has already refused a foreign scheme, so its
+  // own prefix guard is unreachable from that caller and a sweep deleting it
+  // killed nothing. It is reachable from the export, which is the surface a
+  // future caller uses, so it is pinned here rather than deleted.
+  it("answers false for a scheme that is not postgres, whatever the query says", () => {
+    expect(namesSslFileParameter("http://h.invalid/db?sslcert=/etc/hosts")).toBe(false);
+    expect(namesSslFileParameter("mysql://h.invalid/db?sslrootcert=/etc/hosts")).toBe(false);
+    expect(namesSslFileParameter("?sslkey=/etc/hosts")).toBe(false);
+  });
+
+  it("answers true for a PostgreSQL DSN that names one with a value", () => {
+    for (const key of ["sslcert", "sslkey", "sslrootcert"]) {
+      expect(namesSslFileParameter(`postgresql://h.invalid/db?${key}=/etc/hosts`), key).toBe(true);
+    }
+    // Valueless, and uppercase, are both inert to pg and must stay inert here.
+    expect(namesSslFileParameter("postgresql://h.invalid/db?sslcert")).toBe(false);
+    expect(namesSslFileParameter("postgresql://h.invalid/db?SSLCERT=/etc/hosts")).toBe(false);
   });
 });

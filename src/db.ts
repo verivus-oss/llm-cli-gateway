@@ -6,7 +6,6 @@ import {
   PostgresStorageDriver,
   SESSION_POOL_SETTINGS,
 } from "./storage/drivers/postgres.js";
-import { assertAdmissiblePgDsn } from "./storage/pg-dsn-gate.js";
 
 export interface HealthCheckResult {
   postgres: { connected: boolean; latency: number };
@@ -46,12 +45,12 @@ export class DatabaseConnection {
   async connect(): Promise<void> {
     const createPool = await sessionPoolFactory(this.logger);
     const dsns = { ...this.config.roleDsns, app: this.config.database!.connectionString };
-    // THE SAME GATE THE REPORTER CONSULTS. A DSN `redactDsn` will not name is a
-    // DSN this must not dial: until round 24 the reporter refused ambiguous
-    // strings while pg went on resolving `?host=` to wherever they pointed.
-    for (const [role, dsn] of Object.entries(dsns)) {
-      if (typeof dsn === "string") assertAdmissiblePgDsn(dsn, role);
-    }
+    // NO GATE HERE, deliberately. There was one, and it was unkillable: every
+    // DSN in `dsns` reaches pg through `nodePostgresPoolFactory`, which asserts
+    // admissibility for each role it builds a pool for, so deleting this loop
+    // changed no test and could not. Two rules where one carries the class is
+    // how the other stops being a control; the factory is the convergence point
+    // and it is the one that runs.
     const driver = new PostgresStorageDriver(
       // Every credential `[persistence.roles]` configured, with `app` taken
       // from the selected connection string so there is one source for it.

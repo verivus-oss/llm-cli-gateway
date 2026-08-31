@@ -992,12 +992,23 @@ describe("redactDsn names the server pg will actually reach", () => {
   it("quotes a value that collides with the format's own keywords", () => {
     // Round 8: `?host=port` printed `postgresql host port port 5433 database
     // db`. It agreed with pg and was unreadable. The value is still named.
-    // DERIVED FROM THE SET, not from a list of it. Two hand-written loops
-    // covered six of the seven members between them and `postgresql` was in
-    // neither, so deleting it from the set killed nothing. A check that
-    // enumerates the set it governs has that enumeration inside its own blast
-    // radius; iterating the set means a new member arrives with its case.
-    expect(FORMAT_KEYWORDS.size).toBeGreaterThan(0);
+    // BOTH DIRECTIONS, and the first attempt at this had only one of them.
+    //
+    // Two hand-written loops covered six of the seven members and `postgresql`
+    // was in neither, so deleting it killed nothing. Replacing them with a loop
+    // OVER THE SET fixed that and broke the other half: a deleted member also
+    // deletes its own case, so a re-run of the sweep found all six remaining
+    // members newly unpinned. Iterating gives a new member its case; the
+    // membership assertion is what makes a removed one fail.
+    expect([...FORMAT_KEYWORDS].sort()).toEqual([
+      "database",
+      "default",
+      "from",
+      "host",
+      "port",
+      "postgresql",
+      "socket",
+    ]);
     for (const word of FORMAT_KEYWORDS) {
       ambient();
       const dsn = `postgresql://u:p@127.0.0.1:5433/db?host=${word}`;

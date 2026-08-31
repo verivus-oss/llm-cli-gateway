@@ -279,6 +279,23 @@ describe("the admission matrix", () => {
     expect(loopbackListenerUids(5432, join(tmpdir(), "definitely-not-a-proc-dir-9f3a"))).toBeNull();
   });
 
+  it("counts only loopback and wildcard binds, never a public one", () => {
+    // `isLoopbackOrWildcardHex` is the difference between "something local is
+    // listening" and "something is listening". Deleting the filter left the
+    // suite green, and a PUBLIC bind owned by this uid then satisfied the gate,
+    // which is precisely the deployment shape section 6.1 refuses.
+    const publicV4 = "08080808"; // 8.8.8.8, per-word little-endian as /proc writes it
+    const procDir = procWith(row(publicV4, 5432, uid), "");
+    expect(loopbackListenerUids(5432, procDir)).toEqual(new Set());
+
+    const verdict = evaluateTranscriptAdmission("postgresql://127.0.0.1:5432/gw", {
+      procDir,
+      uid,
+    });
+    expect(verdict.admitted).toBe(false);
+    expect(verdict.reason).toContain("nothing is listening on loopback port 5432");
+  });
+
   it("REFUSES a unix socket owned by another uid", () => {
     const dir = socketDir(5432);
     const verdict = evaluateTranscriptAdmission(`postgresql:///gw?host=${dir}`, { uid: 999_999 });
@@ -331,6 +348,69 @@ describe("loopback literals", () => {
     for (const host of ["128.0.0.1", "10.127.0.1", "127.0.0.1.evil.com", "1270.0.0.1", "::2", ""]) {
       expect(isLoopbackLiteral(host), host).toBe(false);
     }
+  });
+
+  it("strips brackets only when BOTH are there", () => {
+    // The bracket test is a conjunction and neither half was pinned: a sweep
+    // deleted each arm with the suite green. Dropping either one makes the
+    // stripper run on a string that is not bracketed, and the remainder then
+    // reads as a loopback literal it is not.
+    for (const host of ["[127.0.0.1x", "x127.0.0.1]", "[::1x", "x::1]"]) {
+      expect(isLoopbackLiteral(host), host).toBe(false);
+    }
+    expect(isLoopbackLiteral("[127.0.0.1]")).toBe(true);
+  });
+
+  it("rejects an octet outside 0-255 even when the first one says 127", () => {
+    // `\d{1,3}` matches `999`, so the range check is the only thing between
+    // `127.999.0.1` and being called loopback. The near-miss list above never
+    // reached it: every entry there fails the pattern or the `=== 127` test,
+    // so deleting the range check killed nothing.
+    for (const host of ["127.999.0.1", "127.0.256.1", "127.0.0.300"]) {
+      expect(isLoopbackLiteral(host), host).toBe(false);
+    }
+  });
+});
+
+describe("an unconfigured dsn is reported as unconfigured", () => {
+  // Three spellings of ABSENT, and the third had no case: a whitespace-only
+  // value fell through to the gate and came back as a scheme refusal, which
+  // sends an operator looking for a malformed string they never wrote. Each
+  // arm gets its own assertion on the REASON, not merely on the refusal.
+  it.each([
+    ["null", null],
+    ["undefined", undefined],
+    ["whitespace only", "   "],
+  ])("says so for a dsn that is %s", (_name, dsn) => {
+    const verdict = evaluateTranscriptAdmission(dsn, { procDir: "/nonexistent", uid: 4242 });
+    expect(verdict.admitted).toBe(false);
+    expect(verdict.reason).toContain("no [persistence].dsn is configured");
+  });
+});
+
+describe("the port bounds pg's own resolution does not enforce", () => {
+  // `resolvePgDsnTarget` refuses a port outside 1..65535. Each arm of that
+  // three-way test was deleted separately with the suite green, so the bound
+  // was carried by nothing. A target the checker cannot bound is a target it
+  // reports on without having proven anything about it.
+  it("refuses a port above 65535", () => {
+    expect(parseDsnTarget("postgresql://127.0.0.1:70000/gw")).toBeNull();
+  });
+
+  it("records which arms of that bound are reachable, and which are not", () => {
+    // MEASURED, so the next sweep reads this as a decision and not a gap. Only
+    // the upper bound is reachable through a URI: pg reads `:0` as NO port and
+    // substitutes its default, and WHATWG rejects a non-numeric port before pg
+    // sees it, so `port <= 0` and `!Number.isInteger(port)` cannot be provoked
+    // from this direction. They are kept as a bound on pg's output rather than
+    // deleted as dead, because the caller passes the result to a syscall.
+    expect(parseDsnTarget("postgresql://127.0.0.1:0/gw")?.port).toBe(5432);
+    expect(parseDsnTarget("postgresql://127.0.0.1:abc/gw")).toBeNull();
+  });
+
+  it("still accepts the edges of the range", () => {
+    expect(parseDsnTarget("postgresql://127.0.0.1:1/gw")?.port).toBe(1);
+    expect(parseDsnTarget("postgresql://127.0.0.1:65535/gw")?.port).toBe(65535);
   });
 });
 
