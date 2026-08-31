@@ -320,12 +320,8 @@ describe("a whole transcript round trip", () => {
     expect(recorder.health().closed).toBe(true);
   });
 
-  it("does not put a password on a health surface", () => {
-    // redactDsn itself is unit-tested in dsn-target-report.test.ts, which is
-    // NOT gated on PG_TESTS. Round 6 found every assertion about it living
-    // here, so `npm test` was green for four rounds while the function
-    // reported a server pg does not connect to.
-    expect(recorder.health().path).not.toContain("test:test");
+  it("uses an opaque identity on health surfaces", () => {
+    expect(recorder.health().path).toBe("postgresql");
   });
 });
 
@@ -352,15 +348,17 @@ describe("the five states", () => {
     }
   });
 
-  it("reports `degraded` with the real error when the server is unreachable", async () => {
+  it("does not copy a DSN-derived socket path into health", async () => {
+    const marker = "dsn-health-secret";
     const url = new URL(BASE_DSN);
-    url.port = "1";
+    url.searchParams.set("host", `/tmp/${marker}`);
     const broken = new PostgresFlightRecorder({ app: url.toString() }, { redactSecrets: false });
     try {
       await expect(broken.readStorageStats()).rejects.toThrow();
       const health = broken.health();
       expect(health.state).toBe("degraded");
-      expect(health.error).toBeTruthy();
+      expect(health.error).toBe("PostgreSQL operation failed");
+      expect(health.error).not.toContain(marker);
       expect(health.failureCount).toBeGreaterThan(0);
     } finally {
       await broken.close();

@@ -456,8 +456,6 @@ describe("loadConfig: [persistence] is the single session-store selector", () =>
   it("rejects a malformed persistence dsn rather than passing it to pg", () => {
     vi.stubEnv("LLM_GATEWAY_CONFIG", pgConfig("mysql://nope/db"));
     vi.stubEnv("DATABASE_URL", "");
-    expect(() => loadConfig(loadPersistenceConfig(noopLogger), noopLogger)).toThrow(
-      /Invalid database URL/
-    );
+    expect(() => loadPersistenceConfig(noopLogger)).toThrow(/Invalid \[persistence\] config/);
   });
 });

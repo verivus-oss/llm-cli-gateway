@@ -95,13 +95,15 @@ export function describeFailure(error: unknown): string {
 export class FlightRecorderRuntime {
   private readonly inFlight = new Set<Promise<unknown>>();
   private readonly target: string | null;
+  private readonly failureMessage: (error: unknown) => string;
   private schemaState: "initialising" | "ready" | "failed" = "initialising";
   private lastFailure: { error: string; at: string } | null = null;
   private failureCount = 0;
   private closed = false;
 
-  constructor(target: string | null) {
+  constructor(target: string | null, failureMessage = describeFailure) {
     this.target = target;
+    this.failureMessage = failureMessage;
   }
 
   markReady(): void {
@@ -120,7 +122,7 @@ export class FlightRecorderRuntime {
 
   private noteFailure(error: unknown): void {
     this.failureCount += 1;
-    this.lastFailure = { error: describeFailure(error), at: new Date().toISOString() };
+    this.lastFailure = { error: this.failureMessage(error), at: new Date().toISOString() };
   }
 
   /**

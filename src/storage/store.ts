@@ -151,7 +151,7 @@ export const STATE_INVENTORY = [
     current: "logs.db (SQLite only)",
     inPort: true,
     owningNode: "s7.flight-recorder-onto-the-port",
-    note: "SQLITE ONLY, by operator decision 0a. There is no Postgres transcript schema and s7 does not author one, so `inPort` here means the recorder starts running through the port's SQLite driver, NOT that this state becomes engine-selectable.",
+    note: "The recorder follows the configured persistence backend through its engine-specific storage driver.",
   },
   {
     id: "gateway_metadata",

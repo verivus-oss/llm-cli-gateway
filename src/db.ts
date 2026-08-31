@@ -6,6 +6,7 @@ import {
   PostgresStorageDriver,
   SESSION_POOL_SETTINGS,
 } from "./storage/drivers/postgres.js";
+import { postgresFailureMessage } from "./storage/postgres-diagnostics.js";
 
 export interface HealthCheckResult {
   postgres: { connected: boolean; latency: number };
@@ -69,11 +70,10 @@ export class DatabaseConnection {
       // Close the pool the failed probe opened. The previous implementation
       // left it behind on every failed connect.
       await driver.close().catch(() => undefined);
-      this.logger.error("Failed to connect to PostgreSQL", { error });
-      throw new Error(
-        `Failed to connect to PostgreSQL: ${error instanceof Error ? error.message : String(error)}`,
-        { cause: error }
-      );
+      this.logger.error("Failed to connect to PostgreSQL", {
+        error: postgresFailureMessage(error),
+      });
+      throw new Error(postgresFailureMessage(error), { cause: error });
     }
 
     this.driver = driver;
@@ -140,7 +140,10 @@ export class DatabaseConnection {
 async function sessionPoolFactory(logger: Logger) {
   try {
     return await nodePostgresPoolFactory(
-      (role, error) => logger.error(`Session pool error on role ${role}`, error),
+      (role, error) =>
+        logger.error(`Session pool error on role ${role}`, {
+          error: postgresFailureMessage(error),
+        }),
       SESSION_POOL_SETTINGS
     );
   } catch (error: any) {

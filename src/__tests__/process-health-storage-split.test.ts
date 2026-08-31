@@ -1,11 +1,6 @@
 /**
- * `llm_process_health` must disclose BOTH storage subsystems.
- *
- * The flight recorder does not follow `[persistence].backend`; it is always
- * SQLite. Reporting only the job store is what made the split invisible: on a
- * postgres host this tool answered `backend: "postgres", dbPath: null` while
- * every request body sat in an unnamed SQLite file, so a caller hunting for
- * request history went to Postgres and found none of it.
+ * `llm_process_health` must disclose both storage subsystems and the
+ * authoritative engine selection without exposing a PostgreSQL DSN.
  */
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { mkdtempSync, rmSync } from "node:fs";
@@ -42,7 +37,7 @@ function mkPersistence(overrides: Partial<PersistenceConfig> = {}): PersistenceC
   };
 }
 
-describe("llm_process_health discloses the storage split", () => {
+describe("llm_process_health discloses storage disposition", () => {
   let tmp: string;
   let flight: FlightRecorder;
   const savedEnv = process.env.LLM_GATEWAY_LOGS_DB;
@@ -78,7 +73,19 @@ describe("llm_process_health discloses the storage split", () => {
     return JSON.parse(res.content[0].text);
   }
 
-  it("names the recorder's own engine and path, which the job store block never carries", async () => {
+  function reportPostgresHealth(): void {
+    flight.health = () => ({
+      state: "active",
+      path: "postgresql",
+      error: null,
+      errorAt: null,
+      failureCount: 0,
+      closed: false,
+    });
+  }
+
+  it("names PostgreSQL without exposing its DSN", async () => {
+    reportPostgresHealth();
     const res = await health(
       mkPersistence({ backend: "postgres", path: null, dsn: "postgres://x" })
     );
@@ -88,22 +95,21 @@ describe("llm_process_health discloses the storage split", () => {
     expect(res.persistence.dbPath).toBeNull();
 
     // The recorder block supplies what was missing.
-    expect(res.flightRecorder.engine).toBe("sqlite");
-    expect(res.flightRecorder.path).toBe(join(tmp, "logs.db"));
+    expect(res.flightRecorder.engine).toBe("postgres");
+    expect(res.flightRecorder.path).toBe("postgresql");
     expect(res.flightRecorder.enabled).toBe(true);
-    expect(res.flightRecorder.followsPersistenceBackend).toBe(false);
+    expect(res.flightRecorder.followsPersistenceBackend).toBe(true);
   });
 
-  it("warns explicitly when the two subsystems are on different engines", async () => {
+  it("reports preserved pre-switch history without claiming an active split", async () => {
+    reportPostgresHealth();
     const res = await health(
       mkPersistence({ backend: "postgres", path: null, dsn: "postgres://x" })
     );
 
-    expect(res.flightRecorder.warning).toContain("SPLIT");
-    // The two facts a caller needs: where requests actually are, and that the
-    // old jobs table left behind in that same file still answers queries.
+    expect(res.flightRecorder.warning).not.toContain("SPLIT");
+    expect(res.flightRecorder.warning).toContain("were NOT migrated");
     expect(res.flightRecorder.warning).toContain(join(tmp, "logs.db"));
-    expect(res.flightRecorder.warning).toContain("abandoned");
   });
 
   it("does not cry split when both subsystems are SQLite", async () => {

@@ -42,7 +42,7 @@ function bytes(n: number): string {
  */
 function sqliteTranscriptPath(): { path: string } | { refusal: string } {
   const persistence = loadPersistenceConfig();
-  const decision = flightRecorderEngineDecision(persistence.backend, persistence.dsn);
+  const decision = flightRecorderEngineDecision(persistence.backend);
   if (decision.engine === "postgres") {
     return {
       refusal:

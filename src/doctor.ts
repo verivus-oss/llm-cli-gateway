@@ -59,7 +59,6 @@ import {
   flightRecorderHealthMessage,
   createFlightRecorder,
   flightRecorderDisabled,
-  flightRecorderOpenFailed,
   flightRecorderReadsAreAuthoritative,
   resolveFlightRecorderDbPath,
   type CoResidentTableStats,
@@ -1603,6 +1602,16 @@ export async function collectStorageHealth(
     return block;
   }
 
+  if (!persistence && !existing) {
+    block.flight_recorder.state = "unavailable";
+    block.flight_recorder.path = null;
+    block.flight_recorder.error = "Persistence configuration is invalid";
+    block.warnings.push(
+      "Flight recorder is unavailable because the persistence configuration is invalid."
+    );
+    return block;
+  }
+
   // A caller that already holds one hands it over, so doctor does not put a
   // second writer on the same file to ask it how big it is.
   const ownsRecorder = !existing;
@@ -1616,12 +1625,7 @@ export async function collectStorageHealth(
     // confusion this block exists to expose.
     recorder = createFlightRecorder(noopDoctorLogger, persistence.backend, persistence.roleDsns);
   } else {
-    try {
-      recorder = new FlightRecorder(dbPath);
-    } catch (error) {
-      // NOT swallowed. This is the state doctor could not previously express.
-      recorder = flightRecorderOpenFailed(dbPath, error);
-    }
+    throw new Error("Persistence configuration is required to select the flight recorder engine");
   }
   const onSqliteFile = recorder instanceof FlightRecorder;
 
@@ -2034,10 +2038,18 @@ export async function printDoctorJson(
   // recorder that was never configured, and doctor said nothing either way.
   const recorderDbPath = resolveFlightRecorderDbPath();
   if (recorderDbPath) {
+    let persistence: PersistenceConfig | undefined;
     try {
-      flightRecorder = new FlightRecorder(recorderDbPath);
-    } catch (error) {
-      flightRecorder = flightRecorderOpenFailed(recorderDbPath, error);
+      persistence = loadPersistenceConfig();
+    } catch {
+      // collectStorageHealth reports the invalid configuration separately.
+    }
+    if (persistence) {
+      flightRecorder = createFlightRecorder(
+        noopDoctorLogger,
+        persistence.backend,
+        persistence.roleDsns
+      );
     }
   }
   try {

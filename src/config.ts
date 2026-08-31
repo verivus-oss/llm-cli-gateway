@@ -346,7 +346,7 @@ const PersistenceSchema = z
     backend: z.enum(PERSISTENCE_BACKENDS).default("sqlite"),
     roles: PersistenceRolesSchema.optional(),
     path: z.string().optional(),
-    dsn: z.string().optional(),
+    dsn: DatabaseUrlSchema.optional(),
     retentionDays: z.number().positive().default(DEFAULT_JOB_RETENTION_DAYS),
     retention: PersistenceRetentionSchema.default({}),
     dedupWindowMs: z.number().int().nonnegative().default(DEFAULT_DEDUP_WINDOW_MS),

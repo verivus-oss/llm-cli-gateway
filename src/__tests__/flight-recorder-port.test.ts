@@ -9,10 +9,6 @@ import {
   flightRecorderEngineDecision,
   type FlightLogResult,
 } from "../flight-recorder.js";
-import {
-  resetTranscriptAdmission,
-  setTranscriptAdmissionForTests,
-} from "../storage/transcript-admission.js";
 import { FlightOwnership } from "../flight-ownership.js";
 import { SqliteStorageDriver } from "../storage/drivers/sqlite.js";
 import { FLIGHT_RECORDER_OPERATION_CLASSES } from "../storage/operations.js";
@@ -444,58 +440,22 @@ describe("flight recorder on the storage port (s7)", () => {
   });
 
   describe("the engine decision", () => {
-    afterEach(() => {
-      resetTranscriptAdmission();
-    });
-
     it("sqlite and none are honoured as themselves", () => {
       for (const backend of ["sqlite", "none", undefined]) {
         const decision = flightRecorderEngineDecision(backend);
         expect(decision.engine).toBe("sqlite");
         expect(decision.requested).toBeUndefined();
-        expect(decision.deferredBecause).toBeUndefined();
       }
     });
 
-    it("postgres with NO dsn is refused, and the reason names the rule", () => {
+    it("postgres is authoritative and never falls back to SQLite", () => {
       const decision = flightRecorderEngineDecision("postgres");
-      expect(decision.engine).toBe("sqlite");
-      expect(decision.requested).toBe("postgres");
-      // The gate is deployment SHAPE now (section 6.1), not the schema: the
-      // schema exists as migrations/022. An unproven shape is treated as remote.
-      expect(decision.deferredBecause).toMatch(/postgres-security-hardening\.md section 6\.1/);
-      expect(decision.deferredBecause).toMatch(/no \[persistence\]\.dsn/);
-    });
-
-    it("postgres on a NON-loopback dsn is refused, and the recorder stays on SQLite", () => {
-      const decision = flightRecorderEngineDecision("postgres", "postgresql://u@db.internal/gw");
-      expect(decision.engine).toBe("sqlite");
-      expect(decision.deferredBecause).toMatch(/db\.internal/);
-      expect(decision.admission?.admitted).toBe(false);
-    });
-
-    it("postgres on an ADMITTED deployment shape is honoured", () => {
-      setTranscriptAdmissionForTests({
-        admitted: true,
-        shape: "loopback-tcp",
-        evidence: "the listener on loopback port 5432 runs as uid 1000, this process's own",
-        reason: null,
-      });
-      const decision = flightRecorderEngineDecision("postgres", "postgresql://u@127.0.0.1/gw");
       expect(decision.engine).toBe("postgres");
       expect(decision.requested).toBe("postgres");
-      expect(decision.deferredBecause).toBeUndefined();
-      expect(decision.admission?.evidence).toMatch(/uid 1000/);
     });
 
-    it("an admitted shape does NOT move the recorder when the switch is off", () => {
+    it("the recorder's explicit off switch still wins", () => {
       // LLM_GATEWAY_LOGS_DB is the recorder's own switch on either engine.
-      setTranscriptAdmissionForTests({
-        admitted: true,
-        shape: "loopback-tcp",
-        evidence: "injected",
-        reason: null,
-      });
       vi.stubEnv("LLM_GATEWAY_LOGS_DB", "none");
       const recorder = createFlightRecorder({ info: () => {}, error: () => {} }, "postgres", {
         app: "postgresql://u@127.0.0.1/gw",

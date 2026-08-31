@@ -291,6 +291,7 @@ import {
 } from "./flight-recorder.js";
 import { FlightOwnership } from "./flight-ownership.js";
 import { formatStorageDisposition, storageDisposition } from "./storage-disposition.js";
+import { POSTGRES_RECORDER_TARGET } from "./storage/postgres-diagnostics.js";
 import {
   resolvePromptInput,
   PromptPartsSchema,
@@ -680,10 +681,8 @@ let approvalManager: ApprovalManager | null = null;
 
 function getFlightRecorder(runtimeLogger: GatewayLogger = logger): FlightRecorderLike {
   // The recorder is told what `[persistence].backend` asked for AND which
-  // credentials it may hold. It honours "postgres" when the deployment shape
-  // admits transcript bodies and refuses out loud otherwise: see
-  // flightRecorderEngineDecision. Resolved through getPersistenceConfig so the
-  // config is loaded once for both subsystems.
+  // credentials it may hold. The backend is authoritative; a PostgreSQL
+  // failure is unavailable rather than an implicit SQLite fallback.
   const persistence = getPersistenceConfig(runtimeLogger);
   flightRecorder ??= createFlightRecorder(runtimeLogger, persistence.backend, persistence.roleDsns);
   return flightRecorder;
@@ -22572,7 +22571,7 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
 
   server.tool(
     "llm_process_health",
-    "Report gateway process health: async-job manager state, the resolved job-store persistence configuration, and the flight recorder's separate engine and path (the two do NOT share a backend setting).",
+    "Report gateway process health: async-job manager state, the resolved durable persistence configuration, and flight-recorder health on that configured engine.",
     {},
     {
       title: "Gateway process health",
@@ -22655,34 +22654,27 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
               ? `Async job persistence is configured (backend = '${persistence.backend}') but the durable job store failed to open, so *_request_async / llm_job_* tools are NOT registered on this gateway. Check gateway startup logs for the store-open error.`
               : "Async job persistence is attached but durable admission is temporarily disabled while its heartbeat lease recovers. Existing async tools fail closed until admission is restored.",
       };
-      // The flight recorder is a SEPARATE subsystem from the job store, with its
-      // own on/off switch (LLM_GATEWAY_LOGS_DB). It follows
-      // [persistence].backend only when the deployment shape admits transcript
-      // bodies; `engineDeferredBecause` names the refusal when it does not.
-      //
-      // Reporting only the job store is what makes the split invisible: on a
-      // postgres host this tool answered `backend: "postgres", dbPath: null`
-      // while every request body sat in a SQLite file it never mentioned, so a
-      // caller looking for request history went to Postgres and found none.
-      // docs/plans/storage-unification.md is the fix; until it lands, the split
-      // is at least stated rather than hidden.
+      // The flight recorder keeps its own on/off switch
+      // (LLM_GATEWAY_LOGS_DB), but its engine follows [persistence].backend.
       // obs: `enabled` is DERIVED from the recorder's own state, and the state
       // is reported beside it. `!(x instanceof NoopFlightRecorder)` was the
       // whole defect: it answered `false` for a recorder the operator turned
       // off and for one that failed to open, and the warning below then named
       // LLM_GATEWAY_LOGS_DB in both cases.
       const recorderEnabled = disposition.requestHistory.enabled;
-      // s7: the recorder now runs through the storage port's SQLite driver and
-      // is TOLD what [persistence].backend asked for. `engineDeferredBecause`
-      // is the difference between a setting that is ignored and one that is
-      // refused with a reason.
-      const recorderEngine = flightRecorderEngineDecision(persistence.backend, persistence.dsn);
+      const recorderEngine = flightRecorderEngineDecision(persistence.backend);
       const recorderMessage = flightRecorderHealthMessage(recorderHealth);
       const flightRecorderBlock = {
         engine: recorderEnabled ? recorderEngine.engine : null,
         // The recorder's OWN target, so a postgres host is not shown the SQLite
         // file it stopped writing to.
-        path: recorderHealth.path ?? (recorderEnabled ? resolveFlightRecorderDbPath() : null),
+        path:
+          recorderHealth.path ??
+          (recorderEnabled
+            ? recorderEngine.engine === "postgres"
+              ? POSTGRES_RECORDER_TARGET
+              : resolveFlightRecorderDbPath()
+            : null),
         enabled: recorderEnabled,
         // The five-way answer. `enabled: false` alone could not tell an
         // operator whether to change a setting or to go and look at a file.
@@ -22694,24 +22686,13 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
         closed: recorderHealth.closed,
         // Stated as a fact rather than implied, because the whole failure mode
         // is a caller assuming one backend setting covers both subsystems.
-        followsPersistenceBackend: recorderEngine.deferredBecause === undefined,
+        followsPersistenceBackend: true,
         engineRequested: recorderEngine.requested ?? null,
-        engineDeferredBecause: recorderEngine.deferredBecause ?? null,
-        engineAdmittedBecause: recorderEngine.admission?.admitted
-          ? recorderEngine.admission.evidence
-          : null,
         holds: "requests (llm_request_list, llm_request_result)",
-        // Composed from two INDEPENDENT facts rather than a chain of else-ifs:
-        // a recorder can be degraded AND split, and the old chain reported at
-        // most one of them because "not enabled" short-circuited everything.
+        // A failure and the one-time no-migration notice are independent.
         warning:
           [
             recorderMessage,
-            recorderEnabled &&
-            recorderEngine.engine !== persistence.backend &&
-            persistence.backend !== "none"
-              ? `Storage is SPLIT: request history is in ${recorderEngine.engine} at ${recorderHealth.path}, while the job store is '${persistence.backend}'. No single database holds a whole request. If this gateway previously ran on sqlite, that same file also still contains an abandoned 'jobs' table which is frozen at the switchover and will answer queries as though it were live. Read through llm_request_list / llm_request_result / llm_job_result, which span the split.`
-              : null,
             recorderEnabled && recorderEngine.engine === "postgres"
               ? `Request history moved to PostgreSQL when this gateway started. Rows written BEFORE the switch are still in ${resolveFlightRecorderDbPath()} and were NOT migrated; nothing reads them from here.`
               : null,
@@ -23973,11 +23954,8 @@ function registerHealthResource(server: McpServer): void {
       },
       async () => {
         const health = await checkHealth(db!);
-        // The recorder rides along because this resource exists only on a
-        // PostgreSQL host, which is precisely the host where request history
-        // is in a DIFFERENT engine that this block never mentioned. A green
-        // Postgres answer here said nothing about whether the transcript file
-        // was readable.
+        // The recorder rides along because PostgreSQL connectivity alone does
+        // not prove that transcript reads are healthy.
         const recorder = flightRecorderHealth(flightRecorder);
         return {
           contents: [

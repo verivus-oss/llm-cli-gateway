@@ -6,7 +6,7 @@
  * `LLM_GATEWAY_LOGS_DB`. They are NOT the same kind of thing, and the design
  * (storage-unification.md 3.3) says to treat them asymmetrically:
  *
- * - `[persistence].backend` selects the job store's ENGINE.
+ * - `[persistence].backend` selects the durable subsystems' ENGINE.
  * - `DATABASE_URL` is a deprecated DSN that also selects an engine, so it can
  *   contradict the backend; `[persistence]` wins and the refusal is reported.
  * - `LLM_GATEWAY_LOGS_DB` is a PATH, or the literal "none". It does not select
@@ -40,6 +40,7 @@ import {
   type StorageOperationClass,
   type StorageRole,
 } from "./storage/roles.js";
+import { POSTGRES_RECORDER_TARGET } from "./storage/postgres-diagnostics.js";
 
 export interface DeprecatedInputReport {
   name: string;
@@ -77,9 +78,6 @@ export interface StorageDisposition {
      */
     followsPersistenceBackend: boolean;
     engineRequested: string | null;
-    engineDeferredBecause: string | null;
-    /** What the deployment-shape check PROVED, when it admitted the DSN. */
-    engineAdmittedBecause: string | null;
   };
   roles: {
     configured: StorageRole[];
@@ -128,7 +126,7 @@ export function storageDisposition(
   const enabled = recorder
     ? recorder.state !== "disabled" && recorder.state !== "unavailable"
     : recorderPath !== null;
-  const engine = flightRecorderEngineDecision(persistence.backend, persistence.dsn);
+  const engine = flightRecorderEngineDecision(persistence.backend);
   const databaseUrl = resolveDatabaseUrlPrecedence({
     databaseUrl: process.env.DATABASE_URL,
     persistenceDsn: persistence.backend === "postgres" ? persistence.dsn : null,
@@ -150,15 +148,14 @@ export function storageDisposition(
       // The path is reported for a FAILED open too. "Which file could not be
       // opened" is the first thing an operator needs and the old boolean
       // nulled it out alongside a message blaming the configuration.
-      // The recorder's OWN path when it has one: on Postgres that is a redacted
-      // DSN, and reporting the SQLite file there would name a file the gateway
-      // is no longer writing to.
-      path: recorder?.path ?? (enabled ? recorderPath : null),
+      // PostgreSQL is deliberately opaque here. Reporting the SQLite path for
+      // configured intent would name a file the gateway will not write.
+      path:
+        recorder?.path ??
+        (enabled ? (engine.engine === "postgres" ? POSTGRES_RECORDER_TARGET : recorderPath) : null),
       decidedBy: process.env.LLM_GATEWAY_LOGS_DB !== undefined ? "LLM_GATEWAY_LOGS_DB" : "default",
-      followsPersistenceBackend: engine.deferredBecause === undefined,
+      followsPersistenceBackend: true,
       engineRequested: engine.requested ?? null,
-      engineDeferredBecause: engine.deferredBecause ?? null,
-      engineAdmittedBecause: engine.admission?.admitted ? engine.admission.evidence : null,
     },
     roles: roleReport(persistence.roleDsns),
     deprecatedInputs: [
@@ -243,16 +240,9 @@ export function formatStorageDisposition(disposition: StorageDisposition): strin
       'Storage: backend = "none" disables async job persistence ONLY. Request history is unaffected and is still being written; its switch is LLM_GATEWAY_LOGS_DB=none.'
     );
   }
-  if (requestHistory.engineDeferredBecause) {
+  if (requestHistory.engineRequested === "postgres" && requestHistory.enabled) {
     lines.push(
-      `Storage: request history is NOT following [persistence].backend = "${requestHistory.engineRequested}": ${requestHistory.engineDeferredBecause}`
-    );
-  } else if (requestHistory.engineAdmittedBecause) {
-    // The admission is announced, not merely the refusal. An operator who
-    // switched backend must be told that transcripts moved AND that the rows
-    // already on disk did not: there is no backfill, by design (s10).
-    lines.push(
-      `Storage: request history IS following [persistence].backend = "${requestHistory.engineRequested}" (${requestHistory.engineAdmittedBecause}). Rows written before this switch stay in the SQLite file and are NOT migrated.`
+      `Storage: request history IS following [persistence].backend = "postgres". Rows written before this switch stay in the SQLite file and are NOT migrated.`
     );
   }
   lines.push(

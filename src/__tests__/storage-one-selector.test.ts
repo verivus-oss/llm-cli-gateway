@@ -342,14 +342,15 @@ describe('backend = "none" and LLM_GATEWAY_LOGS_DB', () => {
     );
   });
 
-  it("reports the recorder as not following a postgres backend, with the reason", () => {
+  it("reports the recorder as following a postgres backend without topology inference", () => {
     withToml(["[persistence]", 'backend = "postgres"', `dsn = "${APP_DSN}"`].join("\n"));
     vi.stubEnv("LLM_GATEWAY_LOGS_DB", join(tempDir, "logs.db"));
     const disposition = storageDisposition(loadPersistenceConfig(noopLogger));
-    expect(disposition.requestHistory.followsPersistenceBackend).toBe(false);
+    expect(disposition.requestHistory.engine).toBe("postgres");
+    expect(disposition.requestHistory.followsPersistenceBackend).toBe(true);
     expect(disposition.requestHistory.engineRequested).toBe("postgres");
-    expect(disposition.requestHistory.engineDeferredBecause).toContain(
-      "postgres-security-hardening.md"
+    expect(formatStorageDisposition(disposition).join("\n")).toContain(
+      'IS following [persistence].backend = "postgres"'
     );
   });
 });

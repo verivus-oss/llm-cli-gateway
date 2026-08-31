@@ -8,10 +8,10 @@
  * whole-operation deadline with the job store and the session store. Every
  * operation is asynchronous, including the reads.
  *
- * WHAT DID NOT CHANGE, and this is the hard stop rather than an omission:
- * `[persistence].backend = "postgres"` does NOT move the transcript. See
- * `flightRecorderEngineDecision` for the reason and for what a postgres host
- * is told instead.
+ * `[persistence].backend` is authoritative: SQLite keeps transcripts on the
+ * SQLite driver and PostgreSQL keeps them on the PostgreSQL driver. A failed
+ * PostgreSQL recorder is reported as unavailable; it never falls back to
+ * SQLite and recreates a split deployment.
  *
  * Read access for cache-stats / MCP resources / doctor goes through the seven
  * named typed reads on `FlightRecorderQuery` (s2). `queryRequests`, which takes
@@ -35,8 +35,11 @@ import { redactSecrets, isRedactionEnabled } from "./secret-redaction.js";
 import { getRequestContext, principalScopeSql, resolveOwnerPrincipal } from "./request-context.js";
 import { derivePromptSignals } from "./token-estimator.js";
 import { FlightRecorderRuntime, truncateThinkingBlocks } from "./flight-recorder-runtime.js";
-import { transcriptAdmission, type TranscriptAdmission } from "./storage/transcript-admission.js";
-import { PostgresFlightRecorder, redactDsn } from "./flight-recorder-pg.js";
+import { PostgresFlightRecorder } from "./flight-recorder-pg.js";
+import {
+  POSTGRES_RECORDER_TARGET,
+  postgresFailureMessage,
+} from "./storage/postgres-diagnostics.js";
 import type { StorageRoleDsns } from "./storage/roles.js";
 import type { ProviderType } from "./session-manager.js";
 
@@ -1644,68 +1647,25 @@ export interface RequestSummaryFilter {
 }
 
 /**
- * Which engine the recorder runs on, and why it is not the one `[persistence]`
- * asked for.
- *
- * This is the whole of what s7 can honestly deliver against "the recorder obeys
- * `[persistence].backend`", and the boundary is operator decision 0a plus
- * `[non_goals].no_transcript_move_yet` in docs/plans/storage-unification.dag.toml:
- * transcript BODIES do not enter Postgres until postgres-security-hardening.md
- * section 6 is complete through step 8, and it is at step 2 of 10. The Postgres
- * transcript schema does not exist and is NEW AUTHORSHIP rather than a
- * migration, so a `postgres` backend cannot be honoured by writing one here.
- *
- * What changes is that the split is now DECLARED instead of implicit. A
- * `postgres` host gets `deferredBecause` populated, which
- * `llm_process_health` reports, rather than a recorder that quietly ignores the
- * setting.
- *
- * `none` is deliberately NOT treated as "disable the recorder". That switch is
- * `LLM_GATEWAY_LOGS_DB=none` today, and reconciling the two inputs (which one
- * wins, which one deprecates) is s9's node, not this one. Silently dropping
- * request history on every `backend = "none"` host would be a data-visible
- * change smuggled in under a refactor.
+ * The recorder follows the one configured persistence engine. `none` leaves
+ * the recorder on SQLite because its existing on/off switch remains
+ * `LLM_GATEWAY_LOGS_DB=none`.
  */
 export interface FlightRecorderEngineDecision {
   /** The engine the recorder will actually use. */
   engine: "sqlite" | "postgres";
-  /** What `[persistence].backend` asked for, when it asked for something else. */
+  /** The explicit backend request, when it selects PostgreSQL. */
   requested?: string;
-  /** Populated only when `requested` could not be honoured. */
-  deferredBecause?: string;
-  /** The deployment-shape verdict, whenever a postgres backend asked for one. */
-  admission?: TranscriptAdmission;
 }
 
 /**
- * ONE decision point, extended rather than joined by a second.
- *
- * A `postgres` backend is honoured when, and only when, the deployment shape
- * admits transcript bodies: loopback or unix socket, same OS user
- * (postgres-security-hardening.md 6.1). A refusal is not silent, and it is not
- * a failure either: the recorder keeps working on SQLite and every surface that
- * reads this says why. `none` is still NOT "disable the recorder"; that is
- * `LLM_GATEWAY_LOGS_DB`, which s9 settled.
- *
- * NO DATA MIGRATION either way. A host that flips backend starts writing into
- * the new engine and its existing rows stay where they are, which is precisely
- * the split `llm_process_health` has to report.
+ * One authoritative engine decision. The configured PostgreSQL DSN remains an
+ * opaque value for `pg`; target inference does not participate in selection.
  */
 export function flightRecorderEngineDecision(
-  backend: string | undefined,
-  dsn?: string | null
+  backend: string | undefined
 ): FlightRecorderEngineDecision {
-  if (backend !== "postgres") return { engine: "sqlite" };
-  const admission = transcriptAdmission(dsn);
-  if (admission.admitted) return { engine: "postgres", requested: backend, admission };
-  return {
-    engine: "sqlite",
-    requested: backend,
-    deferredBecause:
-      admission.reason ??
-      "the deployment shape could not be established, and an unproven shape is treated as remote",
-    admission,
-  };
+  return backend === "postgres" ? { engine: "postgres", requested: backend } : { engine: "sqlite" };
 }
 
 export function createFlightRecorder(
@@ -1722,31 +1682,29 @@ export function createFlightRecorder(
     return flightRecorderDisabled();
   }
 
-  const decision = flightRecorderEngineDecision(persistenceBackend, roleDsns?.app ?? null);
+  const decision = flightRecorderEngineDecision(persistenceBackend);
   if (decision.engine === "postgres") {
-    const target = redactDsn(roleDsns?.app ?? "");
     try {
       const recorder = new PostgresFlightRecorder(roleDsns ?? {}, { logger });
       logger.info(
-        `Flight recorder enabled on PostgreSQL at ${target} (${decision.admission?.evidence}). ` +
-          `Rows already in ${dbPath} are NOT migrated and stay there; llm_process_health reports the split.`
+        "Flight recorder enabled on PostgreSQL. " +
+          `Rows already in ${dbPath} are NOT migrated and stay there.`
       );
       return recorder;
     } catch (error) {
-      logger.error("Flight recorder unavailable; PostgreSQL recorder could not be built", error);
-      return flightRecorderOpenFailed(target, error);
+      logger.error("Flight recorder unavailable; PostgreSQL recorder could not be built", {
+        error: postgresFailureMessage(error),
+      });
+      return flightRecorderOpenFailed(
+        POSTGRES_RECORDER_TARGET,
+        new Error(postgresFailureMessage(error))
+      );
     }
   }
 
   try {
     const recorder = new FlightRecorder(dbPath, { logger });
     logger.info(`Flight recorder enabled at ${dbPath} (engine: ${decision.engine})`);
-    if (decision.deferredBecause) {
-      logger.info(
-        `Flight recorder is NOT following [persistence].backend = "${decision.requested}": ` +
-          decision.deferredBecause
-      );
-    }
     return recorder;
   } catch (error) {
     // DEGRADE, deliberately and unchanged: losing request logging must not take
