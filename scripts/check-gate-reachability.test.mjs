@@ -1,16 +1,15 @@
 /**
- * Can `npm run check` reach its own last step?
+ * The audit's two modes.
  *
- * It could not. The shrinkwrap is generated at pack time and never committed,
- * `security:audit` hard-failed on its absence, and the steps are `&&`-chained,
- * so on a clean developer tree the gate exited 1 every time and
- * `verify:no-internal-mcp:check` never ran at all. Both halves matter: a gate
- * whose exit code is constant carries no signal, and this one was also hiding a
- * release invariant behind the constant.
+ * The shrinkwrap is generated at pack time and never committed, and this step
+ * hard-failed on its absence, so `npm run check` exited 1 on every developer
+ * tree. Under the old `&&` chain that also meant the step after it never ran at
+ * all; the chain is gone (scripts/check.mjs) and THAT property is pinned in
+ * check.test.mjs, but the mode split is still what makes the gate runnable.
  *
- * These tests are about the CHAIN and the MODES, not about the audit's content.
- * Running the audit itself packs a tarball and installs it, which belongs in the
- * release path rather than in every suite run.
+ * These tests are about the MODES, not the audit's content: running the audit
+ * itself packs a tarball and installs it, which belongs in the release path
+ * rather than in every suite run.
  */
 import { execFileSync } from "node:child_process";
 import { existsSync, readFileSync } from "node:fs";
@@ -18,9 +17,6 @@ import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 
 const ROOT = join(import.meta.dirname, "..");
-const pkg = JSON.parse(readFileSync(join(ROOT, "package.json"), "utf8"));
-const steps = pkg.scripts.check.split("&&").map(s => s.trim());
-
 const run = (argv, env = {}) => {
   try {
     return {
@@ -36,23 +32,6 @@ const run = (argv, env = {}) => {
     return { code: error.status ?? 1, out: `${error.stdout ?? ""}${error.stderr ?? ""}` };
   }
 };
-
-describe("the check chain", () => {
-  it("puts security:audit before at least one further step", () => {
-    // If this ever becomes the LAST step the regression below stops being
-    // reachable, and this test should be deleted rather than quietly passing.
-    const at = steps.findIndex(s => s.includes("security:audit"));
-    expect(at, "security:audit is not in the check chain").toBeGreaterThanOrEqual(0);
-    expect(steps.length - 1, "security:audit is now last; this suite is moot").toBeGreaterThan(at);
-  });
-
-  it("names the step that a constant failure used to hide", () => {
-    // Named explicitly, because the defect was invisible: the hidden step
-    // passes on its own, so nothing ever surfaced that it was not running.
-    const at = steps.findIndex(s => s.includes("security:audit"));
-    expect(steps.slice(at + 1).join(" ")).toContain("verify:no-internal-mcp:check");
-  });
-});
 
 describe("the shrinkwrap step has two modes", () => {
   const audit = join(ROOT, "scripts", "release-security-audit.sh");

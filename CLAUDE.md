@@ -38,11 +38,18 @@ npm run test:coverage      # v8 coverage (70% lines/functions/statements, 60% br
 # Watch mode for development
 npm run test:watch
 
-# Full gate. 22 steps, &&-chained, ending build, lint, format:check, ...,
-# test, security:audit, verify:no-internal-mcp:check. Read the `check` script in
-# package.json for the current list rather than trusting a copy here: this
-# comment said 12 for long enough that the last ten were nobody's business.
+# The full gate. `node scripts/check.mjs --list` prints the steps; they are
+# declared in scripts/check-steps.mjs, not chained in package.json.
+#
+# EVERY step runs and every result is reported, which the previous 22-step
+# `&&` chain could not do: one failure hid every step after it, and that is not
+# hypothetical, `security:audit` sat at 21 of 22 failing on every developer tree
+# so `verify:no-internal-mcp:check` never ran at all. A step blocked by a failed
+# dependency is reported SKIPPED and fails the gate; not run is not the same as
+# fine. `--fail-fast` restores the old stop-at-first behaviour when you want it.
 npm run check
+npm run check -- --only lint --only format:check   # one or more steps
+npm run check -- --list                            # what the gate contains
 ```
 
 **`npm run check` never probes an installed provider binary.** `upstream:contracts` inside it is the offline contract check. Version drift against the CLIs actually installed on the host is caught only by `npm run upstream:drift`, which `scripts/pre-release.sh` runs _before_ `npm run check`. So a green `npm run check` says nothing about provider drift, and upgrading any provider CLI (including `claude` itself) can turn the release gate red while `check` stays green. Re-probe and rebaseline via `npm run providers:rebaseline`.
