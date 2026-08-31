@@ -34,6 +34,7 @@ import {
   type PostgresRoleDsns,
 } from "./storage/drivers/postgres.js";
 import { parsePgDsn, SSL_FILE_REFUSAL, type TargetFieldSource } from "./storage/pg-dsn-parse.js";
+import { showLogField } from "./storage/log-field.js";
 import type { StorageConnection } from "./storage/store.js";
 import { FlightRecorderRuntime, truncateThinkingBlocks } from "./flight-recorder-runtime.js";
 import type {
@@ -216,38 +217,13 @@ const SQL_BOOTSTRAP = `
  * attempt at a rule that exists only to serve a format that is gone.
  */
 
-const MAX_FIELD_CHARS = 120;
-
-/**
- * Characters that BREAK, REORDER or COMMAND when a log line is rendered.
- *
- * Defined by PROPERTY, and round 10 proved the first property was the wrong
- * one. An enumerated bidi range missed U+009B CSI (`CSI 2J` erases a terminal
- * screen, and this string goes to stderr) and U+061C. Naming
- * `\p{Bidi_Control}` fixed those and still passed U+00AD SOFT HYPHEN, U+034F,
- * U+070F, U+2060, U+FE0F and U+E0061.
- *
- * The class those all belong to is INVISIBLE OR CONTROLLING, which Unicode
- * already names: `\p{Cf}` (format characters, which is every bidi control,
- * the zero-width joiners, the Arabic and Syriac marks and the interlinear
- * annotations) and `\p{Default_Ignorable_Code_Point}` (soft hyphen, variation
- * selectors, tag characters). Plus the C1 block and DEL, which JSON leaves raw
- * because it escapes C0 only.
- *
- * COST, stated because it is real: a database name legitimately containing a
- * zero-width joiner (an emoji sequence) is now shown escaped. That is the
- * right trade for a diagnostic line whose whole purpose is to be believed.
- */
-const UNSAFE_IN_A_LOG_LINE =
-  /[\u0080-\u009F\u007F\u2028\u2029]|\p{Cf}|\p{Default_Ignorable_Code_Point}/gu;
-
 /**
  * Words this format uses as STRUCTURE. A value equal to one of them reads as a
  * delimiter: round 8 measured `?host=port` printing
  * `postgresql host port port 5433 database db`, which agrees with pg and is
  * unreadable. Quoting the collision is enough; the value is still named.
  */
-const FORMAT_KEYWORDS = new Set([
+export const FORMAT_KEYWORDS = new Set([
   "host",
   "socket",
   "port",
@@ -259,73 +235,19 @@ const FORMAT_KEYWORDS = new Set([
   "default",
 ]);
 
-/** A field value, quoted unless it is plainly a host, path, port or name. */
+/**
+ * This line's format vocabulary, applied by the shared display control.
+ *
+ * The control itself moved to `storage/log-field.ts` when a second printer of
+ * DSN-derived values was found with none: `evaluateTranscriptAdmission` put a
+ * resolved host straight into a refusal string and three DSN shapes landed a
+ * password there. What stayed here is the part that is genuinely local, namely
+ * which words THIS line uses as delimiters.
+ */
 function show(value: string): string {
-  // A long value is truncated BEFORE quoting: pg imposes no length limit worth
-  // relying on here, and a health line is read by a human, not parsed.
-  // BY CODE POINT, not by UTF-16 code unit. Round 10: a 120-character value
-  // ending in an emoji is 121 units, so slicing at 120 SEVERED THE SURROGATE
-  // PAIR and the suffix then called 121 units "chars". Array spread iterates
-  // code points, so neither can happen.
-  const points = [...value];
-  const bounded =
-    points.length > MAX_FIELD_CHARS
-      ? `${points.slice(0, MAX_FIELD_CHARS).join("")}... (${points.length} chars)`
-      : value;
-  // `://` is quoted even though every character in it is bare-word legal. Round
-  // 24 moved the host from a shape allowlist to pg's own resolution, and pg
-  // resolves `?host=evil://host` to exactly that. Naming it is correct; letting
-  // it out UNQUOTED would emit a line shaped like a DSN, which is the property
-  // this function is here to hold.
-  if (
-    /^[A-Za-z0-9._:/[\]-]+$/.test(bounded) &&
-    !bounded.includes("://") &&
-    !FORMAT_KEYWORDS.has(bounded.toLowerCase())
-  ) {
-    return bounded;
-  }
-  return JSON.stringify(bounded).replace(UNSAFE_IN_A_LOG_LINE, c => {
-    // codePointAt, not charCodeAt. Round 11 BLOCKER, codex: the pattern matches
-    // a whole code point but this emitted only its HIGH SURROGATE, so U+E0061
-    // and U+E0062 both rendered as `\udb40` and two different databases
-    // produced identical reports. A line whose job is to name the target must
-    // not collapse two targets into one string.
-    const point = c.codePointAt(0) ?? 0;
-    return point > 0xffff
-      ? `\\u{${point.toString(16).padStart(5, "0")}}`
-      : `\\u${point.toString(16).padStart(4, "0")}`;
-  });
+  return showLogField(value, FORMAT_KEYWORDS);
 }
 
-/**
- * ROUND 21. The report is built from a projection that HAS no password field.
- *
- * Rounds 9 to 19 each tried to make a resolved value safe to print, by gating
- * the input, then by classifying the value, then by a provenance differential.
- * Every one was falsified, and round 19 showed why the whole family must be:
- * these two make pg resolve the same host, so any rule over the resolved
- * (field, value) pair must treat them identically, yet one must print and one
- * must not.
- *
- *   postgres://u:p@real/db?host=X     the operator's real target
- *   postgres://u:?host=X&@real/db     credential text
- *
- * The goal itself was also wrong. "The output never contains the password
- * bytes" is unachievable: an operator may name a host equal to their password.
- * What IS achievable is NONINTERFERENCE, and it is nearly free: parse once,
- * strictly, into a `PgPublicTarget` with no password field, and format only
- * that. No byte of this line can be derived from a secret because the value it
- * is built from cannot hold one.
- *
- * A string that two readings disagree about is refused rather than reported.
- * See `parsePgDsn` for the rules and for why each exists.
- */
-/**
- * The annotation separates what the operator WROTE from what an environment
- * variable or a default supplied. A query parameter is written, so `?host=` is
- * "dsn" here: pg merges searchParams into its config before resolving, and
- * this projection reads that config, so the two are one source by then.
- */
 function annotate(source: TargetFieldSource): string {
   switch (source) {
     case "dsn":

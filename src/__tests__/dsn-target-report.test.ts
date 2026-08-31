@@ -15,7 +15,7 @@
 import fs, { readFileSync } from "fs";
 import { createRequire } from "module";
 import { afterEach, describe, expect, it } from "vitest";
-import { redactDsn } from "../flight-recorder-pg.js";
+import { FORMAT_KEYWORDS, redactDsn } from "../flight-recorder-pg.js";
 import { parsePgDsn } from "../storage/pg-dsn-parse.js";
 
 const require = createRequire(import.meta.url);
@@ -684,6 +684,16 @@ describe("redactDsn names the server pg will actually reach", () => {
       "a keyword-shaped authority is not a URI authority"
     );
     expect(redactDsn(`postgres://host=localhost,password=${S}`)).not.toContain(S);
+    // MEMBER-WISE, because the case above carries BOTH separators and either
+    // arm alone still refuses it: a mutation probe deleting either arm left all
+    // 4836 tests green. The `,` arm is the only rule that sees a comma at all,
+    // and the `=` arm is pinned by the REASON, since dropping it lets the
+    // decoded-keyword rule below catch the same string under a different name.
+    for (const separator of ["=", ","]) {
+      expect(why(`postgres://host${separator}localhost/db`), separator).toBe(
+        "a keyword-shaped authority is not a URI authority"
+      );
+    }
 
     // More than one unencoded `@`. RFC 3986 allows exactly one, so a second
     // means the userinfo boundary is not where it looks.
@@ -753,6 +763,10 @@ describe("redactDsn names the server pg will actually reach", () => {
     expect(why(`postgres://u%3A${S}/db`)).toBe(hidden);
     expect(why(`postgres://%3A${S}/db`)).toBe(hidden);
     expect(why(`postgres://usr%3A${S}@host/db`)).toBe(hidden);
+    // The `i` flag on that pattern is a CONTROL, not decoration: `%3a` is a
+    // valid spelling of the same delimiter and pg decodes both. Dropping the
+    // flag killed nothing until this case existed.
+    expect(why(`postgres://usr%3a${S}@host/db`)).toBe(hidden);
 
     // MEMBER-WISE, not rule-wise. Round 24's matrix mutated whole rules and
     // called fourteen kills coverage; codex showed removing a single MEMBER of
@@ -787,6 +801,14 @@ describe("redactDsn names the server pg will actually reach", () => {
     expect(why(`postgres://u:p@h.invalid/db?host=password=${S}`)).toBe(inAValue);
     expect(why(`postgres://u:p@h.invalid/db?host=x%20password%3D${S}`)).toBe(inAValue);
     expect(why(`postgres://h.invalid?user=alice;password=${S}`)).toBe(inAValue);
+
+    // And the shape the VALUE rule must not eat: it is scoped to the parameters
+    // pg resolves into the target, so a parameter that moves nothing carries no
+    // keyword structure worth refusing. Removing that scope refuses strictly
+    // more, which no assertion here noticed until this one.
+    expect(redactDsn("postgres://h.invalid/db?application_name=svc;role=admin")).toBe(
+      "postgresql host h.invalid port 5432 (default) database db"
+    );
 
     // And the shape the rule must NOT eat. A space is deliberately absent from
     // the keyword set: `db name` is a database PostgreSQL opens, and every
@@ -970,8 +992,14 @@ describe("redactDsn names the server pg will actually reach", () => {
   it("quotes a value that collides with the format's own keywords", () => {
     // Round 8: `?host=port` printed `postgresql host port port 5433 database
     // db`. It agreed with pg and was unreadable. The value is still named.
-    ambient();
-    for (const word of ["host", "port", "database", "socket"]) {
+    // DERIVED FROM THE SET, not from a list of it. Two hand-written loops
+    // covered six of the seven members between them and `postgresql` was in
+    // neither, so deleting it from the set killed nothing. A check that
+    // enumerates the set it governs has that enumeration inside its own blast
+    // radius; iterating the set means a new member arrives with its case.
+    expect(FORMAT_KEYWORDS.size).toBeGreaterThan(0);
+    for (const word of FORMAT_KEYWORDS) {
+      ambient();
       const dsn = `postgresql://u:p@127.0.0.1:5433/db?host=${word}`;
       expect(pgTruth(dsn).host).toBe(word);
       expect(redactDsn(dsn), word).toBe(`postgresql host "${word}" port 5433 database db`);
@@ -1023,6 +1051,16 @@ describe("redactDsn names the server pg will actually reach", () => {
     expect(expectAgreesWithPg("postgresql://bob@127.0.0.1:5433/realdb")).toBe(
       "postgresql host 127.0.0.1 port 5433 database realdb"
     );
+
+    // And the third arm, which no case here produced: NO user in the DSN and no
+    // PGUSER either, so pg falls back to the OS user. Deleting that switch case
+    // left the suite green, and the line then read `(default)`, which sends the
+    // reader looking for a default database name that does not exist. The user
+    // is whoever runs this, so the ANNOTATION is asserted and not the name.
+    ambient();
+    const osUser = redactDsn("postgresql://127.0.0.1:5433");
+    expect(osUser).toContain(" (default: the connecting user)");
+    expect(osUser).not.toContain("(default: the connecting user, from");
   });
 
   it("resolves a DSN that WHATWG rejects and pg accepts", () => {
@@ -1334,17 +1372,6 @@ describe("redactDsn names the server pg will actually reach", () => {
       const report = redactDsn(`postgresql://u:p@127.0.0.1:5433/db${encoded}x`);
       expect(UNSAFE.test(report), encoded).toBe(false);
       expect(report.split("\n"), encoded).toHaveLength(1);
-    }
-  });
-
-  it("quotes the words an annotation is written in", () => {
-    // Round 9: `?host=from` printed `postgresql host from port 5433`, and
-    // `(from PGHOST)` is how provenance is written. Same class as `?host=port`.
-    for (const word of ["from", "default"]) {
-      ambient();
-      expect(redactDsn(`postgresql://u:p@127.0.0.1:5433/db?host=${word}`), word).toBe(
-        `postgresql host "${word}" port 5433 database db`
-      );
     }
   });
 

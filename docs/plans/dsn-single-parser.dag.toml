@@ -1,4 +1,4 @@
-# DSN reporting: one parser, one gate, two consumers
+# DSN reporting: one parser, one gate, three consumers
 #
 # Rounds 14 through 23 each closed one spelling of a single class and each was
 # falsified by the next: an unencoded `@`, a fragment, `%40`, a path colon, a
@@ -9,7 +9,7 @@
 # Before adding a rule, find the node and follow `affects`; a rule that cannot
 # answer `pins` is not a control yet.
 #
-# EVIDENCE  docs/evidence/dsn-single-parser-2026-08-30.md (not mirrored).
+# EVIDENCE  docs/evidence/dsn-single-parser-2026-08-{30,31}.md (not mirrored).
 
 [meta]
 surface = "PostgreSQL DSN parsing, reporting and connection admission"
@@ -17,8 +17,8 @@ branch = "fix/redact-dsn-hardening"
 last_reviewed_head = "925ddcc2"
 generated_from = "round-23 cross-LLM review, verified locally against pg 8.22.0"
 measured_at = "2026-08-30"
-node_count = 14
-invariant_count = 5
+node_count = 18
+invariant_count = 7
 
 [[node]]
 id = "decision.apparent_position"
@@ -128,6 +128,41 @@ kind = "outcome"
 status = "planned"
 role = "Five measured wrong-reports dissolve when one parse serves both, including two where we name a target for a DSN pg refuses outright."
 
+[[node]]
+id = "report.second_printer"
+kind = "defect"
+file = "src/storage/transcript-admission.ts"
+status = "fixed"
+role = "A SECOND printer of DSN-derived values, outside this map and so outside every round that hardened the first. It named its resolved host in a refusal with no control at all; three shapes printed a whole password, measured at 215ded8. The property is POSITION, not secrecy: a credential position is never named, a target position is named only through the control."
+pins = "A corpus planted by position, asserting both halves, plus a case that an ordinary host is still named in full."
+affects = ["display.one_control", "gate.third_consumer"]
+critical = true
+
+[[node]]
+id = "gate.third_consumer"
+kind = "migration"
+file = "src/storage/transcript-admission.ts"
+status = "fixed"
+role = "The deployment-shape gate is the THIRD consumer of `admitPgDsn`, and had its own DSN grammar until now. It decides whether transcript BODIES may enter a deployment, so a target it reads differently from pg admits bodies into a database nothing was proven about."
+affects = ["gate.shared", "parse.single"]
+
+[[node]]
+id = "display.one_control"
+kind = "new_module"
+file = "src/storage/log-field.ts"
+status = "fixed"
+role = "`show()` was private to the reporter while a second caller printed the same class of value with nothing. Bounding, escaping and quoting now live in one module; the FORMAT VOCABULARY stays with each caller, because it describes that caller's line and not a shared fact."
+affects = ["report.allowlist", "report.second_printer"]
+
+[[node]]
+id = "instrument.derived_mutations"
+kind = "test_defect"
+status = "open"
+role = "D7 (a case per arm, a case per member) was asserted and falsified in four consecutive rounds, because which controls have tests was decided by READING. The set is now DERIVED from the tree by AST over five shapes, scoped to the diff under review. Every survivor is a control with no test. The enumerator is itself in the blast radius: its first pass missed two real gates by listing the spellings already in use rather than the shape."
+pins = "A must-survive and a must-be-killed control run before any mutation, and a run with no summary line is `invalid`, never a verdict: the first version scored a suite that never started as 48 of 48 killed."
+affects = ["gate.shared", "instrument.liveness"]
+critical = true
+
 [[invariant]]
 id = "one_grammar"
 question = "How many modules in the tree parse a DSN? One, and not ours."
@@ -147,3 +182,11 @@ question = "Does any reported byte come from a substring of the raw DSN taken by
 [[invariant]]
 id = "liveness_over_placement"
 question = "Does the corpus assert over where the marker was planted, or only over how many DSNs were accepted?"
+
+[[invariant]]
+id = "one_printer"
+question = "How many places render a DSN-derived value into a line a human reads? One control, whatever the caller's vocabulary."
+
+[[invariant]]
+id = "harness_ran"
+question = "For a mutation reported killed: did the suite RUN? Name the summary line, never the exit code alone."

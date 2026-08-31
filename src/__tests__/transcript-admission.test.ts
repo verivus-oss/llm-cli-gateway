@@ -141,12 +141,32 @@ describe("the admission matrix", () => {
     // admitted as loopback while the driver opened the remote host, which sends
     // prompt and response bodies somewhere this gate proved nothing about.
     const procDir = procWith(row(V4_LOOPBACK, 5432, uid), "");
-    const verdict = evaluateTranscriptAdmission(
+
+    // TWO controls now cover this string, and the EARLIER one fires. Folding
+    // `admitPgDsn` in front of this gate means a duplicate target parameter is
+    // refused for being ambiguous, before anything is resolved, so the remote
+    // host is never named at all. That is a stricter answer than the one this
+    // test was written for, and the property it was written for is asserted
+    // separately below, on a string the ambiguity rule does not reach.
+    const duplicated = evaluateTranscriptAdmission(
       "postgresql://u@127.0.0.1:5432/gw?host=127.0.0.1&host=db.remote.invalid",
       { procDir, uid }
     );
-    expect(verdict.admitted).toBe(false);
-    expect(verdict.reason).toContain("db.remote.invalid");
+    expect(duplicated.admitted).toBe(false);
+    expect(duplicated.reason).toContain("a target parameter is given more than once");
+    expect(duplicated.reason).not.toContain("db.remote.invalid");
+
+    // The property itself, UNSHADOWED: one `host` parameter, an authority that
+    // says loopback, and pg resolving somewhere else. No ambiguity rule reaches
+    // this (one target key, and no colon in the authority to make the parameter
+    // look like an apparent password), so only reading the host FROM PG refuses
+    // it. Reverting `parseDsnTarget` to the hand-written parser admits it.
+    const overridden = evaluateTranscriptAdmission(
+      "postgresql://127.0.0.1/gw?host=db.remote.invalid",
+      { procDir, uid }
+    );
+    expect(overridden.admitted).toBe(false);
+    expect(overridden.reason).toContain("db.remote.invalid");
   });
 
   it("follows PGHOST, which the driver follows and the old parser ignored", () => {
@@ -374,5 +394,100 @@ describe("permissions do not decide this", () => {
     const uids = loopbackListenerUids(5432, dir);
     // Running as root would still read them; that host gets the empty answer.
     expect(uids === null || uids.size === 0).toBe(true);
+  });
+});
+
+/**
+ * What a verdict may name, and what it may never name.
+ *
+ * The property is NOT "the secret never appears", which was the first thing
+ * written here and is false: an operator who puts a string in the HOST or in a
+ * socket directory has named the thing pg will dial, and a gate that refuses to
+ * say where it is looking is not diagnosable. The property is about POSITION.
+ *
+ *   credential position   userinfo password, `password=`, and every position
+ *                         inside a DSN the gate REFUSES, since a refused DSN is
+ *                         never named at all. Must not appear, ever.
+ *   target position       host, socket directory. May appear, but only as the
+ *                         one display control renders it.
+ *
+ * A corpus rather than the three shapes measured leaking, because three shapes
+ * is what each previous round fixed before the next found a fourth spelling.
+ * The marker is planted BY POSITION and the whole verdict is checked, `evidence`
+ * included: that field is written on the admit path and read by the same health
+ * surface, so a leak moving between fields would otherwise pass.
+ */
+describe("what a transcript-admission verdict may name", () => {
+  // No `@`, `%`, `;`, `=` or `&`: those make the gate refuse for a DIFFERENT
+  // reason, and the case would then prove nothing about the position it names.
+  // The keyword-shaped entries below plant those separators deliberately.
+  const SECRET = "Xyzzy-Correct-Horse-Battery-Staple-42";
+  const ENV = { procDir: "/nonexistent", uid: 4242 } as const;
+
+  /** Positions holding a credential, or sitting inside a DSN the gate refuses. */
+  const NEVER_NAMED: Array<[string, string]> = [
+    ["userinfo password", `postgres://alice:${SECRET}@db.example.com:5432/app`],
+    ["userinfo password, loopback host", `postgres://alice:${SECRET}@127.0.0.1:5432/app`],
+    [
+      "userinfo password, percent-encoded",
+      `postgres://alice:${encodeURIComponent(SECRET)}@db.example.com/app`,
+    ],
+    ["password query parameter", `postgres://u@127.0.0.1/db?password=${SECRET}`],
+    ["keyword authority", `postgresql://host=evil;password=${SECRET}/app`],
+    ["keyword authority, percent-encoded", `postgres://host=evil%3Bpassword%3D${SECRET}/app`],
+    ["keyword value of a target parameter", `postgres://u@h/db?host=evil;password=${SECRET}`],
+    ["keyword value of the user parameter", `postgres://u@h/db?user=alice;password=${SECRET}`],
+    ["keyword-shaped database name", `postgres:///db;password=${SECRET}`],
+    ["user", `postgres://${SECRET}@127.0.0.1/db`],
+    ["application_name", `postgres://127.0.0.1/db?application_name=${SECRET}`],
+    ["fragment", `postgres://127.0.0.1/db#${SECRET}`],
+  ];
+
+  /** Positions that ARE the target. Naming them is the job; HOW is the control. */
+  const NAMED_THROUGH_THE_CONTROL: Array<[string, string]> = [
+    ["host", `postgres://${SECRET}/db`],
+    ["socket directory", `postgres://u@h/db?host=/tmp/${SECRET}`],
+  ];
+
+  const evaluate = (dsn: string): string => JSON.stringify(evaluateTranscriptAdmission(dsn, ENV));
+
+  it.each(NEVER_NAMED)("a %s is never named", (_position, dsn) => {
+    expect(evaluate(dsn)).not.toContain(SECRET);
+  });
+
+  it.each(NAMED_THROUGH_THE_CONTROL)(
+    "a %s is named only as the control renders it",
+    (_position, dsn) => {
+      const verdict = evaluateTranscriptAdmission(dsn, ENV);
+      const text = `${verdict.reason ?? ""}${verdict.evidence ?? ""}`;
+      if (!text.includes(SECRET)) return;
+      // Present, so it came through `showLogField`: bounded, and carrying no
+      // character that would break or reorder the line it sits in.
+      expect(text).not.toMatch(/[\u0080-\u009F\u007F\u2028\u2029]|\p{Cf}/u);
+      expect([...text].length).toBeLessThan(600);
+    }
+  );
+
+  /**
+   * LIVENESS. Every assertion above passes against a function returning a
+   * constant, and passes just as well if the corpus stopped reaching the code
+   * that formats a target. Both are pinned here: the reasons must be real and
+   * distinct, and at least one must still name a host, which is the path that
+   * leaked.
+   */
+  it("the corpus reaches the code that names a target, and says something", () => {
+    const reasons = [...NEVER_NAMED, ...NAMED_THROUGH_THE_CONTROL]
+      .map(([, dsn]) => evaluateTranscriptAdmission(dsn, ENV).reason)
+      .filter((reason): reason is string => reason !== null);
+    expect(reasons).toHaveLength(NEVER_NAMED.length + NAMED_THROUGH_THE_CONTROL.length);
+    expect(new Set(reasons).size).toBeGreaterThan(1);
+    expect(reasons.filter(reason => reason.includes("host")).length).toBeGreaterThan(0);
+  });
+
+  it("an ordinary DSN is still named in full", () => {
+    // The control for over-refusal: the repair must not have been "print less".
+    const verdict = evaluateTranscriptAdmission("postgres://alice@db.example.com:5432/app", ENV);
+    expect(verdict.admitted).toBe(false);
+    expect(verdict.reason).toContain("db.example.com");
   });
 });

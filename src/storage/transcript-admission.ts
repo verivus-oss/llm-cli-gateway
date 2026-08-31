@@ -20,6 +20,8 @@
  * that cannot be proven is refused rather than assumed.
  */
 import { readFileSync, statSync } from "node:fs";
+import { admitPgDsn } from "./pg-dsn-gate.js";
+import { showLogField } from "./log-field.js";
 import { resolvePgDsnTarget } from "./pg-dsn-target.js";
 import { join } from "node:path";
 
@@ -159,6 +161,23 @@ export function evaluateTranscriptAdmission(
   if (dsn === null || dsn === undefined || dsn.trim().length === 0) {
     return refuse("no [persistence].dsn is configured, so the deployment shape is unknown");
   }
+  // THE SAME GATE THE CONNECTOR AND THE REPORTER CONSULT, and it runs FIRST,
+  // before any byte of this DSN reaches a message. This function used to name
+  // its resolved host in a refusal with no control on it at all, and three
+  // measured shapes put a whole password there:
+  //
+  //   postgresql://host=evil;password=S/app        printed `host=evil;password=S`
+  //   postgres://host=evil%3Bpassword%3DS/app      printed the same, encoded
+  //   postgres://u@h/db?host=evil;password=S       printed `evil;password=S`
+  //
+  // Quoting them would not have helped: they are keyword DSNs whose password
+  // pg resolves INTO the host, so the value being printed is the secret. The
+  // gate refuses that shape outright, which is why it has to run before the
+  // report rather than after it. Its reason names the SHAPE and never the DSN.
+  const admission = admitPgDsn(dsn);
+  if (!admission.admitted) {
+    return refuse(`the [persistence].dsn was refused by the connection gate: ${admission.reason}`);
+  }
   const target = parseDsnTarget(dsn);
   if (!target) {
     return refuse("the [persistence].dsn could not be parsed, so its host cannot be proven local");
@@ -172,25 +191,26 @@ export function evaluateTranscriptAdmission(
 
   if (target.socketDirectory !== null) {
     const socket = join(target.socketDirectory, `.s.PGSQL.${target.port}`);
+    const shown = showLogField(socket);
     let ownerUid: number;
     try {
       ownerUid = statSync(socket).uid;
     } catch {
-      return refuse(`the unix socket ${socket} could not be inspected, so its owner is unknown`);
+      return refuse(`the unix socket ${shown} could not be inspected, so its owner is unknown`);
     }
     if (ownerUid !== uid) {
       return refuse(
-        `the unix socket ${socket} is owned by uid ${ownerUid}, not this process's uid ${uid}`
+        `the unix socket ${shown} is owned by uid ${ownerUid}, not this process's uid ${uid}`
       );
     }
-    return admit("unix-socket", `${socket} is owned by uid ${uid}, this process's own`);
+    return admit("unix-socket", `${shown} is owned by uid ${uid}, this process's own`);
   }
 
   const host = target.host ?? "";
   const localhostName = host.toLowerCase() === "localhost";
   if (!localhostName && !isLoopbackLiteral(host)) {
     return refuse(
-      `the [persistence].dsn host "${host}" is not a loopback literal. A name is not resolved here, ` +
+      `the [persistence].dsn host ${showLogField(host)} is not a loopback literal. A name is not resolved here, ` +
         "because this decision is read by surfaces that cannot await one; write 127.0.0.1 or ::1 if it is loopback"
     );
   }

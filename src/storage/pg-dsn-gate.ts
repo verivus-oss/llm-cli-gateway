@@ -23,8 +23,11 @@ function refuse(reason: string): DsnAdmission {
   return { admitted: false, reason };
 }
 
-/** Both spellings of `@` that survive pg's single decode. `%2540` is not one. */
-const AT_TOKEN = /@|%40/i;
+/** Both spellings of `@` that survive pg's single decode. `%2540` is not one.
+ *  No `i` flag: neither spelling holds a letter, so it would be decoration, and
+ *  a decorative flag beside `ENCODED_COLON`'s load-bearing one reads as though
+ *  both were checked. */
+const AT_TOKEN = /@|%40/;
 /** A colon spelled as an escape hides a password inside the USER field. */
 const ENCODED_COLON = /%3A/i;
 const URI_CHARACTERS = /^[A-Za-z0-9\-._~:/?#[\]@!$&'()*+,;=%]*$/;
