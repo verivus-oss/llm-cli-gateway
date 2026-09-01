@@ -1692,9 +1692,7 @@ export function createFlightRecorder(
       );
       return recorder;
     } catch (error) {
-      logger.error("Flight recorder unavailable; PostgreSQL recorder could not be built", {
-        error: postgresFailureMessage(error),
-      });
+      logger.error("Flight recorder unavailable; PostgreSQL recorder could not be built", error);
       return flightRecorderOpenFailed(
         POSTGRES_RECORDER_TARGET,
         new Error(postgresFailureMessage(error))

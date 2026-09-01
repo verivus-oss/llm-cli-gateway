@@ -218,9 +218,7 @@ export class PostgresFlightRecorder implements FlightRecorderOperations {
     // cleared by ensureReady's own handler, so the next operation retries and
     // rejects where a caller can be told.
     void this.ensureReady().catch((error: unknown) => {
-      this.logger?.error("Flight recorder PostgreSQL bootstrap failed", {
-        error: postgresFailureMessage(error),
-      });
+      this.logger?.error("Flight recorder PostgreSQL bootstrap failed", error);
     });
   }
 
@@ -257,10 +255,7 @@ export class PostgresFlightRecorder implements FlightRecorderOperations {
       const factory =
         this.options.poolFactory ??
         (await nodePostgresPoolFactory(
-          (role, error) =>
-            this.logger?.error(`flight recorder pool error on role ${role}`, {
-              error: postgresFailureMessage(error),
-            }),
+          (role, error) => this.logger?.error(`flight recorder pool error on role ${role}`, error),
           { applicationName: "llm-cli-gateway-transcripts" }
         ));
       this.driver = new PostgresStorageDriver(this.roleDsns, factory);
@@ -276,7 +271,7 @@ export class PostgresFlightRecorder implements FlightRecorderOperations {
     if (!(await transcriptSchemaReady(driver))) {
       throw new Error(
         "PostgreSQL transcript schema is missing and the compatibility bootstrap did not produce it. " +
-          "Run `npm run migrate` with the migration role (migrations/022_flight_recorder_transcripts.sql)."
+          "Run `npm run migrate` with the migration role so every transcript migration is applied."
       );
     }
     return driver;
@@ -661,7 +656,7 @@ function redactStart(entry: FlightLogStart): FlightLogStart {
  *
  * A name-only readiness check fails OPEN: with `routed` as INTEGER rather than
  * BOOLEAN the check passed, the recorder reported `active` and
- * `readsAreAuthoritative`, and then `WHERE m.routed IS TRUE` (:522) was rejected
+ * `readsAreAuthoritative`, and then `WHERE m.routed IS TRUE` was rejected
  * by the server with "argument of IS TRUE must be type boolean, not type
  * integer". Health said fine and the read died.
  *
@@ -675,6 +670,7 @@ const TRANSCRIPT_REQUIRED_TYPES: Readonly<Record<string, string>> = {
   "gateway_metadata.optimization_applied": "boolean",
   "gateway_metadata.cost_usd": "double precision",
   "gateway_metadata.route_est_cost_usd": "double precision",
+  "gateway_metadata.completion_rank": "smallint",
 };
 
 async function transcriptSchemaReady(driver: PostgresStorageDriver): Promise<boolean> {
@@ -740,6 +736,7 @@ export const TRANSCRIPT_REQUIRED_COLUMNS: readonly string[] = [
     "route_considered",
     "route_reroutes",
     "status",
+    "completion_rank",
     "compression_route",
     "compression_transforms",
     "compression_original_chars",

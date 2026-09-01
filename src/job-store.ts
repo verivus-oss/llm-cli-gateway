@@ -27,7 +27,6 @@ import {
 } from "./storage/drivers/postgres.js";
 import { SqliteStorageDriver } from "./storage/drivers/sqlite.js";
 import type { StorageConnection } from "./storage/store.js";
-import { postgresFailureMessage } from "./storage/postgres-diagnostics.js";
 import {
   createPostgresJobStoreOps,
   type PostgresJobStoreOps,
@@ -3221,9 +3220,7 @@ export class PostgresJobStore implements JobStore, ValidationRunStore {
         // which the driver reports rather than implying separation is in force.
         this.roleDsns,
         await nodePostgresPoolFactory((role, error) =>
-          this.logger.error(`PostgresJobStore pool error on role ${role}`, {
-            error: postgresFailureMessage(error),
-          })
+          this.logger.error(`PostgresJobStore pool error on role ${role}`, error)
         )
       );
       // Assigned together, so close() can always reach a driver that exists.

@@ -22735,7 +22735,7 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
           [
             recorderMessage,
             recorderEnabled && recorderEngine.engine === "postgres"
-              ? `Request history moved to PostgreSQL when this gateway started. Rows written BEFORE the switch are still in ${resolveFlightRecorderDbPath()} and were NOT migrated; nothing reads them from here.`
+              ? `Request history is using PostgreSQL. Rows written to the previous SQLite recorder, if any, are still in ${resolveFlightRecorderDbPath()} and were NOT migrated; nothing reads them from here.`
               : null,
           ]
             .filter((line): line is string => line !== null)
@@ -23931,10 +23931,10 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
 // Async Initialization
 //──────────────────────────────────────────────────────────────────────────────
 
-async function initializeSessionManager(): Promise<void> {
+async function initializeSessionManager(persistence: PersistenceConfig): Promise<void> {
   // Pass the runtime logger so the deprecated-DATABASE_URL warning reaches
   // stderr rather than being swallowed by the default noop logger.
-  const config = loadConfig(undefined, logger);
+  const config = loadConfig(persistence, logger);
 
   if (config.database) {
     logger.info("Initializing PostgreSQL session manager");
@@ -24690,8 +24690,11 @@ async function main() {
     "stdio";
   logger.info(`Starting llm-cli-gateway MCP server with ${transportMode} transport`);
 
-  // Initialize session manager first
-  await initializeSessionManager();
+  // Resolve the single backend snapshot once, before constructing any durable
+  // subsystem. A config replacement during startup must not put sessions on a
+  // different engine or DSN from jobs and request history.
+  const persistence = getPersistenceConfig(logger);
+  await initializeSessionManager(persistence);
 
   // Phase-3: warm the provider capability memo in the background (fire-and-forget)
   // so the read surfaces (models://<cli>, list_models) can serve live/cached
@@ -24700,7 +24703,6 @@ async function main() {
   // fault-isolated). Read surfaces peek this memo synchronously.
   void warmProviderCapabilities({ logger }).catch(() => undefined);
 
-  const persistence = getPersistenceConfig(logger);
   // Built before the disposition is reported, so "request history is being
   // written" is the recorder's real state and not the configured intent.
   const startupRecorder = getFlightRecorder(logger);

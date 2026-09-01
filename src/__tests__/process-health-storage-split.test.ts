@@ -2,7 +2,7 @@
  * `llm_process_health` must disclose both storage subsystems and the
  * authoritative engine selection without exposing a PostgreSQL DSN.
  */
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { mkdtempSync, rmSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
@@ -80,12 +80,15 @@ describe("llm_process_health discloses storage disposition", () => {
     return JSON.parse(res.content[0].text);
   }
 
-  function postgresRecorder(): PostgresFlightRecorder {
+  function postgresRecorder(
+    queryError?: Error,
+    logger: typeof noopLogger = noopLogger
+  ): PostgresFlightRecorder {
     const client = {
-      query: async (): Promise<{ rows: unknown[]; rowCount: number }> => ({
-        rows: [],
-        rowCount: 0,
-      }),
+      query: async (): Promise<{ rows: unknown[]; rowCount: number }> => {
+        if (queryError) throw queryError;
+        return { rows: [], rowCount: 0 };
+      },
       release: (): void => {},
     };
     const pool: PgPoolLike = {
@@ -95,7 +98,7 @@ describe("llm_process_health discloses storage disposition", () => {
     };
     return new PostgresFlightRecorder(
       { app: "postgresql://app@127.0.0.1/gateway" },
-      { poolFactory: () => pool, logger: noopLogger }
+      { poolFactory: () => pool, logger }
     );
   }
 
@@ -147,6 +150,27 @@ describe("llm_process_health discloses storage disposition", () => {
     expect(report.subsystems.requests.error).not.toContain("runtime-dsn-secret");
   });
 
+  it("keeps recorder health generic while preserving the raw error in internal logs", async () => {
+    const marker = "ungated-dsn-health-secret";
+    const error = vi.fn();
+    const recorder = postgresRecorder(new Error(`connect ENOENT /tmp/${marker}`), {
+      ...noopLogger,
+      error,
+    });
+    try {
+      await expect(recorder.readStorageStats()).rejects.toThrow(marker);
+      expect(recorder.health().error).toBe("PostgreSQL operation failed");
+      expect(recorder.health().error).not.toContain(marker);
+      const logs = error.mock.calls
+        .flat()
+        .map(value => (value instanceof Error ? value.message : String(value)))
+        .join(" ");
+      expect(logs).toContain(marker);
+    } finally {
+      await recorder.close();
+    }
+  });
+
   it("reports preserved pre-switch history without claiming an active split", async () => {
     const recorder = postgresRecorder();
     try {
@@ -156,6 +180,8 @@ describe("llm_process_health discloses storage disposition", () => {
       );
 
       expect(res.flightRecorder.warning).not.toContain("SPLIT");
+      expect(res.flightRecorder.warning).toContain("Request history is using PostgreSQL");
+      expect(res.flightRecorder.warning).not.toContain("moved to PostgreSQL");
       expect(res.flightRecorder.warning).toContain("were NOT migrated");
       expect(res.flightRecorder.warning).toContain(join(tmp, "logs.db"));
     } finally {

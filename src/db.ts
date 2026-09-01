@@ -6,7 +6,6 @@ import {
   PostgresStorageDriver,
   SESSION_POOL_SETTINGS,
 } from "./storage/drivers/postgres.js";
-import { postgresFailureMessage } from "./storage/postgres-diagnostics.js";
 
 export interface HealthCheckResult {
   postgres: { connected: boolean; latency: number };
@@ -54,7 +53,7 @@ export class DatabaseConnection {
       // config table meaning one thing everywhere is the point of this node,
       // and because an unused pool costs nothing: pg-pool's constructor creates
       // no clients and defaults `min` to 0, so a pool nothing queries opens no
-      // connection (verified in node_modules/pg-pool/index.js:89-108).
+      // connection (verified in pg-pool's constructor and connection path).
       { ...this.config.roleDsns, app: this.config.database!.connectionString },
       createPool
     );
@@ -70,10 +69,11 @@ export class DatabaseConnection {
       // Close the pool the failed probe opened. The previous implementation
       // left it behind on every failed connect.
       await driver.close().catch(() => undefined);
-      this.logger.error("Failed to connect to PostgreSQL", {
-        error: postgresFailureMessage(error),
-      });
-      throw new Error(postgresFailureMessage(error), { cause: error });
+      this.logger.error("Failed to connect to PostgreSQL", { error });
+      throw new Error(
+        `Failed to connect to PostgreSQL: ${error instanceof Error ? error.message : String(error)}`,
+        { cause: error }
+      );
     }
 
     this.driver = driver;
@@ -140,10 +140,7 @@ export class DatabaseConnection {
 async function sessionPoolFactory(logger: Logger) {
   try {
     return await nodePostgresPoolFactory(
-      (role, error) =>
-        logger.error(`Session pool error on role ${role}`, {
-          error: postgresFailureMessage(error),
-        }),
+      (role, error) => logger.error(`Session pool error on role ${role}`, error),
       SESSION_POOL_SETTINGS
     );
   } catch (error: any) {

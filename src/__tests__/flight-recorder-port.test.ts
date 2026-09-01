@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { mkdtempSync, rmSync } from "node:fs";
+import { existsSync, mkdtempSync, rmSync } from "node:fs";
 import { DatabaseSync } from "node:sqlite";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -452,6 +452,22 @@ describe("flight recorder on the storage port (s7)", () => {
       const decision = flightRecorderEngineDecision("postgres");
       expect(decision.engine).toBe("postgres");
       expect(decision.requested).toBe("postgres");
+    });
+
+    it("a PostgreSQL construction failure does not create the SQLite file", () => {
+      vi.stubEnv("LLM_GATEWAY_LOGS_DB", dbPath);
+      const error = vi.fn();
+      const recorder = createFlightRecorder({ info: () => {}, error }, "postgres", {});
+      expect(recorder).not.toBeInstanceOf(FlightRecorder);
+      expect(recorder.health()).toMatchObject({
+        state: "unavailable",
+        path: "postgresql",
+        error: "PostgreSQL operation failed",
+      });
+      expect(existsSync(dbPath)).toBe(false);
+      expect(error.mock.calls.flat().map(String).join(" ")).toContain(
+        "postgres needs an `app` DSN"
+      );
     });
 
     it("the recorder's explicit off switch still wins", () => {

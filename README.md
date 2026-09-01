@@ -317,7 +317,7 @@ Every provider is reachable through the same request, session, job, and validati
 
 Running the source-tree release audit also requires Bash and `flock` from
 util-linux. This prerequisite was verified against commit
-`ae6e645732470049db53704a5e0cddcc895cf689`. Release automation runs the audit
+`a3929dc8e58d499b992b0c7839e0e94d626ae6ab`. Release automation runs the audit
 on Ubuntu. On macOS, install a compatible `flock` before running
 `npm run security:audit` or the full `npm run check` gate.
 
@@ -897,7 +897,7 @@ instanceGcMs = 3600000                      # gateway_instances GC horizon
 Backends:
 
 - **`sqlite`** (default) — durable, file-backed. Safe for single-instance deployments.
-- **`postgres`**: PostgreSQL is authoritative for every durable subsystem, including async jobs, dedup, orphan recovery, HTTP jobs, validation state, session metadata, and the flight recorder. Use this for multi-instance or service deployments. Requires the optional peer dependency `pg` to be installed alongside the gateway.
+- **`postgres`**: PostgreSQL is authoritative for every backend-governed durable subsystem, including async jobs, dedup, orphan recovery, HTTP jobs, validation state, session metadata, and the flight recorder. File-backed operator records such as approvals, admin audit, and the workspace registry are not SQLite/PostgreSQL engine choices. Use this for multi-instance or service deployments. Requires the optional peer dependency `pg` to be installed alongside the gateway.
 - **`memory`** — in-process Map. Lost on gateway exit. Requires `acknowledgeEphemeral = true` to be loaded. Suitable for tests and ephemeral CI gateways.
 - **`none`** — no store. **`*_request_async`, `llm_job_status`, `llm_job_result`, and `llm_job_cancel` are NOT registered on the gateway.** This is a structural invariant: agents that try to call async tools against a gateway with `backend = "none"` get a clean "tool not found" at connect time instead of silent in-memory loss after the 1-hour TTL. Use `llm_process_health` to inspect the resolved persistence state programmatically.
 
@@ -907,7 +907,7 @@ Backends:
 
 **`backend = "none"` and `LLM_GATEWAY_LOGS_DB=none` are different switches.** The first disables async job persistence; the second disables request history. Setting the backend to `"none"` leaves the flight recorder writing, and disabling the recorder leaves the job store alone. Both are stated at startup in the `Storage:` block on stderr. `llm_process_health` reports the selected engine, recorder state, role configuration, and deprecated-input decisions without rendering the configured PostgreSQL target.
 
-**`DATABASE_URL` is deprecated and never wins.** It is honoured only when no `[persistence]` backend is written down at all. Against an explicit backend, or against a `dsn` it disagrees with, it is ignored with a reason: the gateway does not abort, because the outcome is fully determined and is the one the config file describes.
+**`DATABASE_URL` is deprecated and never overrides `[persistence]`.** When it is the only selector, it acts as a deprecated alias for `backend = "postgres"` plus `dsn`, so sessions, jobs, validation state, and request history stay on one engine. Against an explicit backend, or against a `dsn` it disagrees with, it is ignored with a reason: the gateway does not abort, because the outcome is fully determined and is the one the config file describes.
 
 For PostgreSQL, apply the schema with a schema-owner or dedicated migration role before starting a DML-only gateway role:
 
@@ -929,7 +929,7 @@ to a published migration file.
 
 Legacy environment variables (deprecated; emit a warning at startup):
 
-- `LLM_GATEWAY_LOGS_DB` / `LLM_GATEWAY_JOBS_DB` — `none` selects `backend = "none"`; any other value selects `backend = "sqlite"` with that path.
+- `LLM_GATEWAY_LOGS_DB` / `LLM_GATEWAY_JOBS_DB`: when no backend is explicitly configured, `none` selects `backend = "none"` and any other value selects `backend = "sqlite"` with that path. An explicit `[persistence].backend` wins. `LLM_GATEWAY_LOGS_DB` still independently paths or disables the recorder.
 - `LLM_GATEWAY_JOB_RETENTION_DAYS` — overrides `retentionDays`.
 - `LLM_GATEWAY_DEDUP_WINDOW_MS` — overrides `dedupWindowMs`.
 - `LLM_GATEWAY_ACKNOWLEDGE_EPHEMERAL` — `1`/`true`/`yes` sets `acknowledgeEphemeral = true`.
@@ -1094,7 +1094,7 @@ mcp_server_name                = "llm-gateway"               # must match the en
 [policy.gates]
 gate_repo_abs_path_resolved    = "policy.instance.repo_abs_path must NOT be the literal string '<REPO_ABS_PATH>' when U01 starts."
 gate_config_is_committed       = "policy.instance.config_toml_relative MAY be committed. policy.instance.claude_local_settings_relative MUST NOT be committed (it is per-developer). Agent MUST verify .gitignore covers .claude/settings.local.json if absent."
-gate_no_legacy_env_leak        = "Agent MUST grep the shell init files for LLM_GATEWAY_LOGS_DB / LLM_GATEWAY_JOBS_DB. If set, the legacy env var will override the new config and the deprecation warning will fire at every gateway boot. The agent reports this as a finding and asks the operator to unset before proceeding."
+gate_no_legacy_env_leak        = "Agent MUST grep the shell init files for LLM_GATEWAY_LOGS_DB / LLM_GATEWAY_JOBS_DB. An explicit [persistence].backend wins for job persistence, but LLM_GATEWAY_LOGS_DB still paths or disables the recorder and both variables remain deprecated. The agent reports either as a finding and asks the operator to unset it before proceeding."
 gate_health_confirms_isolation = "U05 MUST observe llm_process_health.persistence.sources.configFile == policy.instance.repo_abs_path + '/' + policy.instance.config_toml_relative AND llm_process_health.persistence.path == policy.instance.repo_abs_path + '/' + policy.instance.sqlite_db_relative. Anything else means the override did not take effect."
 
 # ============================================================================
@@ -1738,11 +1738,11 @@ await callTool("session_delete", {
   ```
 - `LLM_GATEWAY_CONFIG`: Path to the gateway TOML config (default: `~/.llm-cli-gateway/config.toml`). See **Persistence configuration** above for the `[persistence]` schema.
 - `LLM_GATEWAY_SKILLS_PATH`: Extra local skill-pack roots to load at startup, separated by the host path delimiter (`:` on Linux/macOS, `;` on Windows). These paths are appended after `[skills].paths`; `~/.llm-cli-gateway/skills` still loads last when present.
-- `LLM_GATEWAY_LOGS_DB`: **Deprecated** — overrides `[persistence].path` and selects `backend = "sqlite"` (or `backend = "none"` when set to `none`). Emits a deprecation warning at startup; migrate to `config.toml`.
+- `LLM_GATEWAY_LOGS_DB`: **Deprecated**. When no backend is explicitly configured, selects `backend = "sqlite"` with this path (or `backend = "none"` when set to `none`). An explicit backend wins for job persistence. The variable still independently paths or disables the recorder. Emits a deprecation warning at startup; migrate to `config.toml`.
   ```bash
   # Custom path
   LLM_GATEWAY_LOGS_DB=/var/log/gateway/logs.db node dist/index.js
-  # Disable durable persistence (also disables *_request_async tools)
+  # Disable the recorder; with no explicit backend, also disable async persistence
   LLM_GATEWAY_LOGS_DB=none node dist/index.js
   ```
 - `LLM_GATEWAY_REDACT_LOGGED_SECRETS`: Redact recognisable secrets (provider/cloud/VCS keys, bearer tokens, JWTs, PEM private keys, `key=value` secret assignments) from the prompt/system/response copies written to the flight-recorder log. **Enabled by default**; set to `0`/`false`/`off`/`no` to store content verbatim. Only the audit log is affected — live sync responses and async `llm_job_result` output are never altered.

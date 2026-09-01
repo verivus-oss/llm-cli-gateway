@@ -1,6 +1,6 @@
 # Historical implementation plan for the session-manager migration. The current
 # unified selector and recorder state were rechecked against
-# ae6e645732470049db53704a5e0cddcc895cf689.
+# a3929dc8e58d499b992b0c7839e0e94d626ae6ab.
 #
 # Context. The stated goal is a SINGLE store. Today the gateway runs three:
 #
@@ -230,10 +230,9 @@ depends_on = ["cutover-and-verify-continuity"]
 actor = "assistant"
 status = "planned"
 action = """
-`npm test` and `npm run test:pg`, then a CHANGELOG entry describing the
-selection unification and the store count going three to two. Note explicitly
-that transcripts remain on SQLite behind the security gate, so the entry does
-not read as if the single-store goal were met.
+HISTORICAL PLANNED STEP, superseded by the completed recorder migration.
+Its original instruction to describe transcripts as remaining on SQLite no
+longer applies. Current release validation runs `npm test` and `npm run test:pg`.
 """
 idempotent = true
 validation = "Both suites green; CHANGELOG states the remaining gap honestly."

@@ -129,7 +129,11 @@ export function storageDisposition(
   const databaseUrl = resolveDatabaseUrlPrecedence({
     databaseUrl: process.env.DATABASE_URL,
     persistenceDsn: persistence.backend === "postgres" ? persistence.dsn : null,
-    explicitBackend: persistence.explicitBackend,
+    explicitBackend:
+      persistence.explicitBackend ||
+      persistence.sources.envOverrides.some(
+        source => source === "LLM_GATEWAY_JOBS_DB" || source === "LLM_GATEWAY_LOGS_DB"
+      ),
     backend: persistence.backend,
   });
   return {
@@ -228,14 +232,18 @@ function recorderLine(requestHistory: StorageDisposition["requestHistory"]): str
 /** One block of stderr at startup, so the answer is in the log and not only in a tool. */
 export function formatStorageDisposition(disposition: StorageDisposition): string[] {
   const { jobStore, requestHistory, roles } = disposition;
+  const requestHistoryRelation =
+    jobStore.backend === "sqlite" || jobStore.backend === "postgres"
+      ? requestHistory.followsPersistenceBackend
+        ? "DOES follow [persistence].backend"
+        : "does NOT follow [persistence].backend"
+      : `is independent of [persistence].backend = "${jobStore.backend}"`;
   const lines = [
     `Storage: job store backend="${jobStore.backend}" (async jobs ${jobStore.asyncJobsEnabled ? "enabled" : "DISABLED"})` +
       `${jobStore.path ? ` at ${jobStore.path}` : ""}`,
     requestHistory.enabled && requestHistory.state !== "degraded"
       ? `Storage: request history is being written to ${requestHistory.path} (engine: ${requestHistory.engine}), which ` +
-        (requestHistory.followsPersistenceBackend
-          ? "DOES follow [persistence].backend"
-          : "does NOT follow [persistence].backend")
+        requestHistoryRelation
       : // Derived, never authored here. The startup line used to name
         // LLM_GATEWAY_LOGS_DB=none whenever the recorder was absent, including
         // when the file was there and unreadable.

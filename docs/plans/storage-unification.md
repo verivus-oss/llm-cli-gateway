@@ -1,8 +1,8 @@
 # Storage unification
 
-Status: implemented for the durable subsystems and retained as historical
+Status: implemented for the three backend-governed durable subsystems and retained as historical
 design rationale. Implementation state was rechecked against
-`ae6e645732470049db53704a5e0cddcc895cf689`.
+`a3929dc8e58d499b992b0c7839e0e94d626ae6ab`.
 Goal: one storage abstraction with one write path per operation, and a single
 knob that makes a deployment genuinely Postgres-only.
 
@@ -549,12 +549,12 @@ through this environment's Bash hook are silently filtered and wrong.
 
 **Retired gate.** The hardening sequence below remains operator guidance, but
 it no longer admits or redirects transcript storage. At the named implementation
-commit, `backend = "postgres"` selects PostgreSQL for every durable subsystem;
+commit, `backend = "postgres"` selects PostgreSQL for every backend-governed durable subsystem;
 a PostgreSQL failure does not redirect request history to SQLite.
 
-**Correction (revision 2 was weaker than the security document and contradicted
-it).** Revision 2 required "TLS, role separation, and a resolved decision on
-body encryption". Two faults:
+**Historical correction.** Before the gate was retired, revision 2 was weaker
+than the security document and required "TLS, role separation, and a resolved
+decision on body encryption". Two faults:
 
 - A _decision_ is not a control. A decision not to encrypt would have satisfied
   that wording while violating the security sequence, which requires the
@@ -565,8 +565,8 @@ body encryption". Two faults:
   channel**, satisfied by either the socket option or the TLS option, not TLS
   specifically.
 
-The gate therefore inherits the security document's sequence rather than
-restating a subset of it, so the two cannot drift apart again.
+The former gate therefore inherited the security document's sequence rather
+than restating a subset of it. That history does not constrain engine selection.
 
 ## 7. Cutover must be lossless and restartable
 

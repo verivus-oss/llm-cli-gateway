@@ -329,6 +329,8 @@ describe('backend = "none" and LLM_GATEWAY_LOGS_DB', () => {
     const lines = formatStorageDisposition(disposition).join("\n");
     expect(lines).toContain("disables async job persistence ONLY");
     expect(lines).toContain("request history is being written");
+    expect(lines).toContain('is independent of [persistence].backend = "none"');
+    expect(lines).not.toContain("does NOT follow [persistence].backend");
   });
 
   it("LLM_GATEWAY_LOGS_DB=none disables the recorder and the log says history is not written", () => {

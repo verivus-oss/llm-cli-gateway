@@ -2,7 +2,7 @@
 
 Status: historical hardening proposal. Its topology admission prerequisite is
 retired; the implemented storage decision was rechecked against
-`ae6e645732470049db53704a5e0cddcc895cf689`.
+`a3929dc8e58d499b992b0c7839e0e94d626ae6ab`.
 Scope: the `llm-gateway-pg` deployment on `workhorse3`, and the preconditions
 for moving flight-recorder transcripts into Postgres.
 

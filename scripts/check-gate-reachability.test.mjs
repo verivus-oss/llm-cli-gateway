@@ -57,25 +57,26 @@ describe("the check chain", () => {
 describe("the shrinkwrap step has two modes", () => {
   const audit = join(ROOT, "scripts", "release-security-audit.sh");
   const source = readFileSync(audit, "utf8");
+  const shrinkwrap = join(ROOT, "npm-shrinkwrap.json");
 
-  it("refuses a missing shrinkwrap under LLM_GATEWAY_REQUIRE_SHRINKWRAP=1", () => {
-    // The RELEASE behaviour, unchanged. Asserted before network-backed audit
-    // work when this checkout is in its normal clean state.
-    // Release callers generate the shrinkwrap before `npm test`, so that state
-    // must not make this test fail before the audit can enforce strict mode.
-    const shrinkwrap = join(ROOT, "npm-shrinkwrap.json");
-    if (existsSync(shrinkwrap)) {
-      expect(source).toContain('if [ ! -f "${SHRINKWRAP_PATH}" ]');
-      expect(source).toContain(
-        "npm-shrinkwrap.json missing under LLM_GATEWAY_REQUIRE_SHRINKWRAP=1"
-      );
-      return;
+  it.skipIf(existsSync(shrinkwrap))(
+    "refuses a missing shrinkwrap under LLM_GATEWAY_REQUIRE_SHRINKWRAP=1",
+    () => {
+      // Release callers generate the shrinkwrap after the test step. A normal
+      // clean checkout therefore exercises the actual strict refusal here.
+      const { code, out } = run(["bash", audit], { LLM_GATEWAY_REQUIRE_SHRINKWRAP: "1" });
+      expect(code).not.toBe(0);
+      expect(out).toContain("npm-shrinkwrap.json missing under LLM_GATEWAY_REQUIRE_SHRINKWRAP=1");
+      expect(existsSync(shrinkwrap)).toBe(false);
     }
-    const { code, out } = run(["bash", audit], { LLM_GATEWAY_REQUIRE_SHRINKWRAP: "1" });
-    expect(code).not.toBe(0);
-    expect(out).toContain("npm-shrinkwrap.json missing under LLM_GATEWAY_REQUIRE_SHRINKWRAP=1");
-    // And it must not have created one while refusing.
-    expect(existsSync(shrinkwrap)).toBe(false);
+  );
+
+  it("checks strict release input before network-backed audit work", () => {
+    const strictAt = source.indexOf("npm-shrinkwrap.json missing under");
+    const networkAuditAt = source.indexOf('echo "==> npm vulnerability audit"');
+    expect(strictAt).toBeGreaterThanOrEqual(0);
+    expect(networkAuditAt).toBeGreaterThanOrEqual(0);
+    expect(strictAt).toBeLessThan(networkAuditAt);
   });
 
   it("says out loud what the dev mode does NOT check", () => {
@@ -127,7 +128,7 @@ describe("the shrinkwrap step has two modes", () => {
     const packAt = source.indexOf('PACKAGE_TGZ="$(npm pack');
     const extractAt = source.indexOf('tar -xOf "${TMP_DIR}/${PACKAGE_TGZ}"');
     const compareAt = source.indexOf(
-      'cmp -s "${SHRINKWRAP_PATH}" "${TMP_DIR}/packed-npm-shrinkwrap.json"'
+      'cmp -s "${EXPECTED_SHRINKWRAP}" "${TMP_DIR}/packed-npm-shrinkwrap.json"'
     );
     expect(packAt).toBeGreaterThanOrEqual(0);
     expect(extractAt).toBeGreaterThan(packAt);
@@ -136,6 +137,34 @@ describe("the shrinkwrap step has two modes", () => {
 });
 
 describe("every release path asks for the strict mode", () => {
+  const releaseInvocation =
+    /(?:^|\s)(?:npm run (?:security:audit|check)\b|(?:bash|sh)\s+scripts\/release-security-audit\.sh\b|\.\/scripts\/release-security-audit\.sh\b)/;
+
+  function workflowStep(lines, invocationAt) {
+    const invocationIndent = lines[invocationAt].search(/\S/);
+    let start = invocationAt;
+    let stepIndent = invocationIndent;
+    for (let index = invocationAt; index >= 0; index -= 1) {
+      const match = /^(\s*)-\s+(?:name|run|uses):/.exec(lines[index]);
+      if (match && match[1].length < invocationIndent) {
+        start = index;
+        stepIndent = match[1].length;
+        break;
+      }
+    }
+    let end = start + 1;
+    while (end < lines.length) {
+      const nextIndent = lines[end].search(/\S/);
+      if (nextIndent >= 0 && nextIndent < stepIndent && !lines[end].trimStart().startsWith("#")) {
+        break;
+      }
+      const match = /^(\s*)-\s+(?:name|run|uses):/.exec(lines[end]);
+      if (match && match[1].length <= stepIndent) break;
+      end += 1;
+    }
+    return lines.slice(start, end).join("\n");
+  }
+
   // Derived per invocation, not per file. A second unflagged step in an
   // existing workflow must fail even when another step in that file is strict.
   it("binds the strict flag to every audit or release-gate invocation", () => {
@@ -147,28 +176,29 @@ describe("every release path asks for the strict mode", () => {
       .filter(
         file => file && !file.endsWith(".test.mjs") && !file.endsWith("release-security-audit.sh")
       );
-    const command =
-      /^\s*(?:-\s*run:\s*)?(?:npm run (?:security:audit|check)\b|bash scripts\/release-security-audit\.sh\b)/;
     const invocations = [];
     const missing = [];
 
     for (const file of tracked) {
       const lines = readFileSync(join(ROOT, file), "utf8").split(/\r?\n/);
+      const isWorkflow = file.endsWith(".yml") || file.endsWith(".yaml");
       for (let index = 0; index < lines.length; index += 1) {
-        if (!command.test(lines[index])) continue;
+        const invokes = isWorkflow
+          ? releaseInvocation.test(lines[index])
+          : /^\s*(?:npm run (?:security:audit|check)\b|(?:bash|sh)\s+scripts\/release-security-audit\.sh\b|\.\/scripts\/release-security-audit\.sh\b)/.test(
+              lines[index]
+            );
+        if (lines[index].trimStart().startsWith("#") || !invokes) continue;
         invocations.push(file);
 
         let context;
-        if (file.endsWith(".yml") || file.endsWith(".yaml")) {
-          const indent = lines[index].search(/\S/);
-          let end = index + 1;
-          while (end < lines.length) {
-            const nextIndent = lines[end].search(/\S/);
-            if (nextIndent >= 0 && nextIndent <= indent && /^\s*-\s/.test(lines[end])) break;
-            end += 1;
-          }
-          context = lines.slice(index, end).join("\n");
-          if (!/LLM_GATEWAY_REQUIRE_SHRINKWRAP:\s*["']?1\b/.test(context)) {
+        if (isWorkflow) {
+          context = workflowStep(lines, index);
+          const executableContext = context
+            .split("\n")
+            .filter(line => !line.trimStart().startsWith("#"))
+            .join("\n");
+          if (!/LLM_GATEWAY_REQUIRE_SHRINKWRAP:\s*["']?1\b/.test(executableContext)) {
             missing.push(`${file} -> ${lines[index].trim()}`);
           }
         } else {
@@ -184,5 +214,43 @@ describe("every release path asks for the strict mode", () => {
     expect(missing, `these invocations lack a bound strict flag: ${missing.join(", ")}`).toEqual(
       []
     );
+  });
+
+  it("recognizes a command inside a multiline workflow run step", () => {
+    const lines = [
+      "      - name: release gate",
+      "        env:",
+      '          LLM_GATEWAY_REQUIRE_SHRINKWRAP: "1"',
+      "        run: |",
+      "          npm run check",
+      "      - run: echo done",
+    ];
+    expect(workflowStep(lines, 4)).toContain("LLM_GATEWAY_REQUIRE_SHRINKWRAP");
+    expect(workflowStep(lines, 4)).not.toContain("echo done");
+  });
+
+  it("recognizes named steps and every supported audit shell spelling", () => {
+    for (const line of [
+      "        run: npm run security:audit",
+      "        run: npm run check",
+      "        run: bash scripts/release-security-audit.sh",
+      "          sh scripts/release-security-audit.sh",
+      "          ./scripts/release-security-audit.sh",
+    ]) {
+      expect(releaseInvocation.test(line), line).toBe(true);
+    }
+  });
+
+  it("does not let a following job provide the current step's strict flag", () => {
+    const lines = [
+      "      - run: npm run check",
+      "",
+      "  next-job:",
+      "    env:",
+      '      LLM_GATEWAY_REQUIRE_SHRINKWRAP: "1"',
+      "    steps:",
+      "      - run: echo done",
+    ];
+    expect(workflowStep(lines, 0)).toBe("      - run: npm run check\n");
   });
 });
