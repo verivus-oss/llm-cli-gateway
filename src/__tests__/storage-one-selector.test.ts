@@ -360,13 +360,15 @@ describe('backend = "none" and LLM_GATEWAY_LOGS_DB', () => {
     withToml("# no persistence section\n");
     vi.stubEnv("DATABASE_URL", APP_DSN);
     vi.stubEnv("LLM_GATEWAY_LOGS_DB", "  ");
-    const disposition = storageDisposition(loadPersistenceConfig(noopLogger));
+    const warn = vi.fn();
+    const disposition = storageDisposition(loadPersistenceConfig({ ...noopLogger, warn }));
     expect(disposition.jobStore.backend).toBe("postgres");
     expect(disposition.requestHistory).toMatchObject({
       enabled: true,
       engine: "postgres",
       followsPersistenceBackend: true,
     });
+    expect(warn).not.toHaveBeenCalled();
   });
 
   it("reports the recorder as following a postgres backend without topology inference", () => {

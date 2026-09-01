@@ -322,6 +322,18 @@ will be no 3.1.0 stable; the first candidate under the new number is
   listener, operating-system user, or deployment-topology inference is part of
   admission, and diagnostics do not render a DSN-derived target.
 
+  **BREAKING configuration cleanup:** a `[persistence].dsn` without
+  `backend = "postgres"` is now refused at startup. Older versions silently
+  discarded that DSN and selected SQLite, which could leave durable data in an
+  engine the operator did not intend. Set the backend explicitly instead of
+  relying on the discarded value.
+
+  An empty or whitespace-only `LLM_GATEWAY_LOGS_DB` value is now treated as
+  unset, so request history follows the selected backend at its default
+  location. Older versions treated an empty value as an undocumented recorder
+  off switch. Use the literal `LLM_GATEWAY_LOGS_DB=none` when request history
+  must be disabled.
+
   A PostgreSQL connection, migration, or operation failure makes the affected
   subsystem fail closed. It is reported generically on health surfaces and
   does not trigger a SQLite fallback.

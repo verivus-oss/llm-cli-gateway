@@ -597,16 +597,21 @@ function applyEnvOverrides(
 
   const jobsDbEnv = process.env.LLM_GATEWAY_JOBS_DB;
   const logsDbEnv = process.env.LLM_GATEWAY_LOGS_DB;
-  // Empty string is treated as "not set" — only an explicitly non-empty value
-  // (or the literal "none") overrides the file/defaults. This avoids the
+  // Empty or whitespace-only input is treated as "not set". Only a value with
+  // content (including the literal "none") overrides the file/defaults. This avoids the
   // old footgun where `LLM_GATEWAY_LOGS_DB=` silently disabled persistence.
+  const dbEnvName = jobsDbEnv?.trim()
+    ? "LLM_GATEWAY_JOBS_DB"
+    : logsDbEnv?.trim()
+      ? "LLM_GATEWAY_LOGS_DB"
+      : undefined;
   const dbEnvRaw =
-    jobsDbEnv && jobsDbEnv.length > 0
+    dbEnvName === "LLM_GATEWAY_JOBS_DB"
       ? jobsDbEnv
-      : logsDbEnv && logsDbEnv.length > 0
+      : dbEnvName === "LLM_GATEWAY_LOGS_DB"
         ? logsDbEnv
         : undefined;
-  if (dbEnvRaw !== undefined) {
+  if (dbEnvName !== undefined && dbEnvRaw !== undefined) {
     const normalized = dbEnvRaw.trim().toLowerCase();
     // A PATH in these deprecated variables must not silently rewrite an
     // explicit backend. Previously it always won, so setting
@@ -621,7 +626,7 @@ function applyEnvOverrides(
     if (explicitBackend) {
       logWarn(
         logger,
-        `${jobsDbEnv && jobsDbEnv.length > 0 ? "LLM_GATEWAY_JOBS_DB" : "LLM_GATEWAY_LOGS_DB"} is set but [persistence].backend is explicitly configured; the config file wins. Remove the environment variable.`,
+        `${dbEnvName} is set but [persistence].backend is explicitly configured; the config file wins. Remove the environment variable.`,
         { backend: base.backend }
       );
       return out;
@@ -633,7 +638,7 @@ function applyEnvOverrides(
       out.backend = "sqlite";
       out.path = dbEnvRaw.trim();
     }
-    const which = jobsDbEnv && jobsDbEnv.length > 0 ? "LLM_GATEWAY_JOBS_DB" : "LLM_GATEWAY_LOGS_DB";
+    const which = dbEnvName;
     sources.envOverrides.push(which);
     logWarn(
       logger,

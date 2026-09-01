@@ -139,6 +139,8 @@ describe("the shrinkwrap step has two modes", () => {
 describe("every release path asks for the strict mode", () => {
   const releaseInvocation =
     /(?:^|\s)(?:npm run (?:security:audit|check)\b|(?:bash|sh)\s+scripts\/release-security-audit\.sh\b|\.\/scripts\/release-security-audit\.sh\b)/;
+  const shellReleaseInvocation =
+    /^\s*(?:env\s+)?(?:[A-Za-z_][A-Za-z0-9_]*=(?:"[^"]*"|'[^']*'|[^\s;&]+)\s+)*(?:npm run (?:security:audit|check)\b|(?:bash|sh)\s+scripts\/release-security-audit\.sh\b|\.\/scripts\/release-security-audit\.sh\b)/;
 
   function workflowStep(lines, invocationAt) {
     const invocationIndent = lines[invocationAt].search(/\S/);
@@ -208,9 +210,7 @@ describe("every release path asks for the strict mode", () => {
       for (let index = 0; index < lines.length; index += 1) {
         const invokes = isWorkflow
           ? releaseInvocation.test(lines[index])
-          : /^\s*(?:npm run (?:security:audit|check)\b|(?:bash|sh)\s+scripts\/release-security-audit\.sh\b|\.\/scripts\/release-security-audit\.sh\b)/.test(
-              lines[index]
-            );
+          : shellReleaseInvocation.test(lines[index]);
         if (lines[index].trimStart().startsWith("#") || !invokes) continue;
         invocations.push(file);
 
@@ -302,5 +302,14 @@ describe("every release path asks for the strict mode", () => {
     expect(
       shellHasExactStrictBinding(["LLM_GATEWAY_REQUIRE_SHRINKWRAP=1 npm run security:audit"], 0)
     ).toBe(true);
+  });
+
+  it("discovers release commands with inline environment assignments", () => {
+    expect(
+      shellReleaseInvocation.test("LLM_GATEWAY_REQUIRE_SHRINKWRAP=1 npm run security:audit")
+    ).toBe(true);
+    expect(shellReleaseInvocation.test("env LLM_GATEWAY_REQUIRE_SHRINKWRAP=0 npm run check")).toBe(
+      true
+    );
   });
 });

@@ -142,12 +142,12 @@ describe("doctor reports the policy rather than deciding one", () => {
     expect(storage.flight_recorder.request_rows).toBe(1);
   });
 
-  it("reports invalid persistence configuration without opening a default recorder", async () => {
+  it("reports invalid persistence configuration even with an existing recorder", async () => {
     writeFileSync(
       join(dir, "config.toml"),
       '[persistence]\nbackend = "postgres"\ndsn = "postgresql://unterminated'
     );
-    const storage = await collectStorageHealth();
+    const storage = await collectStorageHealth(recorder);
     expect(storage.flight_recorder).toMatchObject({
       state: "unavailable",
       path: null,
