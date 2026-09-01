@@ -292,6 +292,10 @@ import {
 import { FlightOwnership } from "./flight-ownership.js";
 import { formatStorageDisposition, storageDisposition } from "./storage-disposition.js";
 import {
+  POSTGRES_RECORDER_TARGET,
+  postgresFailureMessage,
+} from "./storage/postgres-diagnostics.js";
+import {
   resolvePromptInput,
   PromptPartsSchema,
   assembleClaudeCacheBlocks,
@@ -680,10 +684,8 @@ let approvalManager: ApprovalManager | null = null;
 
 function getFlightRecorder(runtimeLogger: GatewayLogger = logger): FlightRecorderLike {
   // The recorder is told what `[persistence].backend` asked for AND which
-  // credentials it may hold. It honours "postgres" when the deployment shape
-  // admits transcript bodies and refuses out loud otherwise: see
-  // flightRecorderEngineDecision. Resolved through getPersistenceConfig so the
-  // config is loaded once for both subsystems.
+  // credentials it may hold. The backend is authoritative; a PostgreSQL
+  // failure is unavailable rather than an implicit SQLite fallback.
   const persistence = getPersistenceConfig(runtimeLogger);
   flightRecorder ??= createFlightRecorder(runtimeLogger, persistence.backend, persistence.roleDsns);
   return flightRecorder;
@@ -741,6 +743,30 @@ function getProvidersConfig(runtimeLogger: GatewayLogger = logger): ProvidersCon
  */
 let retentionSweeper: RetentionSweeper | null = null;
 
+/**
+ * Build the process retention surface from the same persistence decision as
+ * the runtime. Keeping the PostgreSQL failure formatter inside this factory
+ * makes the health-safe wiring directly testable rather than a fragile option
+ * at one call site in main().
+ */
+export function createRuntimeRetentionSweeper(input: {
+  recorder: FlightRecorderLike;
+  validationRuns: JobStore | null;
+  persistence: PersistenceConfig;
+  logger: GatewayLogger;
+}): RetentionSweeper {
+  return new RetentionSweeper({
+    recorder: input.recorder,
+    validationRuns:
+      input.validationRuns && isValidationRunStore(input.validationRuns)
+        ? input.validationRuns
+        : null,
+    policy: persistenceRetentionPolicy(input.persistence),
+    logger: input.logger,
+    failureMessage: input.persistence.backend === "postgres" ? postgresFailureMessage : undefined,
+  });
+}
+
 function getJobStore(runtimeLogger: GatewayLogger = logger): JobStore | null {
   if (jobStoreInitialized) return jobStore;
   jobStoreInitialized = true;
@@ -757,14 +783,14 @@ function newAsyncJobManager(
   metrics: PerformanceMetrics,
   runtimeLogger: GatewayLogger,
   store: JobStore | null = getJobStore(runtimeLogger),
-  fr: FlightRecorderLike = getFlightRecorder(runtimeLogger)
+  fr: FlightRecorderLike = getFlightRecorder(runtimeLogger),
+  pc: PersistenceConfig = getPersistenceConfig(runtimeLogger)
 ): AsyncJobManager {
   // Issue #139 (durable lease): the blanket startup orphan sweep is gone. Every
   // instance registers a lease and runs the per-job fencing sweep, which is safe
   // on a shared store because heartbeat and sweep serialize on the job row. The
   // interim ownsOrphanRecovery flag is deprecated (parsed + warned in config.ts)
   // and no longer load-bearing.
-  const pc = getPersistenceConfig(runtimeLogger);
   return new AsyncJobManager(
     runtimeLogger,
     (cli, durationMs, success) => {
@@ -1276,19 +1302,33 @@ export function resolveGatewayServerRuntime(
   options: { isolateState?: boolean } = {}
 ): GatewayServerRuntime {
   const runtimeLogger = deps.logger ?? logger;
+  // Resolve the selector before any dependency that follows it. An injected
+  // persistence config must not be reported by health while the recorder and
+  // lease settings were constructed from an unrelated ambient config.
+  const runtimePersistence = deps.persistence ?? getPersistenceConfig(runtimeLogger);
   const runtimeSessionManager = deps.sessionManager ?? sessionManager;
   const runtimePerformanceMetrics =
     deps.performanceMetrics ??
     (options.isolateState ? new PerformanceMetrics() : performanceMetrics);
   // Resolve flight recorder BEFORE async manager so isolateState managers
   // can be wired with the same recorder instance the runtime exposes.
-  const runtimeFlightRecorder = deps.flightRecorder ?? getFlightRecorder(runtimeLogger);
+  const runtimeFlightRecorder =
+    deps.flightRecorder ??
+    (deps.persistence
+      ? createFlightRecorder(runtimeLogger, runtimePersistence.backend, runtimePersistence.roleDsns)
+      : getFlightRecorder(runtimeLogger));
   const runtimeAsyncJobManager =
     deps.asyncJobManager ??
     (options.isolateState
       ? // Factory-created test/HTTP session servers must not mark another instance's
         // durable jobs orphaned. Stdio startup injects the process-global manager.
-        newAsyncJobManager(runtimePerformanceMetrics, runtimeLogger, null, runtimeFlightRecorder)
+        newAsyncJobManager(
+          runtimePerformanceMetrics,
+          runtimeLogger,
+          null,
+          runtimeFlightRecorder,
+          runtimePersistence
+        )
       : getAsyncJobManager(runtimeLogger));
   const runtimeApprovalManager =
     deps.approvalManager ??
@@ -1321,7 +1361,7 @@ export function resolveGatewayServerRuntime(
     approvalManager: runtimeApprovalManager,
     flightRecorder: runtimeFlightRecorder,
     logger: runtimeLogger,
-    persistence: deps.persistence ?? getPersistenceConfig(runtimeLogger),
+    persistence: runtimePersistence,
     cacheAwareness: deps.cacheAwareness ?? getCacheAwarenessConfig(runtimeLogger),
     compression: deps.compression ?? getCompressionConfig(runtimeLogger),
     providers: deps.providers ?? getProvidersConfig(runtimeLogger),
@@ -22572,7 +22612,7 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
 
   server.tool(
     "llm_process_health",
-    "Report gateway process health: async-job manager state, the resolved job-store persistence configuration, and the flight recorder's separate engine and path (the two do NOT share a backend setting).",
+    "Report gateway process health: async-job manager state, the resolved durable persistence configuration, and flight-recorder health on that configured engine.",
     {},
     {
       title: "Gateway process health",
@@ -22655,34 +22695,27 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
               ? `Async job persistence is configured (backend = '${persistence.backend}') but the durable job store failed to open, so *_request_async / llm_job_* tools are NOT registered on this gateway. Check gateway startup logs for the store-open error.`
               : "Async job persistence is attached but durable admission is temporarily disabled while its heartbeat lease recovers. Existing async tools fail closed until admission is restored.",
       };
-      // The flight recorder is a SEPARATE subsystem from the job store, with its
-      // own on/off switch (LLM_GATEWAY_LOGS_DB). It follows
-      // [persistence].backend only when the deployment shape admits transcript
-      // bodies; `engineDeferredBecause` names the refusal when it does not.
-      //
-      // Reporting only the job store is what makes the split invisible: on a
-      // postgres host this tool answered `backend: "postgres", dbPath: null`
-      // while every request body sat in a SQLite file it never mentioned, so a
-      // caller looking for request history went to Postgres and found none.
-      // docs/plans/storage-unification.md is the fix; until it lands, the split
-      // is at least stated rather than hidden.
+      // The flight recorder keeps its own on/off switch
+      // (LLM_GATEWAY_LOGS_DB), but its engine follows [persistence].backend.
       // obs: `enabled` is DERIVED from the recorder's own state, and the state
       // is reported beside it. `!(x instanceof NoopFlightRecorder)` was the
       // whole defect: it answered `false` for a recorder the operator turned
       // off and for one that failed to open, and the warning below then named
       // LLM_GATEWAY_LOGS_DB in both cases.
       const recorderEnabled = disposition.requestHistory.enabled;
-      // s7: the recorder now runs through the storage port's SQLite driver and
-      // is TOLD what [persistence].backend asked for. `engineDeferredBecause`
-      // is the difference between a setting that is ignored and one that is
-      // refused with a reason.
-      const recorderEngine = flightRecorderEngineDecision(persistence.backend, persistence.dsn);
+      const recorderEngine = flightRecorderEngineDecision(persistence.backend);
       const recorderMessage = flightRecorderHealthMessage(recorderHealth);
       const flightRecorderBlock = {
         engine: recorderEnabled ? recorderEngine.engine : null,
         // The recorder's OWN target, so a postgres host is not shown the SQLite
         // file it stopped writing to.
-        path: recorderHealth.path ?? (recorderEnabled ? resolveFlightRecorderDbPath() : null),
+        path:
+          recorderHealth.path ??
+          (recorderEnabled
+            ? recorderEngine.engine === "postgres"
+              ? POSTGRES_RECORDER_TARGET
+              : resolveFlightRecorderDbPath()
+            : null),
         enabled: recorderEnabled,
         // The five-way answer. `enabled: false` alone could not tell an
         // operator whether to change a setting or to go and look at a file.
@@ -22694,26 +22727,15 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
         closed: recorderHealth.closed,
         // Stated as a fact rather than implied, because the whole failure mode
         // is a caller assuming one backend setting covers both subsystems.
-        followsPersistenceBackend: recorderEngine.deferredBecause === undefined,
+        followsPersistenceBackend: disposition.requestHistory.followsPersistenceBackend,
         engineRequested: recorderEngine.requested ?? null,
-        engineDeferredBecause: recorderEngine.deferredBecause ?? null,
-        engineAdmittedBecause: recorderEngine.admission?.admitted
-          ? recorderEngine.admission.evidence
-          : null,
         holds: "requests (llm_request_list, llm_request_result)",
-        // Composed from two INDEPENDENT facts rather than a chain of else-ifs:
-        // a recorder can be degraded AND split, and the old chain reported at
-        // most one of them because "not enabled" short-circuited everything.
+        // A failure and the one-time no-migration notice are independent.
         warning:
           [
             recorderMessage,
-            recorderEnabled &&
-            recorderEngine.engine !== persistence.backend &&
-            persistence.backend !== "none"
-              ? `Storage is SPLIT: request history is in ${recorderEngine.engine} at ${recorderHealth.path}, while the job store is '${persistence.backend}'. No single database holds a whole request. If this gateway previously ran on sqlite, that same file also still contains an abandoned 'jobs' table which is frozen at the switchover and will answer queries as though it were live. Read through llm_request_list / llm_request_result / llm_job_result, which span the split.`
-              : null,
             recorderEnabled && recorderEngine.engine === "postgres"
-              ? `Request history moved to PostgreSQL when this gateway started. Rows written BEFORE the switch are still in ${resolveFlightRecorderDbPath()} and were NOT migrated; nothing reads them from here.`
+              ? `Request history is using PostgreSQL. Rows written to the previous SQLite recorder, if any, are still in ${resolveFlightRecorderDbPath()} and were NOT migrated; nothing reads them from here.`
               : null,
           ]
             .filter((line): line is string => line !== null)
@@ -23909,10 +23931,10 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
 // Async Initialization
 //──────────────────────────────────────────────────────────────────────────────
 
-async function initializeSessionManager(): Promise<void> {
+async function initializeSessionManager(persistence: PersistenceConfig): Promise<void> {
   // Pass the runtime logger so the deprecated-DATABASE_URL warning reaches
   // stderr rather than being swallowed by the default noop logger.
-  const config = loadConfig(undefined, logger);
+  const config = loadConfig(persistence, logger);
 
   if (config.database) {
     logger.info("Initializing PostgreSQL session manager");
@@ -23973,11 +23995,8 @@ function registerHealthResource(server: McpServer): void {
       },
       async () => {
         const health = await checkHealth(db!);
-        // The recorder rides along because this resource exists only on a
-        // PostgreSQL host, which is precisely the host where request history
-        // is in a DIFFERENT engine that this block never mentioned. A green
-        // Postgres answer here said nothing about whether the transcript file
-        // was readable.
+        // The recorder rides along because PostgreSQL connectivity alone does
+        // not prove that transcript reads are healthy.
         const recorder = flightRecorderHealth(flightRecorder);
         return {
           contents: [
@@ -24671,8 +24690,11 @@ async function main() {
     "stdio";
   logger.info(`Starting llm-cli-gateway MCP server with ${transportMode} transport`);
 
-  // Initialize session manager first
-  await initializeSessionManager();
+  // Resolve the single backend snapshot once, before constructing any durable
+  // subsystem. A config replacement during startup must not put sessions on a
+  // different engine or DSN from jobs and request history.
+  const persistence = getPersistenceConfig(logger);
+  await initializeSessionManager(persistence);
 
   // Phase-3: warm the provider capability memo in the background (fire-and-forget)
   // so the read surfaces (models://<cli>, list_models) can serve live/cached
@@ -24681,7 +24703,6 @@ async function main() {
   // fault-isolated). Read surfaces peek this memo synchronously.
   void warmProviderCapabilities({ logger }).catch(() => undefined);
 
-  const persistence = getPersistenceConfig(logger);
   // Built before the disposition is reported, so "request history is being
   // written" is the recorder's real state and not the configured intent.
   const startupRecorder = getFlightRecorder(logger);
@@ -24729,10 +24750,10 @@ async function main() {
   // store has settled so `validationRuns` is the store that actually opened,
   // not the one that was configured.
   const retentionStore = getJobStore(logger);
-  retentionSweeper = new RetentionSweeper({
+  retentionSweeper = createRuntimeRetentionSweeper({
     recorder: getFlightRecorder(logger),
-    validationRuns: retentionStore && isValidationRunStore(retentionStore) ? retentionStore : null,
-    policy: persistenceRetentionPolicy(persistence),
+    validationRuns: retentionStore,
+    persistence,
     logger,
   });
   const sweepInterval = persistence.retentionSweepIntervalMs ?? DEFAULT_RETENTION_SWEEP_INTERVAL_MS;

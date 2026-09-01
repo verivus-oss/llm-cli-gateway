@@ -21,7 +21,8 @@ import type { QualityTier } from "./least-cost-types.js";
 // Zod schemas for configuration validation
 const DatabaseUrlSchema = z
   .string()
-  .url()
+  .trim()
+  .min(1)
   .refine(url => url.startsWith("postgresql://") || url.startsWith("postgres://"), {
     message: "Database URL must start with postgresql:// or postgres://",
   });
@@ -110,8 +111,9 @@ export function resolveDatabaseUrlPrecedence(input: {
   explicitBackend: boolean;
   backend: PersistenceBackend;
 }): DatabaseUrlDecision {
-  const { databaseUrl, persistenceDsn, explicitBackend, backend } = input;
-  if (!databaseUrl || databaseUrl.length === 0) {
+  const { persistenceDsn, explicitBackend, backend } = input;
+  const databaseUrl = input.databaseUrl?.trim();
+  if (!databaseUrl) {
     return { outcome: "absent", connectionString: persistenceDsn, reason: null };
   }
   if (persistenceDsn && databaseUrl !== persistenceDsn) {
@@ -125,6 +127,16 @@ export function resolveDatabaseUrlPrecedence(input: {
     };
   }
   if (persistenceDsn) {
+    if (!explicitBackend) {
+      return {
+        outcome: "honoured",
+        connectionString: persistenceDsn,
+        reason:
+          "DATABASE_URL is deprecated; because no [persistence] backend is configured, " +
+          "it selects PostgreSQL for every backend-governed durable subsystem. Move the " +
+          'same URL to [persistence].dsn with backend = "postgres".',
+      };
+    }
     return {
       outcome: "redundant",
       connectionString: persistenceDsn,
@@ -135,16 +147,14 @@ export function resolveDatabaseUrlPrecedence(input: {
     };
   }
   if (explicitBackend) {
-    // An operator who WROTE DOWN a non-postgres backend has chosen where
-    // durable state lives. Honouring DATABASE_URL here would put sessions in
-    // Postgres while jobs stayed on that backend: the exact split this
-    // selector exists to prevent, and reachable with `backend = "sqlite"`,
-    // `"memory"` or `"none"`.
+    // Another persistence selector has chosen where durable state lives.
+    // Honouring DATABASE_URL here would put sessions in Postgres while jobs
+    // stayed on that backend: the exact split this selector exists to prevent.
     return {
       outcome: "ignored_explicit_backend",
       connectionString: null,
       reason:
-        "DATABASE_URL is set but [persistence].backend is explicitly configured as " +
+        "DATABASE_URL is set but the persistence backend is already selected as " +
         `"${backend}"; ignoring it. Honouring it would put sessions in ` +
         "Postgres while jobs stay on the configured backend. Remove the variable, or " +
         'set [persistence] backend = "postgres" with a dsn.',
@@ -201,10 +211,15 @@ export function loadConfig(
       : DEFAULT_SESSION_TTL_SECONDS;
 
   const persistenceDsn = persistence.backend === "postgres" ? persistence.dsn : null;
+  const backendSelectedOutsideDatabaseUrl =
+    persistence.explicitBackend ||
+    persistence.sources.envOverrides.some(
+      source => source === "LLM_GATEWAY_JOBS_DB" || source === "LLM_GATEWAY_LOGS_DB"
+    );
   const decision = resolveDatabaseUrlPrecedence({
     databaseUrl: process.env.DATABASE_URL,
     persistenceDsn,
-    explicitBackend: persistence.explicitBackend,
+    explicitBackend: backendSelectedOutsideDatabaseUrl,
     backend: persistence.backend,
   });
   if (decision.reason && !warnedSessionDatabaseUrl) {
@@ -219,9 +234,12 @@ export function loadConfig(
     return { sessionTtl };
   }
 
-  // Validate URL
+  // Validate the category only. PostgreSQL accepts URI forms, including
+  // hostless socket URLs with userinfo, that WHATWG URL parsers reject. The
+  // driver owns the rest of the syntax and connection validation.
+  let validatedConnectionString: string;
   try {
-    DatabaseUrlSchema.parse(connectionString);
+    validatedConnectionString = DatabaseUrlSchema.parse(connectionString);
   } catch (error) {
     throw new Error(
       `Invalid database URL: ${error instanceof Error ? error.message : String(error)}`,
@@ -231,7 +249,7 @@ export function loadConfig(
 
   return {
     database: {
-      connectionString,
+      connectionString: validatedConnectionString,
       pool: {
         max: 10,
         idleTimeoutMillis: 30000,
@@ -242,9 +260,11 @@ export function loadConfig(
     // Per-role credentials only ever come from `[persistence.roles]`, so a
     // legacy DATABASE_URL deployment gets none and its driver holds `app`
     // alone, which is what it holds today.
-    roleDsns: connectionString === persistenceDsn ? persistence.roleDsns : {},
+    roleDsns: validatedConnectionString === persistenceDsn ? persistence.roleDsns : {},
     sessionTtl,
-    databaseSource: connectionString === persistenceDsn ? "persistence" : "env",
+    databaseSource: persistence.sources.envOverrides.includes("DATABASE_URL")
+      ? "env"
+      : "persistence",
   };
 }
 
@@ -346,7 +366,7 @@ const PersistenceSchema = z
     backend: z.enum(PERSISTENCE_BACKENDS).default("sqlite"),
     roles: PersistenceRolesSchema.optional(),
     path: z.string().optional(),
-    dsn: z.string().optional(),
+    dsn: DatabaseUrlSchema.optional(),
     retentionDays: z.number().positive().default(DEFAULT_JOB_RETENTION_DAYS),
     retention: PersistenceRetentionSchema.default({}),
     dedupWindowMs: z.number().int().nonnegative().default(DEFAULT_DEDUP_WINDOW_MS),
@@ -536,8 +556,8 @@ function readPersistenceFile(
     const parsed = TOML.parse(text) as Record<string, unknown>;
     return { raw: parsed?.persistence, sourcePath: configPath };
   } catch (err) {
-    logger.error(`Failed to parse gateway config at ${configPath}; using defaults`, err);
-    return { raw: undefined, sourcePath: null };
+    logger.error(`Failed to parse gateway config at ${configPath}; refusing defaults`, err);
+    throw new Error(`Failed to parse gateway config at ${configPath}`, { cause: err });
   }
 }
 
@@ -577,16 +597,21 @@ function applyEnvOverrides(
 
   const jobsDbEnv = process.env.LLM_GATEWAY_JOBS_DB;
   const logsDbEnv = process.env.LLM_GATEWAY_LOGS_DB;
-  // Empty string is treated as "not set" — only an explicitly non-empty value
-  // (or the literal "none") overrides the file/defaults. This avoids the
+  // Empty or whitespace-only input is treated as "not set". Only a value with
+  // content (including the literal "none") overrides the file/defaults. This avoids the
   // old footgun where `LLM_GATEWAY_LOGS_DB=` silently disabled persistence.
+  const dbEnvName = jobsDbEnv?.trim()
+    ? "LLM_GATEWAY_JOBS_DB"
+    : logsDbEnv?.trim()
+      ? "LLM_GATEWAY_LOGS_DB"
+      : undefined;
   const dbEnvRaw =
-    jobsDbEnv && jobsDbEnv.length > 0
+    dbEnvName === "LLM_GATEWAY_JOBS_DB"
       ? jobsDbEnv
-      : logsDbEnv && logsDbEnv.length > 0
+      : dbEnvName === "LLM_GATEWAY_LOGS_DB"
         ? logsDbEnv
         : undefined;
-  if (dbEnvRaw !== undefined) {
+  if (dbEnvName !== undefined && dbEnvRaw !== undefined) {
     const normalized = dbEnvRaw.trim().toLowerCase();
     // A PATH in these deprecated variables must not silently rewrite an
     // explicit backend. Previously it always won, so setting
@@ -594,15 +619,14 @@ function applyEnvOverrides(
     // different subsystem) rewrote an explicit `backend = "postgres"` or
     // `"memory"` to "sqlite". A config file being overridden by a variable that
     // does not appear to be about it is the worst kind of precedence rule.
-    //
-    // `= "none"` is deliberately EXEMPT and still wins: it is a documented kill
-    // switch for disabling persistence, and an operator setting it is asking
-    // for exactly that regardless of what the file says.
-    const explicitBackend = typeof base.backend === "string";
-    if (explicitBackend && normalized !== "none") {
+    // The same precedence applies to `none`. LLM_GATEWAY_LOGS_DB remains the
+    // recorder's independent off switch, but it no longer rewrites an explicit
+    // job-persistence backend as a side effect.
+    const explicitBackend = Object.hasOwn(base, "backend");
+    if (explicitBackend) {
       logWarn(
         logger,
-        `${jobsDbEnv && jobsDbEnv.length > 0 ? "LLM_GATEWAY_JOBS_DB" : "LLM_GATEWAY_LOGS_DB"} is set but [persistence].backend is explicitly configured; the config file wins. Remove the environment variable.`,
+        `${dbEnvName} is set but [persistence].backend is explicitly configured; the config file wins. Remove the environment variable.`,
         { backend: base.backend }
       );
       return out;
@@ -614,7 +638,7 @@ function applyEnvOverrides(
       out.backend = "sqlite";
       out.path = dbEnvRaw.trim();
     }
-    const which = jobsDbEnv && jobsDbEnv.length > 0 ? "LLM_GATEWAY_JOBS_DB" : "LLM_GATEWAY_LOGS_DB";
+    const which = dbEnvName;
     sources.envOverrides.push(which);
     logWarn(
       logger,
@@ -685,11 +709,25 @@ export function loadPersistenceConfig(logger: Logger = noopLogger): PersistenceC
     envOverrides: [],
   };
 
-  const merged = applyEnvOverrides(
-    (raw as Record<string, unknown> | undefined) ?? {},
-    logger,
-    sources
+  const rawPersistence = (raw as Record<string, unknown> | undefined) ?? {};
+  const base = { ...rawPersistence };
+  const legacyDatabaseUrl = process.env.DATABASE_URL?.trim();
+  const legacyFileSelector =
+    Boolean(process.env.LLM_GATEWAY_JOBS_DB?.trim()) ||
+    Boolean(process.env.LLM_GATEWAY_LOGS_DB?.trim());
+  const explicitEngineSelection = ["backend", "dsn", "path", "roles"].some(key =>
+    Object.hasOwn(rawPersistence, key)
   );
+  if (!explicitEngineSelection && legacyDatabaseUrl && !legacyFileSelector) {
+    // Backward compatibility without the old split: DATABASE_URL used to move
+    // sessions alone. When it is the only selector, treat it as a deprecated
+    // alias for the PostgreSQL backend so jobs and request history follow too.
+    base.backend = "postgres";
+    base.dsn = legacyDatabaseUrl;
+    sources.envOverrides.push("DATABASE_URL");
+  }
+
+  const merged = applyEnvOverrides(base, logger, sources);
 
   // Issue #139: one-time deprecation warning when the interim gate is set. The
   // durable lease supersedes it; the value is parsed but no longer load-bearing.
@@ -725,6 +763,11 @@ export function loadPersistenceConfig(logger: Logger = noopLogger): PersistenceC
   const resolvedPath = backend === "sqlite" ? expandHome(parsed.path ?? DEFAULT_SQLITE_PATH) : null;
   const dsn = backend === "postgres" ? (parsed.dsn ?? null) : null;
 
+  if (backend !== "postgres" && parsed.dsn !== undefined) {
+    throw new Error(
+      `[persistence].dsn requires backend = "postgres"; this config selects backend = "${backend}".`
+    );
+  }
   if (backend === "postgres" && !dsn) {
     throw new Error(
       "[persistence].backend = 'postgres' requires a non-empty 'dsn' (e.g. postgresql://user:pw@host/db)"
@@ -791,12 +834,10 @@ export function loadPersistenceConfig(logger: Logger = noopLogger): PersistenceC
     instanceGcMs: parsed.instanceGcMs,
     asyncJobsEnabled,
     sources,
-    // Read from the FILE, not from `merged`: `applyEnvOverrides` synthesises a
-    // backend from the legacy LLM_GATEWAY_LOGS_DB / _JOBS_DB variables, so
-    // `merged.backend` is a string on any host that sets either, including the
-    // test harness. Explicit means an operator wrote a backend down, which is
-    // the same source the env-override precedence rule above consults.
-    explicitBackend: typeof (raw as Record<string, unknown> | undefined)?.backend === "string",
+    // Read from the FILE, not from `merged`: legacy environment variables can
+    // synthesise a backend. A path, DSN, or roles table also makes the engine
+    // choice explicit enough that DATABASE_URL must not redirect sessions.
+    explicitBackend: explicitEngineSelection,
   };
 }
 

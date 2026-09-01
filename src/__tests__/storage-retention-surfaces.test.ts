@@ -141,6 +141,35 @@ describe("doctor reports the policy rather than deciding one", () => {
     expect(storage.retention.requests_beyond_retention).toBe(0);
     expect(storage.flight_recorder.request_rows).toBe(1);
   });
+
+  it("reports invalid persistence configuration even with an existing recorder", async () => {
+    writeFileSync(
+      join(dir, "config.toml"),
+      '[persistence]\nbackend = "postgres"\ndsn = "postgresql://unterminated'
+    );
+    const storage = await collectStorageHealth(recorder);
+    expect(storage.flight_recorder).toMatchObject({
+      state: "unavailable",
+      path: null,
+      error: "Persistence configuration is invalid",
+    });
+    expect(storage.warnings.join(" ")).toContain("persistence configuration is invalid");
+  });
+
+  it("reports invalid persistence even when the recorder is explicitly disabled", async () => {
+    writeFileSync(
+      join(dir, "config.toml"),
+      '[persistence]\nbackend = "postgres"\ndsn = "postgresql://unterminated'
+    );
+    vi.stubEnv("LLM_GATEWAY_LOGS_DB", "none");
+    const storage = await collectStorageHealth();
+    expect(storage.flight_recorder).toMatchObject({
+      state: "unavailable",
+      path: null,
+      error: "Persistence configuration is invalid",
+    });
+    expect(storage.warnings.join(" ")).toContain("persistence configuration is invalid");
+  });
 });
 
 describe("`storage compact` is an operator action, never a timer", () => {
@@ -200,6 +229,19 @@ describe("`storage compact` is an operator action, never a timer", () => {
     expect(text).toMatch(/unbounded:\s+requests, wedgedValidationRuns/);
     expect(text).toMatch(/transcript file/);
     expect(statSync(dbPath).size).toBe(before);
+  });
+
+  it("reports an explicitly disabled PostgreSQL recorder as disabled", async () => {
+    writeFileSync(
+      join(dir, "config.toml"),
+      `[persistence]\nbackend = "postgres"\ndsn = "postgresql://app@127.0.0.1/gateway"\n`
+    );
+    vi.stubEnv("LLM_GATEWAY_LOGS_DB", "none");
+
+    await runStorageCommand(["status"]);
+
+    expect(out.join(" ")).toContain("flight recorder is disabled");
+    expect(out.join(" ")).not.toContain("Request history is in PostgreSQL");
   });
 
   it("refuses an unknown subcommand instead of doing something", async () => {

@@ -158,6 +158,17 @@ describe("DATABASE_URL precedence matrix", () => {
       outcome: "absent",
       connectionString: null,
     },
+    {
+      name: "DATABASE_URL is normalized before it is compared with the configured DSN",
+      input: {
+        databaseUrl: `  ${APP_DSN}\n`,
+        persistenceDsn: APP_DSN,
+        explicitBackend: false,
+        backend: "postgres",
+      },
+      outcome: "honoured",
+      connectionString: APP_DSN,
+    },
   ];
 
   for (const cell of cells) {
@@ -329,6 +340,8 @@ describe('backend = "none" and LLM_GATEWAY_LOGS_DB', () => {
     const lines = formatStorageDisposition(disposition).join("\n");
     expect(lines).toContain("disables async job persistence ONLY");
     expect(lines).toContain("request history is being written");
+    expect(lines).toContain('is independent of [persistence].backend = "none"');
+    expect(lines).not.toContain("does NOT follow [persistence].backend");
   });
 
   it("LLM_GATEWAY_LOGS_DB=none disables the recorder and the log says history is not written", () => {
@@ -336,21 +349,50 @@ describe('backend = "none" and LLM_GATEWAY_LOGS_DB', () => {
     vi.stubEnv("LLM_GATEWAY_LOGS_DB", "none");
     const disposition = storageDisposition(loadPersistenceConfig(noopLogger));
     expect(disposition.requestHistory.enabled).toBe(false);
+    expect(disposition.requestHistory.followsPersistenceBackend).toBe(false);
     expect(disposition.requestHistory.decidedBy).toBe("LLM_GATEWAY_LOGS_DB");
     expect(formatStorageDisposition(disposition).join("\n")).toContain(
       "request history is NOT being written"
     );
   });
 
-  it("reports the recorder as not following a postgres backend, with the reason", () => {
+  it("treats an empty recorder variable as unset on a sole DATABASE_URL host", () => {
+    withToml("# no persistence section\n");
+    vi.stubEnv("DATABASE_URL", APP_DSN);
+    vi.stubEnv("LLM_GATEWAY_LOGS_DB", "  ");
+    const warn = vi.fn();
+    const disposition = storageDisposition(loadPersistenceConfig({ ...noopLogger, warn }));
+    expect(disposition.jobStore.backend).toBe("postgres");
+    expect(disposition.requestHistory).toMatchObject({
+      enabled: true,
+      engine: "postgres",
+      followsPersistenceBackend: true,
+    });
+    expect(warn).not.toHaveBeenCalled();
+  });
+
+  it("reports the recorder as following a postgres backend without topology inference", () => {
     withToml(["[persistence]", 'backend = "postgres"', `dsn = "${APP_DSN}"`].join("\n"));
     vi.stubEnv("LLM_GATEWAY_LOGS_DB", join(tempDir, "logs.db"));
     const disposition = storageDisposition(loadPersistenceConfig(noopLogger));
-    expect(disposition.requestHistory.followsPersistenceBackend).toBe(false);
+    expect(disposition.requestHistory.engine).toBe("postgres");
+    expect(disposition.requestHistory.decidedBy).toBe("default");
+    expect(disposition.requestHistory.followsPersistenceBackend).toBe(true);
     expect(disposition.requestHistory.engineRequested).toBe("postgres");
-    expect(disposition.requestHistory.engineDeferredBecause).toContain(
-      "postgres-security-hardening.md"
+    expect(
+      disposition.deprecatedInputs.find(input => input.name === "LLM_GATEWAY_LOGS_DB")
+    ).toMatchObject({ outcome: "recorder_path_ignored" });
+    expect(formatStorageDisposition(disposition).join("\n")).toContain(
+      'IS following [persistence].backend = "postgres"'
     );
+  });
+
+  it("does not claim that an SQLite recorder follows memory persistence", () => {
+    withToml(["[persistence]", 'backend = "memory"', "acknowledgeEphemeral = true"].join("\n"));
+    vi.stubEnv("LLM_GATEWAY_LOGS_DB", join(tempDir, "logs.db"));
+    const disposition = storageDisposition(loadPersistenceConfig(noopLogger));
+    expect(disposition.requestHistory.engine).toBe("sqlite");
+    expect(disposition.requestHistory.followsPersistenceBackend).toBe(false);
   });
 });
 

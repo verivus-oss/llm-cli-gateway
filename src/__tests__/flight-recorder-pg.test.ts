@@ -10,17 +10,22 @@
  * Isolated in its OWN PostgreSQL schema through the DSN's `options` keyword, so
  * it neither sees nor leaves anything in `public` where the other -pg suites live.
  */
-import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
-import { readdirSync, readFileSync } from "node:fs";
+import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
+import { mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { Pool } from "pg";
 import { PostgresFlightRecorder } from "../flight-recorder-pg.js";
 import type { FlightLogResult, FlightLogStart } from "../flight-recorder.js";
+import { collectStorageHealth } from "../doctor.js";
 import { TEST_DATABASE_URL } from "./setup.js";
 
 const BASE_DSN = TEST_DATABASE_URL;
 const SCHEMA = `flight_pg_${process.pid}`;
 const MIRROR = `${SCHEMA}_mirror`;
+const INCOMPLETE = `${SCHEMA}_incomplete`;
+const NULLABLE_RANK = `${SCHEMA}_nullable_rank`;
+const DEFAULTLESS_RANK = `${SCHEMA}_defaultless_rank`;
 
 function scoped(schema: string): string {
   const url = new URL(BASE_DSN);
@@ -74,14 +79,23 @@ beforeAll(async () => {
   admin = new Pool({ connectionString: BASE_DSN });
   await admin.query(`DROP SCHEMA IF EXISTS ${SCHEMA} CASCADE`);
   await admin.query(`DROP SCHEMA IF EXISTS ${MIRROR} CASCADE`);
+  await admin.query(`DROP SCHEMA IF EXISTS ${INCOMPLETE} CASCADE`);
+  await admin.query(`DROP SCHEMA IF EXISTS ${NULLABLE_RANK} CASCADE`);
+  await admin.query(`DROP SCHEMA IF EXISTS ${DEFAULTLESS_RANK} CASCADE`);
   await admin.query(`CREATE SCHEMA ${SCHEMA}`);
   await admin.query(`CREATE SCHEMA ${MIRROR}`);
+  await admin.query(`CREATE SCHEMA ${INCOMPLETE}`);
+  await admin.query(`CREATE SCHEMA ${NULLABLE_RANK}`);
+  await admin.query(`CREATE SCHEMA ${DEFAULTLESS_RANK}`);
 });
 
 afterAll(async () => {
   await recorder?.close();
   await admin.query(`DROP SCHEMA IF EXISTS ${SCHEMA} CASCADE`);
   await admin.query(`DROP SCHEMA IF EXISTS ${MIRROR} CASCADE`);
+  await admin.query(`DROP SCHEMA IF EXISTS ${INCOMPLETE} CASCADE`);
+  await admin.query(`DROP SCHEMA IF EXISTS ${NULLABLE_RANK} CASCADE`);
+  await admin.query(`DROP SCHEMA IF EXISTS ${DEFAULTLESS_RANK} CASCADE`);
   await admin.end();
 });
 
@@ -320,12 +334,8 @@ describe("a whole transcript round trip", () => {
     expect(recorder.health().closed).toBe(true);
   });
 
-  it("does not put a password on a health surface", () => {
-    // redactDsn itself is unit-tested in dsn-target-report.test.ts, which is
-    // NOT gated on PG_TESTS. Round 6 found every assertion about it living
-    // here, so `npm test` was green for four rounds while the function
-    // reported a server pg does not connect to.
-    expect(recorder.health().path).not.toContain("test:test");
+  it("uses an opaque identity on health surfaces", () => {
+    expect(recorder.health().path).toBe("postgresql");
   });
 });
 
@@ -352,18 +362,61 @@ describe("the five states", () => {
     }
   });
 
-  it("reports `degraded` with the real error when the server is unreachable", async () => {
+  it("does not copy a DSN-derived socket path into health", async () => {
+    const marker = "dsn-health-secret";
     const url = new URL(BASE_DSN);
-    url.port = "1";
-    const broken = new PostgresFlightRecorder({ app: url.toString() }, { redactSecrets: false });
+    url.searchParams.set("host", `/tmp/${marker}`);
+    const logError = vi.fn();
+    const broken = new PostgresFlightRecorder(
+      { app: url.toString() },
+      { redactSecrets: false, logger: { info: () => {}, error: logError } }
+    );
     try {
       await expect(broken.readStorageStats()).rejects.toThrow();
       const health = broken.health();
       expect(health.state).toBe("degraded");
-      expect(health.error).toBeTruthy();
+      expect(health.error).toBe("PostgreSQL operation failed");
+      expect(health.error).not.toContain(marker);
       expect(health.failureCount).toBeGreaterThan(0);
+      const logs = logError.mock.calls
+        .flat()
+        .map(value => (value instanceof Error ? value.message : String(value)))
+        .join(" ");
+      expect(logs).toContain(marker);
     } finally {
       await broken.close();
+    }
+  });
+
+  it("keeps doctor warnings opaque when its configured PostgreSQL recorder fails", async () => {
+    const marker = "doctor-dsn-health-secret";
+    const url = new URL(BASE_DSN);
+    url.searchParams.set("host", `/tmp/${marker}`);
+    const dir = mkdtempSync(join(tmpdir(), "doctor-pg-health-"));
+    const configPath = join(dir, "config.toml");
+    writeFileSync(
+      configPath,
+      ["[persistence]", 'backend = "postgres"', `dsn = ${JSON.stringify(url.toString())}`, ""].join(
+        "\n"
+      )
+    );
+    const savedConfig = process.env.LLM_GATEWAY_CONFIG;
+    const savedLogs = process.env.LLM_GATEWAY_LOGS_DB;
+    process.env.LLM_GATEWAY_CONFIG = configPath;
+    process.env.LLM_GATEWAY_LOGS_DB = join(dir, "unused-sqlite.db");
+    try {
+      const storage = await collectStorageHealth();
+      expect(storage.job_store.backend).toBe("postgres");
+      expect(storage.flight_recorder.path).toBe("postgresql");
+      expect(storage.flight_recorder.error).toBe("PostgreSQL operation failed");
+      expect(storage.warnings.join(" ")).not.toContain(marker);
+      expect(storage.warnings.join(" ")).toContain("PostgreSQL operation failed");
+    } finally {
+      if (savedConfig === undefined) delete process.env.LLM_GATEWAY_CONFIG;
+      else process.env.LLM_GATEWAY_CONFIG = savedConfig;
+      if (savedLogs === undefined) delete process.env.LLM_GATEWAY_LOGS_DB;
+      else process.env.LLM_GATEWAY_LOGS_DB = savedLogs;
+      rmSync(dir, { recursive: true, force: true });
     }
   });
 });
@@ -476,6 +529,71 @@ describe("the completion rank fence (migrations/023)", () => {
     const row = await recorder.readRequestById("imported-0");
     expect(row?.response).toBe("live overwrite");
   });
+});
+
+describe("readiness requires every transcript migration", () => {
+  it("rejects a migration-022-only schema before reporting authoritative reads", async () => {
+    const migration022 = readFileSync(
+      join(process.cwd(), "migrations/022_flight_recorder_transcripts.sql"),
+      "utf8"
+    );
+    await admin.query(
+      `SET search_path TO ${INCOMPLETE};
+       CREATE TABLE schema_migrations (version INTEGER PRIMARY KEY, name TEXT NOT NULL);
+       ${migration022}`
+    );
+    const logError = vi.fn();
+    const incomplete = new PostgresFlightRecorder(
+      { app: scoped(INCOMPLETE) },
+      {
+        redactSecrets: false,
+        logger: { info: () => {}, error: logError },
+      }
+    );
+    try {
+      await expect(incomplete.readStorageStats()).rejects.toThrow(/every transcript migration/);
+      expect(incomplete.health()).toMatchObject({
+        state: "degraded",
+        error: "PostgreSQL operation failed",
+      });
+      expect(incomplete.health().error).not.toContain("migration");
+      const logs = logError.mock.calls
+        .flat()
+        .map(value => (value instanceof Error ? value.message : String(value)))
+        .join(" ");
+      expect(logs).toContain("every transcript migration");
+    } finally {
+      await incomplete.close();
+    }
+  });
+
+  it.each([
+    [NULLABLE_RANK, "DROP NOT NULL"],
+    [DEFAULTLESS_RANK, "DROP DEFAULT"],
+  ])(
+    "rejects completion_rank when its write invariant is missing: %s",
+    async (schema, alteration) => {
+      await admin.query(
+        `SET search_path TO ${schema};
+       CREATE TABLE schema_migrations (version INTEGER PRIMARY KEY, name TEXT NOT NULL);
+       ${transcriptMigrations()}
+       ALTER TABLE gateway_metadata ALTER COLUMN completion_rank ${alteration}`
+      );
+      const incomplete = new PostgresFlightRecorder(
+        { app: scoped(schema) },
+        { redactSecrets: false, logger: { info: () => {}, error: () => {} } }
+      );
+      try {
+        await expect(incomplete.readStorageStats()).rejects.toThrow(/every transcript migration/);
+        expect(incomplete.health()).toMatchObject({
+          state: "degraded",
+          error: "PostgreSQL operation failed",
+        });
+      } finally {
+        await incomplete.close();
+      }
+    }
+  );
 });
 
 describe("the bootstrap and the migration are the same schema", () => {

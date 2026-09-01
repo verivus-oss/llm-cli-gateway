@@ -1,6 +1,8 @@
 # Postgres security hardening
 
-Status: draft. One change applied (2.1); everything else unimplemented.
+Status: historical hardening proposal. Its topology admission prerequisite is
+retired; the implemented storage decision was rechecked against
+`d302fbf3c3cf9931c644ee9c9ffefd0efde68c32`.
 Scope: the `llm-gateway-pg` deployment on `workhorse3`, and the preconditions
 for moving flight-recorder transcripts into Postgres.
 
@@ -16,11 +18,12 @@ rest before treating it as deployable.
 
 ## 1. Why this exists
 
-The gateway moved its control plane to Postgres, but the flight recorder is
-still SQLite-only (`flight-recorder.ts:24`), so prompt and response bodies land
-in `~/.llm-cli-gateway/logs.db`. See `storage-unification.md` for that problem.
-This document covers what the Postgres deployment must become before transcript
-bodies are moved into it.
+At the time this proposal was written, the gateway control plane used
+PostgreSQL while the flight recorder used SQLite. That historical split
+motivated the hardening work below. It is no longer an admission rule: at the
+named commit, `backend = "postgres"` selects PostgreSQL for every
+backend-governed durable subsystem, and operators own the deployment controls
+described here. File-backed operator records remain outside this selector.
 
 ## 2. Verified current state
 
@@ -623,61 +626,25 @@ OS user.
    transactional principal propagation (4.4).
 7. Envelope encryption of the three transcript columns.
 8. http principal granularity (4.5).
-9. Only then: transcripts into Postgres, per `storage-unification.md`.
+9. Configure `[persistence].backend = "postgres"` when PostgreSQL is the chosen
+   engine for every backend-governed durable subsystem.
 
-### 6.1 AMENDMENT 2026-08-22: the gate is deployment shape, not step 8
+### 6.1 AMENDMENT 2026-09-01: topology admission is retired
 
-Step 9 read as "finish 3 through 8 first". Applied literally it blocked the
-storage unification indefinitely on LUKS volumes and key management, and it was
-enforced that way through nodes s7 and s9.
+The earlier deployment-shape gate attempted to decide whether transcript bodies
+could enter PostgreSQL by inspecting the configured DSN, local listeners, and
+operating-system ownership. That is not a reliable security boundary and it made
+one explicit engine setting behave as two hidden settings.
 
-That reading is stricter than this document's own threat model supports.
+`[persistence].backend` is now authoritative. With `backend = "postgres"`, all
+durable subsystems use PostgreSQL. The DSN boundary establishes only that the
+configured value is a PostgreSQL URL. It does not attest transport security,
+credential scope, server ownership, encryption, or deployment topology.
 
-Section 3 says threat 1, a local process under the same OS user, is DOMINANT,
-that it "defeats the encryption controls available today", and that LUKS
-"answers threat 4 only". Steps 5 and 7, the two expensive ones, do nothing about
-the dominant threat. Section 3 then says the rest of the document addresses
-threats 2, 3 and 4.
-
-Now compare source and destination for the DEFAULT deployment. Transcripts sit
-today in `~/.llm-cli-gateway/logs.db`, mode 0600, owned by the account the
-provider CLIs run as. The Postgres in section 2 is `127.0.0.1:5432`, rootless
-podman, same host, same account, DSN in `config.toml` at 0600. Against threat 1
-those are the same exposure. Against threats 3 and 4 they are the same exposure,
-because the SQLite file is equally unencrypted and equally backed up.
-
-So for a local single-user deployment, moving transcripts into that Postgres is
-NOT a regression. The bar this document was being held to was "the destination
-must be better than the source". The honest bar is "not worse", and the local
-case already meets it.
-
-**What is still genuinely gated is the SHARED deployment.** A Postgres reachable
-by another principal, or one serving several gateway instances, or one reached
-over the OAuth-gated HTTP transport, is a different threat model, and
-`listen_addresses = *` is mitigated only by the podman port binding. There
-threats 2, 3 and 4 are real and steps 3 through 8 are the right answer.
-
-**Therefore the admission rule for transcript bodies is deployment shape:**
-
-- Loopback or unix-socket DSN, gateway and database under the same OS user:
-  transcripts may enter Postgres. This is the local developer tool this project
-  is, and it is threat-equivalent to the file it replaces.
-- Anything else, including any non-loopback host in the DSN: refused until
-  steps 3 through 8 are complete.
-
-The check fails CLOSED: a DSN it cannot prove is loopback is treated as remote.
-
-**Granted by the operator on 2026-08-22**, explicitly and in response to being
-shown the steps this gate was demanding. Named here rather than only in a
-commit message, because a lowered security bar should be attributable in the
-document that carries it, the way `[decisions].scope_0a` in
-storage-unification.dag.toml names the 2026-08-21 scope decision.
-
-This amendment lowers a bar that was set deliberately, so it is recorded here
-rather than applied quietly. What it does NOT do is claim the local case is
-secure against threat 1. Nothing in this document does. It claims only that
-SQLite was never secure against threat 1 either, and that a refactor is not the
-place to fix that.
+The controls in steps 1 through 8 remain deployment hardening guidance. They are
+the operator's responsibility and do not cause the gateway to redirect durable
+data to SQLite. A PostgreSQL failure leaves the affected subsystem unavailable,
+and health surfaces report it generically without rendering DSN-derived details.
 
 ## 7. Residual risks
 
@@ -688,14 +655,9 @@ place to fix that.
 - **Client certificates are still on-disk credentials.** Reduced, not
   eliminated; see 4.1.
 - **`listen_addresses = *`** is mitigated only by the podman port binding.
-- **A loopback tunnel defeats the 6.1 deployment-shape check.** `ssh -L
-  5432:remote:5432`, socat, or any forwarder owned by this user presents as a
-  loopback listener with our uid while the database is remote, and is ADMITTED.
-  The check proves the LISTENER's owner, not the PostgreSQL backend's, and under
-  rootless podman those differ by design. Closing it needs a server-side fact
-  such as `inet_client_addr()` after connecting, which is asynchronous and
-  therefore cannot gate the synchronous engine decision. That is a design
-  tension, not an oversight. Until this run it was disclosed only in host-local
-  evidence, which is to say nowhere a consumer of this repository could read it.
+- **A PostgreSQL URL is configuration, not a security attestation.** The gateway
+  does not infer whether the server is local, shared, tunneled, encrypted, or
+  correctly provisioned. Apply the controls in this plan for the deployment's
+  actual threat model.
 
 - **Row counts in this document are snapshots** and drift on a live system.

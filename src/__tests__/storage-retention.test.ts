@@ -489,6 +489,59 @@ describe("the sweeper reads the count it produces", () => {
     expect(report.subsystems.requests.eligible).toBeNull();
   });
 
+  it("uses the configured health-safe failure formatter", async () => {
+    const sweeper = new RetentionSweeper({
+      recorder: {
+        readStorageStats: async () => {
+          throw new Error("connect ENOENT /tmp/dsn-health-secret/.s.PGSQL.5432");
+        },
+        evictExpiredRequests: async () => 0,
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      } as any,
+      validationRuns: noRuns,
+      policy,
+      logger: noopLogger,
+      failureMessage: () => "PostgreSQL operation failed",
+    });
+    const report = await sweeper.sweep();
+    expect(report.subsystems.requests.error).toBe("PostgreSQL operation failed");
+    expect(report.subsystems.requests.error).not.toContain("dsn-health-secret");
+  });
+
+  it("does not label an absent optional validation store as a PostgreSQL failure", async () => {
+    const fake = fakeRecorder(0);
+    const sweeper = new RetentionSweeper({
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      recorder: fake.recorder as any,
+      validationRuns: null,
+      policy,
+      logger: noopLogger,
+      failureMessage: () => "PostgreSQL operation failed",
+    });
+
+    const report = await sweeper.sweep();
+    expect(report.subsystems.wedgedValidationRuns.eligible).toBeNull();
+    expect(report.subsystems.wedgedValidationRuns.deleted).toBe(0);
+    expect(report.subsystems.wedgedValidationRuns.error).toBeNull();
+
+    const failingStore = {
+      countWedgedValidationRuns: async () => {
+        throw new Error("connect ENOENT /tmp/retention-dsn-secret/.s.PGSQL.5432");
+      },
+      evictWedgedValidationRuns: async () => 0,
+    };
+    const failed = await new RetentionSweeper({
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      recorder: fake.recorder as any,
+      validationRuns: failingStore,
+      policy,
+      logger: noopLogger,
+      failureMessage: () => "PostgreSQL operation failed",
+    }).sweep();
+    expect(failed.subsystems.wedgedValidationRuns.error).toBe("PostgreSQL operation failed");
+    expect(failed.subsystems.wedgedValidationRuns.error).not.toContain("retention-dsn-secret");
+  });
+
   it("does nothing at all while every destructive bound is unset", async () => {
     const fake = fakeRecorder(7);
     const sweeper = new RetentionSweeper({

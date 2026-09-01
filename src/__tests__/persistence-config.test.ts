@@ -138,7 +138,7 @@ describe("loadPersistenceConfig", () => {
     expect(() => loadPersistenceConfig(noopLogger)).toThrow(/dsn/);
   });
 
-  it("LLM_GATEWAY_LOGS_DB=none env overrides file with deprecation warning", () => {
+  it("an explicit backend wins over LLM_GATEWAY_LOGS_DB=none for persistence", () => {
     pointToFile(
       [
         "[persistence]",
@@ -155,10 +155,10 @@ describe("loadPersistenceConfig", () => {
       debug: () => {},
       warn,
     });
-    expect(cfg.backend).toBe("none");
-    expect(cfg.sources.envOverrides).toContain("LLM_GATEWAY_LOGS_DB");
+    expect(cfg.backend).toBe("sqlite");
+    expect(cfg.sources.envOverrides).not.toContain("LLM_GATEWAY_LOGS_DB");
     expect(warn).toHaveBeenCalledWith(
-      expect.stringMatching(/LLM_GATEWAY_LOGS_DB is deprecated/),
+      expect.stringMatching(/explicitly configured/),
       expect.anything()
     );
   });

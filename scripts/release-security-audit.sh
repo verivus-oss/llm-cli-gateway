@@ -4,6 +4,18 @@ set -euo pipefail
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "${ROOT_DIR}"
 
+SHRINKWRAP_PATH="${ROOT_DIR}/npm-shrinkwrap.json"
+# Release mode must fail on the missing release input before any advisory
+# endpoint or other audit work can obscure the actual defect.
+if [ "${LLM_GATEWAY_REQUIRE_SHRINKWRAP:-0}" = "1" ] && [ ! -f "${SHRINKWRAP_PATH}" ]; then
+  echo "npm-shrinkwrap.json missing under LLM_GATEWAY_REQUIRE_SHRINKWRAP=1 - consumers would resolve their own (unpinned) transitive versions. It is generated, never committed: run node scripts/make-prod-shrinkwrap.mjs (pre-release.sh and the CI/publish workflows do this before auditing/packing)." >&2
+  exit 1
+fi
+if ! command -v flock >/dev/null 2>&1; then
+  echo "release-security-audit requires flock from util-linux to serialize generated shrinkwrap work" >&2
+  exit 1
+fi
+
 echo "==> internal-only paths must not be tracked"
 # This repo mirrors to a public GitHub repo as a PLAIN PUSH of shared history,
 # so a file committed here is public even if a later commit deletes it: git log
@@ -125,25 +137,78 @@ console.log(`node:sqlite confined to the adapter (${ADAPTER_REL}); no db.pragma(
 NODE
 
 echo "==> shrinkwrap presence + prod-projection parity"
-if [ ! -f npm-shrinkwrap.json ]; then
-  echo "npm-shrinkwrap.json missing — consumers would resolve their own (unpinned) transitive versions. It is generated, never committed: run node scripts/make-prod-shrinkwrap.mjs (pre-release.sh and the CI/publish workflows do this before auditing/packing)." >&2
-  exit 1
+# TWO MODES, because this step had exactly one and it made `npm run check`
+# permanently red.
+#
+# The shrinkwrap is generated at pack time and never committed (a committed one
+# is treated as the authoritative lockfile and breaks every `npm ci`). So a
+# clean developer tree never has it, this step exited 1 on every direct
+# `npm run check`, and the LAST step of that chain, verify:no-internal-mcp:check,
+# never ran at all: it sits behind this one in an && chain. A gate whose exit
+# code is constant reports nothing, and it hid a release invariant while doing
+# it.
+#
+# STRICT (release): absence is a failure, unchanged. CI, npm-publish and
+# pre-release.sh all generate the file before calling this, so if one of them
+# ever stops doing so, this still says: nothing was pinned.
+#
+# DEV (default): generate it for the duration of the run and remove it after.
+# Not a skip. The steps below PACK A TARBALL and install it as a consumer, so
+# without the file they would audit a materially different artifact from the one
+# a release ships. Generating it is what keeps `npm run check` equivalent to the
+# release audit rather than a weaker relative of it.
+#
+# The generated file lives at a fixed path in the checkout. Serialize this
+# whole section so two audits cannot remove or replace each other's subject.
+AUDIT_LOCK="$(git rev-parse --git-path llm-gateway-security-audit.lock)"
+exec 9>"${AUDIT_LOCK}"
+flock 9
+
+SHRINKWRAP_MADE_HERE=0
+EXPECTED_SHRINKWRAP=""
+TMP_DIR=""
+cleanup_audit_temporaries() {
+  [ -n "${EXPECTED_SHRINKWRAP}" ] && rm -f "${EXPECTED_SHRINKWRAP}"
+  [ -n "${TMP_DIR}" ] && rm -rf "${TMP_DIR}"
+  [ "${SHRINKWRAP_MADE_HERE}" = "1" ] && rm -f "${SHRINKWRAP_PATH}"
+  return 0
+}
+trap cleanup_audit_temporaries EXIT
+
+if [ ! -f "${SHRINKWRAP_PATH}" ]; then
+  if [ "${LLM_GATEWAY_REQUIRE_SHRINKWRAP:-0}" = "1" ]; then
+    echo "npm-shrinkwrap.json missing under LLM_GATEWAY_REQUIRE_SHRINKWRAP=1 - consumers would resolve their own (unpinned) transitive versions. It is generated, never committed: run node scripts/make-prod-shrinkwrap.mjs (pre-release.sh and the CI/publish workflows do this before auditing/packing)." >&2
+    exit 1
+  fi
+  echo "npm-shrinkwrap.json absent, which is the normal state of a checkout: it is generated at pack time and never committed."
+  echo "Generating it for this run so the packed-artifact steps below audit the same tree a release ships, and removing it afterwards."
+  echo "PARITY AGAINST A COMMITTED FILE IS NOT CHECKED IN THIS MODE, because there is no committed file to compare. Set LLM_GATEWAY_REQUIRE_SHRINKWRAP=1 to make its absence a failure instead."
+  SHRINKWRAP_MADE_HERE=1
+  node scripts/make-prod-shrinkwrap.mjs >/dev/null
 fi
+
+# ONE handler for both temporaries, installed once. Two separate `trap ... EXIT`
+# calls do not compose: the second REPLACES the first, so the earlier version of
+# this block armed a shrinkwrap cleanup and then lost it to the temp-file trap
+# three lines later. Anything this script creates is removed however it exits,
+# because a generated shrinkwrap left on disk is treated by npm as the
+# authoritative lockfile for every later install in this checkout.
 # The shipped shrinkwrap is the PROD-ONLY projection of package-lock.json
 # (dev-only entries + root devDependencies stripped — npm/cli#4323), not a
 # byte-identical copy. Parity = regenerate the expected projection from the
 # current lockfile via the same deterministic generator into a temp file and
 # compare byte-for-byte. Determinism makes this exact; no semantic diff needed.
 EXPECTED_SHRINKWRAP="$(mktemp)"
-trap 'rm -f "${EXPECTED_SHRINKWRAP}"' EXIT
 node scripts/make-prod-shrinkwrap.mjs "${EXPECTED_SHRINKWRAP}" >/dev/null
-if ! cmp -s "${EXPECTED_SHRINKWRAP}" npm-shrinkwrap.json; then
+if ! cmp -s "${EXPECTED_SHRINKWRAP}" "${SHRINKWRAP_PATH}"; then
   echo "npm-shrinkwrap.json is not the prod-only projection of package-lock.json — regenerate with scripts/pre-release.sh (node scripts/make-prod-shrinkwrap.mjs) so the shipped pin set matches the audited lockfile." >&2
   exit 1
 fi
-rm -f "${EXPECTED_SHRINKWRAP}"
-trap - EXIT
-echo "npm-shrinkwrap.json present and matches the prod-only projection of package-lock.json."
+if [ "${SHRINKWRAP_MADE_HERE}" = "1" ]; then
+  echo "npm-shrinkwrap.json generated by this run; the prod-only projection is what the steps below audit, and it is removed on exit."
+else
+  echo "npm-shrinkwrap.json present and matches the prod-only projection of package-lock.json."
+fi
 
 echo "==> dependency tree policy"
 node --input-type=module <<'NODE'
@@ -248,10 +313,17 @@ console.log(`hono is at or above the ${FLOOR.join('.')} security floor.`);
 NODE
 
 echo "==> packed consumer install policy"
+# No `trap` here: the handler installed above already removes this. Re-arming
+# one would REPLACE that handler and strand the generated shrinkwrap, which is
+# the composition bug this consolidation exists to remove.
 TMP_DIR="$(mktemp -d)"
-trap 'rm -rf "${TMP_DIR}"' EXIT
 
 PACKAGE_TGZ="$(npm pack --pack-destination "${TMP_DIR}" --silent)"
+tar -xOf "${TMP_DIR}/${PACKAGE_TGZ}" package/npm-shrinkwrap.json > "${TMP_DIR}/packed-npm-shrinkwrap.json"
+if ! cmp -s "${EXPECTED_SHRINKWRAP}" "${TMP_DIR}/packed-npm-shrinkwrap.json"; then
+  echo "packed npm-shrinkwrap.json does not exactly match the audited prod-only projection" >&2
+  exit 1
+fi
 mkdir -p "${TMP_DIR}/consumer"
 pushd "${TMP_DIR}/consumer" >/dev/null
 npm init -y >/dev/null

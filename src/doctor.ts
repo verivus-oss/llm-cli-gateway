@@ -59,13 +59,13 @@ import {
   flightRecorderHealthMessage,
   createFlightRecorder,
   flightRecorderDisabled,
-  flightRecorderOpenFailed,
   flightRecorderReadsAreAuthoritative,
   resolveFlightRecorderDbPath,
   type CoResidentTableStats,
   type FlightRecorderLike,
   type FlightRecorderState,
 } from "./flight-recorder.js";
+import { postgresFailureMessage } from "./storage/postgres-diagnostics.js";
 import {
   buildUpstreamContractReport,
   type InstalledCliContractProbe,
@@ -1593,6 +1593,16 @@ export async function collectStorageHealth(
     block.retention.unbounded = unboundedRetentionSubsystems(policy);
   }
 
+  if (!persistence) {
+    block.flight_recorder.state = "unavailable";
+    block.flight_recorder.path = null;
+    block.flight_recorder.error = "Persistence configuration is invalid";
+    block.warnings.push(
+      "Flight recorder is unavailable because the persistence configuration is invalid."
+    );
+    return block;
+  }
+
   if (!dbPath) {
     const disabled = flightRecorderHealth(flightRecorderDisabled());
     block.flight_recorder.state = disabled.state;
@@ -1609,19 +1619,15 @@ export async function collectStorageHealth(
   let recorder: FlightRecorderLike;
   if (existing) {
     recorder = existing;
-  } else if (persistence) {
+  } else {
     // The FACTORY, not `new FlightRecorder`. Building the SQLite recorder here
     // unconditionally meant doctor reported a file on a host whose transcripts
     // had moved to PostgreSQL, which is the same "one subsystem, two engines"
     // confusion this block exists to expose.
-    recorder = createFlightRecorder(noopDoctorLogger, persistence.backend, persistence.roleDsns);
-  } else {
-    try {
-      recorder = new FlightRecorder(dbPath);
-    } catch (error) {
-      // NOT swallowed. This is the state doctor could not previously express.
-      recorder = flightRecorderOpenFailed(dbPath, error);
-    }
+    // The invalid-config/no-recorder case returned above, so persistence is
+    // present on this branch.
+    const configured = persistence as PersistenceConfig;
+    recorder = createFlightRecorder(noopDoctorLogger, configured.backend, configured.roleDsns);
   }
   const onSqliteFile = recorder instanceof FlightRecorder;
 
@@ -1661,9 +1667,12 @@ export async function collectStorageHealth(
     // Reached the file and could not read it. The health snapshot below is
     // already `degraded` because every operation records its own failure; this
     // catch exists so doctor still emits a report rather than throwing.
-    block.warnings.push(
-      `Reading flight-recorder storage statistics FAILED: ${error instanceof Error ? error.message : String(error)}`
-    );
+    const detail = onSqliteFile
+      ? error instanceof Error
+        ? error.message
+        : String(error)
+      : postgresFailureMessage(error);
+    block.warnings.push(`Reading flight-recorder storage statistics FAILED: ${detail}`);
   }
 
   const health = flightRecorderHealth(recorder);
@@ -2034,10 +2043,18 @@ export async function printDoctorJson(
   // recorder that was never configured, and doctor said nothing either way.
   const recorderDbPath = resolveFlightRecorderDbPath();
   if (recorderDbPath) {
+    let persistence: PersistenceConfig | undefined;
     try {
-      flightRecorder = new FlightRecorder(recorderDbPath);
-    } catch (error) {
-      flightRecorder = flightRecorderOpenFailed(recorderDbPath, error);
+      persistence = loadPersistenceConfig();
+    } catch {
+      // collectStorageHealth reports the invalid configuration separately.
+    }
+    if (persistence) {
+      flightRecorder = createFlightRecorder(
+        noopDoctorLogger,
+        persistence.backend,
+        persistence.roleDsns
+      );
     }
   }
   try {

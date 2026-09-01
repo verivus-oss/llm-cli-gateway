@@ -53,7 +53,7 @@ export class DatabaseConnection {
       // config table meaning one thing everywhere is the point of this node,
       // and because an unused pool costs nothing: pg-pool's constructor creates
       // no clients and defaults `min` to 0, so a pool nothing queries opens no
-      // connection (verified in node_modules/pg-pool/index.js:89-108).
+      // connection (verified in pg-pool's constructor and connection path).
       { ...this.config.roleDsns, app: this.config.database!.connectionString },
       createPool
     );

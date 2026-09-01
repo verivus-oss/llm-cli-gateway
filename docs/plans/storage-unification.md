@@ -1,6 +1,8 @@
 # Storage unification
 
-Status: draft, not implemented.
+Status: implemented for the three backend-governed durable subsystems and retained as historical
+design rationale. Implementation state was rechecked against
+`d302fbf3c3cf9931c644ee9c9ffefd0efde68c32`.
 Goal: one storage abstraction with one write path per operation, and a single
 knob that makes a deployment genuinely Postgres-only.
 
@@ -18,9 +20,10 @@ presenting it as a property of this repository.
 
 ## 1. The actual problem
 
-It is not "SQLite versus Postgres". It is that the gateway has **multiple
-independent persistence subsystems, each with its own engine and its own
-backend-selection mechanism**, none of which agree.
+At authoring time, the problem was not "SQLite versus Postgres". The gateway
+had multiple independent persistence subsystems with selectors that did not
+agree. The implementation named above has since replaced those selectors with
+one authoritative durable-backend decision.
 
 The three below are the ones with distinct _engines and selectors_, and they are
 what makes `[persistence].backend` meaningless. They are not the whole
@@ -29,8 +32,8 @@ workspace registry, capability cache) that has no selector at all because it
 never had an engine choice. Revision 3 said "exactly three", contradicting its
 own inventory.
 
-Measured on `workhorse3`, 2026-08-13 (counts are snapshots of a live system and
-are timestamped for that reason):
+The following is the historical host snapshot measured on 2026-08-13. It is
+retained as motivation, not as a statement of current repository behavior:
 
 | Subsystem                       | Engine in use           | Location                                            | Selected by             |
 | ------------------------------- | ----------------------- | --------------------------------------------------- | ----------------------- |
@@ -38,7 +41,8 @@ are timestamped for that reason):
 | Jobs, validation runs, receipts | Postgres                | `llm_cli_gateway`                                   | `[persistence].backend` |
 | Requests, transcripts           | SQLite                  | `~/.llm-cli-gateway/logs.db`, 1.2 GB                | `LLM_GATEWAY_LOGS_DB`   |
 
-Setting `[persistence].backend = "postgres"` moves exactly one of the three.
+At that time, setting `[persistence].backend = "postgres"` moved exactly one of
+the three.
 
 The consequences are the ones already observed: transcripts and the jobs that
 produced them live in different engines and cannot be joined, and the SQLite
@@ -543,17 +547,14 @@ through this environment's Bash hook are silently filtered and wrong.
 10. **Cutover and backfill** per section 7.
 11. Retention, expressible once for all subsystems.
 
-**Hard gate.** Transcript bodies must not be moved into Postgres until **every**
-step of `postgres-security-hardening.md` section 6 is complete, through and
-including its http principal-granularity step. Revision 3 stopped the gate one
-step short, at encryption, while the security document's own sequence puts
-principal granularity before transcript movement. The gate now inherits that
-sequence in full rather than naming a cut-off that can drift. Moving plaintext transcripts into a store reachable
-in cleartext by a single superuser role would be a regression.
+**Retired gate.** The hardening sequence below remains operator guidance, but
+it no longer admits or redirects transcript storage. At the named implementation
+commit, `backend = "postgres"` selects PostgreSQL for every backend-governed durable subsystem;
+a PostgreSQL failure does not redirect request history to SQLite.
 
-**Correction (revision 2 was weaker than the security document and contradicted
-it).** Revision 2 required "TLS, role separation, and a resolved decision on
-body encryption". Two faults:
+**Historical correction.** Before the gate was retired, revision 2 was weaker
+than the security document and required "TLS, role separation, and a resolved
+decision on body encryption". Two faults:
 
 - A _decision_ is not a control. A decision not to encrypt would have satisfied
   that wording while violating the security sequence, which requires the
@@ -564,8 +565,8 @@ body encryption". Two faults:
   channel**, satisfied by either the socket option or the TLS option, not TLS
   specifically.
 
-The gate therefore inherits the security document's sequence rather than
-restating a subset of it, so the two cannot drift apart again.
+The former gate therefore inherited the security document's sequence rather
+than restating a subset of it. That history does not constrain engine selection.
 
 ## 7. Cutover must be lossless and restartable
 

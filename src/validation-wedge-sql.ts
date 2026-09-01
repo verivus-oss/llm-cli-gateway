@@ -50,3 +50,14 @@ export const SQL_SELECT_WEDGED_VALIDATION_RUNS = `
       SELECT r.validation_id AS validation_id FROM validation_runs r${WHERE_WEDGED}
       ORDER BY r.created_at
       LIMIT ?`;
+
+/**
+ * PostgreSQL retention must own each candidate row before deleting its links.
+ * A concurrent finalizer owns the same row, so SKIP LOCKED leaves that run for
+ * a later sweep instead of deleting a run whose final receipt is being minted.
+ */
+export const SQL_SELECT_WEDGED_VALIDATION_RUNS_FOR_UPDATE = `
+      SELECT r.validation_id AS validation_id FROM validation_runs r${WHERE_WEDGED}
+      ORDER BY r.created_at
+      LIMIT ?
+      FOR UPDATE OF r SKIP LOCKED`;

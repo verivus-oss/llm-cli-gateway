@@ -84,6 +84,12 @@ jobs:
       # shrinkwrap is generated, never committed (it would break npm ci).
       - run: node scripts/make-prod-shrinkwrap.mjs
       - run: npm run security:audit
+        # STRICT: the generate step above must have produced the file. Without
+        # this the audit would generate a missing one itself, which is right for
+        # a hand-run `npm run check` and wrong here, where it would hide that
+        # step having been dropped.
+        env:
+          LLM_GATEWAY_REQUIRE_SHRINKWRAP: "1"
 
   pack-smoke-test:
     runs-on: ${{ github.repository == 'verivus-oss/llm-cli-gateway' && 'ubuntu-latest' || fromJSON('["self-hosted","Linux","X64","x86_64","workhorse3","gateway"]') }}

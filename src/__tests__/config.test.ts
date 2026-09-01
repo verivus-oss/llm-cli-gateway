@@ -84,6 +84,8 @@ describe("config", () => {
       // test is actually about.
       vi.stubEnv("LLM_GATEWAY_CONFIG", withConfigToml("# no persistence section\n"));
       vi.stubEnv("DATABASE_URL", "postgresql://localhost:5432/test");
+      vi.stubEnv("LLM_GATEWAY_LOGS_DB", "");
+      vi.stubEnv("LLM_GATEWAY_JOBS_DB", "");
       const config = loadConfig();
       expect(config.database).toBeDefined();
       expect(config.database!.connectionString).toBe("postgresql://localhost:5432/test");
@@ -391,13 +393,77 @@ describe("loadConfig: [persistence] is the single session-store selector", () =>
     // "Nothing configured" is the ONLY case where it is honoured.
     vi.stubEnv("LLM_GATEWAY_CONFIG", withConfigToml("# no persistence section\n"));
     vi.stubEnv("DATABASE_URL", PG);
+    vi.stubEnv("LLM_GATEWAY_LOGS_DB", "");
+    vi.stubEnv("LLM_GATEWAY_JOBS_DB", "");
     const warn = vi.fn();
     const persistence = loadPersistenceConfig(noopLogger);
     expect(persistence.explicitBackend).toBe(false);
+    expect(persistence.backend).toBe("postgres");
+    expect(persistence.dsn).toBe(PG);
     const config = loadConfig(persistence, { ...noopLogger, warn });
     expect(config.database?.connectionString).toBe(PG);
     expect(config.databaseSource).toBe("env");
     expect(warn).toHaveBeenCalledOnce();
+  });
+
+  it("does not let DATABASE_URL split sessions from a legacy SQLite selector", () => {
+    vi.stubEnv("LLM_GATEWAY_CONFIG", withConfigToml("# no persistence section\n"));
+    vi.stubEnv("DATABASE_URL", PG);
+    vi.stubEnv("LLM_GATEWAY_LOGS_DB", join(tmpdir(), "legacy-logs.db"));
+    vi.stubEnv("LLM_GATEWAY_JOBS_DB", "");
+    const persistence = loadPersistenceConfig(noopLogger);
+    expect(persistence.backend).toBe("sqlite");
+    const config = loadConfig(persistence, noopLogger);
+    expect(config.database).toBeUndefined();
+  });
+
+  it("does not let DATABASE_URL repair an invalid explicit backend", () => {
+    vi.stubEnv("LLM_GATEWAY_CONFIG", withConfigToml("[persistence]\nbackend = 7\n"));
+    vi.stubEnv("DATABASE_URL", PG);
+    vi.stubEnv("LLM_GATEWAY_LOGS_DB", "");
+    vi.stubEnv("LLM_GATEWAY_JOBS_DB", "");
+    expect(() => loadPersistenceConfig(noopLogger)).toThrow(/Invalid \[persistence\] config/);
+  });
+
+  it("does not let a legacy file selector repair an invalid explicit backend", () => {
+    vi.stubEnv("LLM_GATEWAY_CONFIG", withConfigToml("[persistence]\nbackend = 7\n"));
+    vi.stubEnv("DATABASE_URL", "");
+    vi.stubEnv("LLM_GATEWAY_LOGS_DB", join(tmpdir(), "legacy.db"));
+    vi.stubEnv("LLM_GATEWAY_JOBS_DB", "");
+    expect(() => loadPersistenceConfig(noopLogger)).toThrow(/Invalid \[persistence\] config/);
+  });
+
+  it("does not let DATABASE_URL overwrite a configured dsn that omitted its backend", () => {
+    vi.stubEnv("LLM_GATEWAY_CONFIG", withConfigToml(`[persistence]\ndsn = "${PG}"\n`));
+    vi.stubEnv("DATABASE_URL", "postgresql://environment.example/other");
+    vi.stubEnv("LLM_GATEWAY_LOGS_DB", "");
+    vi.stubEnv("LLM_GATEWAY_JOBS_DB", "");
+    expect(() => loadPersistenceConfig(noopLogger)).toThrow(/dsn requires backend = "postgres"/);
+  });
+
+  it("does not let DATABASE_URL complete a roles-only persistence block", () => {
+    vi.stubEnv("LLM_GATEWAY_CONFIG", withConfigToml(`[persistence.roles]\nreader = "${PG}"\n`));
+    vi.stubEnv("DATABASE_URL", "postgresql://environment.example/other");
+    vi.stubEnv("LLM_GATEWAY_LOGS_DB", "");
+    vi.stubEnv("LLM_GATEWAY_JOBS_DB", "");
+    expect(() => loadPersistenceConfig(noopLogger)).toThrow(
+      /\[persistence\.roles\] is only meaningful with backend = "postgres"/
+    );
+  });
+
+  it("treats an explicit SQLite path as a persistence selection over DATABASE_URL", () => {
+    const sqlitePath = join(tmpdir(), "selected-by-path.db");
+    vi.stubEnv("LLM_GATEWAY_CONFIG", withConfigToml(`[persistence]\npath = "${sqlitePath}"\n`));
+    vi.stubEnv("DATABASE_URL", PG);
+    vi.stubEnv("LLM_GATEWAY_LOGS_DB", "");
+    vi.stubEnv("LLM_GATEWAY_JOBS_DB", "");
+    const persistence = loadPersistenceConfig(noopLogger);
+    expect(persistence).toMatchObject({
+      backend: "sqlite",
+      path: sqlitePath,
+      explicitBackend: true,
+    });
+    expect(loadConfig(persistence, noopLogger).database).toBeUndefined();
   });
 
   // Found by adversarial review (Codex) and reproduced with a runtime probe:
@@ -414,7 +480,7 @@ describe("loadConfig: [persistence] is the single session-store selector", () =>
     const config = loadConfig(persistence, { ...noopLogger, warn });
     expect(config.database).toBeUndefined();
     expect(warn).toHaveBeenCalledOnce();
-    expect(warn.mock.calls[0][0]).toMatch(/explicitly configured/);
+    expect(warn.mock.calls[0][0]).toMatch(/already selected/);
   });
 
   it("warns once, not on every call", () => {
@@ -456,8 +522,43 @@ describe("loadConfig: [persistence] is the single session-store selector", () =>
   it("rejects a malformed persistence dsn rather than passing it to pg", () => {
     vi.stubEnv("LLM_GATEWAY_CONFIG", pgConfig("mysql://nope/db"));
     vi.stubEnv("DATABASE_URL", "");
-    expect(() => loadConfig(loadPersistenceConfig(noopLogger), noopLogger)).toThrow(
-      /Invalid database URL/
+    expect(() => loadPersistenceConfig(noopLogger)).toThrow(/Invalid \[persistence\] config/);
+  });
+
+  it.each([
+    "postgresql:///gw",
+    "postgresql://",
+    "postgresql://llmgw_app@/gateway?host=/var/run/postgresql",
+  ])("accepts a hostless PostgreSQL URL without inferring its topology: %s", dsn => {
+    vi.stubEnv("LLM_GATEWAY_CONFIG", pgConfig(dsn));
+    vi.stubEnv("DATABASE_URL", "");
+    expect(loadPersistenceConfig(noopLogger)).toMatchObject({ backend: "postgres", dsn });
+  });
+
+  it("normalizes a sole DATABASE_URL once before selection and reporting", () => {
+    vi.stubEnv("LLM_GATEWAY_CONFIG", withConfigToml("# no persistence section\n"));
+    vi.stubEnv("DATABASE_URL", ` ${PG}\n`);
+    vi.stubEnv("LLM_GATEWAY_LOGS_DB", "");
+    vi.stubEnv("LLM_GATEWAY_JOBS_DB", "");
+    const persistence = loadPersistenceConfig(noopLogger);
+    const decision = loadConfig(persistence, noopLogger);
+    expect(persistence.dsn).toBe(PG);
+    expect(decision.database?.connectionString).toBe(PG);
+    expect(decision.databaseSource).toBe("env");
+  });
+
+  it("rejects a libpq keyword string because it is not a PostgreSQL URL", () => {
+    vi.stubEnv("LLM_GATEWAY_CONFIG", pgConfig("host=/var/run/postgresql dbname=gw user=llmgw"));
+    vi.stubEnv("DATABASE_URL", "");
+    expect(() => loadPersistenceConfig(noopLogger)).toThrow(/Invalid \[persistence\] config/);
+  });
+
+  it("refuses malformed existing TOML instead of silently selecting SQLite defaults", () => {
+    vi.stubEnv(
+      "LLM_GATEWAY_CONFIG",
+      withConfigToml('[persistence]\nbackend = "postgres"\ndsn = "postgresql://unterminated')
     );
+    vi.stubEnv("DATABASE_URL", "");
+    expect(() => loadPersistenceConfig(noopLogger)).toThrow(/Failed to parse gateway config/);
   });
 });

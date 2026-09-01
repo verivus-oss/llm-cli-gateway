@@ -1,11 +1,6 @@
 /**
- * The flight recorder on PostgreSQL: the capability s7 stopped short of.
- *
- * s7 put the recorder on the storage port under the SQLite driver and refused
- * `backend = "postgres"` out loud, because the transcript schema did not exist
- * and postgres-security-hardening.md section 6 was read as gating it on step 8.
- * Section 6.1 (amendment 2026-08-22) replaced that with a DEPLOYMENT SHAPE gate,
- * and migrations/022 is the schema. This is the implementation behind both.
+ * The flight recorder on PostgreSQL, selected authoritatively by
+ * `[persistence].backend = "postgres"`.
  *
  * A SEPARATE implementation rather than a translated one, as the port requires
  * (src/storage/store.ts): drivers own their own SQL, because 50 of 77 audited
@@ -16,11 +11,9 @@
  * `sqlite_master`, and `schema_migrations` where it kept its own `_migrations`.
  *
  * NO DATA MIGRATION. A host that switches backend starts writing here and its
- * existing logs.db rows stay where they are; s10 is the human-supervised
- * cutover that moves them. `llm_process_health` reports the split so an
- * operator is never guessing where their history is.
+ * existing logs.db rows stay where they are. The configured DSN is passed
+ * opaquely to `pg`; health surfaces identify only PostgreSQL.
  */
-import { createRequire } from "module";
 import { derivePromptSignals } from "./token-estimator.js";
 import { getRequestContext, principalScopeSql, resolveOwnerPrincipal } from "./request-context.js";
 import { isRedactionEnabled, redactSecrets } from "./secret-redaction.js";
@@ -36,6 +29,10 @@ import {
 } from "./storage/drivers/postgres.js";
 import type { StorageConnection } from "./storage/store.js";
 import { FlightRecorderRuntime, truncateThinkingBlocks } from "./flight-recorder-runtime.js";
+import {
+  POSTGRES_RECORDER_TARGET,
+  postgresFailureMessage,
+} from "./storage/postgres-diagnostics.js";
 import type {
   CacheAggregateRow,
   CompressionTelemetry,
@@ -70,8 +67,8 @@ const SQL_INSERT_REQUEST = `
     `;
 
 const SQL_INSERT_METADATA = `
-      INSERT INTO gateway_metadata (request_id, async_job_id, status)
-      VALUES (?, ?, 'started')
+      INSERT INTO gateway_metadata (request_id, async_job_id, status, completion_rank)
+      VALUES (?, ?, 'started', 0)
     `;
 
 const SQL_UPDATE_REQUEST_COMPLETE = `
@@ -177,253 +174,6 @@ const SQL_BOOTSTRAP = `
     CREATE INDEX IF NOT EXISTS idx_metadata_status ON gateway_metadata(status);
   `;
 
-/**
- * One place that turns a DSN into a printable identity: host, port and
- * database, never the password, and never a place the connection does not go.
- *
- * THE DEFECT CLASS THIS EXISTS TO CLOSE is reporting a target in a
- * representation other than the one `pg` resolves. Four rounds produced four
- * variants of it, each fixed at the site and each reappearing a layer out:
- *
- *   r3  the URL authority was reported while `?host=` moved the connection.
- *   r4  `?host=/var/run/postgresql` became `postgresql:///var/run/postgresql:5433/db`,
- *       which re-parses as an empty host and a database named `var/run/...`.
- *   r4  `?host=::1` became `postgresql://::1:5433/db`, unbracketed and ambiguous.
- *   r5  an absent port was reported as `5432 (default)` while PGPORT won.
- *   r6  the r5 fix annotated provenance INSIDE a URI, so PGPORT=6543 produced
- *       `postgresql://127.0.0.1:6543 (from PGPORT)/db` (not a URI at all) and
- *       PGDATABASE produced `postgresql://127.0.0.1:5433/ambient_db (from PGDATABASE)`,
- *       which IS a valid URI naming a database that does not exist.
- *
- * Every one of those came from the same two mistakes, so both are removed here
- * rather than patched again.
- *
- * ONE PARSER. `pg` resolves a DSN through `pg-connection-string` and then
- * layers `config[key] || process.env.PG* || default` on top. Re-implementing
- * either half is what produced r3 and r5, so neither is re-implemented: the
- * resolved target is read off a `pg.Client` constructed and never connected,
- * which IS the code that decides where the connection goes. `parse` is
- * consulted only to learn which fields the DSN stated explicitly, so that a
- * substituted value can be marked as substituted.
- *
- * ONE SHAPE. Never a URI. A URI-shaped report has to be abandoned for sockets,
- * for IPv6 and for any annotated field, and every abandonment was a chance to
- * emit something that still looked like a DSN and was not. A reader cannot
- * paste this form into a client by accident, which is the point.
- */
-/** The four target fields, the only ones this module hands to `pg`. */
-interface PgTargetConfig {
-  host?: string;
-  port?: string;
-  database?: string;
-  user?: string;
-}
-
-type FieldSource = "explicit" | "PGHOST" | "PGPORT" | "PGDATABASE" | "default";
-
-interface ResolvedTarget {
-  host: string;
-  hostSource: FieldSource;
-  isSocket: boolean;
-  port: string;
-  portSource: FieldSource;
-  database: string;
-  /** Prebuilt because an unstated database is the USER, whose own origin varies. */
-  databaseNote: string;
-}
-
-/** `pg` is an optional peer, but redactDsn is only reached where it must exist. */
-function loadPgTargetResolvers(): {
-  parse: (s: string) => Record<string, string | null | undefined>;
-  Client: new (config: PgTargetConfig) => {
-    host?: string;
-    port?: number;
-    database?: string;
-    user?: string;
-  };
-} {
-  const require = createRequire(import.meta.url);
-  const { parse } = require("pg-connection-string") as {
-    parse: (s: string) => Record<string, string | null | undefined>;
-  };
-  const { Client } = require("pg") as {
-    Client: new (config: PgTargetConfig) => {
-      host?: string;
-      port?: number;
-      database?: string;
-      user?: string;
-    };
-  };
-  return { parse, Client };
-}
-/**
- * Query parameters `pg-connection-string` reads FROM DISK, stripped before it
- * ever sees the string.
- *
- * Round 7, measured: `parse("...?sslcert=/etc/hosts")` calls
- * `fs.readFileSync("/etc/hosts")`, and so does `new Client({connectionString})`.
- * A function whose entire job is to PRINT a host and port must not read a file
- * named in its input: a FIFO or /dev/zero there would hang or exhaust the
- * process at startup, before anything connects. None of the three can move the
- * host, port or database, so removing them cannot change the answer.
- */
-const SSL_FILE_PARAMS = new Set(["sslcert", "sslkey", "sslrootcert"]);
-
-function withoutSslFileParams(dsn: string): string {
-  const start = dsn.indexOf("?");
-  if (start < 0) return dsn;
-  // Split the fragment off first: `?a=1#frag` must not fold the fragment into
-  // the last parameter. Not `new URL`, which rejects DSNs pg accepts.
-  const hash = dsn.indexOf("#", start);
-  const head = dsn.slice(0, start);
-  const query = hash < 0 ? dsn.slice(start + 1) : dsn.slice(start + 1, hash);
-  const fragment = hash < 0 ? "" : dsn.slice(hash);
-  const kept = query
-    .split("&")
-    .filter(pair => !SSL_FILE_PARAMS.has(pair.split("=")[0].toLowerCase()));
-  if (kept.length === query.split("&").length) return dsn;
-  return kept.length > 0 ? `${head}?${kept.join("&")}${fragment}` : `${head}${fragment}`;
-}
-
-/**
- * IPv6 arrives bracketed from the authority and bare from `?host=`. Pick one.
- *
- * TCP HOSTS ONLY. Round 7: this ran on every host, so a socket DIRECTORY with a
- * colon in it (`?host=/tmp/pg:socket`, which pg accepts) came out as
- * `socket [/tmp/pg:socket]`. A path is not an address and never wants brackets.
- */
-function normaliseTcpHost(host: string): string {
-  const bare = host.startsWith("[") && host.endsWith("]") ? host.slice(1, -1) : host;
-  return bare.includes(":") ? `[${bare}]` : bare;
-}
-
-/**
- * A field value, quoted unless it is plainly a host, path, port or name.
- *
- * Round 7, measured: every value here is DECODED by pg's parser, and both a
- * newline and the report's own delimiters survive that. `/db%0AINJECTED` became
- * a literal newline in the startup log line, and
- * `/db%20port%209999%20database%20other` produced
- * `database db port 9999 database other`, which reads as structure it is not.
- * The parent implementation happened to be safe because the WHATWG path kept
- * the value encoded; decoding is correct, so the escaping has to be explicit.
- *
- * JSON quoting is used because it escapes control characters as well as quotes,
- * and because a reader already knows how to read it.
- */
-function show(value: string): string {
-  return /^[A-Za-z0-9._:/[\]-]+$/.test(value) ? value : JSON.stringify(value);
-}
-
-function resolveTarget(dsn: string): ResolvedTarget | null {
-  // pg's parser does NOT throw on garbage: `parse("not a dsn")` returns
-  // `{ host: "base", database: "not a dsn" }`, so it cannot decide whether the
-  // input was a DSN.
-  //
-  // Requiring the scheme is that decision. It is NOT "pg's own test", which an
-  // earlier version of this comment claimed and round 7 falsified: pg-connection-string
-  // treats ANY scheme but `socket:` as TCP, so `pg://h/db` and a bare `/path`
-  // also resolve there. This is deliberately narrower than pg, because the only
-  // DSNs that reach here come from gateway config, which admits exactly these
-  // two spellings. Anything else is likelier a mistake than a target.
-  if (!/^postgres(ql)?:\/\//i.test(dsn)) return null;
-
-  let parse: ReturnType<typeof loadPgTargetResolvers>["parse"];
-  let Client: ReturnType<typeof loadPgTargetResolvers>["Client"];
-  try {
-    ({ parse, Client } = loadPgTargetResolvers());
-  } catch {
-    return null;
-  }
-
-  let stated: Record<string, string | null | undefined>;
-  let resolved: { host?: string; port?: number; database?: string; user?: string };
-  try {
-    stated = parse(withoutSslFileParams(dsn));
-    // FIELDS, not the connection string. Handing Client the string makes it
-    // re-parse and read the SSL files again; handing it the four target fields
-    // applies the SAME `config[key] || process.env.PG* || default` resolution
-    // (measured identical) and touches no disk. This object is what the driver
-    // hands to the socket, so reading it cannot disagree with the connection.
-    resolved = new Client({
-      host: stated.host || undefined,
-      port: stated.port || undefined,
-      database: stated.database || undefined,
-      user: stated.user || undefined,
-    });
-  } catch {
-    return null;
-  }
-
-  const wasStated = (value: string | null | undefined): boolean =>
-    value !== null && value !== undefined && value !== "";
-  const ambient = (name: string): boolean => {
-    const value = process.env[name];
-    return value !== undefined && value !== "";
-  };
-  const sourceOf = (
-    statedValue: string | null | undefined,
-    envName: "PGHOST" | "PGPORT" | "PGDATABASE"
-  ): FieldSource => (wasStated(statedValue) ? "explicit" : ambient(envName) ? envName : "default");
-
-  // An unstated database is not a default NAME: pg substitutes the connecting
-  // USER, whose own origin is the DSN, PGUSER, or the OS account.
-  //
-  // Round 7 BLOCKER: this used to report `(from PGUSER)` whenever PGUSER was
-  // merely SET, so `postgresql://bob@host` with PGUSER=alice printed
-  // `database bob (from PGUSER)`. pg had taken `bob` from the DSN and ignored
-  // PGUSER entirely, and the annotation sent the reader to the wrong variable.
-  // The user's provenance decides the note, not the presence of the variable.
-  const databaseNote = wasStated(stated.database)
-    ? ""
-    : ambient("PGDATABASE")
-      ? " (from PGDATABASE)"
-      : wasStated(stated.user)
-        ? " (default: the connecting user, from the DSN)"
-        : ambient("PGUSER")
-          ? " (default: the connecting user, from PGUSER)"
-          : " (default: the connecting user)";
-
-  const host = String(resolved.host ?? "");
-  // Decide socket-ness FIRST, then bracket only what is an address.
-  const isSocket = host.startsWith("/");
-  return {
-    host: isSocket ? host : normaliseTcpHost(host),
-    hostSource: sourceOf(stated.host, "PGHOST"),
-    isSocket,
-    port: String(resolved.port ?? ""),
-    portSource: sourceOf(stated.port, "PGPORT"),
-    database: String(resolved.database ?? ""),
-    databaseNote,
-  };
-}
-
-function annotate(source: FieldSource): string {
-  if (source === "explicit") return "";
-  if (source === "default") return " (default)";
-  return ` (from ${source})`;
-}
-
-/**
- * Host, port and database only. A DSN carries a password and health output is
- * read aloud.
- *
- * The guarantee is that the result is never URI-SHAPED, NOT that it contains no
- * `://` anywhere. Round 7 falsified the stronger claim: pg accepts
- * `?host=evil://host`, and naming the host pg resolved is the whole point, so
- * the substring can appear INSIDE a value. What must never happen is a result a
- * reader could paste back as a DSN.
- */
-export function redactDsn(dsn: string): string {
-  const target = resolveTarget(dsn);
-  if (target === null) return "postgresql (dsn not parseable)";
-  const where = target.isSocket ? "socket" : "host";
-  const host = `${show(target.host)}${annotate(target.hostSource)}`;
-  const port = `${show(target.port)}${annotate(target.portSource)}`;
-  const database = `${show(target.database)}${target.databaseNote}`;
-  return `postgresql ${where} ${host} port ${port} database ${database}`;
-}
-
 type RoutedFlightOperation = Exclude<keyof FlightRecorderOperations, "close">;
 
 export interface PostgresFlightRecorderOptions {
@@ -449,9 +199,9 @@ export class PostgresFlightRecorder implements FlightRecorderOperations {
   private readonly redactEnabled: boolean;
   private readonly logger: LoggerLike | null;
   private readonly runtime: FlightRecorderRuntime;
-  private readonly target: string;
   private driver: PostgresStorageDriver | null = null;
   private startupPromise: Promise<PostgresStorageDriver> | null = null;
+  private closed = false;
 
   constructor(roleDsns: PostgresRoleDsns, options: PostgresFlightRecorderOptions = {}) {
     if (!roleDsns.app) throw new Error("flight recorder: postgres needs an `app` DSN");
@@ -459,8 +209,7 @@ export class PostgresFlightRecorder implements FlightRecorderOperations {
     this.options = options;
     this.redactEnabled = options.redactSecrets ?? isRedactionEnabled();
     this.logger = options.logger ?? null;
-    this.target = redactDsn(roleDsns.app);
-    this.runtime = new FlightRecorderRuntime(this.target);
+    this.runtime = new FlightRecorderRuntime(POSTGRES_RECORDER_TARGET, postgresFailureMessage);
 
     // STARTED here, not awaited here, exactly as the SQLite twin does. Without
     // it an idle gateway reports `initialising` for as long as nothing logs a
@@ -488,6 +237,7 @@ export class PostgresFlightRecorder implements FlightRecorderOperations {
    * operation retries rather than poisoning the recorder for the process.
    */
   private ensureReady(): Promise<PostgresStorageDriver> {
+    if (this.closed) return Promise.reject(new Error("flight recorder is closed"));
     this.startupPromise ??= this.buildAndBootstrap().then(
       driver => {
         this.runtime.markReady();
@@ -523,7 +273,7 @@ export class PostgresFlightRecorder implements FlightRecorderOperations {
     if (!(await transcriptSchemaReady(driver))) {
       throw new Error(
         "PostgreSQL transcript schema is missing and the compatibility bootstrap did not produce it. " +
-          "Run `npm run migrate` with the migration role (migrations/022_flight_recorder_transcripts.sql)."
+          "Run `npm run migrate` with the migration role so every transcript migration is applied."
       );
     }
     return driver;
@@ -877,8 +627,12 @@ export class PostgresFlightRecorder implements FlightRecorderOperations {
     return deleted;
   }
 
-  /** Drain what has started, then end the pools. MUST be awaited; see the SQLite twin. */
+  /** Join bootstrap, drain started work, then end the pools. MUST be awaited. */
   async close(): Promise<void> {
+    if (this.closed) return;
+    this.closed = true;
+    const startup = this.startupPromise;
+    if (startup) await startup.catch(() => undefined);
     await this.runtime.close();
     await this.driver?.close();
     this.driver = null;
@@ -908,7 +662,7 @@ function redactStart(entry: FlightLogStart): FlightLogStart {
  *
  * A name-only readiness check fails OPEN: with `routed` as INTEGER rather than
  * BOOLEAN the check passed, the recorder reported `active` and
- * `readsAreAuthoritative`, and then `WHERE m.routed IS TRUE` (:522) was rejected
+ * `readsAreAuthoritative`, and then `WHERE m.routed IS TRUE` was rejected
  * by the server with "argument of IS TRUE must be type boolean, not type
  * integer". Health said fine and the read died.
  *
@@ -922,21 +676,36 @@ const TRANSCRIPT_REQUIRED_TYPES: Readonly<Record<string, string>> = {
   "gateway_metadata.optimization_applied": "boolean",
   "gateway_metadata.cost_usd": "double precision",
   "gateway_metadata.route_est_cost_usd": "double precision",
+  "gateway_metadata.completion_rank": "smallint",
 };
 
 async function transcriptSchemaReady(driver: PostgresStorageDriver): Promise<boolean> {
   const rows = await driver.withConnection("analytics_read", conn =>
-    conn.query<{ table_name: string; column_name: string; data_type: string }>(
-      `SELECT table_name, column_name, data_type FROM information_schema.columns
+    conn.query<{
+      table_name: string;
+      column_name: string;
+      data_type: string;
+      is_nullable: string;
+      column_default: string | null;
+    }>(
+      `SELECT table_name, column_name, data_type, is_nullable, column_default
+         FROM information_schema.columns
         WHERE table_schema = current_schema() AND table_name IN ('requests', 'gateway_metadata')`
     )
   );
-  const have = new Map(rows.map(row => [`${row.table_name}.${row.column_name}`, row.data_type]));
+  const have = new Map(rows.map(row => [`${row.table_name}.${row.column_name}`, row]));
   if (!TRANSCRIPT_REQUIRED_COLUMNS.every(column => have.has(column))) return false;
   // Type, for the columns a query depends on. Readiness that ignores type is
   // readiness that reports healthy and then fails the read.
   for (const [column, expected] of Object.entries(TRANSCRIPT_REQUIRED_TYPES)) {
-    if (have.get(column) !== expected) return false;
+    if (have.get(column)?.data_type !== expected) return false;
+  }
+  const completionRank = have.get("gateway_metadata.completion_rank");
+  if (
+    completionRank?.is_nullable !== "NO" ||
+    !/^0(?:::[a-z ]+)?$/i.test(completionRank.column_default ?? "")
+  ) {
+    return false;
   }
   return true;
 }
@@ -987,6 +756,7 @@ export const TRANSCRIPT_REQUIRED_COLUMNS: readonly string[] = [
     "route_considered",
     "route_reroutes",
     "status",
+    "completion_rank",
     "compression_route",
     "compression_transforms",
     "compression_original_chars",

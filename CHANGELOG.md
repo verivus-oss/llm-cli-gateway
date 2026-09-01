@@ -13,7 +13,6 @@ can detect what it looks for, storage claims against `src/storage/`,
 `migrations/022_flight_recorder_transcripts.sql` and `setup/status.schema.json`
 rather than against the programme's own summary.
 
-
 516 commits since 3.0.0. The gateway now notices when a provider CLI has moved
 underneath it, applies the upstream deprecation instead of queueing it for a
 human, and stops treating an absence of provider output as evidence that a job
@@ -23,11 +22,12 @@ of three: the job store, the session store and the flight recorder now sit on
 one storage port with a SQLite driver and a PostgreSQL driver under it, so a
 request's two halves can finally live in one engine.
 
-Read the two limits before assuming that happens on your host. Request history
-follows
-`[persistence].backend` **only where the database can be proven local**, and
-when it does, **nothing already written is migrated**. Both are stated in full
-under Changed, and both are visible on `llm_process_health`.
+`[persistence].backend` is the engine decision. With `postgres`, the three
+backend-governed durable subsystems use PostgreSQL: jobs and validation,
+sessions, and request history. File-backed operator records such as approvals,
+admin audit, and the workspace registry are outside this engine selector.
+Nothing already written is migrated when the engine changes; that cutover
+remains an explicit operator action.
 
 Candidate history, since it is not a straight line. rc.1, rc.2, rc.6, rc.7 and
 rc.8 were published to npm as 3.1.0 candidates. rc.3 and rc.4 exist in
@@ -38,7 +38,6 @@ will be no 3.1.0 stable; the first candidate under the new number is
 3.2.0-rc.1, and anyone on any 3.1.0 candidate should move to it.
 
 ### Added
-
 
 - **Retention over the transcript and over wedged validation runs, opt-in.**
   `[persistence].retentionDays` has always bounded exactly one table, `jobs`,
@@ -114,7 +113,6 @@ will be no 3.1.0 stable; the first candidate under the new number is
   cannot be reached from a joined string at all.
 
   All seven providers, sync and async.
-
 
 - **A storage port, with a SQLite driver and a PostgreSQL driver, under all
   three durable subsystems.** `src/storage/` defines one `StorageDriver`
@@ -312,54 +310,38 @@ will be no 3.1.0 stable; the first candidate under the new number is
 
 ### Changed
 
-- **`[persistence].backend` now selects the engine for request history as well,
-  on a LOCAL deployment only, and migrates nothing.** Until this release the
-  flight recorder was always SQLite regardless of `[persistence]`, so on a
-  Postgres host the two halves of one request sat in two engines. The recorder
-  now takes that decision at one point, `flightRecorderEngineDecision`, and
-  there are two limits on it that matter more than the capability does.
+- **`[persistence].backend` now selects the engine for every backend-governed
+  durable subsystem, and changing it migrates nothing.** Until this release the flight
+  recorder was always SQLite regardless of `[persistence]`, so a PostgreSQL
+  host split one request across two engines. `flightRecorderEngineDecision`
+  now follows the configured backend directly.
 
-  **The gate is deployment shape, and it fails closed.** `backend = "postgres"`
-  is honoured only when the DSN can be PROVEN to reach a database running as
-  this same OS user: a unix socket whose `.s.PGSQL.<port>` file this uid owns,
-  or a loopback literal (`127.0.0.0/8`, `::1`, or their IPv4-mapped forms) or
-  the bare name `localhost`, with a listener on that port whose uid in
-  `/proc/net/tcp{,6}` equals this process's effective uid. A wildcard bind
-  counts, because the reference rootless-podman deployment publishes through a
-  userspace forwarder and a checker demanding a literal loopback bind would
-  refuse the exact shape this rule exists to admit. Any other host name is
-  refused WITHOUT resolution, because the decision is read by surfaces that
-  cannot await one; write `127.0.0.1` if it is loopback. An unreadable `/proc`,
-  an unparseable DSN, a platform with no effective uid: all refused. Anything
-  refused stays on SQLite and says why, on `llm_process_health`, on
-  `health://status` and in the startup `Storage:` block. A refusal is not a
-  failure; the recorder keeps working.
+  With `backend = "postgres"`, async jobs, dedup state, orphan recovery, HTTP
+  jobs, validation state, session metadata, and request history all use
+  PostgreSQL. The configured `dsn` must be a PostgreSQL URL. No locality,
+  listener, operating-system user, or deployment-topology inference is part of
+  admission, and diagnostics do not render a DSN-derived target.
 
-  **There is NO data migration, in either direction.** A host that switches
-  backend starts writing transcripts to the new engine, and the rows already in
-  `~/.llm-cli-gateway/logs.db` stay exactly where they are. They are not
-  backfilled, not dual-written and not read from. `llm_process_health` and the
-  startup block both report the split, because the previous cutover in this
-  project abandoned its old rows in place and nothing said so: on the reference
-  dev host that left a stale `jobs` table of 31,895 rows inside `logs.db`,
-  frozen months ago and still answering queries beside a live `requests` table.
-  The lossless restartable backfill is a separate,
-  human-supervised run, held by operator decision.
+  **BREAKING configuration cleanup:** a `[persistence].dsn` without
+  `backend = "postgres"` is now refused at startup. Older versions silently
+  discarded that DSN and selected SQLite, which could leave durable data in an
+  engine the operator did not intend. Set the backend explicitly instead of
+  relying on the discarded value.
 
-  **Disclosed and not fixed:** a loopback SSH tunnel or a `socat` forwarder
-  defeats the check. It presents as a local listener owned by this user while
-  the database is remote, and the check admits it. Closing that needs a
-  server-side fact, and this decision has to be synchronous, so it cannot go and
-  get one. Related: the uid the check proves is the LISTENER's, not the
-  PostgreSQL backend's, and under rootless podman those differ by design.
+  An empty or whitespace-only `LLM_GATEWAY_LOGS_DB` value is now treated as
+  unset, so request history follows the selected backend at its default
+  location. Older versions treated an empty value as an undocumented recorder
+  off switch. Use the literal `LLM_GATEWAY_LOGS_DB=none` when request history
+  must be disabled.
 
-  **Not exercised end to end.** No live gateway has been switched to
-  `backend = "postgres"` and run through. The path is covered by the suite and
-  by the `*-pg` suites against a real server, which is not the same claim.
+  A PostgreSQL connection, migration, or operation failure makes the affected
+  subsystem fail closed. It is reported generically on health surfaces and
+  does not trigger a SQLite fallback.
 
-  On a shared or remote PostgreSQL nothing changes: transcripts remain gated on
-  steps 3 through 8 of `docs/plans/postgres-security-hardening.md`, and the
-  refusal names that document.
+  **There is no data migration in either direction.** A host that switches
+  backend starts writing to the selected engine, while rows already in the old
+  engine stay there. They are not backfilled, dual-written, or read through the
+  new engine. A data move, if required, is a separate operator-run cutover.
 
 - **The async job store runs on the storage port, and the PostgreSQL worker
   thread is gone.** `PostgresJobStore` used to run its work in
@@ -467,26 +449,24 @@ will be no 3.1.0 stable; the first candidate under the new number is
   Prune out of band until a reaper ships. Tracked in
   `docs/plans/durable-state-lifecycle.dag.toml`.
 
-  `DATABASE_URL` remains as a deprecated override that warns once. It is refused
+  `DATABASE_URL` remains as a deprecated input that warns once. It is refused
   when it disagrees with `[persistence].dsn`, and refused when
   `[persistence].backend` is explicitly written as `"sqlite"`, `"memory"` or
   `"none"`, because honouring it would put sessions in one database and jobs in
-  another. It is still honoured when no `[persistence]` block is configured at
-  all, which is the one remaining case where sessions and jobs can differ; that
-  is the pre-`[persistence]` behaviour of deployments that never adopted the
-  config file, and refusing it would silently move their sessions to an empty
-  file store.
+  another. When it is the sole persistence selector, it now acts as a deprecated
+  alias for `backend = "postgres"` plus `dsn`: sessions, jobs, validation runs,
+  and request history all select PostgreSQL. Existing SQLite rows are not
+  migrated or cross-read, so operators who need that history must move it as a
+  separate cutover step.
 
-  On its own this did not complete the single-store goal, and an earlier draft
-  of this entry said prompt and response bodies stay in SQLite behind a
-  deliberate gate. That gate has since been re-drawn: on a deployment the
-  gateway can prove local, transcripts follow `[persistence]` too. See the
-  entry at the head of this section for the shape of that proof and for what it
-  does not cover.
+  On its own this did not complete the single-store goal. The flight recorder
+  now follows `[persistence]` directly as described at the head of this section,
+  so `backend = "postgres"` puts session metadata, jobs, and transcripts in the
+  same engine.
 
 - **The idle timeout is derived from the registry, and terminal-burst providers
   get a total-runtime bound instead.** A hand-maintained table gave gemini,
-  mistral and cursor a 600,000 ms *idle* timeout with comments asserting they
+  mistral and cursor a 600,000 ms _idle_ timeout with comments asserting they
   "stream in real-time", which their own probed evidence contradicts. The timer
   never reset, so healthy work was killed at ten minutes: a real cross-LLM
   review job was terminated at exactly 600000 ms of "inactivity" having produced
@@ -561,7 +541,7 @@ will be no 3.1.0 stable; the first candidate under the new number is
   child that cannot succeed.** `codex fork` is an interactive subcommand
   requiring a controlling terminal, and provider children are spawned with
   pipes, so every call failed with `exit code 1: Error: stdin is not a
-  terminal`. Codex exposes no non-interactive equivalent. The tool now names the
+terminal`. Codex exposes no non-interactive equivalent. The tool now names the
   route that works (`codex_request` with a session UUID or `resumeLatest`). The
   availability check is deliberately evaluated after workspace resolution and
   argv admission, so a remote caller without a registered workspace still gets
@@ -911,8 +891,9 @@ will be no 3.1.0 stable; the first candidate under the new number is
   an operator with `backend = "postgres"` could be moved off Postgres by a
   variable named for a different subsystem. An explicitly configured backend now
   wins and the override is refused with a warning naming the variable. The
-  literal value `none` is exempt and still overrides, because it is a documented
-  kill switch.
+  literal value `none` still disables the recorder when it comes from
+  `LLM_GATEWAY_LOGS_DB`, but it does not override an explicit job-persistence
+  backend.
 
 - **Provider output flushed during shutdown is no longer lost.** Cancellation,
   idle timeout and the output cap all commit a job's terminal row at the moment
@@ -1024,44 +1005,6 @@ will be no 3.1.0 stable; the first candidate under the new number is
   the losing claimant.
 
 ### Security
-
-- **A security bar was LOWERED to let transcripts into a local PostgreSQL. The
-  operator granted it explicitly on 2026-08-22, and the argument is written down
-  in section 6.1 of the hardening design rather than applied quietly.**
-  `docs/plans/postgres-security-hardening.md` sequenced transcripts into
-  PostgreSQL as step 9, "only then", behind steps 3 through 8: an authenticated
-  confidential channel, role separation with generated grants, a LUKS volume
-  move, row-level security, envelope encryption of the three transcript columns,
-  and HTTP principal granularity. Read literally that blocked the storage
-  unification indefinitely on key management, and it was enforced that way
-  through two nodes of the programme before anyone questioned it.
-
-  Section 6.1 amends it on that document's OWN threat model, not on convenience.
-  Section 3 says threat 1, a local process running as the same OS user, is
-  DOMINANT, that it "defeats the encryption controls available today", and that
-  LUKS "answers threat 4 only". Steps 5 and 7, the two expensive ones, do
-  nothing about the dominant threat. Then compare source and destination for the
-  default deployment. Transcripts sit today in `~/.llm-cli-gateway/logs.db`,
-  mode 0600, owned by the account the provider CLIs run as. The PostgreSQL in
-  question is on the same host, under the same account, with its DSN in a
-  `config.toml` at 0600. Against threat 1 those are the same exposure. Against
-  threats 3 and 4 they are the same exposure too, because the SQLite file is
-  equally unencrypted and equally backed up.
-
-  The bar being applied was "the destination must be better than the source".
-  The honest bar is "not worse", and the local case already meets it.
-
-  **This does NOT claim the local case is secure against threat 1. It is not,
-  and SQLite never was.** Nothing in that document claims otherwise. The claim
-  is only that a refactor is not the place to fix it.
-
-  What stays genuinely gated is the SHARED deployment: a PostgreSQL reachable by
-  another principal, or serving several gateway instances, or reached over the
-  OAuth-gated HTTP transport. There threats 2, 3 and 4 are real and steps 3
-  through 8 remain the answer. The admission check refuses everything it cannot
-  prove local, and the two things it cannot see, a loopback tunnel and the
-  distinction between a listener's uid and the database backend's, are stated
-  under Changed.
 
 - **Two session tools decided who owned a session in a handler and then acted in
   a statement that did not re-decide it.** `session_delete` read the row,

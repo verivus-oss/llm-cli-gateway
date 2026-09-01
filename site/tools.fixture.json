@@ -4282,7 +4282,7 @@
     },
     {
       "name": "llm_process_health",
-      "description": "Report gateway process health: async-job manager state, the resolved job-store persistence configuration, and the flight recorder's separate engine and path (the two do NOT share a backend setting).",
+      "description": "Report gateway process health: async-job manager state, the resolved durable persistence configuration, and flight-recorder health on that configured engine.",
       "inputSchema": {
         "type": "object",
         "properties": {},

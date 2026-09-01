@@ -1,5 +1,6 @@
-# Implementation plan: move the session manager onto Postgres, collapsing three
-# stores to two.
+# Historical implementation plan for the session-manager migration. The current
+# unified selector and recorder state were rechecked against
+# d302fbf3c3cf9931c644ee9c9ffefd0efde68c32.
 #
 # Context. The stated goal is a SINGLE store. Today the gateway runs three:
 #
@@ -7,12 +8,10 @@
 #   sessions            ~/.llm-cli-gateway/sessions.json, 3,590 sessions
 #   transcripts         logs.db, SQLite, 1.21 GB
 #
-# Transcripts are blocked behind a deliberate gate (postgres-security-hardening
-# section 6 step 9: bodies do not move until the security sequence completes
-# through http principal granularity). Sessions carry NO such gate, because
-# session state is minimal by construction: id, cli, timestamps, description,
-# and never conversation content. So sessions are the half of the remaining work
-# that can be finished now, and finishing it takes three stores to two.
+# This was the state when the plan was authored. The transcript gate has since
+# been retired. With backend = "postgres", the three backend-governed durable
+# subsystems now use PostgreSQL; the hardening sequence remains operator
+# guidance rather than a backend admission mechanism.
 #
 # This is step 6 of `storage-unification.md` section 6, executed ahead of steps
 # 1 to 5 (the unified async port). That inversion is deliberate and is recorded
@@ -231,10 +230,9 @@ depends_on = ["cutover-and-verify-continuity"]
 actor = "assistant"
 status = "planned"
 action = """
-`npm test` and `npm run test:pg`, then a CHANGELOG entry describing the
-selection unification and the store count going three to two. Note explicitly
-that transcripts remain on SQLite behind the security gate, so the entry does
-not read as if the single-store goal were met.
+HISTORICAL PLANNED STEP, superseded by the completed recorder migration.
+Its original instruction to describe transcripts as remaining on SQLite no
+longer applies. Current release validation runs `npm test` and `npm run test:pg`.
 """
 idempotent = true
 validation = "Both suites green; CHANGELOG states the remaining gap honestly."
