@@ -1619,14 +1619,15 @@ export async function collectStorageHealth(
   let recorder: FlightRecorderLike;
   if (existing) {
     recorder = existing;
-  } else if (persistence) {
+  } else {
     // The FACTORY, not `new FlightRecorder`. Building the SQLite recorder here
     // unconditionally meant doctor reported a file on a host whose transcripts
     // had moved to PostgreSQL, which is the same "one subsystem, two engines"
     // confusion this block exists to expose.
-    recorder = createFlightRecorder(noopDoctorLogger, persistence.backend, persistence.roleDsns);
-  } else {
-    throw new Error("Persistence configuration is required to select the flight recorder engine");
+    // The invalid-config/no-recorder case returned above, so persistence is
+    // present on this branch.
+    const configured = persistence as PersistenceConfig;
+    recorder = createFlightRecorder(noopDoctorLogger, configured.backend, configured.roleDsns);
   }
   const onSqliteFile = recorder instanceof FlightRecorder;
 

@@ -153,7 +153,7 @@ export function storageDisposition(
         recorder?.path ??
         (enabled ? (engine.engine === "postgres" ? POSTGRES_RECORDER_TARGET : recorderPath) : null),
       decidedBy: logsDbDecidedRecorder ? "LLM_GATEWAY_LOGS_DB" : "default",
-      followsPersistenceBackend: persistence.backend === engine.engine,
+      followsPersistenceBackend: enabled && persistence.backend === engine.engine,
       engineRequested: engine.requested ?? null,
     },
     roles: roleReport(persistence.roleDsns),

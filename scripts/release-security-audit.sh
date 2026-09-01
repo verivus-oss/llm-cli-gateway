@@ -4,6 +4,18 @@ set -euo pipefail
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "${ROOT_DIR}"
 
+SHRINKWRAP_PATH="${ROOT_DIR}/npm-shrinkwrap.json"
+# Release mode must fail on the missing release input before any advisory
+# endpoint or other audit work can obscure the actual defect.
+if [ "${LLM_GATEWAY_REQUIRE_SHRINKWRAP:-0}" = "1" ] && [ ! -f "${SHRINKWRAP_PATH}" ]; then
+  echo "npm-shrinkwrap.json missing under LLM_GATEWAY_REQUIRE_SHRINKWRAP=1 - consumers would resolve their own (unpinned) transitive versions. It is generated, never committed: run node scripts/make-prod-shrinkwrap.mjs (pre-release.sh and the CI/publish workflows do this before auditing/packing)." >&2
+  exit 1
+fi
+if ! command -v flock >/dev/null 2>&1; then
+  echo "release-security-audit requires flock from util-linux to serialize generated shrinkwrap work" >&2
+  exit 1
+fi
+
 echo "==> internal-only paths must not be tracked"
 # This repo mirrors to a public GitHub repo as a PLAIN PUSH of shared history,
 # so a file committed here is public even if a later commit deletes it: git log
@@ -153,7 +165,6 @@ exec 9>"${AUDIT_LOCK}"
 flock 9
 
 SHRINKWRAP_MADE_HERE=0
-SHRINKWRAP_PATH="${ROOT_DIR}/npm-shrinkwrap.json"
 EXPECTED_SHRINKWRAP=""
 TMP_DIR=""
 cleanup_audit_temporaries() {

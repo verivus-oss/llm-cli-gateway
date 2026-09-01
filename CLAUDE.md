@@ -38,8 +38,8 @@ npm run test:coverage      # v8 coverage (70% lines/functions/statements, 60% br
 # Watch mode for development
 npm run test:watch
 
-# Full gate. 22 steps, &&-chained, ending build, lint, format:check, ...,
-# test, security:audit, verify:no-internal-mcp:check. Read the `check` script in
+# Full gate. 22 steps, &&-chained, starting with build, lint, format:check and
+# ending with test, security:audit, verify:no-internal-mcp:check. Read the `check` script in
 # package.json for the current list rather than trusting a copy here: this
 # comment said 12 for long enough that the last ten were nobody's business.
 npm run check

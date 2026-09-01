@@ -4,20 +4,6 @@ All notable changes to the llm-cli-gateway project.
 
 ## [Unreleased]
 
-### Changed
-
-- **PostgreSQL is now authoritative when `[persistence].backend = "postgres"`.**
-  Every durable subsystem uses PostgreSQL, and a PostgreSQL failure never
-  silently opens SQLite. The configured DSN is validated only as a PostgreSQL
-  URL. Deployment-shape admission and DSN-derived target rendering were
-  removed. Health surfaces report PostgreSQL failures generically. Changing
-  engines still does not migrate or dual-read existing data.
-- **The release security audit now works from a clean checkout.** In developer
-  mode it creates the production shrinkwrap for the duration of the audit,
-  serializes that fixed-path work across concurrent audits, proves the packed
-  tarball contains the exact audited projection, and removes what it created.
-  Release paths remain strict and refuse a missing shrinkwrap.
-
 ## [3.2.0-rc.1] - 2026-08-23: provider contracts that maintain themselves, one storage port under all three subsystems
 
 The entries below were verified against the code, not against the candidate
@@ -26,7 +12,6 @@ behaviour by probing the installed CLIs with a control that proves the probe
 can detect what it looks for, storage claims against `src/storage/`,
 `migrations/022_flight_recorder_transcripts.sql` and `setup/status.schema.json`
 rather than against the programme's own summary.
-
 
 516 commits since 3.0.0. The gateway now notices when a provider CLI has moved
 underneath it, applies the upstream deprecation instead of queueing it for a
@@ -50,7 +35,6 @@ will be no 3.1.0 stable; the first candidate under the new number is
 3.2.0-rc.1, and anyone on any 3.1.0 candidate should move to it.
 
 ### Added
-
 
 - **Retention over the transcript and over wedged validation runs, opt-in.**
   `[persistence].retentionDays` has always bounded exactly one table, `jobs`,
@@ -126,7 +110,6 @@ will be no 3.1.0 stable; the first candidate under the new number is
   cannot be reached from a joined string at all.
 
   All seven providers, sync and async.
-
 
 - **A storage port, with a SQLite driver and a PostgreSQL driver, under all
   three durable subsystems.** `src/storage/` defines one `StorageDriver`
@@ -468,7 +451,7 @@ will be no 3.1.0 stable; the first candidate under the new number is
 
 - **The idle timeout is derived from the registry, and terminal-burst providers
   get a total-runtime bound instead.** A hand-maintained table gave gemini,
-  mistral and cursor a 600,000 ms *idle* timeout with comments asserting they
+  mistral and cursor a 600,000 ms _idle_ timeout with comments asserting they
   "stream in real-time", which their own probed evidence contradicts. The timer
   never reset, so healthy work was killed at ten minutes: a real cross-LLM
   review job was terminated at exactly 600000 ms of "inactivity" having produced
@@ -543,7 +526,7 @@ will be no 3.1.0 stable; the first candidate under the new number is
   child that cannot succeed.** `codex fork` is an interactive subcommand
   requiring a controlling terminal, and provider children are spawned with
   pipes, so every call failed with `exit code 1: Error: stdin is not a
-  terminal`. Codex exposes no non-interactive equivalent. The tool now names the
+terminal`. Codex exposes no non-interactive equivalent. The tool now names the
   route that works (`codex_request` with a session UUID or `resumeLatest`). The
   availability check is deliberately evaluated after workspace resolution and
   argv admission, so a remote caller without a registered workspace still gets

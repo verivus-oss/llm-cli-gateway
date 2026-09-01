@@ -6,10 +6,13 @@ import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { mkdtempSync, rmSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
-import { createGatewayServer } from "../index.js";
+import { createGatewayServer, createRuntimeRetentionSweeper } from "../index.js";
 import { AsyncJobManager } from "../async-job-manager.js";
 import { MemoryJobStore } from "../job-store.js";
-import { FlightRecorder, NoopFlightRecorder } from "../flight-recorder.js";
+import { FlightRecorder, NoopFlightRecorder, type FlightRecorderLike } from "../flight-recorder.js";
+import { PostgresFlightRecorder } from "../flight-recorder-pg.js";
+import type { PgPoolLike } from "../storage/drivers/postgres.js";
+import { resolveRetentionPolicy } from "../storage/retention.js";
 import { noopLogger } from "../logger.js";
 import type { PersistenceConfig } from "../config.js";
 import { FileSessionManager } from "../session-manager.js";
@@ -57,11 +60,15 @@ describe("llm_process_health discloses storage disposition", () => {
 
   async function health(
     persistence: PersistenceConfig,
-    recorder: FlightRecorder | NoopFlightRecorder = flight
+    recorder: FlightRecorder | PostgresFlightRecorder | NoopFlightRecorder = flight
   ): Promise<Record<string, any>> {
     const server = createGatewayServer({
       sessionManager: new FileSessionManager(join(tmp, "sessions.json")),
-      asyncJobManager: new AsyncJobManager(noopLogger, undefined, new MemoryJobStore()),
+      asyncJobManager: new AsyncJobManager(
+        noopLogger,
+        undefined,
+        persistence.backend === "postgres" ? null : new MemoryJobStore()
+      ),
       persistence,
       flightRecorder: recorder,
     });
@@ -73,43 +80,87 @@ describe("llm_process_health discloses storage disposition", () => {
     return JSON.parse(res.content[0].text);
   }
 
-  function reportPostgresHealth(): void {
-    flight.health = () => ({
-      state: "active",
-      path: "postgresql",
-      error: null,
-      errorAt: null,
-      failureCount: 0,
-      closed: false,
-    });
+  function postgresRecorder(): PostgresFlightRecorder {
+    const client = {
+      query: async (): Promise<{ rows: unknown[]; rowCount: number }> => ({
+        rows: [],
+        rowCount: 0,
+      }),
+      release: (): void => {},
+    };
+    const pool: PgPoolLike = {
+      query: client.query,
+      connect: async () => client,
+      end: async (): Promise<void> => {},
+    };
+    return new PostgresFlightRecorder(
+      { app: "postgresql://app@127.0.0.1/gateway" },
+      { poolFactory: () => pool, logger: noopLogger }
+    );
   }
 
   it("names PostgreSQL without exposing its DSN", async () => {
-    reportPostgresHealth();
-    const res = await health(
-      mkPersistence({ backend: "postgres", path: null, dsn: "postgres://x" })
-    );
+    const recorder = postgresRecorder();
+    try {
+      const res = await health(
+        mkPersistence({ backend: "postgres", path: null, dsn: "postgres://x" }),
+        recorder
+      );
 
-    // The job store block alone is what misled callers: no path at all.
-    expect(res.persistence.backend).toBe("postgres");
-    expect(res.persistence.dbPath).toBeNull();
+      // The job store block alone is what misled callers: no path at all.
+      expect(res.persistence.backend).toBe("postgres");
+      expect(res.persistence.dbPath).toBeNull();
 
-    // The recorder block supplies what was missing.
-    expect(res.flightRecorder.engine).toBe("postgres");
-    expect(res.flightRecorder.path).toBe("postgresql");
-    expect(res.flightRecorder.enabled).toBe(true);
-    expect(res.flightRecorder.followsPersistenceBackend).toBe(true);
+      // The recorder block supplies what was missing.
+      expect(res.flightRecorder.engine).toBe("postgres");
+      expect(res.flightRecorder.path).toBe("postgresql");
+      expect(res.flightRecorder.enabled).toBe(true);
+      expect(res.flightRecorder.followsPersistenceBackend).toBe(true);
+    } finally {
+      await recorder.close();
+    }
+  });
+
+  it("wires the generic PostgreSQL formatter into runtime retention health", async () => {
+    const sweeper = createRuntimeRetentionSweeper({
+      recorder: {
+        readStorageStats: async () => {
+          throw new Error("connect ENOENT /tmp/runtime-dsn-secret/.s.PGSQL.5432");
+        },
+        evictExpiredRequests: async () => 0,
+      } as unknown as FlightRecorderLike,
+      validationRuns: null,
+      persistence: mkPersistence({
+        backend: "postgres",
+        path: null,
+        dsn: "postgresql://app@127.0.0.1/gateway",
+        retention: resolveRetentionPolicy({
+          jobRetentionDays: 30,
+          overrides: { requests: 1 },
+        }),
+      }),
+      logger: noopLogger,
+    });
+
+    const report = await sweeper.sweep();
+    expect(report.subsystems.requests.error).toBe("PostgreSQL operation failed");
+    expect(report.subsystems.requests.error).not.toContain("runtime-dsn-secret");
   });
 
   it("reports preserved pre-switch history without claiming an active split", async () => {
-    reportPostgresHealth();
-    const res = await health(
-      mkPersistence({ backend: "postgres", path: null, dsn: "postgres://x" })
-    );
+    const recorder = postgresRecorder();
+    try {
+      const res = await health(
+        mkPersistence({ backend: "postgres", path: null, dsn: "postgres://x" }),
+        recorder
+      );
 
-    expect(res.flightRecorder.warning).not.toContain("SPLIT");
-    expect(res.flightRecorder.warning).toContain("were NOT migrated");
-    expect(res.flightRecorder.warning).toContain(join(tmp, "logs.db"));
+      expect(res.flightRecorder.warning).not.toContain("SPLIT");
+      expect(res.flightRecorder.warning).toContain("were NOT migrated");
+      expect(res.flightRecorder.warning).toContain(join(tmp, "logs.db"));
+    } finally {
+      await recorder.close();
+    }
   });
 
   it("does not cry split when both subsystems are SQLite", async () => {

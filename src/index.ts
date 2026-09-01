@@ -743,6 +743,30 @@ function getProvidersConfig(runtimeLogger: GatewayLogger = logger): ProvidersCon
  */
 let retentionSweeper: RetentionSweeper | null = null;
 
+/**
+ * Build the process retention surface from the same persistence decision as
+ * the runtime. Keeping the PostgreSQL failure formatter inside this factory
+ * makes the health-safe wiring directly testable rather than a fragile option
+ * at one call site in main().
+ */
+export function createRuntimeRetentionSweeper(input: {
+  recorder: FlightRecorderLike;
+  validationRuns: JobStore | null;
+  persistence: PersistenceConfig;
+  logger: GatewayLogger;
+}): RetentionSweeper {
+  return new RetentionSweeper({
+    recorder: input.recorder,
+    validationRuns:
+      input.validationRuns && isValidationRunStore(input.validationRuns)
+        ? input.validationRuns
+        : null,
+    policy: persistenceRetentionPolicy(input.persistence),
+    logger: input.logger,
+    failureMessage: input.persistence.backend === "postgres" ? postgresFailureMessage : undefined,
+  });
+}
+
 function getJobStore(runtimeLogger: GatewayLogger = logger): JobStore | null {
   if (jobStoreInitialized) return jobStore;
   jobStoreInitialized = true;
@@ -759,14 +783,14 @@ function newAsyncJobManager(
   metrics: PerformanceMetrics,
   runtimeLogger: GatewayLogger,
   store: JobStore | null = getJobStore(runtimeLogger),
-  fr: FlightRecorderLike = getFlightRecorder(runtimeLogger)
+  fr: FlightRecorderLike = getFlightRecorder(runtimeLogger),
+  pc: PersistenceConfig = getPersistenceConfig(runtimeLogger)
 ): AsyncJobManager {
   // Issue #139 (durable lease): the blanket startup orphan sweep is gone. Every
   // instance registers a lease and runs the per-job fencing sweep, which is safe
   // on a shared store because heartbeat and sweep serialize on the job row. The
   // interim ownsOrphanRecovery flag is deprecated (parsed + warned in config.ts)
   // and no longer load-bearing.
-  const pc = getPersistenceConfig(runtimeLogger);
   return new AsyncJobManager(
     runtimeLogger,
     (cli, durationMs, success) => {
@@ -1278,19 +1302,33 @@ export function resolveGatewayServerRuntime(
   options: { isolateState?: boolean } = {}
 ): GatewayServerRuntime {
   const runtimeLogger = deps.logger ?? logger;
+  // Resolve the selector before any dependency that follows it. An injected
+  // persistence config must not be reported by health while the recorder and
+  // lease settings were constructed from an unrelated ambient config.
+  const runtimePersistence = deps.persistence ?? getPersistenceConfig(runtimeLogger);
   const runtimeSessionManager = deps.sessionManager ?? sessionManager;
   const runtimePerformanceMetrics =
     deps.performanceMetrics ??
     (options.isolateState ? new PerformanceMetrics() : performanceMetrics);
   // Resolve flight recorder BEFORE async manager so isolateState managers
   // can be wired with the same recorder instance the runtime exposes.
-  const runtimeFlightRecorder = deps.flightRecorder ?? getFlightRecorder(runtimeLogger);
+  const runtimeFlightRecorder =
+    deps.flightRecorder ??
+    (deps.persistence
+      ? createFlightRecorder(runtimeLogger, runtimePersistence.backend, runtimePersistence.roleDsns)
+      : getFlightRecorder(runtimeLogger));
   const runtimeAsyncJobManager =
     deps.asyncJobManager ??
     (options.isolateState
       ? // Factory-created test/HTTP session servers must not mark another instance's
         // durable jobs orphaned. Stdio startup injects the process-global manager.
-        newAsyncJobManager(runtimePerformanceMetrics, runtimeLogger, null, runtimeFlightRecorder)
+        newAsyncJobManager(
+          runtimePerformanceMetrics,
+          runtimeLogger,
+          null,
+          runtimeFlightRecorder,
+          runtimePersistence
+        )
       : getAsyncJobManager(runtimeLogger));
   const runtimeApprovalManager =
     deps.approvalManager ??
@@ -1323,7 +1361,7 @@ export function resolveGatewayServerRuntime(
     approvalManager: runtimeApprovalManager,
     flightRecorder: runtimeFlightRecorder,
     logger: runtimeLogger,
-    persistence: deps.persistence ?? getPersistenceConfig(runtimeLogger),
+    persistence: runtimePersistence,
     cacheAwareness: deps.cacheAwareness ?? getCacheAwarenessConfig(runtimeLogger),
     compression: deps.compression ?? getCompressionConfig(runtimeLogger),
     providers: deps.providers ?? getProvidersConfig(runtimeLogger),
@@ -24710,12 +24748,11 @@ async function main() {
   // store has settled so `validationRuns` is the store that actually opened,
   // not the one that was configured.
   const retentionStore = getJobStore(logger);
-  retentionSweeper = new RetentionSweeper({
+  retentionSweeper = createRuntimeRetentionSweeper({
     recorder: getFlightRecorder(logger),
-    validationRuns: retentionStore && isValidationRunStore(retentionStore) ? retentionStore : null,
-    policy: persistenceRetentionPolicy(persistence),
+    validationRuns: retentionStore,
+    persistence,
     logger,
-    failureMessage: persistence.backend === "postgres" ? postgresFailureMessage : undefined,
   });
   const sweepInterval = persistence.retentionSweepIntervalMs ?? DEFAULT_RETENTION_SWEEP_INTERVAL_MS;
   // The return value is READ. `start()` declines when every destructive bound

@@ -121,7 +121,7 @@ describe("transcript_read is declared exactly where a body can come back", () =>
   });
 });
 
-describe("the state inventory after s5", () => {
+describe("the state inventory after the durable subsystems reached the port", () => {
   it("gives every group a determination about who authors its operations", async () => {
     expect(Object.keys(STATE_GROUP_AUTHORSHIP).sort()).toEqual(
       STATE_INVENTORY.map(group => group.id).sort()
@@ -136,18 +136,34 @@ describe("the state inventory after s5", () => {
     expect(unowned).toEqual(["approvals", "admin_audit", "workspace_registry"]);
   });
 
-  it("marks as carried exactly the groups s5 actually moved", async () => {
+  it("marks as carried exactly the groups the completed nodes moved", async () => {
     const carried = STATE_INVENTORY.filter(g => g.carried).map(g => g.id);
-    expect(carried).toEqual(["jobs", "validation_runs", "validation_receipts", "kit_persistence"]);
-    for (const group of STATE_INVENTORY.filter(g => g.carried)) {
+    expect(carried).toEqual([
+      "jobs",
+      "validation_runs",
+      "validation_receipts",
+      "kit_persistence",
+      "requests",
+      "gateway_metadata",
+    ]);
+    for (const group of STATE_INVENTORY.filter(g =>
+      ["jobs", "validation_runs", "validation_receipts", "kit_persistence"].includes(g.id)
+    )) {
       expect(group.owningNode).toBe("s5.job-store-first");
+    }
+    for (const group of STATE_INVENTORY.filter(g =>
+      ["requests", "gateway_metadata"].includes(g.id)
+    )) {
+      expect(group.owningNode).toBe("s7.flight-recorder-onto-the-port");
     }
   });
 
-  it("records the SQLite-only transcript groups as a decision, not an oversight", async () => {
+  it("records the dual-engine transcript groups as completed work", async () => {
     for (const id of ["requests", "gateway_metadata"] as const) {
       const group = STATE_INVENTORY.find(g => g.id === id);
       expect(group?.owningNode).toBe("s7.flight-recorder-onto-the-port");
+      expect(group?.current).toBe("logs.db or Postgres");
+      expect(group?.carried).toBe(true);
       expect(group?.note).toBeTruthy();
     }
   });

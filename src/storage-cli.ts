@@ -36,12 +36,16 @@ function bytes(n: number): string {
 /**
  * The file this host's transcripts are actually in, or a reason there is none.
  *
- * Not `resolveFlightRecorderDbPath()` alone: on a host whose transcripts were
- * admitted into PostgreSQL that path still names a file, and compacting it
- * would rewrite an abandoned database while reporting success.
+ * Not `resolveFlightRecorderDbPath()` alone: on a PostgreSQL host that path can
+ * still name the abandoned SQLite file, and compacting it would rewrite the
+ * wrong database while reporting success.
  */
 function sqliteTranscriptPath(): { path: string } | { refusal: string } {
   const persistence = loadPersistenceConfig();
+  const path = resolveFlightRecorderDbPath();
+  if (!path) {
+    return { refusal: "The flight recorder is disabled (LLM_GATEWAY_LOGS_DB is 'none')." };
+  }
   const decision = flightRecorderEngineDecision(persistence.backend);
   if (decision.engine === "postgres") {
     return {
@@ -49,10 +53,6 @@ function sqliteTranscriptPath(): { path: string } | { refusal: string } {
         "Request history is in PostgreSQL on this host. There is nothing to compact: autovacuum " +
         "reclaims deleted rows and no exclusive lock or operator step is involved.",
     };
-  }
-  const path = resolveFlightRecorderDbPath();
-  if (!path) {
-    return { refusal: "The flight recorder is disabled (LLM_GATEWAY_LOGS_DB is unset or 'none')." };
   }
   return { path };
 }

@@ -520,7 +520,26 @@ describe("the sweeper reads the count it produces", () => {
     });
 
     const report = await sweeper.sweep();
+    expect(report.subsystems.wedgedValidationRuns.eligible).toBeNull();
+    expect(report.subsystems.wedgedValidationRuns.deleted).toBe(0);
     expect(report.subsystems.wedgedValidationRuns.error).toBeNull();
+
+    const failingStore = {
+      countWedgedValidationRuns: async () => {
+        throw new Error("connect ENOENT /tmp/retention-dsn-secret/.s.PGSQL.5432");
+      },
+      evictWedgedValidationRuns: async () => 0,
+    };
+    const failed = await new RetentionSweeper({
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      recorder: fake.recorder as any,
+      validationRuns: failingStore,
+      policy,
+      logger: noopLogger,
+      failureMessage: () => "PostgreSQL operation failed",
+    }).sweep();
+    expect(failed.subsystems.wedgedValidationRuns.error).toBe("PostgreSQL operation failed");
+    expect(failed.subsystems.wedgedValidationRuns.error).not.toContain("retention-dsn-secret");
   });
 
   it("does nothing at all while every destructive bound is unset", async () => {

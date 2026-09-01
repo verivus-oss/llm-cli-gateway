@@ -336,6 +336,7 @@ describe('backend = "none" and LLM_GATEWAY_LOGS_DB', () => {
     vi.stubEnv("LLM_GATEWAY_LOGS_DB", "none");
     const disposition = storageDisposition(loadPersistenceConfig(noopLogger));
     expect(disposition.requestHistory.enabled).toBe(false);
+    expect(disposition.requestHistory.followsPersistenceBackend).toBe(false);
     expect(disposition.requestHistory.decidedBy).toBe("LLM_GATEWAY_LOGS_DB");
     expect(formatStorageDisposition(disposition).join("\n")).toContain(
       "request history is NOT being written"

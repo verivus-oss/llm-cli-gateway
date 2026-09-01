@@ -59,8 +59,8 @@ describe("the shrinkwrap step has two modes", () => {
   const source = readFileSync(audit, "utf8");
 
   it("refuses a missing shrinkwrap under LLM_GATEWAY_REQUIRE_SHRINKWRAP=1", () => {
-    // The RELEASE behaviour, unchanged. Asserted by running the audit far
-    // enough to reach the step when this checkout is in its normal clean state.
+    // The RELEASE behaviour, unchanged. Asserted before network-backed audit
+    // work when this checkout is in its normal clean state.
     // Release callers generate the shrinkwrap before `npm test`, so that state
     // must not make this test fail before the audit can enforce strict mode.
     const shrinkwrap = join(ROOT, "npm-shrinkwrap.json");
@@ -105,9 +105,11 @@ describe("the shrinkwrap step has two modes", () => {
     }
     // Only ever its own: a shrinkwrap the caller supplied must survive.
     expect(handler).toContain('[ "${SHRINKWRAP_MADE_HERE}" = "1" ] && rm -f "${SHRINKWRAP_PATH}"');
-    expect(source.indexOf('SHRINKWRAP_PATH="${ROOT_DIR}/npm-shrinkwrap.json"')).toBeLessThan(
-      source.indexOf("cleanup_audit_temporaries() {")
-    );
+    const shrinkwrapAt = source.indexOf('SHRINKWRAP_PATH="${ROOT_DIR}/npm-shrinkwrap.json"');
+    const cleanupAt = source.indexOf("cleanup_audit_temporaries() {");
+    expect(shrinkwrapAt).toBeGreaterThanOrEqual(0);
+    expect(cleanupAt).toBeGreaterThanOrEqual(0);
+    expect(shrinkwrapAt).toBeLessThan(cleanupAt);
   });
 
   it("serializes fixed-path generation and arms cleanup before writing", () => {
@@ -134,37 +136,52 @@ describe("the shrinkwrap step has two modes", () => {
 });
 
 describe("every release path asks for the strict mode", () => {
-  // Derived from the tree, not from a list: any workflow that runs the audit or
-  // the gate is a release path and must opt in, or the dev mode silently
-  // becomes the release mode. A new workflow added without it fails here.
-  const callers = [
-    ".github/workflows/ci.yml",
-    ".github/workflows/npm-publish.yml",
-    ".github/workflows/release-tag-publish.yml",
-    "scripts/pre-release.sh",
-  ];
-
-  it.each(callers)("%s sets LLM_GATEWAY_REQUIRE_SHRINKWRAP", file => {
-    expect(readFileSync(join(ROOT, file), "utf8")).toContain("LLM_GATEWAY_REQUIRE_SHRINKWRAP");
-  });
-
-  it("finds no OTHER caller of the audit or the gate that skips it", () => {
+  // Derived per invocation, not per file. A second unflagged step in an
+  // existing workflow must fail even when another step in that file is strict.
+  it("binds the strict flag to every audit or release-gate invocation", () => {
     const tracked = execFileSync("git", ["ls-files", ".github/workflows", "scripts"], {
       cwd: ROOT,
       encoding: "utf8",
     })
       .split("\n")
-      .filter(Boolean);
-    const missing = tracked.filter(file => {
-      if (callers.includes(file)) return false;
-      if (file.endsWith(".test.mjs")) return false;
-      const text = readFileSync(join(ROOT, file), "utf8");
-      const invokes =
-        /^\s*-?\s*run:\s*npm run (security:audit|check)\b/m.test(text) ||
-        /^\s*npm run (security:audit|check)\b/m.test(text);
-      return invokes && !text.includes("LLM_GATEWAY_REQUIRE_SHRINKWRAP");
-    });
-    expect(missing, `these run the gate without the strict flag: ${missing.join(", ")}`).toEqual(
+      .filter(
+        file => file && !file.endsWith(".test.mjs") && !file.endsWith("release-security-audit.sh")
+      );
+    const command =
+      /^\s*(?:-\s*run:\s*)?(?:npm run (?:security:audit|check)\b|bash scripts\/release-security-audit\.sh\b)/;
+    const invocations = [];
+    const missing = [];
+
+    for (const file of tracked) {
+      const lines = readFileSync(join(ROOT, file), "utf8").split(/\r?\n/);
+      for (let index = 0; index < lines.length; index += 1) {
+        if (!command.test(lines[index])) continue;
+        invocations.push(file);
+
+        let context;
+        if (file.endsWith(".yml") || file.endsWith(".yaml")) {
+          const indent = lines[index].search(/\S/);
+          let end = index + 1;
+          while (end < lines.length) {
+            const nextIndent = lines[end].search(/\S/);
+            if (nextIndent >= 0 && nextIndent <= indent && /^\s*-\s/.test(lines[end])) break;
+            end += 1;
+          }
+          context = lines.slice(index, end).join("\n");
+          if (!/LLM_GATEWAY_REQUIRE_SHRINKWRAP:\s*["']?1\b/.test(context)) {
+            missing.push(`${file} -> ${lines[index].trim()}`);
+          }
+        } else {
+          context = lines.slice(Math.max(0, index - 5), index + 1).join("\n");
+          if (!/(?:export\s+)?LLM_GATEWAY_REQUIRE_SHRINKWRAP=1\b/.test(context)) {
+            missing.push(`${file} -> ${lines[index].trim()}`);
+          }
+        }
+      }
+    }
+
+    expect(invocations.length, "no release audit or gate invocation was found").toBeGreaterThan(0);
+    expect(missing, `these invocations lack a bound strict flag: ${missing.join(", ")}`).toEqual(
       []
     );
   });

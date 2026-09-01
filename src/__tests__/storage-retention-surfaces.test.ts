@@ -202,6 +202,19 @@ describe("`storage compact` is an operator action, never a timer", () => {
     expect(statSync(dbPath).size).toBe(before);
   });
 
+  it("reports an explicitly disabled PostgreSQL recorder as disabled", async () => {
+    writeFileSync(
+      join(dir, "config.toml"),
+      `[persistence]\nbackend = "postgres"\ndsn = "postgresql://app@127.0.0.1/gateway"\n`
+    );
+    vi.stubEnv("LLM_GATEWAY_LOGS_DB", "none");
+
+    await runStorageCommand(["status"]);
+
+    expect(out.join(" ")).toContain("flight recorder is disabled");
+    expect(out.join(" ")).not.toContain("Request history is in PostgreSQL");
+  });
+
   it("refuses an unknown subcommand instead of doing something", async () => {
     await runStorageCommand(["vacuum"]);
     expect(process.exitCode).toBe(2);

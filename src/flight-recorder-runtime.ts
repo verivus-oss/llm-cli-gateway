@@ -197,6 +197,6 @@ export class FlightRecorderRuntime {
  * lint rule can see. Every read returns a promise, so it is truthy before it
  * resolves and `npm run promise:conditions:check` is the control for that.
  *
- * What it does NOT do, by operator decision 0a: choose Postgres. See
- * `flightRecorderEngineDecision`.
+ * Engine selection remains outside this class. `flightRecorderEngineDecision`
+ * selects this SQLite implementation or the PostgreSQL implementation.
  */

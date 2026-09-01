@@ -1,6 +1,8 @@
 # Postgres security hardening
 
-Status: draft. One change applied (2.1); everything else unimplemented.
+Status: historical hardening proposal. Its topology admission prerequisite is
+retired; the implemented storage decision was rechecked against
+`ae6e645732470049db53704a5e0cddcc895cf689`.
 Scope: the `llm-gateway-pg` deployment on `workhorse3`, and the preconditions
 for moving flight-recorder transcripts into Postgres.
 
@@ -16,11 +18,11 @@ rest before treating it as deployable.
 
 ## 1. Why this exists
 
-The gateway moved its control plane to Postgres, but the flight recorder is
-still SQLite-only (`flight-recorder.ts:24`), so prompt and response bodies land
-in `~/.llm-cli-gateway/logs.db`. See `storage-unification.md` for that problem.
-This document covers what the Postgres deployment must become before transcript
-bodies are moved into it.
+At the time this proposal was written, the gateway control plane used
+PostgreSQL while the flight recorder used SQLite. That historical split
+motivated the hardening work below. It is no longer an admission rule: at the
+named commit, `backend = "postgres"` selects PostgreSQL for every durable
+subsystem, and operators own the deployment controls described here.
 
 ## 2. Verified current state
 
