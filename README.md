@@ -1384,7 +1384,7 @@ List recent persisted requests newest-first **without** a correlation ID, which 
 
 ##### `llm_process_health`
 
-Report gateway process health: async-job manager state, the resolved job-store persistence block (`backend`, `dbPath`, config sources), and a separate `flightRecorder` block naming the recorder's own engine and path. Use it to confirm which config file the gateway is running under and **which storage backend each subsystem is actually on** before assuming they match: they are independent, and on any non-SQLite job store the `flightRecorder.warning` field says so explicitly.
+Report gateway process health: async-job manager state, the resolved durable persistence configuration, and flight-recorder health on that configured engine. With `backend = "postgres"`, the recorder reports the opaque `postgresql` target and generic PostgreSQL failures, and never falls back to SQLite. Its warning also states that rows left in the previous engine were not migrated. The explicit `LLM_GATEWAY_LOGS_DB=none` recorder-off switch remains separate, as do the intentionally ephemeral `memory` and disabled `none` job-store modes.
 
 ##### `upstream_contracts`
 
