@@ -165,10 +165,33 @@ describe("every release path asks for the strict mode", () => {
     return lines.slice(start, end).join("\n");
   }
 
+  function workflowHasExactStrictBinding(context) {
+    return context
+      .split("\n")
+      .filter(line => !line.trimStart().startsWith("#"))
+      .some(line => /^\s*LLM_GATEWAY_REQUIRE_SHRINKWRAP:\s*(?:1|"1"|'1')\s*(?:#.*)?$/.test(line));
+  }
+
+  function shellHasExactStrictBinding(lines, invocationAt) {
+    let effectiveValue = null;
+    for (const line of lines.slice(0, invocationAt + 1)) {
+      if (line.trimStart().startsWith("#")) continue;
+      const assignments = [
+        ...line.matchAll(
+          /(?:^|[;&]\s*|\bexport\s+)LLM_GATEWAY_REQUIRE_SHRINKWRAP=(?:"([^"]*)"|'([^']*)'|([^\s;&]+))/g
+        ),
+      ];
+      for (const match of assignments) {
+        effectiveValue = match[1] ?? match[2] ?? match[3] ?? null;
+      }
+    }
+    return effectiveValue === "1";
+  }
+
   // Derived per invocation, not per file. A second unflagged step in an
   // existing workflow must fail even when another step in that file is strict.
   it("binds the strict flag to every audit or release-gate invocation", () => {
-    const tracked = execFileSync("git", ["ls-files", ".github/workflows", "scripts"], {
+    const tracked = execFileSync("git", ["ls-files", ".github/workflows", "scripts", "installer"], {
       cwd: ROOT,
       encoding: "utf8",
     })
@@ -194,16 +217,11 @@ describe("every release path asks for the strict mode", () => {
         let context;
         if (isWorkflow) {
           context = workflowStep(lines, index);
-          const executableContext = context
-            .split("\n")
-            .filter(line => !line.trimStart().startsWith("#"))
-            .join("\n");
-          if (!/LLM_GATEWAY_REQUIRE_SHRINKWRAP:\s*["']?1\b/.test(executableContext)) {
+          if (!workflowHasExactStrictBinding(context)) {
             missing.push(`${file} -> ${lines[index].trim()}`);
           }
         } else {
-          context = lines.slice(Math.max(0, index - 5), index + 1).join("\n");
-          if (!/(?:export\s+)?LLM_GATEWAY_REQUIRE_SHRINKWRAP=1\b/.test(context)) {
+          if (!shellHasExactStrictBinding(lines, index)) {
             missing.push(`${file} -> ${lines[index].trim()}`);
           }
         }
@@ -252,5 +270,37 @@ describe("every release path asks for the strict mode", () => {
       "      - run: echo done",
     ];
     expect(workflowStep(lines, 0)).toBe("      - run: npm run check\n");
+  });
+
+  it.each(['"1-disabled"', '"1 "', "0"])(
+    "rejects a workflow strict value that is not exactly one: %s",
+    value => {
+      expect(
+        workflowHasExactStrictBinding(
+          [
+            "      - run: npm run check",
+            "        env:",
+            `          LLM_GATEWAY_REQUIRE_SHRINKWRAP: ${value}`,
+          ].join("\n")
+        )
+      ).toBe(false);
+    }
+  );
+
+  it("uses the last effective shell assignment and ignores comments", () => {
+    expect(
+      shellHasExactStrictBinding(
+        [
+          "# export LLM_GATEWAY_REQUIRE_SHRINKWRAP=1",
+          "export LLM_GATEWAY_REQUIRE_SHRINKWRAP=1",
+          "LLM_GATEWAY_REQUIRE_SHRINKWRAP=0",
+          "npm run check",
+        ],
+        3
+      )
+    ).toBe(false);
+    expect(
+      shellHasExactStrictBinding(["LLM_GATEWAY_REQUIRE_SHRINKWRAP=1 npm run security:audit"], 0)
+    ).toBe(true);
   });
 });

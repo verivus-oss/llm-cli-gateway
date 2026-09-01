@@ -99,7 +99,8 @@ If verification fails, **do not run the binary**; redownload and reverify.
 Run this before creating the GitHub release:
 
 ```bash
-npm run security:audit
+node scripts/make-prod-shrinkwrap.mjs
+LLM_GATEWAY_REQUIRE_SHRINKWRAP=1 npm run security:audit
 ```
 
 The gate runs the npm vulnerability audit, scans production source for dynamic
