@@ -22,9 +22,12 @@ of three: the job store, the session store and the flight recorder now sit on
 one storage port with a SQLite driver and a PostgreSQL driver under it, so a
 request's two halves can finally live in one engine.
 
-`[persistence].backend` is the engine decision. With `postgres`, all durable
-subsystems use PostgreSQL. Nothing already written is migrated when the engine
-changes; that cutover remains an explicit operator action.
+`[persistence].backend` is the engine decision. With `postgres`, the three
+backend-governed durable subsystems use PostgreSQL: jobs and validation,
+sessions, and request history. File-backed operator records such as approvals,
+admin audit, and the workspace registry are outside this engine selector.
+Nothing already written is migrated when the engine changes; that cutover
+remains an explicit operator action.
 
 Candidate history, since it is not a straight line. rc.1, rc.2, rc.6, rc.7 and
 rc.8 were published to npm as 3.1.0 candidates. rc.3 and rc.4 exist in
@@ -307,8 +310,8 @@ will be no 3.1.0 stable; the first candidate under the new number is
 
 ### Changed
 
-- **`[persistence].backend` now selects the engine for every durable
-  subsystem, and changing it migrates nothing.** Until this release the flight
+- **`[persistence].backend` now selects the engine for every backend-governed
+  durable subsystem, and changing it migrates nothing.** Until this release the flight
   recorder was always SQLite regardless of `[persistence]`, so a PostgreSQL
   host split one request across two engines. `flightRecorderEngineDecision`
   now follows the configured backend directly.
@@ -320,7 +323,7 @@ will be no 3.1.0 stable; the first candidate under the new number is
   admission, and diagnostics do not render a DSN-derived target.
 
   A PostgreSQL connection, migration, or operation failure makes the affected
-  subsystem unavailable. It is reported generically on health surfaces and
+  subsystem fail closed. It is reported generically on health surfaces and
   does not trigger a SQLite fallback.
 
   **There is no data migration in either direction.** A host that switches
@@ -434,15 +437,15 @@ will be no 3.1.0 stable; the first candidate under the new number is
   Prune out of band until a reaper ships. Tracked in
   `docs/plans/durable-state-lifecycle.dag.toml`.
 
-  `DATABASE_URL` remains as a deprecated override that warns once. It is refused
+  `DATABASE_URL` remains as a deprecated input that warns once. It is refused
   when it disagrees with `[persistence].dsn`, and refused when
   `[persistence].backend` is explicitly written as `"sqlite"`, `"memory"` or
   `"none"`, because honouring it would put sessions in one database and jobs in
-  another. It is still honoured when no `[persistence]` block is configured at
-  all, which is the one remaining case where sessions and jobs can differ; that
-  is the pre-`[persistence]` behaviour of deployments that never adopted the
-  config file, and refusing it would silently move their sessions to an empty
-  file store.
+  another. When it is the sole persistence selector, it now acts as a deprecated
+  alias for `backend = "postgres"` plus `dsn`: sessions, jobs, validation runs,
+  and request history all select PostgreSQL. Existing SQLite rows are not
+  migrated or cross-read, so operators who need that history must move it as a
+  separate cutover step.
 
   On its own this did not complete the single-store goal. The flight recorder
   now follows `[persistence]` directly as described at the head of this section,
@@ -876,8 +879,9 @@ terminal`. Codex exposes no non-interactive equivalent. The tool now names the
   an operator with `backend = "postgres"` could be moved off Postgres by a
   variable named for a different subsystem. An explicitly configured backend now
   wins and the override is refused with a warning naming the variable. The
-  literal value `none` is exempt and still overrides, because it is a documented
-  kill switch.
+  literal value `none` still disables the recorder when it comes from
+  `LLM_GATEWAY_LOGS_DB`, but it does not override an explicit job-persistence
+  backend.
 
 - **Provider output flushed during shutdown is no longer lost.** Cancellation,
   idle timeout and the output cap all commit a job's terminal row at the moment

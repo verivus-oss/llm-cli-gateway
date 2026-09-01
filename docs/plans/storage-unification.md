@@ -2,7 +2,7 @@
 
 Status: implemented for the three backend-governed durable subsystems and retained as historical
 design rationale. Implementation state was rechecked against
-`a3929dc8e58d499b992b0c7839e0e94d626ae6ab`.
+`d302fbf3c3cf9931c644ee9c9ffefd0efde68c32`.
 Goal: one storage abstraction with one write path per operation, and a single
 knob that makes a deployment genuinely Postgres-only.
 

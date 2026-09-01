@@ -1,9 +1,9 @@
-# One storage choice for every subsystem. Implements docs/plans/storage-unification.md (rev 3, 84c2c2f).
+# One storage choice for every backend-governed subsystem. Implements docs/plans/storage-unification.md (rev 3, 84c2c2f).
 # Evidence: docs/evidence/storage-unification-audit-2026-08-21.md (host-local).
 
 [meta]
 surface = "FlightRecorder, JobStore and ISessionManager: 3 interfaces, 2 engines. RECOUNTED 2026-08-21: 53 members, not the 42 this line carried since before s2 split queryRequests into seven named reads. JobStore 26, ISessionManager 13, FlightRecorder 14. s3sig signs 12 recorder operations and excludes 2 by name, which is where its own figure of 48 comes from; both are above 42 and that is the point. s11 added THREE more without a recount: evictExpiredRequests on the recorder, and countWedgedValidationRuns / evictWedgedValidationRuns on ValidationRunStore."
-status = "2026-08-22. Everything but s10 and s12 is DONE: s1, s2, s3 part 1, s4, b1, s5, s3sig, s6, s7, s7pg, s8, s9, s11, s13, rf, dur and obs. s7 is done ONLY as far as decision 0a allows and says where it stopped. s12 has its collect half; s10 stays held for a human-supervised run."
+status = "Updated 2026-09-01. The PostgreSQL recorder phase s7pg is done and supersedes the historical SQLite-only stopping point in s7 and decision 0a. Everything except s10 and the remaining half of s12 is done; s10 stays held for a separate operator-run data move."
 
 # WHY: `[persistence].backend` selects the job store and nothing else, so one
 # request's two halves live in two engines 15 ms apart, beside an abandoned
@@ -12,7 +12,7 @@ status = "2026-08-22. Everything but s10 and s12 is DONE: s1, s2, s3 part 1, s4,
 
 [decisions]
 # Operator, 2026-08-21. A stopping point not written down reads as an abandonment.
-scope_0a = "Option A. b1, s3sig, s5, s6, s8, s9, s11 in full; s7 stops with the recorder on the port under the SQLite driver. Transcript bodies into Postgres and s10 are a separate human-supervised run: a plan-sanctioned stop, not a deferral."
+scope_0a = "HISTORICAL 2026-08-21 stopping point, superseded 2026-09-01 by completed s7pg. The no-automatic-data-move decision survives: s10 remains a separate operator-run cutover."
 retirement_0b = "Superseded state is proposed per file and may be moved to a quarantine directory so it stops looking live. Nothing is deleted by this run."
 
 [facts]
@@ -23,7 +23,7 @@ schema_gap = "CLOSED: `requests` and `gateway_metadata` have SQLite and PostgreS
 gate_output_is_not_a_control = "A gate reporting `0 production, 8 tests` was read as a clean production number with a tail, by BOTH the track and the controller, for hours. All eight were live defects of the exact class the gate was built to find, including a receipt helper that returned a promise typed as a record and caused 15 downstream failures. Work every gate's output to zero or say why a finding is not one. Output nobody acts on is not a control. Its twin, hit INDEPENDENTLY by the controller and by a track on the same day: `check | tail` returns tail's exit code, so both of us reported a gate green while it was red. Never read an exit code through a pipe."
 a_constraint_is_not_a_gate = "s3sig's constraint said PRAGMA and VACUUM must be UNREACHABLE from the surface. Checked at f6048d5: scripts/check-storage-port.mjs contained ZERO mentions of either word, enforced two unrelated rules, and had NO test file. The constraint had been sitting in this map since s3, cited by name, wired to nothing. A constraint written in a plan is an unexecuted assertion until something runs it, and this map has now produced two of them (see also inPort:true on approvals, admin_audit and workspace_registry, which names no implementing node and never did). When you write a constraint, name the gate that enforces it or mark it UNENFORCED."
 no_postgres_mandate = "Decided 2026-08-13. SQLite stays as a driver. 'Postgres only' is a deployment property via config, never a package property via removal; the 2.0.0 node:sqlite move exists to keep zero-config npm installs working."
-transcript_gate_is_retired = "SUPERSEDED 2026-09-01. `[persistence].backend = postgres` is authoritative for all durable subsystems. The DSN boundary validates a PostgreSQL URL and does not infer deployment topology. PostgreSQL failure never redirects transcripts to SQLite."
+transcript_gate_is_retired = "SUPERSEDED 2026-09-01. `[persistence].backend = postgres` is authoritative for the three backend-governed durable subsystems. The DSN boundary validates a PostgreSQL URL and does not infer deployment topology. PostgreSQL failure never redirects transcripts to SQLite."
 
 [[node]]
 id = "b1.sqlite-async-benchmark"

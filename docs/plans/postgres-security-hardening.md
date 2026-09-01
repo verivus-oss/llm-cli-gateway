@@ -2,7 +2,7 @@
 
 Status: historical hardening proposal. Its topology admission prerequisite is
 retired; the implemented storage decision was rechecked against
-`a3929dc8e58d499b992b0c7839e0e94d626ae6ab`.
+`d302fbf3c3cf9931c644ee9c9ffefd0efde68c32`.
 Scope: the `llm-gateway-pg` deployment on `workhorse3`, and the preconditions
 for moving flight-recorder transcripts into Postgres.
 
@@ -21,8 +21,9 @@ rest before treating it as deployable.
 At the time this proposal was written, the gateway control plane used
 PostgreSQL while the flight recorder used SQLite. That historical split
 motivated the hardening work below. It is no longer an admission rule: at the
-named commit, `backend = "postgres"` selects PostgreSQL for every durable
-subsystem, and operators own the deployment controls described here.
+named commit, `backend = "postgres"` selects PostgreSQL for every
+backend-governed durable subsystem, and operators own the deployment controls
+described here. File-backed operator records remain outside this selector.
 
 ## 2. Verified current state
 
@@ -626,7 +627,7 @@ OS user.
 7. Envelope encryption of the three transcript columns.
 8. http principal granularity (4.5).
 9. Configure `[persistence].backend = "postgres"` when PostgreSQL is the chosen
-   engine for every durable subsystem.
+   engine for every backend-governed durable subsystem.
 
 ### 6.1 AMENDMENT 2026-09-01: topology admission is retired
 
