@@ -1488,6 +1488,33 @@ describe("s11: the wedged-validation-run termination on PostgreSQL", () => {
     expect(await store.evictWedgedValidationRuns(CUTOFF, 1)).toBe(1);
     expect((await runIds()).length).toBe(4);
   });
+
+  it("skips a validation run whose concurrent finalizer owns the row", async () => {
+    await addRun("finalizing", "running", "2019-01-01T00:00:00.000Z", []);
+    const finalizer = await pool.connect();
+    try {
+      await finalizer.query("BEGIN");
+      await finalizer.query(
+        "UPDATE validation_runs SET status = 'finalized' WHERE validation_id = 'finalizing'"
+      );
+
+      // This is a real second PostgreSQL connection. The retention transaction
+      // sees the pre-update row but must skip its lock rather than selecting it
+      // for deletion while the final receipt transaction is in flight.
+      expect(await store.evictWedgedValidationRuns(CUTOFF, 500)).toBe(2);
+      await finalizer.query("COMMIT");
+    } catch (error) {
+      await finalizer.query("ROLLBACK").catch(() => undefined);
+      throw error;
+    } finally {
+      finalizer.release();
+    }
+
+    const rows = await pool.query(
+      "SELECT status FROM validation_runs WHERE validation_id = 'finalizing'"
+    );
+    expect(rows.rows).toEqual([{ status: "finalized" }]);
+  });
 });
 
 function postgresPersistence(): PersistenceConfig {

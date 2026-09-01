@@ -67,8 +67,8 @@ const SQL_INSERT_REQUEST = `
     `;
 
 const SQL_INSERT_METADATA = `
-      INSERT INTO gateway_metadata (request_id, async_job_id, status)
-      VALUES (?, ?, 'started')
+      INSERT INTO gateway_metadata (request_id, async_job_id, status, completion_rank)
+      VALUES (?, ?, 'started', 0)
     `;
 
 const SQL_UPDATE_REQUEST_COMPLETE = `
@@ -201,6 +201,7 @@ export class PostgresFlightRecorder implements FlightRecorderOperations {
   private readonly runtime: FlightRecorderRuntime;
   private driver: PostgresStorageDriver | null = null;
   private startupPromise: Promise<PostgresStorageDriver> | null = null;
+  private closed = false;
 
   constructor(roleDsns: PostgresRoleDsns, options: PostgresFlightRecorderOptions = {}) {
     if (!roleDsns.app) throw new Error("flight recorder: postgres needs an `app` DSN");
@@ -236,6 +237,7 @@ export class PostgresFlightRecorder implements FlightRecorderOperations {
    * operation retries rather than poisoning the recorder for the process.
    */
   private ensureReady(): Promise<PostgresStorageDriver> {
+    if (this.closed) return Promise.reject(new Error("flight recorder is closed"));
     this.startupPromise ??= this.buildAndBootstrap().then(
       driver => {
         this.runtime.markReady();
@@ -625,8 +627,12 @@ export class PostgresFlightRecorder implements FlightRecorderOperations {
     return deleted;
   }
 
-  /** Drain what has started, then end the pools. MUST be awaited; see the SQLite twin. */
+  /** Join bootstrap, drain started work, then end the pools. MUST be awaited. */
   async close(): Promise<void> {
+    if (this.closed) return;
+    this.closed = true;
+    const startup = this.startupPromise;
+    if (startup) await startup.catch(() => undefined);
     await this.runtime.close();
     await this.driver?.close();
     this.driver = null;
@@ -675,17 +681,31 @@ const TRANSCRIPT_REQUIRED_TYPES: Readonly<Record<string, string>> = {
 
 async function transcriptSchemaReady(driver: PostgresStorageDriver): Promise<boolean> {
   const rows = await driver.withConnection("analytics_read", conn =>
-    conn.query<{ table_name: string; column_name: string; data_type: string }>(
-      `SELECT table_name, column_name, data_type FROM information_schema.columns
+    conn.query<{
+      table_name: string;
+      column_name: string;
+      data_type: string;
+      is_nullable: string;
+      column_default: string | null;
+    }>(
+      `SELECT table_name, column_name, data_type, is_nullable, column_default
+         FROM information_schema.columns
         WHERE table_schema = current_schema() AND table_name IN ('requests', 'gateway_metadata')`
     )
   );
-  const have = new Map(rows.map(row => [`${row.table_name}.${row.column_name}`, row.data_type]));
+  const have = new Map(rows.map(row => [`${row.table_name}.${row.column_name}`, row]));
   if (!TRANSCRIPT_REQUIRED_COLUMNS.every(column => have.has(column))) return false;
   // Type, for the columns a query depends on. Readiness that ignores type is
   // readiness that reports healthy and then fails the read.
   for (const [column, expected] of Object.entries(TRANSCRIPT_REQUIRED_TYPES)) {
-    if (have.get(column) !== expected) return false;
+    if (have.get(column)?.data_type !== expected) return false;
+  }
+  const completionRank = have.get("gateway_metadata.completion_rank");
+  if (
+    completionRank?.is_nullable !== "NO" ||
+    !/^0(?:::[a-z ]+)?$/i.test(completionRank.column_default ?? "")
+  ) {
+    return false;
   }
   return true;
 }

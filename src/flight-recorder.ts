@@ -499,9 +499,11 @@ export function resolveFlightRecorderDbPath(): string | null {
   const configured = process.env.LLM_GATEWAY_LOGS_DB;
   if (configured !== undefined) {
     const normalized = configured.trim().toLowerCase();
-    if (!normalized || normalized === "none") {
-      return null;
-    }
+    if (normalized === "none") return null;
+    // Empty environment assignments are unset selectors everywhere else in
+    // persistence configuration. Treating one as a recorder-only kill switch
+    // split a sole DATABASE_URL deployment back across two engines.
+    if (!normalized) return path.join(os.homedir(), ".llm-cli-gateway", "logs.db");
     return configured.trim();
   }
 

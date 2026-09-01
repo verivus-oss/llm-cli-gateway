@@ -155,6 +155,21 @@ describe("doctor reports the policy rather than deciding one", () => {
     });
     expect(storage.warnings.join(" ")).toContain("persistence configuration is invalid");
   });
+
+  it("reports invalid persistence even when the recorder is explicitly disabled", async () => {
+    writeFileSync(
+      join(dir, "config.toml"),
+      '[persistence]\nbackend = "postgres"\ndsn = "postgresql://unterminated'
+    );
+    vi.stubEnv("LLM_GATEWAY_LOGS_DB", "none");
+    const storage = await collectStorageHealth();
+    expect(storage.flight_recorder).toMatchObject({
+      state: "unavailable",
+      path: null,
+      error: "Persistence configuration is invalid",
+    });
+    expect(storage.warnings.join(" ")).toContain("persistence configuration is invalid");
+  });
 });
 
 describe("`storage compact` is an operator action, never a timer", () => {

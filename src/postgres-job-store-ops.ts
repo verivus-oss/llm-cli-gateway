@@ -27,7 +27,7 @@ import {
 import { assertMcpArtifactAdmissionInvariant } from "./mcp-artifact-admission.js";
 import {
   SQL_COUNT_WEDGED_VALIDATION_RUNS,
-  SQL_SELECT_WEDGED_VALIDATION_RUNS,
+  SQL_SELECT_WEDGED_VALIDATION_RUNS_FOR_UPDATE,
 } from "./validation-wedge-sql.js";
 import { POSTGRES_JOB_STORE_REQUIRED_COLUMNS } from "./postgres-job-store-schema.js";
 import { principalCanAccess } from "./request-context.js";
@@ -1335,7 +1335,7 @@ export function createPostgresJobStoreOps(
         return driver.transaction("retention", async client => {
           const wedged = await rows<{ validation_id: string }>(
             client,
-            SQL_SELECT_WEDGED_VALIDATION_RUNS,
+            SQL_SELECT_WEDGED_VALIDATION_RUNS_FOR_UPDATE,
             [args[0], args[1]]
           );
           if (wedged.rows.length === 0) return 0;

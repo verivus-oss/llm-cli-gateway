@@ -158,6 +158,17 @@ describe("DATABASE_URL precedence matrix", () => {
       outcome: "absent",
       connectionString: null,
     },
+    {
+      name: "DATABASE_URL is normalized before it is compared with the configured DSN",
+      input: {
+        databaseUrl: `  ${APP_DSN}\n`,
+        persistenceDsn: APP_DSN,
+        explicitBackend: false,
+        backend: "postgres",
+      },
+      outcome: "honoured",
+      connectionString: APP_DSN,
+    },
   ];
 
   for (const cell of cells) {
@@ -343,6 +354,19 @@ describe('backend = "none" and LLM_GATEWAY_LOGS_DB', () => {
     expect(formatStorageDisposition(disposition).join("\n")).toContain(
       "request history is NOT being written"
     );
+  });
+
+  it("treats an empty recorder variable as unset on a sole DATABASE_URL host", () => {
+    withToml("# no persistence section\n");
+    vi.stubEnv("DATABASE_URL", APP_DSN);
+    vi.stubEnv("LLM_GATEWAY_LOGS_DB", "  ");
+    const disposition = storageDisposition(loadPersistenceConfig(noopLogger));
+    expect(disposition.jobStore.backend).toBe("postgres");
+    expect(disposition.requestHistory).toMatchObject({
+      enabled: true,
+      engine: "postgres",
+      followsPersistenceBackend: true,
+    });
   });
 
   it("reports the recorder as following a postgres backend without topology inference", () => {

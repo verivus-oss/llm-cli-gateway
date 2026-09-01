@@ -3,13 +3,18 @@
  * authoritative engine selection without exposing a PostgreSQL DSN.
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { mkdtempSync, rmSync } from "node:fs";
+import { existsSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { createGatewayServer, createRuntimeRetentionSweeper } from "../index.js";
 import { AsyncJobManager } from "../async-job-manager.js";
 import { MemoryJobStore } from "../job-store.js";
-import { FlightRecorder, NoopFlightRecorder, type FlightRecorderLike } from "../flight-recorder.js";
+import {
+  createFlightRecorder,
+  FlightRecorder,
+  NoopFlightRecorder,
+  type FlightRecorderLike,
+} from "../flight-recorder.js";
 import { PostgresFlightRecorder } from "../flight-recorder-pg.js";
 import type { PgPoolLike } from "../storage/drivers/postgres.js";
 import { resolveRetentionPolicy } from "../storage/retention.js";
@@ -17,6 +22,7 @@ import { noopLogger } from "../logger.js";
 import type { PersistenceConfig } from "../config.js";
 import { FileSessionManager } from "../session-manager.js";
 import { runWithRequestContext } from "../request-context.js";
+import { collectStorageHealth } from "../doctor.js";
 
 interface RegisteredTool {
   handler: (
@@ -101,6 +107,76 @@ describe("llm_process_health discloses storage disposition", () => {
       { poolFactory: () => pool, logger }
     );
   }
+
+  it("joins an in-flight PostgreSQL bootstrap before closing its pool", async () => {
+    let rejectBootstrap!: (error: Error) => void;
+    let markQueryStarted!: () => void;
+    const queryStarted = new Promise<void>(resolve => {
+      markQueryStarted = resolve;
+    });
+    const end = vi.fn(async (): Promise<void> => {});
+    const query = vi.fn(
+      () =>
+        new Promise<{ rows: unknown[]; rowCount: number }>((_resolve, reject) => {
+          rejectBootstrap = reject;
+          markQueryStarted();
+        })
+    );
+    const client = { query, release: (): void => {} };
+    const pool: PgPoolLike = {
+      query,
+      connect: async () => client,
+      end,
+    };
+    const recorder = new PostgresFlightRecorder(
+      { app: "postgresql://app@127.0.0.1/gateway" },
+      { poolFactory: () => pool, logger: noopLogger }
+    );
+    await queryStarted;
+
+    const closing = recorder.close();
+    await Promise.resolve();
+    expect(end).not.toHaveBeenCalled();
+    rejectBootstrap(new Error("bootstrap stopped for close test"));
+    await closing;
+
+    expect(end).toHaveBeenCalledOnce();
+    expect(recorder.health().closed).toBe(true);
+  });
+
+  it("keeps doctor warnings generic when a PostgreSQL recorder operation fails", async () => {
+    const configPath = join(tmp, "config.toml");
+    writeFileSync(
+      configPath,
+      '[persistence]\nbackend = "postgres"\ndsn = "postgresql://app@127.0.0.1/gateway"\n'
+    );
+    vi.stubEnv("LLM_GATEWAY_CONFIG", configPath);
+    const marker = "connect ENOENT /tmp/raw-dsn-derived-target/.s.PGSQL.5432";
+    const recorder = postgresRecorder(new Error(marker));
+    try {
+      const storage = await collectStorageHealth(recorder);
+      expect(storage.flight_recorder.path).toBe("postgresql");
+      expect(storage.flight_recorder.error).toBe("PostgreSQL operation failed");
+      expect(storage.warnings.join(" ")).toContain("PostgreSQL operation failed");
+      expect(storage.warnings.join(" ")).not.toContain(marker);
+    } finally {
+      await recorder.close();
+    }
+  });
+
+  it("constructs the PostgreSQL recorder without creating the configured SQLite file", async () => {
+    const sqlitePath = join(tmp, "must-not-exist.db");
+    vi.stubEnv("LLM_GATEWAY_LOGS_DB", sqlitePath);
+    const recorder = createFlightRecorder(noopLogger, "postgres", {
+      app: "postgresql://app@127.0.0.1:1/gateway?connect_timeout=1",
+    });
+    try {
+      expect(recorder).toBeInstanceOf(PostgresFlightRecorder);
+      expect(existsSync(sqlitePath)).toBe(false);
+    } finally {
+      await recorder.close();
+    }
+  });
 
   it("names PostgreSQL without exposing its DSN", async () => {
     const recorder = postgresRecorder();

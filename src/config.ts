@@ -21,7 +21,8 @@ import type { QualityTier } from "./least-cost-types.js";
 // Zod schemas for configuration validation
 const DatabaseUrlSchema = z
   .string()
-  .url()
+  .trim()
+  .min(1)
   .refine(url => url.startsWith("postgresql://") || url.startsWith("postgres://"), {
     message: "Database URL must start with postgresql:// or postgres://",
   });
@@ -110,8 +111,9 @@ export function resolveDatabaseUrlPrecedence(input: {
   explicitBackend: boolean;
   backend: PersistenceBackend;
 }): DatabaseUrlDecision {
-  const { databaseUrl, persistenceDsn, explicitBackend, backend } = input;
-  if (!databaseUrl || databaseUrl.length === 0) {
+  const { persistenceDsn, explicitBackend, backend } = input;
+  const databaseUrl = input.databaseUrl?.trim();
+  if (!databaseUrl) {
     return { outcome: "absent", connectionString: persistenceDsn, reason: null };
   }
   if (persistenceDsn && databaseUrl !== persistenceDsn) {
@@ -232,9 +234,12 @@ export function loadConfig(
     return { sessionTtl };
   }
 
-  // Validate URL
+  // Validate the category only. PostgreSQL accepts URI forms, including
+  // hostless socket URLs with userinfo, that WHATWG URL parsers reject. The
+  // driver owns the rest of the syntax and connection validation.
+  let validatedConnectionString: string;
   try {
-    DatabaseUrlSchema.parse(connectionString);
+    validatedConnectionString = DatabaseUrlSchema.parse(connectionString);
   } catch (error) {
     throw new Error(
       `Invalid database URL: ${error instanceof Error ? error.message : String(error)}`,
@@ -244,7 +249,7 @@ export function loadConfig(
 
   return {
     database: {
-      connectionString,
+      connectionString: validatedConnectionString,
       pool: {
         max: 10,
         idleTimeoutMillis: 30000,
@@ -255,7 +260,7 @@ export function loadConfig(
     // Per-role credentials only ever come from `[persistence.roles]`, so a
     // legacy DATABASE_URL deployment gets none and its driver holds `app`
     // alone, which is what it holds today.
-    roleDsns: connectionString === persistenceDsn ? persistence.roleDsns : {},
+    roleDsns: validatedConnectionString === persistenceDsn ? persistence.roleDsns : {},
     sessionTtl,
     databaseSource: persistence.sources.envOverrides.includes("DATABASE_URL")
       ? "env"
@@ -612,7 +617,7 @@ function applyEnvOverrides(
     // The same precedence applies to `none`. LLM_GATEWAY_LOGS_DB remains the
     // recorder's independent off switch, but it no longer rewrites an explicit
     // job-persistence backend as a side effect.
-    const explicitBackend = typeof base.backend === "string";
+    const explicitBackend = Object.hasOwn(base, "backend");
     if (explicitBackend) {
       logWarn(
         logger,
@@ -705,7 +710,10 @@ export function loadPersistenceConfig(logger: Logger = noopLogger): PersistenceC
   const legacyFileSelector =
     Boolean(process.env.LLM_GATEWAY_JOBS_DB?.trim()) ||
     Boolean(process.env.LLM_GATEWAY_LOGS_DB?.trim());
-  if (typeof rawPersistence.backend !== "string" && legacyDatabaseUrl && !legacyFileSelector) {
+  const explicitEngineSelection = ["backend", "dsn", "path", "roles"].some(key =>
+    Object.hasOwn(rawPersistence, key)
+  );
+  if (!explicitEngineSelection && legacyDatabaseUrl && !legacyFileSelector) {
     // Backward compatibility without the old split: DATABASE_URL used to move
     // sessions alone. When it is the only selector, treat it as a deprecated
     // alias for the PostgreSQL backend so jobs and request history follow too.
@@ -750,6 +758,11 @@ export function loadPersistenceConfig(logger: Logger = noopLogger): PersistenceC
   const resolvedPath = backend === "sqlite" ? expandHome(parsed.path ?? DEFAULT_SQLITE_PATH) : null;
   const dsn = backend === "postgres" ? (parsed.dsn ?? null) : null;
 
+  if (backend !== "postgres" && parsed.dsn !== undefined) {
+    throw new Error(
+      `[persistence].dsn requires backend = "postgres"; this config selects backend = "${backend}".`
+    );
+  }
   if (backend === "postgres" && !dsn) {
     throw new Error(
       "[persistence].backend = 'postgres' requires a non-empty 'dsn' (e.g. postgresql://user:pw@host/db)"
@@ -816,12 +829,10 @@ export function loadPersistenceConfig(logger: Logger = noopLogger): PersistenceC
     instanceGcMs: parsed.instanceGcMs,
     asyncJobsEnabled,
     sources,
-    // Read from the FILE, not from `merged`: `applyEnvOverrides` synthesises a
-    // backend from the legacy LLM_GATEWAY_LOGS_DB / _JOBS_DB variables, so
-    // `merged.backend` is a string on any host that sets either, including the
-    // test harness. Explicit means an operator wrote a backend down, which is
-    // the same source the env-override precedence rule above consults.
-    explicitBackend: typeof (raw as Record<string, unknown> | undefined)?.backend === "string",
+    // Read from the FILE, not from `merged`: legacy environment variables can
+    // synthesise a backend. A path, DSN, or roles table also makes the engine
+    // choice explicit enough that DATABASE_URL must not redirect sessions.
+    explicitBackend: explicitEngineSelection,
   };
 }
 

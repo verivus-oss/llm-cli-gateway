@@ -24,6 +24,8 @@ const BASE_DSN = TEST_DATABASE_URL;
 const SCHEMA = `flight_pg_${process.pid}`;
 const MIRROR = `${SCHEMA}_mirror`;
 const INCOMPLETE = `${SCHEMA}_incomplete`;
+const NULLABLE_RANK = `${SCHEMA}_nullable_rank`;
+const DEFAULTLESS_RANK = `${SCHEMA}_defaultless_rank`;
 
 function scoped(schema: string): string {
   const url = new URL(BASE_DSN);
@@ -78,9 +80,13 @@ beforeAll(async () => {
   await admin.query(`DROP SCHEMA IF EXISTS ${SCHEMA} CASCADE`);
   await admin.query(`DROP SCHEMA IF EXISTS ${MIRROR} CASCADE`);
   await admin.query(`DROP SCHEMA IF EXISTS ${INCOMPLETE} CASCADE`);
+  await admin.query(`DROP SCHEMA IF EXISTS ${NULLABLE_RANK} CASCADE`);
+  await admin.query(`DROP SCHEMA IF EXISTS ${DEFAULTLESS_RANK} CASCADE`);
   await admin.query(`CREATE SCHEMA ${SCHEMA}`);
   await admin.query(`CREATE SCHEMA ${MIRROR}`);
   await admin.query(`CREATE SCHEMA ${INCOMPLETE}`);
+  await admin.query(`CREATE SCHEMA ${NULLABLE_RANK}`);
+  await admin.query(`CREATE SCHEMA ${DEFAULTLESS_RANK}`);
 });
 
 afterAll(async () => {
@@ -88,6 +94,8 @@ afterAll(async () => {
   await admin.query(`DROP SCHEMA IF EXISTS ${SCHEMA} CASCADE`);
   await admin.query(`DROP SCHEMA IF EXISTS ${MIRROR} CASCADE`);
   await admin.query(`DROP SCHEMA IF EXISTS ${INCOMPLETE} CASCADE`);
+  await admin.query(`DROP SCHEMA IF EXISTS ${NULLABLE_RANK} CASCADE`);
+  await admin.query(`DROP SCHEMA IF EXISTS ${DEFAULTLESS_RANK} CASCADE`);
   await admin.end();
 });
 
@@ -558,6 +566,34 @@ describe("readiness requires every transcript migration", () => {
       await incomplete.close();
     }
   });
+
+  it.each([
+    [NULLABLE_RANK, "DROP NOT NULL"],
+    [DEFAULTLESS_RANK, "DROP DEFAULT"],
+  ])(
+    "rejects completion_rank when its write invariant is missing: %s",
+    async (schema, alteration) => {
+      await admin.query(
+        `SET search_path TO ${schema};
+       CREATE TABLE schema_migrations (version INTEGER PRIMARY KEY, name TEXT NOT NULL);
+       ${transcriptMigrations()}
+       ALTER TABLE gateway_metadata ALTER COLUMN completion_rank ${alteration}`
+      );
+      const incomplete = new PostgresFlightRecorder(
+        { app: scoped(schema) },
+        { redactSecrets: false, logger: { info: () => {}, error: () => {} } }
+      );
+      try {
+        await expect(incomplete.readStorageStats()).rejects.toThrow(/every transcript migration/);
+        expect(incomplete.health()).toMatchObject({
+          state: "degraded",
+          error: "PostgreSQL operation failed",
+        });
+      } finally {
+        await incomplete.close();
+      }
+    }
+  );
 });
 
 describe("the bootstrap and the migration are the same schema", () => {

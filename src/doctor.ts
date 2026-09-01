@@ -1593,6 +1593,16 @@ export async function collectStorageHealth(
     block.retention.unbounded = unboundedRetentionSubsystems(policy);
   }
 
+  if (!persistence) {
+    block.flight_recorder.state = "unavailable";
+    block.flight_recorder.path = null;
+    block.flight_recorder.error = "Persistence configuration is invalid";
+    block.warnings.push(
+      "Flight recorder is unavailable because the persistence configuration is invalid."
+    );
+    return block;
+  }
+
   if (!dbPath) {
     const disabled = flightRecorderHealth(flightRecorderDisabled());
     block.flight_recorder.state = disabled.state;
@@ -1600,16 +1610,6 @@ export async function collectStorageHealth(
     block.flight_recorder.error = null;
     const message = flightRecorderHealthMessage(disabled);
     if (message) block.warnings.push(message);
-    return block;
-  }
-
-  if (!persistence && !existing) {
-    block.flight_recorder.state = "unavailable";
-    block.flight_recorder.path = null;
-    block.flight_recorder.error = "Persistence configuration is invalid";
-    block.warnings.push(
-      "Flight recorder is unavailable because the persistence configuration is invalid."
-    );
     return block;
   }
 
