@@ -71,11 +71,7 @@ export interface StorageDisposition {
     path: string | null;
     /** Which input decided on/off. */
     decidedBy: "LLM_GATEWAY_LOGS_DB" | "default";
-    /**
-     * True when `[persistence].backend` was honoured. It was hard-coded false,
-     * which was correct while the recorder was SQLite-only and is now the
-     * question an operator is actually asking.
-     */
+    /** True when the recorder engine matches `[persistence].backend`. */
     followsPersistenceBackend: boolean;
     engineRequested: string | null;
   };
@@ -127,6 +123,9 @@ export function storageDisposition(
     ? recorder.state !== "disabled" && recorder.state !== "unavailable"
     : recorderPath !== null;
   const engine = flightRecorderEngineDecision(persistence.backend);
+  const logsDbWasSet = process.env.LLM_GATEWAY_LOGS_DB !== undefined;
+  const logsDbDecidedRecorder =
+    logsDbWasSet && (engine.engine === "sqlite" || recorderPath === null);
   const databaseUrl = resolveDatabaseUrlPrecedence({
     databaseUrl: process.env.DATABASE_URL,
     persistenceDsn: persistence.backend === "postgres" ? persistence.dsn : null,
@@ -153,8 +152,8 @@ export function storageDisposition(
       path:
         recorder?.path ??
         (enabled ? (engine.engine === "postgres" ? POSTGRES_RECORDER_TARGET : recorderPath) : null),
-      decidedBy: process.env.LLM_GATEWAY_LOGS_DB !== undefined ? "LLM_GATEWAY_LOGS_DB" : "default",
-      followsPersistenceBackend: true,
+      decidedBy: logsDbDecidedRecorder ? "LLM_GATEWAY_LOGS_DB" : "default",
+      followsPersistenceBackend: persistence.backend === engine.engine,
       engineRequested: engine.requested ?? null,
     },
     roles: roleReport(persistence.roleDsns),
@@ -177,19 +176,26 @@ function logsDbReport(persistence: PersistenceConfig): DeprecatedInputReport {
   }
   const disablesRecorder = raw.trim().toLowerCase() === "none";
   const tookJobStore = persistence.sources.envOverrides.includes("LLM_GATEWAY_LOGS_DB");
+  const postgresIgnoresPath = persistence.backend === "postgres" && !disablesRecorder;
   return {
     name: "LLM_GATEWAY_LOGS_DB",
     set: true,
-    outcome: disablesRecorder ? "recorder_disabled" : "recorder_path",
+    outcome: disablesRecorder
+      ? "recorder_disabled"
+      : postgresIgnoresPath
+        ? "recorder_path_ignored"
+        : "recorder_path",
     reason: disablesRecorder
       ? "LLM_GATEWAY_LOGS_DB=none turns the flight recorder OFF. It is deprecated as a job-store selector but remains the recorder's own switch; " +
         (tookJobStore
           ? 'it also set [persistence].backend = "none" here.'
           : "[persistence] governs the job store separately.")
-      : "LLM_GATEWAY_LOGS_DB is deprecated; it still paths the flight recorder. " +
-        (tookJobStore
-          ? "It also selected the job store's SQLite file, because no [persistence].backend was written down."
-          : "[persistence] governs the job store separately."),
+      : postgresIgnoresPath
+        ? 'LLM_GATEWAY_LOGS_DB does not path a PostgreSQL recorder. [persistence].backend = "postgres" selects PostgreSQL; only LLM_GATEWAY_LOGS_DB=none still affects the recorder.'
+        : "LLM_GATEWAY_LOGS_DB is deprecated; it still paths the flight recorder. " +
+          (tookJobStore
+            ? "It also selected the job store's SQLite file, because no [persistence].backend was written down."
+            : "[persistence] governs the job store separately."),
   };
 }
 

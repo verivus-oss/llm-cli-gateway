@@ -22689,7 +22689,7 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
         closed: recorderHealth.closed,
         // Stated as a fact rather than implied, because the whole failure mode
         // is a caller assuming one backend setting covers both subsystems.
-        followsPersistenceBackend: true,
+        followsPersistenceBackend: disposition.requestHistory.followsPersistenceBackend,
         engineRequested: recorderEngine.requested ?? null,
         holds: "requests (llm_request_list, llm_request_result)",
         // A failure and the one-time no-migration notice are independent.

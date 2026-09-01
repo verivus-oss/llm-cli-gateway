@@ -60,13 +60,22 @@ describe("the shrinkwrap step has two modes", () => {
 
   it("refuses a missing shrinkwrap under LLM_GATEWAY_REQUIRE_SHRINKWRAP=1", () => {
     // The RELEASE behaviour, unchanged. Asserted by running the audit far
-    // enough to reach the step: it exits non-zero and says why.
-    expect(existsSync(join(ROOT, "npm-shrinkwrap.json"))).toBe(false);
+    // enough to reach the step when this checkout is in its normal clean state.
+    // Release callers generate the shrinkwrap before `npm test`, so that state
+    // must not make this test fail before the audit can enforce strict mode.
+    const shrinkwrap = join(ROOT, "npm-shrinkwrap.json");
+    if (existsSync(shrinkwrap)) {
+      expect(source).toContain('if [ ! -f "${SHRINKWRAP_PATH}" ]');
+      expect(source).toContain(
+        "npm-shrinkwrap.json missing under LLM_GATEWAY_REQUIRE_SHRINKWRAP=1"
+      );
+      return;
+    }
     const { code, out } = run(["bash", audit], { LLM_GATEWAY_REQUIRE_SHRINKWRAP: "1" });
     expect(code).not.toBe(0);
     expect(out).toContain("npm-shrinkwrap.json missing under LLM_GATEWAY_REQUIRE_SHRINKWRAP=1");
     // And it must not have created one while refusing.
-    expect(existsSync(join(ROOT, "npm-shrinkwrap.json"))).toBe(false);
+    expect(existsSync(shrinkwrap)).toBe(false);
   });
 
   it("says out loud what the dev mode does NOT check", () => {
@@ -91,11 +100,36 @@ describe("the shrinkwrap step has two modes", () => {
       source.indexOf("cleanup_audit_temporaries() {"),
       source.indexOf("trap cleanup_audit_temporaries EXIT")
     );
-    for (const cleaned of ["EXPECTED_SHRINKWRAP", "TMP_DIR", "npm-shrinkwrap.json"]) {
+    for (const cleaned of ["EXPECTED_SHRINKWRAP", "TMP_DIR", "SHRINKWRAP_PATH"]) {
       expect(handler, cleaned).toContain(cleaned);
     }
     // Only ever its own: a shrinkwrap the caller supplied must survive.
-    expect(handler).toContain('[ "${SHRINKWRAP_MADE_HERE}" = "1" ] && rm -f npm-shrinkwrap.json');
+    expect(handler).toContain('[ "${SHRINKWRAP_MADE_HERE}" = "1" ] && rm -f "${SHRINKWRAP_PATH}"');
+    expect(source.indexOf('SHRINKWRAP_PATH="${ROOT_DIR}/npm-shrinkwrap.json"')).toBeLessThan(
+      source.indexOf("cleanup_audit_temporaries() {")
+    );
+  });
+
+  it("serializes fixed-path generation and arms cleanup before writing", () => {
+    const lockAt = source.indexOf("flock 9");
+    const trapAt = source.indexOf("trap cleanup_audit_temporaries EXIT");
+    const ownershipAt = source.indexOf("SHRINKWRAP_MADE_HERE=1");
+    const generationAt = source.indexOf("node scripts/make-prod-shrinkwrap.mjs >/dev/null");
+    expect(lockAt).toBeGreaterThanOrEqual(0);
+    expect(trapAt).toBeGreaterThan(lockAt);
+    expect(ownershipAt).toBeGreaterThan(trapAt);
+    expect(generationAt).toBeGreaterThan(ownershipAt);
+  });
+
+  it("compares the packed shrinkwrap with the audited projection", () => {
+    const packAt = source.indexOf('PACKAGE_TGZ="$(npm pack');
+    const extractAt = source.indexOf('tar -xOf "${TMP_DIR}/${PACKAGE_TGZ}"');
+    const compareAt = source.indexOf(
+      'cmp -s "${SHRINKWRAP_PATH}" "${TMP_DIR}/packed-npm-shrinkwrap.json"'
+    );
+    expect(packAt).toBeGreaterThanOrEqual(0);
+    expect(extractAt).toBeGreaterThan(packAt);
+    expect(compareAt).toBeGreaterThan(extractAt);
   });
 });
 

@@ -347,11 +347,23 @@ describe('backend = "none" and LLM_GATEWAY_LOGS_DB', () => {
     vi.stubEnv("LLM_GATEWAY_LOGS_DB", join(tempDir, "logs.db"));
     const disposition = storageDisposition(loadPersistenceConfig(noopLogger));
     expect(disposition.requestHistory.engine).toBe("postgres");
+    expect(disposition.requestHistory.decidedBy).toBe("default");
     expect(disposition.requestHistory.followsPersistenceBackend).toBe(true);
     expect(disposition.requestHistory.engineRequested).toBe("postgres");
+    expect(
+      disposition.deprecatedInputs.find(input => input.name === "LLM_GATEWAY_LOGS_DB")
+    ).toMatchObject({ outcome: "recorder_path_ignored" });
     expect(formatStorageDisposition(disposition).join("\n")).toContain(
       'IS following [persistence].backend = "postgres"'
     );
+  });
+
+  it("does not claim that an SQLite recorder follows memory persistence", () => {
+    withToml(["[persistence]", 'backend = "memory"', "acknowledgeEphemeral = true"].join("\n"));
+    vi.stubEnv("LLM_GATEWAY_LOGS_DB", join(tempDir, "logs.db"));
+    const disposition = storageDisposition(loadPersistenceConfig(noopLogger));
+    expect(disposition.requestHistory.engine).toBe("sqlite");
+    expect(disposition.requestHistory.followsPersistenceBackend).toBe(false);
   });
 });
 
