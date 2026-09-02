@@ -1379,7 +1379,7 @@ Read back any persisted request — sync or async — by its correlation ID. Eve
 
 ##### `llm_request_list`
 
-List recent persisted requests newest-first **without** a correlation ID, which is how you find one. Every other flight-recorder read is keyed by an id handed out inline to the caller that made the request, so an agent that did not make the call (or whose context was compacted since) starts here. Returns metadata only: pass a returned `correlationId` to `llm_request_result` for the bodies, or a returned `asyncJobId` to `llm_job_status`. A caller only ever sees its own requests. An empty list is not proof nothing ran: cross-LLM validation seats write no flight-recorder row, and flight recording can be disabled.
+List recent persisted requests newest-first **without** a correlation ID, which is how you find one. Every other flight-recorder read is keyed by an id handed out inline to the caller that made the request, so an agent that did not make the call (or whose context was compacted since) starts here. Returns metadata only: pass a returned `correlationId` to `llm_request_result` for the bodies, or a returned `asyncJobId` to `llm_job_status`. A caller only ever sees its own requests. An empty list is not proof nothing ran, and it does not mean the work left no record: cross-LLM validation seats write no row here, but they write `validation_runs` and `validation_run_jobs`, and each of those links a job row holding the launched argv and the provider output (read it with `validation_receipt`, then `llm_job_result`). Flight recording can also be disabled. The reverse gap is real too: a listed request can outlive its job, because request retention is unbounded by default and job retention defaults to 30 days.
 
 **Parameters:**
 

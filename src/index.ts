@@ -217,6 +217,7 @@ import {
   type StartJobOutcome,
 } from "./async-job-manager.js";
 import { createJobStore, isValidationRunStore, type JobStore } from "./job-store.js";
+import type { JobCwdResolution } from "./job-cwd-scope.js";
 import {
   MCP_ARTIFACT_RECOVERY_ACKNOWLEDGEMENT,
   recoverMcpArtifactCleanupPin,
@@ -1801,7 +1802,14 @@ async function awaitJobOrDefer(
    * contract assertion on the deferred path. Omitting it re-refuses every
    * pass-through flag the sync handler already admitted.
    */
-  passthroughFlags?: Readonly<Record<string, unknown>>
+  passthroughFlags?: Readonly<Record<string, unknown>>,
+  /**
+   * #296: the request scope `cwd` came out of, so the durable job row records
+   * HOW the directory was chosen and not only that one was. Omitting it stores
+   * `unknown` when a cwd was supplied, which is a visible gap rather than a
+   * wrong answer.
+   */
+  cwdResolution?: JobCwdResolution
 ): Promise<InlineJobResponse | DeferredJobResponse> {
   // U26 fix: ownership of onComplete is a contract. Once this function returns
   // OR throws, the caller MUST consider onComplete consumed — i.e. it has
@@ -1916,6 +1924,7 @@ async function awaitJobOrDefer(
   try {
     outcome = await runtime.asyncJobManager.startJobWithDedup(cli, args, corrId, {
       cwd,
+      cwdResolution,
       idleTimeoutMs,
       outputFormat,
       forceRefresh,
@@ -3665,6 +3674,26 @@ async function resolveWorkspaceAndWorktreeForRequest(args: {
  * Use `formatWorktreePrefix(resolution.worktreePath)` once per tool, at
  * the moment a successful response is constructed.
  */
+/**
+ * #296: project a resolved request scope for the durable job row.
+ *
+ * Returns undefined unless this resolution IS the directory that will be
+ * spawned in. Several handlers pick a Kit, cursor, or isolation directory ahead
+ * of the resolution, and describing the job with a resolution that lost would
+ * record a confident wrong scope; an omission records `unknown` instead.
+ */
+export function jobCwdResolutionOf(
+  cwd: string | undefined,
+  resolution?: ResolvedWorktree
+): JobCwdResolution | undefined {
+  if (cwd === undefined || !resolution || resolution.cwd !== cwd) return undefined;
+  return {
+    worktreePath: resolution.worktreePath,
+    effectiveWorkingDir: resolution.effectiveWorkingDir,
+    workspaceAlias: resolution.workspace?.alias ?? resolution.workspaceAlias,
+  };
+}
+
 export function formatWorktreePrefix(worktreePath?: string): string {
   return worktreePath ? `[gateway] worktree=${worktreePath}\n` : "";
 }
@@ -11240,7 +11269,11 @@ export async function handleClaudeRequest(
             mcpConfig?.cleanup ? mcpConfig.path : undefined,
             mcpConfig?.cleanup ? mcpConfig.artifactScope : undefined,
             undefined,
-            params.providerFlags
+            params.providerFlags,
+            jobCwdResolutionOf(
+              kit?.context.scope.cwd ?? worktreeResolution.cwd ?? workingDir,
+              worktreeResolution
+            )
           ),
       });
     },
@@ -11883,7 +11916,11 @@ export async function handleCodexRequest(
             undefined,
             undefined,
             undefined,
-            params.providerFlags
+            params.providerFlags,
+            jobCwdResolutionOf(
+              kit?.codexIsolation?.cwd ?? worktreeResolution.cwd,
+              worktreeResolution
+            )
           ),
       });
     },
@@ -12240,7 +12277,8 @@ export async function handleGeminiRequest(
         undefined,
         undefined,
         undefined,
-        params.providerFlags
+        params.providerFlags,
+        jobCwdResolutionOf(worktreeResolution.cwd, worktreeResolution)
       );
     },
     computeSuccessFacts: stdout => {
@@ -12979,7 +13017,8 @@ export async function handleGrokRequest(
         undefined,
         undefined,
         undefined,
-        params.providerFlags
+        params.providerFlags,
+        jobCwdResolutionOf(worktreeResolution.cwd, worktreeResolution)
       );
     },
     // Grok json/streaming-json carries a provider-native session id and stop
@@ -13750,7 +13789,8 @@ export async function handleDevinRequest(
         undefined,
         undefined,
         undefined,
-        params.providerFlags
+        params.providerFlags,
+        jobCwdResolutionOf(worktreeResolution.cwd ?? params.workingDir, worktreeResolution)
       );
     },
     decorateDeferred: deferred => {
@@ -14547,7 +14587,8 @@ export async function handleCursorRequest(
         undefined,
         undefined,
         undefined,
-        params.providerFlags
+        params.providerFlags,
+        jobCwdResolutionOf(cursorWorkspace.cwd ?? worktreeResolution.cwd, worktreeResolution)
       );
     },
     computeSuccessFacts: () => undefined,
@@ -15345,7 +15386,8 @@ export async function handleMistralRequest(
           undefined,
           undefined,
           kit?.mistralIsolation?.sessionDir,
-          params.providerFlags
+          params.providerFlags,
+          jobCwdResolutionOf(dispatchCwd, worktreeResolution)
         );
       // The Kit heartbeat keeps the attempt lease alive until deferral or terminal
       // state; a null kitSession runs the dispatch directly.
@@ -15410,7 +15452,8 @@ export async function handleMistralRequest(
             undefined,
             undefined,
             undefined,
-            params.providerFlags
+            params.providerFlags,
+            jobCwdResolutionOf(worktreeResolution.cwd, worktreeResolution)
           );
           if (isDeferredResponse(result)) return result;
           prep.resolvedModel = recoveryModel;
@@ -16343,7 +16386,8 @@ async function dispatchRoutedCli(
       undefined,
       undefined,
       undefined,
-      undefined
+      undefined,
+      jobCwdResolutionOf(workspaceResolution.cwd, workspaceResolution)
     );
 
     if (isDeferredResponse(result)) {
@@ -18660,7 +18704,8 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
           undefined,
           undefined,
           undefined,
-          undefined
+          undefined,
+          jobCwdResolutionOf(worktreeResolution.cwd, worktreeResolution)
         );
 
         if (isDeferredResponse(result)) {
@@ -22594,7 +22639,7 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
                 success: true,
                 count: requests.length,
                 requests,
-                hint: "Pass correlationId to llm_request_result for prompt/response, or asyncJobId to llm_job_status. An empty list is not proof nothing ran: cross-LLM validation seats write no flight-recorder row, and flight recording can be disabled (LLM_GATEWAY_LOGS_DB=none).",
+                hint: "Pass correlationId to llm_request_result for prompt/response, or asyncJobId to llm_job_status. An empty list is not proof nothing ran, and it does not mean the work left no record: cross-LLM validation seats write no row HERE, but they write validation_runs and validation_run_jobs, and each of those links a job row holding the launched argv and the provider output (read it with validation_receipt, then llm_job_result). Flight recording can also be disabled (LLM_GATEWAY_LOGS_DB=none). The reverse gap is real too: a listed request can outlive its job, because request retention is unbounded by default and job retention defaults to 30 days.",
                 // obs: the hint above lists ONE reason a list can be empty and
                 // there are five. This says which one is true right now, so an
                 // empty result from an unreadable database stops looking the

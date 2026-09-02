@@ -121,6 +121,23 @@ describe("llm_request_list (wire)", () => {
     expect(res.hint).toContain("llm_job_status");
   });
 
+  it("#296: sends an empty-handed reader to where the seat record actually is", async () => {
+    // The hint used to stop at "validation seats write no flight-recorder row",
+    // which is true and is the end of the trail. The seats write validation_runs
+    // and validation_run_jobs, and each of those links a job row that holds the
+    // launched argv and the provider output. A reader told only what is absent
+    // opens the database; a reader told where to look calls the next tool.
+    const res = await call({});
+
+    expect(res.hint).toContain("validation_run_jobs");
+    expect(res.hint).toContain("validation_receipt");
+    expect(res.hint).toContain("llm_job_result");
+    // And the opposite gap, which is what makes an OLD correlationId resolve
+    // here and its job not resolve at all.
+    expect(res.hint).toMatch(/request retention is unbounded by default/);
+    expect(res.hint).toMatch(/job retention defaults to 30 days/);
+  });
+
   it("hands back an asyncJobId usable with llm_job_*", async () => {
     await seed("corr-async", "local", "job-42");
 

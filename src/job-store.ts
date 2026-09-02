@@ -14,6 +14,7 @@ import {
   type KitExecutionRef,
 } from "./personal-config-types.js";
 import { assertMcpArtifactAdmissionInvariant } from "./mcp-artifact-admission.js";
+import { parseJobCwdScope, type JobCwdRecord, type JobCwdScope } from "./job-cwd-scope.js";
 import {
   SQL_COUNT_WEDGED_VALIDATION_RUNS,
   SQL_SELECT_WEDGED_VALIDATION_RUNS,
@@ -197,6 +198,20 @@ export interface JobRecord {
   kitTerminalFinalizedAt: string | null;
   /** Bounded, privacy-projected async progress state. Never contains raw provider output. */
   progressJson: string | null;
+  /**
+   * #296: how the child process's working directory was chosen. Null on a
+   * legacy row, which is NOT MEASURED and never "neutral": the column did not
+   * exist when that job ran.
+   */
+  cwdScope: JobCwdScope | null;
+  /**
+   * The directory itself, and null whenever `cwdScope` is `neutral`: that
+   * directory is removed when the process closes, so the path names nothing
+   * afterwards and the scope is the whole record.
+   */
+  cwdPath: string | null;
+  /** Registered workspace alias the directory was bound to, when there was one. */
+  workspaceAlias: string | null;
 }
 
 /**
@@ -326,6 +341,9 @@ function rowToRecord(row: any): JobRecord {
     kitTerminalFinalized: parseDurableBoolean(row.kit_terminal_finalized),
     kitTerminalFinalizedAt: row.kit_terminal_finalized_at ?? null,
     progressJson: typeof row.progress_json === "string" ? row.progress_json : null,
+    cwdScope: parseJobCwdScope(row.cwd_scope),
+    cwdPath: typeof row.cwd_path === "string" ? row.cwd_path : null,
+    workspaceAlias: typeof row.workspace_alias === "string" ? row.workspace_alias : null,
   };
 }
 
@@ -451,6 +469,21 @@ async function ensureJobsProgressColumn(conn: StorageConnection): Promise<void> 
   const cols = (await conn.query("PRAGMA table_info(jobs)")) as Array<{ name?: string }>;
   if (!cols.some(col => col?.name === "progress_json")) {
     await conn.execute("ALTER TABLE jobs ADD COLUMN progress_json TEXT");
+  }
+}
+
+/** #296: record which directory a job ran in, and how that directory was chosen. */
+async function ensureJobsCwdScopeColumns(conn: StorageConnection): Promise<void> {
+  const cols = (await conn.query("PRAGMA table_info(jobs)")) as Array<{ name?: string }>;
+  const names = new Set(cols.map(col => col?.name));
+  if (!names.has("cwd_scope")) {
+    await conn.execute("ALTER TABLE jobs ADD COLUMN cwd_scope TEXT");
+  }
+  if (!names.has("cwd_path")) {
+    await conn.execute("ALTER TABLE jobs ADD COLUMN cwd_path TEXT");
+  }
+  if (!names.has("workspace_alias")) {
+    await conn.execute("ALTER TABLE jobs ADD COLUMN workspace_alias TEXT");
   }
 }
 
@@ -723,6 +756,13 @@ export interface JobStore {
     kitSessionId?: string | null;
     /** Repository-review provider link committed in the same transaction as the job row. */
     validationAdmission?: ValidationJobAdmission;
+    /**
+     * #296: the resolved working directory and how it was selected. Omitted by
+     * a caller that cannot describe its own resolution, which persists as NULL
+     * rather than as a guess. Never recorded for a Kit row, whose argv is
+     * redacted for the same privacy reason.
+     */
+    cwd?: JobCwdRecord | null;
   }): Promise<void>;
   /**
    * Permanently reserve an unadmitted Kit attempt id. This is an atomic
@@ -1096,7 +1136,8 @@ const SQL_INSERT = `
                         transport, http_status, payload_json, owner_instance, owner_hostname,
                         mcp_artifact_path, mcp_artifact_scope, mcp_artifact_cleanup_pending, lease_deadline,
                         kit_execution_json, kit_session_id, kit_terminal_finalized,
-                        kit_terminal_finalized_at, kit_terminal_metadata_json)
+                        kit_terminal_finalized_at, kit_terminal_metadata_json,
+                        cwd_scope, cwd_path, workspace_alias)
       VALUES (@id, @correlation_id, @request_key, @cli, @args_json, @output_format,
               @compress_response,
               'queued', @exit_code, @stdout, @stderr, @output_truncated, @error,
@@ -1104,7 +1145,7 @@ const SQL_INSERT = `
               @transport, @http_status, @payload_json, @owner_instance, @owner_hostname,
               @mcp_artifact_path, @mcp_artifact_scope, @mcp_artifact_cleanup_pending,
               ${SQLITE_NOW_MS} + @lease_ttl_ms, @kit_execution_json, @kit_session_id,
-              0, NULL, NULL)
+              0, NULL, NULL, @cwd_scope, @cwd_path, @workspace_alias)
     `;
 
 const SQL_INSERT_KIT_ATTEMPT_FENCE = `
@@ -1425,7 +1466,10 @@ export class SqliteJobStore implements JobStore, ValidationRunStore {
         kit_terminal_metadata_json TEXT,
         kit_terminal_finalized INTEGER NOT NULL DEFAULT 0,
         kit_terminal_finalized_at TEXT,
-        progress_json TEXT
+        progress_json TEXT,
+        cwd_scope TEXT,
+        cwd_path TEXT,
+        workspace_alias TEXT
       );
       CREATE INDEX IF NOT EXISTS idx_jobs_request_key ON jobs(request_key);
       CREATE INDEX IF NOT EXISTS idx_jobs_status ON jobs(status);
@@ -1512,6 +1556,8 @@ export class SqliteJobStore implements JobStore, ValidationRunStore {
       await ensureJobsTransportColumns(conn);
       await ensureJobsProgressColumn(conn);
       await ensureJobsErrorClassificationColumns(conn);
+      // #296: must also run before the prepared INSERT below binds its columns.
+      await ensureJobsCwdScopeColumns(conn);
       // #139: idempotent migration for durable ownership and lease columns.
       // Same must-run-before-prepare ordering.
       await ensureJobsLeaseColumns(conn);
@@ -1645,6 +1691,7 @@ export class SqliteJobStore implements JobStore, ValidationRunStore {
     kitExecution?: KitExecutionRef | null;
     kitSessionId?: string | null;
     validationAdmission?: ValidationJobAdmission;
+    cwd?: JobCwdRecord | null;
   }): Promise<void> {
     assertMcpArtifactAdmissionInvariant(input);
     const insertJob = async (conn?: StorageConnection): Promise<void> => {
@@ -1688,6 +1735,11 @@ export class SqliteJobStore implements JobStore, ValidationRunStore {
               ? JSON.stringify(cloneKitExecutionRef(input.kitExecution))
               : null,
             kit_session_id: input.kitSessionId ?? null,
+            // Withheld for a Kit row on the same ground as args_json: a Kit
+            // execution's paths are the operator's private baseline.
+            cwd_scope: input.kitExecution ? null : (input.cwd?.scope ?? null),
+            cwd_path: input.kitExecution ? null : (input.cwd?.path ?? null),
+            workspace_alias: input.kitExecution ? null : (input.cwd?.workspaceAlias ?? null),
           },
         ],
         conn
@@ -2709,6 +2761,7 @@ export class MemoryJobStore implements JobStore {
     kitExecution?: KitExecutionRef | null;
     kitSessionId?: string | null;
     validationAdmission?: ValidationJobAdmission;
+    cwd?: JobCwdRecord | null;
   }): Promise<void> {
     assertMcpArtifactAdmissionInvariant(input);
     if (input.kitExecution) {
@@ -2768,6 +2821,9 @@ export class MemoryJobStore implements JobStore {
       leaseDeadline: Date.now() + this.leaseTtlMs,
       kitExecution: input.kitExecution ? cloneKitExecutionRef(input.kitExecution) : null,
       kitSessionId: input.kitSessionId ?? null,
+      cwdScope: input.kitExecution ? null : (input.cwd?.scope ?? null),
+      cwdPath: input.kitExecution ? null : (input.cwd?.path ?? null),
+      workspaceAlias: input.kitExecution ? null : (input.cwd?.workspaceAlias ?? null),
       kitTerminalMetadata: null,
       kitTerminalFinalized: false,
       kitTerminalFinalizedAt: null,
@@ -3267,6 +3323,7 @@ export class PostgresJobStore implements JobStore, ValidationRunStore {
     kitExecution?: KitExecutionRef | null;
     kitSessionId?: string | null;
     validationAdmission?: ValidationJobAdmission;
+    cwd?: JobCwdRecord | null;
   }): Promise<void> {
     assertMcpArtifactAdmissionInvariant(input);
     await this.call("recordStart", input);

@@ -3,6 +3,7 @@ import { randomUUID } from "node:crypto";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { Pool } from "pg";
 import { POSTGRES_JOB_STORE_REQUIRED_COLUMNS } from "../postgres-job-store-schema.js";
+import { PostgresJobStore } from "../job-store.js";
 import { JOB_SCHEMA_SQL, SESSION_SCHEMA_SQL, TEST_DATABASE_URL } from "./setup.js";
 
 /**
@@ -33,6 +34,7 @@ import { JOB_SCHEMA_SQL, SESSION_SCHEMA_SQL, TEST_DATABASE_URL } from "./setup.j
 const suffix = randomUUID().replaceAll("-", "");
 const BOOTSTRAP_SCHEMA = `parity_bootstrap_${suffix}`;
 const MIGRATED_SCHEMA = `parity_migrated_${suffix}`;
+const REPAIRED_SCHEMA = `parity_repaired_${suffix}`;
 
 interface Column {
   table_name: string;
@@ -91,6 +93,7 @@ afterAll(async () => {
   if (!pool) return;
   await pool.query(`DROP SCHEMA IF EXISTS ${BOOTSTRAP_SCHEMA} CASCADE`);
   await pool.query(`DROP SCHEMA IF EXISTS ${MIGRATED_SCHEMA} CASCADE`);
+  await pool.query(`DROP SCHEMA IF EXISTS ${REPAIRED_SCHEMA} CASCADE`);
   await pool.end();
 });
 
@@ -141,7 +144,14 @@ describe("bootstrap SQL and migrations/ agree", () => {
     // would widen the gap and still pass. These three are what
     // PostgresJobStore.init() actually adds via ALTER TABLE, so changing this
     // list has to be a deliberate edit here.
-    expect(gap).toEqual(["jobs.error_category", "jobs.progress_json", "jobs.retryable"]);
+    expect(gap).toEqual([
+      "jobs.cwd_path",
+      "jobs.cwd_scope",
+      "jobs.error_category",
+      "jobs.progress_json",
+      "jobs.retryable",
+      "jobs.workspace_alias",
+    ]);
 
     // Cross-check the pin against the store's own declaration, so the two
     // cannot drift apart silently either.
@@ -151,6 +161,47 @@ describe("bootstrap SQL and migrations/ agree", () => {
       expect(required[table] ?? []).toContain(name);
     }
   });
+
+  it("repairs that whole gap when the store starts on a bootstrap-only schema", async () => {
+    // The pin above named init() as the thing that closes the gap and asserted
+    // nothing about it, so a column could join the gap without joining the
+    // repair. This runs the repair: bootstrap SQL only, no migrations, then a
+    // real store against that schema.
+    await pool.query(`CREATE SCHEMA ${REPAIRED_SCHEMA}`);
+    const seed = await pool.connect();
+    try {
+      await seed.query(`SET search_path TO ${REPAIRED_SCHEMA}`);
+      await seed.query(SESSION_SCHEMA_SQL);
+      await seed.query(JOB_SCHEMA_SQL);
+    } finally {
+      seed.release();
+    }
+
+    const before = new Set((await columnsOf(REPAIRED_SCHEMA)).map(key));
+    const bootstrapKeys = new Set(bootstrapColumns.map(key));
+    const bootstrapTables = new Set(bootstrapColumns.map(c => c.table_name));
+    const gap = migratedColumns
+      .filter(c => bootstrapTables.has(c.table_name))
+      .filter(c => !bootstrapKeys.has(key(c)))
+      .map(key)
+      .sort();
+    expect(gap.filter(column => before.has(column))).toEqual([]);
+
+    const scoped = new URL(TEST_DATABASE_URL);
+    scoped.searchParams.set("options", `-c search_path=${REPAIRED_SCHEMA}`);
+    const store = new PostgresJobStore(scoped.toString(), undefined, {
+      retentionMs: 60_000,
+      dedupWindowMs: 60_000,
+    });
+    try {
+      await store.selectOrphanedProcessCandidates("parity-host");
+    } finally {
+      await store.close();
+    }
+
+    const after = new Set((await columnsOf(REPAIRED_SCHEMA)).map(key));
+    expect(gap.filter(column => !after.has(column))).toEqual([]);
+  }, 60_000);
 
   it("leaves the migration-owned tables out of bootstrap, which is by design", () => {
     const bootstrapTables = new Set(bootstrapColumns.map(c => c.table_name));

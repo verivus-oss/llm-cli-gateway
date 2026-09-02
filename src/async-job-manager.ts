@@ -47,6 +47,7 @@ import {
   removeClaudeMcpArtifact,
 } from "./claude-mcp-config.js";
 import { assertMcpArtifactAdmissionInvariant } from "./mcp-artifact-admission.js";
+import { describeJobCwd, type JobCwdResolution } from "./job-cwd-scope.js";
 import {
   createPersonalKitTerminalMetadata,
   createVibeKitTerminalMetadata,
@@ -1181,6 +1182,15 @@ function redactKnownTextPage(
 
 export interface StartJobOptions {
   cwd?: string;
+  /**
+   * #296: the RESOLUTION `cwd` came out of, not a finished record. The manager
+   * derives the record from it and from `cwd` together, so the stored scope and
+   * the stored path can never disagree. Omit it and the derivation answers
+   * `neutral` (no cwd was supplied, so the executor mints a throwaway
+   * directory) or `unknown` (a directory was chosen and this call site did not
+   * say how). `unknown` is a recorded gap, not a guess.
+   */
+  cwdResolution?: JobCwdResolution;
   idleTimeoutMs?: number;
   outputFormat?: string;
   /** Bypass dedup and force a fresh CLI run even if a recent matching job exists. */
@@ -4097,6 +4107,7 @@ export class AsyncJobManager {
       extractUsage,
       writeFlightStart,
       compressResponse,
+      cwdResolution,
       dedupArgs,
       persistedArgs,
       payloadJson,
@@ -4364,6 +4375,7 @@ export class AsyncJobManager {
       kitExecution: stableKitExecution,
       kitSessionId: stableKitSessionId,
       validationAdmission,
+      cwd: describeJobCwd(cwd, cwdResolution),
     });
     await this.maybeFlushProgress(job, true);
     // Slice 1.5: only opt-in callers (pure async handlers) write logStart

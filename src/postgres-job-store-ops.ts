@@ -398,7 +398,10 @@ export function createPostgresJobStoreOps(
       kit_terminal_metadata_json TEXT,
       kit_terminal_finalized BOOLEAN NOT NULL DEFAULT FALSE,
       kit_terminal_finalized_at TEXT,
-      progress_json TEXT
+      progress_json TEXT,
+      cwd_scope TEXT,
+      cwd_path TEXT,
+      workspace_alias TEXT
     );
     CREATE INDEX IF NOT EXISTS idx_jobs_request_key ON jobs(request_key);
     CREATE INDEX IF NOT EXISTS idx_jobs_status ON jobs(status);
@@ -500,6 +503,9 @@ export function createPostgresJobStoreOps(
           "ALTER TABLE jobs ADD COLUMN IF NOT EXISTS kit_terminal_finalized_at TEXT"
         );
         await affected(client, "ALTER TABLE jobs ADD COLUMN IF NOT EXISTS progress_json TEXT");
+        await affected(client, "ALTER TABLE jobs ADD COLUMN IF NOT EXISTS cwd_scope TEXT");
+        await affected(client, "ALTER TABLE jobs ADD COLUMN IF NOT EXISTS cwd_path TEXT");
+        await affected(client, "ALTER TABLE jobs ADD COLUMN IF NOT EXISTS workspace_alias TEXT");
         // The owner/status index references owner_instance, so it can only be created
         // AFTER the ALTER adds that column to a pre-existing (migration-created) table.
         await affected(
@@ -612,11 +618,12 @@ export function createPostgresJobStoreOps(
                            transport, http_status, payload_json, owner_instance, owner_hostname,
                            mcp_artifact_path, mcp_artifact_scope, mcp_artifact_cleanup_pending, lease_deadline,
                            kit_execution_json, kit_session_id, kit_terminal_finalized,
-                           kit_terminal_finalized_at, kit_terminal_metadata_json)
+                           kit_terminal_finalized_at, kit_terminal_metadata_json,
+                           cwd_scope, cwd_path, workspace_alias)
          VALUES ($1, $2, $3, $4, $5, $6, $7, 'queued', NULL, '', '', FALSE, NULL,
                  $8, NULL, $9, $10, $11, $12, NULL, $13, $14, $15, $16, $17, $18,
                  ${PG_NOW_MS} + $19, $20, $21,
-                 FALSE, NULL, NULL)`;
+                 FALSE, NULL, NULL, $22, $23, $24)`;
         const insertArgs = [
           input.id,
           input.correlationId,
@@ -639,6 +646,9 @@ export function createPostgresJobStoreOps(
           config.leaseTtlMs,
           input.kitExecution ? JSON.stringify(input.kitExecution) : null,
           input.kitSessionId ?? null,
+          input.cwd?.scope ?? null,
+          input.cwd?.path ?? null,
+          input.cwd?.workspaceAlias ?? null,
         ];
         if (!input.validationAdmission) {
           await poolAffected(insertSql, insertArgs);

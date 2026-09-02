@@ -142,6 +142,55 @@ describe("doctor reports the policy rather than deciding one", () => {
     expect(storage.flight_recorder.request_rows).toBe(1);
   });
 
+  describe("#296: the inverted window is reported once it has actually cost something", () => {
+    /** Backdate the one seeded request so it sits outside the job window. */
+    function backdateSeededRequest(daysAgo: number): void {
+      const db = openDatabase(dbPath);
+      try {
+        db.prepare("UPDATE requests SET datetime_utc = ?").run(
+          new Date(Date.now() - daysAgo * 86_400_000).toISOString()
+        );
+      } finally {
+        db.close();
+      }
+    }
+
+    const inversionWarning = (warnings: string[]): string | undefined =>
+      warnings.find(line => line.includes("Retention is inverted"));
+
+    it("warns once a request has outlived the job bound", async () => {
+      // The request row survives and its job row does not, so the launched argv
+      // and the raw provider stream for that correlation id are already gone.
+      backdateSeededRequest(45);
+      const storage = await collectStorageHealth(recorder);
+      const warning = inversionWarning(storage.warnings);
+      expect(warning).toBeDefined();
+      expect(warning).toMatch(/'jobs' is bounded at 30 day\(s\)/);
+      expect(warning).toMatch(/\[persistence\.retention\]\.jobs/);
+    });
+
+    it("stays silent while every request is still inside the job window", async () => {
+      // NEGATIVE CONTROL. The default configuration is inverted on every host,
+      // so a warning keyed on the configuration alone would fire always and be
+      // read as background. It must key on the loss having happened here.
+      const storage = await collectStorageHealth(recorder);
+      expect(inversionWarning(storage.warnings)).toBeUndefined();
+    });
+
+    it("stays silent once the operator has bounded requests too", async () => {
+      // Both bounded is a taken decision, not an inversion, whatever the two
+      // numbers are.
+      writeFileSync(
+        join(dir, "config.toml"),
+        `[persistence]\nbackend = "sqlite"\n[persistence.retention]\nrequests = 90\n`
+      );
+      backdateSeededRequest(45);
+      const storage = await collectStorageHealth(recorder);
+      expect(storage.retention.unbounded).not.toContain("requests");
+      expect(inversionWarning(storage.warnings)).toBeUndefined();
+    });
+  });
+
   it("reports invalid persistence configuration even with an existing recorder", async () => {
     writeFileSync(
       join(dir, "config.toml"),

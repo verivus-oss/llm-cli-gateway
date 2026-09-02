@@ -1,0 +1,106 @@
+# Issue #296. What a dispatched job durably records, and what it cannot.
+# Subordinate to durable-state-lifecycle.dag.toml (same tables, same bounds).
+
+[meta]
+surface = "the jobs table, its two drivers, and the doctor/retention surfaces that report on it"
+status = "r1, r5 and r6 implemented 2026-09-02; r2, r3, r4, r7 open. Superseded in scope by complete-flight-record.dag.toml."
+issue = "https://github.com/verivusai-labs/llm-cli-gateway/issues/296"
+
+# WHY THIS EXISTS
+#
+# Replaying a dispatched job against a modified instruction set needs four
+# inputs: argv, prompt, the working directory, and the ambient instruction files
+# the harness loaded. Two are durable. Two are not recorded anywhere.
+
+[facts]
+measured_at = "5aa45b2 on refactor/postgres-authoritative, source read; row counts in #296 are from one private Postgres deployment"
+no_cwd_column = "JobRecord in job-store.ts and POSTGRES_JOB_STORE_REQUIRED_COLUMNS carry no working-directory field of any spelling"
+cwd_is_not_known_at_admission = "an unscoped job's directory is minted by createNeutralExecutionWorkspace inside executor.ts at spawn, after the row is written, and is removed on close"
+codex_argv_loses_it_on_resume = "CODEX_RESUME_FILTERED_FLAGS contains -C and --cd, so args_json carries the directory for fresh codex sessions only"
+requests_system_is_a_caller_field = "requests.system exists in both drivers and is fed only by the optional caller-supplied system parameter, so it is not and never was the harness instruction set"
+doctor_already_prints_the_bound = "the doctor storage block reports retention.policy for every subsystem including jobs, plus retention.unbounded; #296 proposal 3's minimum is already met"
+the_inversion_is_real_anyway = "RETENTION_SUBSYSTEMS gives jobs 30 days and requests null, and jobs is the store that holds argv and the raw stream"
+
+[non_goals]
+no_instruction_bodies = "store a digest and a byte count, never the file contents. The bodies are the operator's private repository and the record must stay safe to ship to a health surface."
+no_retention_default_change = "moving either number deletes or retains data on every installed host. The decision belongs with #287 and is taken once for both tables."
+no_provider_invocation_change = "#296 proposal 5 suggests emitting a session id for gemini. Changing the run mode to get an init event changes what every gemini caller gets. Out of scope here; r7 gets the join without it."
+no_new_table = "columns on jobs. A second table would need its own retention bound, which is the problem this is about."
+no_replay_command = "this makes the record sufficient. Executing a replay from it is separate work and should not be designed against an incomplete record."
+
+[[node]]
+id = "r1.cwd-scope-on-the-job"
+critical = true
+depends_on = []
+role = "The directory is the input that decides which AGENTS.md or CLAUDE.md was in force. Without it, #190's contamination class is invisible in the record and detectable only in the output."
+action = "DONE. Three columns: cwd_scope (caller|workspace|worktree|neutral|unknown), cwd_path, workspace_alias, plus migration 024 and the SQLite ALTER path."
+constraint = "cwd_path is NULL for neutral by construction. MEASURED CORRECTION to an earlier draft of this node: the record is written at enqueue, not at recordStart. The neutral directory does not exist until spawn, but its PATH is never stored, and whether the job is unscoped is decided by whether a cwd was supplied, which is known at enqueue."
+constraint_2 = "For scope=workspace and scope=worktree also record the binding alias. A path is not a workspace identity; the binding can be repointed."
+constraint_3 = "unknown is a fifth value and it is load-bearing: several handlers pick a Kit, cursor or isolation directory ahead of the resolution, and a resolution that lost must not describe the job. Kit rows record nothing, on the same ground that redacts their argv."
+affects = ["r3.three-declarations-one-schema", "r4.reachable-through-the-tools", "r7.gemini-joins-on-cwd"]
+
+[[node]]
+id = "r2.instruction-set-digest"
+critical = true
+depends_on = ["r1.cwd-scope-on-the-job"]
+role = "The harness-neutral half of 'what did the instructions say when this ran'. Which files count is per provider and the launcher already knows the directory; the hash is common."
+action = "Record, per job, a list of {path, sha256, bytes} over the instruction files that provider will load from that directory plus the global one, and the repository HEAD when the directory is a work tree."
+constraint = "A digest over the WHOLE file is a false record when the provider truncates. #296 measured a 44 KB repository AGENTS.md arriving at 32,202 bytes under codex's 32 KiB project_doc_max_bytes default. Record the effective cap alongside the digest, or hash the truncated prefix and say which."
+constraint_2 = "Hashing is I/O on the request path. Bound it: refuse to hash above a size ceiling and record the refusal rather than blocking a dispatch."
+constraint_3 = "scope=neutral has no repository file. Its digest list is the global file alone, and that is the evidence that nothing repository-local was loaded."
+affects = ["r3.three-declarations-one-schema", "r4.reachable-through-the-tools"]
+
+[[node]]
+id = "r3.three-declarations-one-schema"
+critical = true
+depends_on = ["r1.cwd-scope-on-the-job", "r2.instruction-set-digest"]
+role = "The jobs schema is written down in three places and a fourth asserts on it. All four move together or the Postgres driver ships a column the SQLite one does not have."
+action = "SQLite DDL and INSERT in job-store.ts, PostgreSQL DDL and INSERT in postgres-job-store-ops.ts, POSTGRES_JOB_STORE_REQUIRED_COLUMNS in postgres-job-store-schema.ts, and one ALTER TABLE migration."
+constraint = "transcript-cutover.design.md reserves migration 024 for transcript_migrations and is unbuilt. Take the next free number and renumber exactly one of the two deliberately; do not let both claim 024."
+constraint_2 = "Every column is nullable. A legacy row predates the record and must read as NOT MEASURED, never as a value."
+constraint_3 = "The parity control that actually compares two declarations by information_schema is a *-pg test, and npm run check does not run those. Assume this ships unchecked unless test:pg is run."
+affects = ["r4.reachable-through-the-tools"]
+
+[[node]]
+id = "r4.reachable-through-the-tools"
+critical = true
+depends_on = ["r3.three-declarations-one-schema"]
+role = "A column no tool projects is a column an agent finds by opening the database, which is the habit llm_request_list exists to end."
+action = "Project the scope, the path, the alias and the digest list from llm_job_result and llm_job_status, behind the same ownership checks."
+constraint = "Digest entries name absolute paths on the operator's disk. Decide once whether those ship on a health surface or only to the owning principal, and write the decision down beside the projection."
+affects = []
+
+[[node]]
+id = "r5.retention-inversion"
+depends_on = []
+role = "The complete record is swept in 30 days and the partial one is kept forever. #296 proposal 3's minimum is already met, so what remains is the warning and the decision."
+action = "Add a doctor warning when retention.jobs is bounded and retention.requests is not, saying which of the two holds argv and the stream. Take the default-values decision with #287, for both tables at once."
+constraint = "Do not change either default under this node. RETENTION_SUBSYSTEMS.jobs already records why: changing it here changes behaviour on every installed host."
+affects = []
+
+[[node]]
+id = "r6.request-list-hint-names-the-record"
+depends_on = []
+role = "The llm_request_list hint says validation seats write no flight-recorder row. True, and it steers the reader away from the richer record rather than towards it."
+action = "Name validation_runs, validation_run_jobs and the jobs rows those link to, so a reader who gets an empty list knows where to look next."
+constraint = "The hint is also the place to say that jobs is bounded and requests is not, since that is why an old correlationId resolves and its job does not."
+affects = []
+
+[[node]]
+id = "r7.gemini-joins-on-cwd"
+depends_on = ["r1.cwd-scope-on-the-job"]
+role = "gemini reaches the store with no session key at all. #296 proposes emitting one; the cheaper half is that its native store is keyed by project root and start time."
+action = "Once the directory is durable, document the join as directory plus start time and stop describing gemini as unjoinable. Emitting a real session id stays open."
+constraint = "This REDUCES the gap, it does not close it. A scope=neutral gemini job is still unjoinable, and the join is not unique under concurrent dispatches into one directory."
+affects = []
+
+[[node]]
+id = "r8.applied-and-the-set-it-broke"
+depends_on = ["r3.three-declarations-one-schema"]
+status = "done"
+role = "r3 constraint_3 predicted this ships unchecked because npm run check does not run the -pg suites. Running them found two defects, so the prediction is now a measurement."
+action = "DONE. Migration 024 applied to the development PostgreSQL; ledger pin recorded at authorship; init() gained the three ADD COLUMN repairs; the recorder's migration selection now derives from what a file targets."
+constraint = "Two readers spelled the recorder's migration set as 'numbered 022 or higher'. The static parity gate survived it by filtering on table while parsing; the dynamic mirror executes what it selects and failed with relation \"jobs\" does not exist. One derivation now serves both, in scripts/transcript-migration-selection.mjs."
+constraint_2 = "The schema-parity pin named init() as the thing that closes the bootstrap gap and asserted nothing about it, so a column could join the gap without joining the repair. The gap is now measured by running a store against a bootstrap-only schema, and the mutant that removes the three repairs is killed by exactly that test."
+constraint_3 = "Pinning 024's digest at authorship follows 022's recorded reason: a host has recorded the checksum, so an edit to the file now breaks npm run migrate there rather than the build here."
+affects = []

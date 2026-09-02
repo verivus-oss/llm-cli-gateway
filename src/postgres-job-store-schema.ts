@@ -42,6 +42,10 @@ export const POSTGRES_IMMUTABLE_MIGRATION_SHA256 = {
   // that already recorded them.
   "022_flight_recorder_transcripts.sql":
     "64f2e6515cb0e10c9ce484088258e930a6ca1ffce3a0c146d1fe11d0e3c90489",
+  // 024 joins at authorship for the same reason as 022: it has been applied to
+  // a development database, which recorded its checksum, so a source edit now
+  // breaks `npm run migrate` on that host rather than here.
+  "024_async_job_cwd_scope.sql": "414c22f2ada88e4946f47e511e993e7f59bd7778e00df27e09ca5075fe1cbc80",
 } as const;
 
 /**
@@ -98,6 +102,9 @@ export const POSTGRES_JOB_STORE_REQUIRED_COLUMNS = {
     "kit_terminal_finalized",
     "kit_terminal_finalized_at",
     "progress_json",
+    "cwd_scope",
+    "cwd_path",
+    "workspace_alias",
   ],
   gateway_instances: ["instance_id", "role", "hostname", "pid", "started_at", "last_heartbeat"],
   validation_runs: [
