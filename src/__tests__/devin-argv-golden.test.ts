@@ -20,8 +20,27 @@
  * bare `--sandbox`/`--respect-workspace-trust` without the boolean value, or
  * defaulting --sandbox on, flips those assertions red.
  */
-import { describe, it, expect } from "vitest";
+import { mkdtempSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { afterAll, beforeAll, describe, it, expect } from "vitest";
 import { prepareDevinRequest, resolveGatewayServerRuntime } from "../index.js";
+
+// #296: the builder now DEFAULTS --export on, and creating that directory is a
+// real filesystem write. Point HOME at a temp directory so a test run does not
+// leave one in the developer's home.
+let fakeHome: string;
+let realHome: string | undefined;
+beforeAll(() => {
+  fakeHome = mkdtempSync(join(tmpdir(), "devin-argv-home-"));
+  realHome = process.env.HOME;
+  process.env.HOME = fakeHome;
+});
+afterAll(() => {
+  if (realHome === undefined) delete process.env.HOME;
+  else process.env.HOME = realHome;
+  rmSync(fakeHome, { recursive: true, force: true });
+});
 
 function argsFor(params: Record<string, unknown>): string[] {
   const prep = prepareDevinRequest(
@@ -49,8 +68,36 @@ function count(args: string[], flag: string): number {
 }
 
 describe("devin argv golden (Phase 4 Part B)", () => {
-  it("minimal request emits -p plus an option boundary and prompt", () => {
-    expect(argsFor({})).toEqual(["-p", "--", "PROMPT"]);
+  it("minimal request emits -p, the default transcript export, the boundary and prompt", () => {
+    // #296: devin writes only its final text to stdout (23 bytes against a
+    // 92 KB export for the same one-line task), so a run with no export leaves
+    // no reconstructable record. The path is gateway-owned and derived from the
+    // correlation id.
+    const args = argsFor({});
+    expect(args[0]).toBe("-p");
+    expect(args.slice(-2)).toEqual(["--", "PROMPT"]);
+    expect(count(args, "--export")).toBe(1);
+    expect(valueAfter(args, "--export")).toContain("devin-transcripts");
+    expect(valueAfter(args, "--export")).toMatch(/\.json$/);
+  });
+
+  it("exportSession:false is the opt-out and emits nothing", () => {
+    const args = argsFor({ exportSession: false });
+    expect(args).toEqual(["-p", "--", "PROMPT"]);
+  });
+
+  it("exportSession:true keeps meaning a BARE --export, with no gateway path", () => {
+    const args = argsFor({ exportSession: true });
+    expect(count(args, "--export")).toBe(1);
+    // The token after a bare --export is the option boundary, not a path.
+    expect(valueAfter(args, "--export")).toBe("--");
+  });
+
+  it("gives two correlation ids two different transcript paths", () => {
+    const a = valueAfter(argsFor({ correlationId: "corr-a" }), "--export");
+    const b = valueAfter(argsFor({ correlationId: "corr-b" }), "--export");
+    expect(a).toBeDefined();
+    expect(a).not.toBe(b);
   });
 
   it("kitchen sink: every wired flag emits in order with its value", () => {
@@ -116,7 +163,6 @@ describe("devin argv golden (Phase 4 Part B)", () => {
     expect(count(args, "--permission-mode")).toBe(0);
     expect(count(args, "--config")).toBe(0);
     expect(count(args, "--sandbox")).toBe(0);
-    expect(count(args, "--export")).toBe(0);
     expect(count(args, "--respect-workspace-trust")).toBe(0);
   });
 });

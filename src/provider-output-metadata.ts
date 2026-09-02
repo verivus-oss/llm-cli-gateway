@@ -17,6 +17,8 @@ import { parseStreamJson } from "./stream-json-parser.js";
 import { parseCodexJsonStream } from "./codex-json-parser.js";
 import { parseGeminiJson, parseGeminiStreamJson } from "./gemini-json-parser.js";
 import { parseGrokOutput } from "./grok-json-parser.js";
+import { parseVibeStream } from "./vibe-stream-parser.js";
+import { parseCursorStreamJson } from "./cursor-stream-parser.js";
 import { isKitNativeSessionIdForProvider, isVibeNativeSessionId } from "./personal-config-types.js";
 import { resolveNewestVibeNativeSessionId } from "./mistral-meta-json-parser.js";
 
@@ -193,12 +195,35 @@ export function extractProviderOutputMetadata(
       if (!out.stopReason) (out.absentFields as ProviderMetadataAbsentField[]).push("stopReason");
       return out;
     }
-    case "mistral":
-      // Capability fact: Mistral Vibe `-p` emits neither a session id nor a
-      // stop reason on stdout. (Its session id lives on disk in
-      // ~/.vibe/logs/session/<id>/meta.json, resolved separately from the
-      // gateway sessionId, not from this stdout.)
-      return { absentFields: ["sessionId", "stopReason"] };
+    case "mistral": {
+      // `--output streaming` stamps the real Vibe session UUID on every entry
+      // and ends with a per-entry generationStatus. On `text` (the default)
+      // neither is emitted, which is what the old unconditional absence recorded
+      // and what made ~/.vibe/logs/session/<id>/meta.json unreachable: without
+      // this id, parseVibeMetaJson only ever saw a gw-* id and returned nothing.
+      const parsed =
+        outputFormat === "streaming" || outputFormat === "stream-json"
+          ? parseVibeStream(stdout)
+          : null;
+      const out: ProviderOutputMetadata = { absentFields: ["usage"] };
+      if (parsed?.sessionId) out.sessionId = parsed.sessionId;
+      if (parsed?.stopReason) out.stopReason = parsed.stopReason;
+      if (!out.sessionId) (out.absentFields as ProviderMetadataAbsentField[]).push("sessionId");
+      if (!out.stopReason) (out.absentFields as ProviderMetadataAbsentField[]).push("stopReason");
+      return out;
+    }
+    case "cursor": {
+      // stream-json carries session_id on every event and a terminal result
+      // event with subtype and usage. text and json carry none of it.
+      const parsed = outputFormat === "stream-json" ? parseCursorStreamJson(stdout) : null;
+      const out: ProviderOutputMetadata = { absentFields: [] };
+      if (parsed?.sessionId) out.sessionId = parsed.sessionId;
+      if (parsed?.stopReason) out.stopReason = parsed.stopReason;
+      if (!parsed?.usage) (out.absentFields as ProviderMetadataAbsentField[]).push("usage");
+      if (!out.sessionId) (out.absentFields as ProviderMetadataAbsentField[]).push("sessionId");
+      if (!out.stopReason) (out.absentFields as ProviderMetadataAbsentField[]).push("stopReason");
+      return out;
+    }
     default:
       return { absentFields: ["sessionId", "stopReason"] };
   }

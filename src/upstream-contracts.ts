@@ -1987,6 +1987,15 @@ export const UPSTREAM_CLI_CONTRACTS: Record<CliType, CliContract> = {
         arity: "none",
         description: "Create a new Antigravity project for this session",
       },
+      // Measured against agy 1.1.24 in
+      // docs/evidence/c1-capture-ceiling-2026-09-02.md. The `values` list is
+      // ENFORCED by validateUpstreamCliArgs, so a value missing here is a value
+      // the gateway refuses even though the binary accepts it.
+      "--output-format": {
+        arity: "one",
+        values: ["text", "json", "stream-json"],
+        description: "Output format for print mode",
+      },
       "--print-timeout": {
         arity: "one",
         description: "Print-mode wait timeout as a Go duration string (e.g. 5m0s)",
@@ -2005,12 +2014,16 @@ export const UPSTREAM_CLI_CONTRACTS: Record<CliType, CliContract> = {
     // the bounded gateway approval profiles above.
     // `--effort` (agy 1.1.7 reasoning effort) is advertised by `agy --help` but
     // the gateway emits no gemini effort flag, so it stays acknowledge-only.
-    // `--json-schema` and `--output-format` arrived in agy 1.1.8. They are
-    // acknowledge-only for the same reason: the gemini adapter's outputFormat is
-    // text-only (the Antigravity headless path emits text, and json/stream-json
-    // are rejected at request time), so the gateway emits neither. Recording
-    // them here keeps a genuinely new upstream flag standing out as drift rather
-    // than being lost in a permanently failing probe.
+    // `--json-schema` arrived in agy 1.1.8 and stays acknowledge-only: the
+    // gateway emits no gemini output schema.
+    //
+    // `--output-format` was acknowledge-only on the claim that the Antigravity
+    // headless path emits text. That claim was FALSE at 1.1.24 and is measured
+    // false in docs/evidence/c1-capture-ceiling-2026-09-02.md: `agy --print
+    // --output-format stream-json` returns an init event carrying cwd,
+    // permission_mode and 57 tool names, one step_update per tool naming its
+    // parameters, per-step usage, and a result event with conversation_id. It
+    // is a real flag now, below.
     acknowledgedUpstreamFlags: [
       "--agent",
       "--disable-slash-commands",
@@ -2030,7 +2043,6 @@ export const UPSTREAM_CLI_CONTRACTS: Record<CliType, CliContract> = {
       // the rebaseline procedure, not a one-time fix.
       "--json-schema",
       "--log-file",
-      "--output-format",
       "--prompt-interactive",
     ],
     env: {},
@@ -2040,6 +2052,23 @@ export const UPSTREAM_CLI_CONTRACTS: Record<CliType, CliContract> = {
         description: "Minimal Antigravity print-mode prompt request",
         args: ["--print", "hello"],
         expect: "pass",
+      },
+      {
+        // #296: stream-json is the only agy wire carrying the working
+        // directory, the tool list and per-tool parameters. Measured against
+        // agy 1.1.24 in docs/evidence/c1-capture-ceiling-2026-09-02.md.
+        id: "gemini-output-format-stream-json",
+        description: "Antigravity print mode accepts --output-format stream-json",
+        args: ["--print", "hello", "--output-format", "stream-json"],
+        expect: "pass",
+      },
+      {
+        // `values` is ENFORCED, so a spelling the binary does not take must be
+        // refused here rather than reaching spawn.
+        id: "gemini-output-format-unknown-value",
+        description: "An undeclared --output-format value is refused before spawn",
+        args: ["--print", "hello", "--output-format", "ndjson"],
+        expect: "fail",
       },
       {
         id: "gemini-unsupported-flag",

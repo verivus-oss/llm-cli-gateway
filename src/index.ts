@@ -218,6 +218,7 @@ import {
 } from "./async-job-manager.js";
 import { createJobStore, isValidationRunStore, type JobStore } from "./job-store.js";
 import type { JobCwdResolution } from "./job-cwd-scope.js";
+import { devinTranscriptDedupArgs, ensureDevinTranscriptPath } from "./devin-transcript.js";
 import {
   MCP_ARTIFACT_RECOVERY_ACKNOWLEDGEMENT,
   recoverMcpArtifactCleanupPin,
@@ -6981,9 +6982,13 @@ export function prepareGeminiRequest(
   }
   // Antigravity (agy) owns its own MCP configuration, so the gateway never
   // emits an MCP allowlist to argv. This legacy metadata is returned unchanged.
-  if (params.outputFormat && params.outputFormat !== "text") {
-    return unsupported("outputFormat", "agy print mode currently emits text only");
-  }
+  // agy 1.1.24 accepts text|json|stream-json in print mode. This used to refuse
+  // everything but text on the claim that the headless path emits text only,
+  // which was false at this version: stream-json is the only gemini wire that
+  // carries the working directory, the tool list and per-tool parameters.
+  // The Zod enum already bounds the value; validateUpstreamCliArgs bounds it
+  // again against the contract.
+  const geminiOutputFormat = params.outputFormat;
   if (params.policyFiles && params.policyFiles.length > 0) {
     return unsupported("policyFiles", "agy has no --policy flag");
   }
@@ -7025,6 +7030,10 @@ export function prepareGeminiRequest(
     return createErrorResponse(params.operation, 1, "", corrId, error as Error);
   }
   const args = ["--print", effectivePrompt];
+  // Emitted only when the caller asked for one: an explicit `--output-format
+  // text` would be a new argv element on every default request, which changes
+  // the dedup key for every existing gemini caller.
+  if (geminiOutputFormat) args.push("--output-format", geminiOutputFormat);
   if (resolvedModel) args.push("--model", resolvedModel);
   if (params.includeDirs && params.includeDirs.length > 0) {
     sanitizeCliArgValues(params.includeDirs, "includeDirs");
@@ -13491,10 +13500,19 @@ export function prepareDevinRequest(
   // `--sandbox` is a safety control: bare boolean flag, never defaulted on.
   if (params.sandbox) args.push("--sandbox");
   // `--export` takes an optional path: `true` -> bare flag; string -> flag + path.
+  //
+  // DEFAULT ON. Without it a devin job records 23 bytes of final text and the
+  // run is unreconstructable; with it the ATIF export carries the system
+  // prompt, the tool definitions and the instruction files in force. The
+  // gateway supplies the path because a bare `--export` was measured to leave
+  // no file this gateway could find. `false` is the opt-out.
   if (typeof params.exportSession === "string") {
     args.push("--export", params.exportSession);
   } else if (params.exportSession === true) {
     args.push("--export");
+  } else if (params.exportSession === undefined) {
+    const transcript = ensureDevinTranscriptPath(corrId);
+    if (transcript) args.push("--export", transcript);
   }
   // `--respect-workspace-trust` takes an optional value; emit the explicit bool.
   if (params.respectWorkspaceTrust !== undefined) {
@@ -13784,7 +13802,13 @@ export async function handleDevinRequest(
         undefined,
         undefined,
         undefined,
-        sessionBoundDedupArgs(args, effectiveSessionId),
+        // The export path carries the correlation id, which differs on every
+        // request. Left in argv it would make two identical requests look
+        // different and silently disable dedup for devin.
+        devinTranscriptDedupArgs(
+          sessionBoundDedupArgs(args, effectiveSessionId),
+          params.exportSession === undefined ? ensureDevinTranscriptPath(corrId) : null
+        ),
         undefined,
         undefined,
         undefined,
@@ -18863,7 +18887,7 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
         .enum(["text", "json", "stream-json"])
         .default("text")
         .describe(
-          "Output format. The Antigravity agy headless path emits text only; json and stream-json are rejected at request time. Per-request token usage and cost are therefore not available for gemini."
+          "Output format (text|json|stream-json), default text. stream-json is the only agy wire that carries the working directory, the tool list, per-tool parameters and per-step token usage; text carries none of them, so per-request usage and cost are unavailable on the default."
         ),
       sandbox: GEMINI_HIGH_IMPACT_PARAMS_SCHEMA.shape.sandbox.describe(
         "Run Antigravity in sandbox mode (--sandbox)"
@@ -19316,7 +19340,7 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
         .union([z.boolean(), CLI_OPTION_VALUE_SCHEMA])
         .optional()
         .describe(
-          "Export the session (Devin --export [<PATH>]). true emits a bare --export; a string path emits --export <path>."
+          "Export the conversation (Devin --export [<PATH>]). ON BY DEFAULT to a gateway-owned path under ~/.llm-cli-gateway/devin-transcripts: devin writes only its final text to stdout, so without the export a run leaves no reconstructable record. Pass false to opt out, true for a bare --export (devin picks the path), or a string for your own path."
         ),
       respectWorkspaceTrust: z
         .boolean()
@@ -20969,7 +20993,7 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
           .enum(["text", "json", "stream-json"])
           .default("text")
           .describe(
-            "Output format. The Antigravity agy headless path emits text only; json and stream-json are rejected at request time. Per-request token usage and cost are therefore not available for gemini."
+            "Output format (text|json|stream-json), default text. stream-json is the only agy wire that carries the working directory, the tool list, per-tool parameters and per-step token usage; text carries none of them, so per-request usage and cost are unavailable on the default."
           ),
         sandbox: GEMINI_HIGH_IMPACT_PARAMS_SCHEMA.shape.sandbox.describe(
           "Run Antigravity in sandbox mode (--sandbox)"
@@ -21544,7 +21568,7 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
           .union([z.boolean(), CLI_OPTION_VALUE_SCHEMA])
           .optional()
           .describe(
-            "Export the session (Devin --export [<PATH>]). true emits a bare --export; a string path emits --export <path>."
+            "Export the conversation (Devin --export [<PATH>]). ON BY DEFAULT to a gateway-owned path under ~/.llm-cli-gateway/devin-transcripts: devin writes only its final text to stdout, so without the export a run leaves no reconstructable record. Pass false to opt out, true for a bare --export (devin picks the path), or a string for your own path."
           ),
         respectWorkspaceTrust: z
           .boolean()

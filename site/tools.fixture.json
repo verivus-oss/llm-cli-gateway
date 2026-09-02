@@ -2339,7 +2339,7 @@
                 "type": "string"
               }
             ],
-            "description": "Export the session (Devin --export [<PATH>]). true emits a bare --export; a string path emits --export <path>."
+            "description": "Export the conversation (Devin --export [<PATH>]). ON BY DEFAULT to a gateway-owned path under ~/.llm-cli-gateway/devin-transcripts: devin writes only its final text to stdout, so without the export a run leaves no reconstructable record. Pass false to opt out, true for a bare --export (devin picks the path), or a string for your own path."
           },
           "respectWorkspaceTrust": {
             "type": "boolean",
@@ -2529,7 +2529,7 @@
                 "type": "string"
               }
             ],
-            "description": "Export the session (Devin --export [<PATH>]). true emits a bare --export; a string path emits --export <path>."
+            "description": "Export the conversation (Devin --export [<PATH>]). ON BY DEFAULT to a gateway-owned path under ~/.llm-cli-gateway/devin-transcripts: devin writes only its final text to stdout, so without the export a run leaves no reconstructable record. Pass false to opt out, true for a bare --export (devin picks the path), or a string for your own path."
           },
           "respectWorkspaceTrust": {
             "type": "boolean",
@@ -2851,7 +2851,7 @@
               "stream-json"
             ],
             "default": "text",
-            "description": "Output format. The Antigravity agy headless path emits text only; json and stream-json are rejected at request time. Per-request token usage and cost are therefore not available for gemini."
+            "description": "Output format (text|json|stream-json), default text. stream-json is the only agy wire that carries the working directory, the tool list, per-tool parameters and per-step token usage; text carries none of them, so per-request usage and cost are unavailable on the default."
           },
           "sandbox": {
             "type": "boolean",
@@ -3120,7 +3120,7 @@
               "stream-json"
             ],
             "default": "text",
-            "description": "Output format. The Antigravity agy headless path emits text only; json and stream-json are rejected at request time. Per-request token usage and cost are therefore not available for gemini."
+            "description": "Output format (text|json|stream-json), default text. stream-json is the only agy wire that carries the working directory, the tool list, per-tool parameters and per-step token usage; text carries none of them, so per-request usage and cost are unavailable on the default."
           },
           "sandbox": {
             "type": "boolean",

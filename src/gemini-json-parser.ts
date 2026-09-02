@@ -7,12 +7,24 @@
  *   - `usageMetadata`: { promptTokenCount, candidatesTokenCount,
  *                        cachedContentTokenCount?, totalTokenCount }
  *
- * `-o stream-json` emits one JSON object per line:
+ * `stream-json` is NDJSON, and there are TWO grammars behind that one flag
+ * value. The original, keyed on `type`:
  *   - `{ "type": "init", "session_id": "...", "model": "..." }`
  *   - `{ "type": "message", "role": "user", "content": "..." }`
  *   - `{ "type": "message", "role": "assistant", "content": "...", "delta": true }` (repeated)
  *   - `{ "type": "result", "status": "success", "stats": { "input_tokens": N,
  *        "output_tokens": N, "cached": N, ... } }`
+ *
+ * And Antigravity `agy` 1.1.24, keyed on `event`, measured in
+ * docs/evidence/c1-capture-ceiling-2026-09-02.md:
+ *   - `{ "event": "init", "conversation_id": "...",
+ *        "init": { "cwd": "...", "permission_mode": "...", "tools": [...] } }`
+ *   - `{ "event": "step_update", "step_update": { "step_type": "tool",
+ *        "tool_name": "...", "tool_info": { "parameters": {...} }, "usage": {...} } }`
+ *   - `{ "event": "result", "result": { "conversation_id": "...",
+ *        "status": "...", "response": "...", "usage": {...} } }`
+ *
+ * The two are disjoint (`type` vs `event`), so one pass reads either.
  *
  * Both parsers return null when stdout is unparseable. Both populate the same
  * `GeminiJsonParseResult` shape so `extractUsageAndCost` can branch on
@@ -157,6 +169,23 @@ export function parseGeminiStreamJson(stdout: string): GeminiJsonParseResult | n
       continue;
     }
 
+    // agy grammar. `conversation_id` is what `--conversation <id>` resumes, so
+    // it is this transport's session id under a different name.
+    if (typeof event.event === "string") {
+      if (typeof event.conversation_id === "string") {
+        result.sessionId = event.conversation_id;
+      }
+      if (event.event === "result" && event.result && typeof event.result === "object") {
+        const r = event.result;
+        if (typeof r.conversation_id === "string") result.sessionId = r.conversation_id;
+        if (typeof r.status === "string") result.stopReason = r.status;
+        if (typeof r.response === "string" && r.response !== "") result.response = r.response;
+        const usage = agyUsage(r.usage);
+        if (usage) result.usage = usage;
+      }
+      continue;
+    }
+
     if (
       event.type === "message" &&
       event.role === "assistant" &&
@@ -201,9 +230,23 @@ export function parseGeminiStreamJson(stdout: string): GeminiJsonParseResult | n
     return null;
   }
 
-  if (assistantChunks.length > 0) {
+  // The agy `result` event already supplied a whole response; only the
+  // delta-accumulating grammar needs joining, and it must not overwrite it.
+  if (assistantChunks.length > 0 && result.response === undefined) {
     result.response = assistantChunks.join("");
   }
 
   return result;
+}
+
+/** agy usage block: input_tokens / output_tokens / cache_read_tokens. */
+function agyUsage(value: unknown): GeminiUsage | null {
+  if (!value || typeof value !== "object") return null;
+  const u = value as Record<string, unknown>;
+  const input = typeof u.input_tokens === "number" ? u.input_tokens : undefined;
+  const output = typeof u.output_tokens === "number" ? u.output_tokens : undefined;
+  if (input === undefined && output === undefined) return null;
+  const usage: GeminiUsage = { input_tokens: input ?? 0, output_tokens: output ?? 0 };
+  if (typeof u.cache_read_tokens === "number") usage.cache_read_tokens = u.cache_read_tokens;
+  return usage;
 }

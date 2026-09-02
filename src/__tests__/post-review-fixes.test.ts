@@ -183,8 +183,12 @@ describe("U23 fix: outputFormat reaches the CLI as a flag", () => {
     expect(prep.args).toContain("--json");
   });
 
-  it("prepareGeminiRequest with outputFormat='json' rejects the legacy Gemini-only flag", () => {
-    // Use the default runtime parameter on the prepare functions (no explicit runtime needed).
+  it("prepareGeminiRequest emits agy's --output-format and never the legacy -o", () => {
+    // This used to assert a REFUSAL, on the claim that the Antigravity headless
+    // path emits text only. Measured false against agy 1.1.24 (see
+    // docs/evidence/c1-capture-ceiling-2026-09-02.md). The invariant that
+    // actually mattered survives and is asserted here: the legacy Gemini `-o`
+    // flag must never be emitted, whatever the caller asks for.
     const prep = prepareGeminiRequest(
       {
         prompt: "hello",
@@ -195,9 +199,9 @@ describe("U23 fix: outputFormat reaches the CLI as a flag", () => {
       },
       undefined
     );
-    expect("args" in prep).toBe(false);
-    if ("args" in prep) throw new Error("expected error response");
-    expect(prep.content[0].text).toContain("outputFormat");
+    if (!("args" in prep)) throw new Error("expected args");
+    expect(prep.args).not.toContain("-o");
+    expect(prep.args[prep.args.indexOf("--output-format") + 1]).toBe("json");
   });
 
   it("prepareGeminiRequest with outputFormat='text' (default) does NOT emit -o json", () => {
@@ -360,8 +364,7 @@ describe("U23 fix: JSON usage extraction is wired end-to-end", () => {
     expect(skipIdx).toBeGreaterThan(jsonIdx);
   });
 
-  it("prepareGeminiRequest rejects legacy Gemini outputFormat even with agy sandbox enabled", () => {
-    // Use the default runtime parameter on the prepare functions (no explicit runtime needed).
+  it("prepareGeminiRequest keeps outputFormat and sandbox independent", () => {
     const prep = prepareGeminiRequest(
       {
         prompt: "hi",
@@ -373,8 +376,9 @@ describe("U23 fix: JSON usage extraction is wired end-to-end", () => {
       },
       undefined
     );
-    expect("args" in prep).toBe(false);
-    if ("args" in prep) throw new Error("expected error response");
-    expect(prep.content[0].text).toContain("outputFormat");
+    if (!("args" in prep)) throw new Error("expected args");
+    expect(prep.args).toContain("--sandbox");
+    expect(prep.args).not.toContain("-o");
+    expect(prep.args[prep.args.indexOf("--output-format") + 1]).toBe("json");
   });
 });

@@ -892,7 +892,15 @@ const PROVIDER_DEFINITIONS = {
       trust: false,
       flags: ["--sandbox", "--mode", "--dangerously-skip-permissions"],
     },
-    outputFormats: ["text"],
+    // agy 1.1.24 accepts --output-format text|json|stream-json in print mode.
+    // stream-json is the only wire that carries the working directory, the tool
+    // list, per-tool parameters and usage; measured in
+    // docs/evidence/c1-capture-ceiling-2026-09-02.md.
+    outputFormats: ["text", "json", "stream-json"],
+    // NOT stream-json. Whether agy flushes its NDJSON incrementally or in one
+    // burst at exit was not measured, and streamingFormats drives the idle-timer
+    // semantics. Declaring it streaming on an unmeasured guess would turn the
+    // total-runtime bound into an idle bound for every gemini caller.
     streamingFormats: [],
     outputDiscipline: {
       streaming: "terminal-burst",

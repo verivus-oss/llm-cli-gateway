@@ -88,9 +88,14 @@ describe("REGRESSIONS Eα — registered tool outputFormat enum (slice ε)", () 
 
 // ─── REGRESSIONS Eβ — Antigravity text-only output guard ───────────────
 //
-// Antigravity CLI has no Gemini-compatible `-o` output flag. The gateway keeps
-// the schema enum for compatibility but rejects non-text modes before spawn.
-describe("REGRESSIONS Eβ — prepareGeminiRequest rejects legacy Gemini output modes", () => {
+// Antigravity CLI has no Gemini-compatible `-o` output flag. It DOES have
+// `--output-format text|json|stream-json`, measured against agy 1.1.24 in
+// docs/evidence/c1-capture-ceiling-2026-09-02.md. These cases used to assert a
+// blanket refusal of every non-text mode; the surviving invariant is that the
+// legacy `-o` token is never emitted, and that a caller asking for text gets no
+// output flag at all (an unconditional `--output-format text` would change the
+// dedup key of every existing gemini request).
+describe("REGRESSIONS Eβ — prepareGeminiRequest emits agy output modes, never legacy -o", () => {
   const baseParams = {
     prompt: "hello",
     approvalStrategy: "legacy" as const,
@@ -98,18 +103,26 @@ describe("REGRESSIONS Eβ — prepareGeminiRequest rejects legacy Gemini output 
     operation: "gemini_request",
   };
 
-  it("rejects outputFormat=stream-json before argv emission", () => {
+  it("emits --output-format stream-json, the only agy wire carrying cwd and tools", () => {
     const prep = prepareGeminiRequest({ ...baseParams, outputFormat: "stream-json" });
-    expect("args" in prep).toBe(false);
-    if ("args" in prep) throw new Error("expected error response");
-    expect(prep.content[0].text).toContain("outputFormat");
+    if (!("args" in prep)) throw new Error("expected args");
+    expect(prep.args).not.toContain("-o");
+    expect(prep.args[prep.args.indexOf("--output-format") + 1]).toBe("stream-json");
   });
 
-  it("rejects outputFormat=json before argv emission", () => {
+  it("emits --output-format json", () => {
     const prep = prepareGeminiRequest({ ...baseParams, outputFormat: "json" });
-    expect("args" in prep).toBe(false);
-    if ("args" in prep) throw new Error("expected error response");
-    expect(prep.content[0].text).toContain("outputFormat");
+    if (!("args" in prep)) throw new Error("expected args");
+    expect(prep.args[prep.args.indexOf("--output-format") + 1]).toBe("json");
+  });
+
+  it("emits NO output flag when the caller asked for nothing", () => {
+    // Not the same case as outputFormat:"text" below. An unconditional
+    // `--output-format text` on the default path would be a new argv element on
+    // every existing gemini request, and argv is part of the dedup key.
+    const prep = prepareGeminiRequest({ ...baseParams });
+    if (!("args" in prep)) throw new Error("expected args");
+    expect(prep.args).not.toContain("--output-format");
   });
 
   it("emits no -o token at all when outputFormat=text (the default)", () => {
