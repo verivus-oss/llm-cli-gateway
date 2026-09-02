@@ -19,6 +19,8 @@ import { PostgresFlightRecorder } from "../flight-recorder-pg.js";
 import type { FlightLogResult, FlightLogStart } from "../flight-recorder.js";
 import { collectStorageHealth } from "../doctor.js";
 import { TEST_DATABASE_URL } from "./setup.js";
+// @ts-expect-error - plain ESM helper shared with the static parity gate
+import { transcriptMigrationText } from "../../scripts/transcript-migration-selection.mjs";
 
 const BASE_DSN = TEST_DATABASE_URL;
 const SCHEMA = `flight_pg_${process.pid}`;
@@ -100,17 +102,14 @@ afterAll(async () => {
 });
 
 /**
- * Every transcript migration, 022 onward, concatenated in version order. The
- * selection matches `scripts/check-transcript-schema-parity.mjs`, so a 024
- * lands in the mirror without anyone remembering to add it here.
+ * Every flight-recorder migration, concatenated in version order. The selection
+ * is the one `scripts/check-transcript-schema-parity.mjs` uses, imported rather
+ * than restated, so a later recorder migration lands in the mirror without
+ * anyone remembering to add it here and a migration for another subsystem stays
+ * out of a schema that has none of its tables.
  */
 function transcriptMigrations(): string {
-  const dir = join(process.cwd(), "migrations");
-  const files = readdirSync(dir)
-    .filter(name => /^\d+_.*\.sql$/.test(name) && Number(name.slice(0, 3)) >= 22)
-    .sort();
-  if (files.length === 0) throw new Error("no transcript migrations found from 022 onward");
-  return files.map(name => readFileSync(join(dir, name), "utf8")).join("\n");
+  return transcriptMigrationText(join(process.cwd(), "migrations"));
 }
 
 /** The stored rank, read on a connection the recorder does not own. */
