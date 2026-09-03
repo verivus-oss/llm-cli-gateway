@@ -4,6 +4,7 @@ import { tmpdir } from "os";
 import { join } from "path";
 import { describe, expect, it } from "vitest";
 import { AsyncJobManager, isAsyncJobInProgress, type LlmCli } from "../async-job-manager.js";
+import { buildClaudeMcpConfig } from "../claude-mcp-config.js";
 import type { JobLimitsConfig } from "../config.js";
 import { SqliteJobStore } from "../job-store.js";
 import type { KitExecutionRef } from "../personal-config-types.js";
@@ -241,6 +242,154 @@ describe("AsyncJobManager shutdown fencing", () => {
       expect(deregistered).toBe(false);
     } finally {
       releaseRetry?.();
+      await manager.whenPendingWritesSettled();
+      await store.close();
+      rmSync(testDir, { recursive: true, force: true });
+    }
+  });
+
+  it("tracks post-persistence artifact acknowledgement through the shutdown deadline", async () => {
+    const originalHome = process.env.HOME;
+    const testDir = mkdtempSync(join(tmpdir(), "async-shutdown-artifact-"));
+    process.env.HOME = testDir;
+    const config = buildClaudeMcpConfig([]);
+    const store = new SqliteJobStore(join(testDir, "jobs.db"));
+    const manager = new AsyncJobManager(undefined, undefined, store, undefined, limits());
+    const acknowledgeMcpArtifactCleanup = store.acknowledgeMcpArtifactCleanup.bind(store);
+    const deregisterInstance = store.deregisterInstance.bind(store);
+    let releaseAcknowledgement: (() => void) | undefined;
+    const acknowledgementGate = new Promise<void>(resolve => {
+      releaseAcknowledgement = resolve;
+    });
+    let acknowledgementStarted = false;
+    let deregistered = false;
+    store.acknowledgeMcpArtifactCleanup = async (...args) => {
+      acknowledgementStarted = true;
+      await acknowledgementGate;
+      return acknowledgeMcpArtifactCleanup(...args);
+    };
+    store.deregisterInstance = async instanceId => {
+      deregistered = true;
+      await deregisterInstance(instanceId);
+    };
+
+    try {
+      const slot = await manager.acquireProcessSlot("claude");
+      try {
+        const queued = await manager.startJobWithDedup(
+          "claude",
+          ["-p", "review", "--mcp-config", config.path],
+          "shutdown-artifact-acknowledgement",
+          {
+            forceRefresh: true,
+            artifactCleanup: config.cleanup,
+            mcpArtifactPath: config.path,
+            mcpArtifactScope: config.artifactScope,
+          }
+        );
+        expect(queued.snapshot.status).toBe("queued");
+
+        const startedAt = Date.now();
+        await manager.dispose({ timeoutMs: 75 });
+
+        expect(Date.now() - startedAt).toBeLessThan(1_000);
+        expect(acknowledgementStarted).toBe(true);
+        expect(deregistered).toBe(false);
+      } finally {
+        slot.release();
+      }
+    } finally {
+      releaseAcknowledgement?.();
+      await manager.whenPendingWritesSettled();
+      config.cleanup?.();
+      await store.close();
+      rmSync(testDir, { recursive: true, force: true });
+      if (originalHome === undefined) delete process.env.HOME;
+      else process.env.HOME = originalHome;
+    }
+  });
+
+  it("does not spawn after shutdown fences a stalled pre-spawn progress write", async () => {
+    const testDir = mkdtempSync(join(tmpdir(), "async-shutdown-pre-spawn-"));
+    const markerPath = join(testDir, "late-process-started");
+    const store = new SqliteJobStore(join(testDir, "jobs.db"));
+    const manager = new AsyncJobManager(undefined, undefined, store, undefined, limits());
+    const recordProgressIfStatus = store.recordProgressIfStatus.bind(store);
+    let releaseProgress: (() => void) | undefined;
+    const progressGate = new Promise<void>(resolve => {
+      releaseProgress = resolve;
+    });
+    let runningProgressStarted = false;
+    store.recordProgressIfStatus = async (...args) => {
+      if (args[1] === "running") {
+        runningProgressStarted = true;
+        await progressGate;
+      }
+      return recordProgressIfStatus(...args);
+    };
+
+    try {
+      const prepared = await manager.startJobWithDedup(
+        "sh" as LlmCli,
+        ["-c", `printf started > ${JSON.stringify(markerPath)}`],
+        "shutdown-stalled-pre-spawn",
+        { forceRefresh: true, deferLaunch: true }
+      );
+      expect(prepared.snapshot.status).toBe("queued");
+      expect(prepared.deferredLaunch).toBeDefined();
+
+      await new Promise(resolve => setTimeout(resolve, 1_050));
+      prepared.deferredLaunch!.release();
+      await waitFor(() => runningProgressStarted);
+
+      const startedAt = Date.now();
+      await manager.dispose({ timeoutMs: 75 });
+      expect(Date.now() - startedAt).toBeLessThan(1_000);
+
+      releaseProgress?.();
+      await waitFor(
+        async () =>
+          !isAsyncJobInProgress((await manager.getJobSnapshot(prepared.snapshot.id)!).status)
+      );
+      await new Promise(resolve => setTimeout(resolve, 50));
+      expect(existsSync(markerPath)).toBe(false);
+      expect(await manager.getJobSnapshot(prepared.snapshot.id)).toMatchObject({
+        status: "failed",
+        exitCode: 1,
+      });
+    } finally {
+      releaseProgress?.();
+      await manager.whenPendingWritesSettled();
+      await store.close();
+      rmSync(testDir, { recursive: true, force: true });
+    }
+  });
+
+  it("bounds instance deregistration by the remaining shutdown deadline", async () => {
+    const testDir = mkdtempSync(join(tmpdir(), "async-shutdown-deregister-"));
+    const store = new SqliteJobStore(join(testDir, "jobs.db"));
+    const manager = new AsyncJobManager(undefined, undefined, store);
+    const deregisterInstance = store.deregisterInstance.bind(store);
+    let releaseDeregistration: (() => void) | undefined;
+    const deregistrationGate = new Promise<void>(resolve => {
+      releaseDeregistration = resolve;
+    });
+    let deregistrationStarted = false;
+    store.deregisterInstance = async instanceId => {
+      deregistrationStarted = true;
+      await deregistrationGate;
+      await deregisterInstance(instanceId);
+    };
+
+    try {
+      await manager.whenStartupSettled();
+      const startedAt = Date.now();
+      await manager.dispose({ timeoutMs: 75 });
+
+      expect(Date.now() - startedAt).toBeLessThan(1_000);
+      expect(deregistrationStarted).toBe(true);
+    } finally {
+      releaseDeregistration?.();
       await manager.whenPendingWritesSettled();
       await store.close();
       rmSync(testDir, { recursive: true, force: true });

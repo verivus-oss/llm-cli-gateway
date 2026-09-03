@@ -1787,10 +1787,24 @@ export class AsyncJobManager {
       return;
     }
     if (!this.store) return; // isolate-mode / no durable state: nothing to deregister.
-    try {
-      await this.store.deregisterInstance(this.instanceId);
-    } catch (err) {
-      this.logger.error("#139 dispose: deregisterInstance failed", err);
+    if (Date.now() >= deadline) {
+      logWarn(
+        this.logger,
+        "#139 dispose exhausted its deadline before deregistration; letting the lease expire"
+      );
+      return;
+    }
+    const deregistration = Promise.resolve()
+      .then(() => this.store!.deregisterInstance(this.instanceId))
+      .catch(err => {
+        this.logger.error("#139 dispose: deregisterInstance failed", err);
+      });
+    this.trackPendingWrite(deregistration);
+    if (!(await awaitWithinDeadline(deregistration))) {
+      logWarn(
+        this.logger,
+        "#139 dispose timed out during deregistration; letting the lease expire"
+      );
     }
   }
 
@@ -3210,7 +3224,17 @@ export class AsyncJobManager {
     resolve?.(success);
   }
 
-  private async fireOnComplete(job: AsyncJobRecord): Promise<void> {
+  private fireOnComplete(job: AsyncJobRecord): Promise<void> {
+    const completion = this.fireOnCompleteBody(job);
+    // Terminal persistence can settle before session and artifact cleanup do.
+    // Keep the complete lifecycle in the shutdown drain so dispose cannot
+    // deregister this instance while a post-persistence acknowledgement is
+    // still outstanding.
+    this.trackPendingWrite(completion.catch(() => undefined));
+    return completion;
+  }
+
+  private async fireOnCompleteBody(job: AsyncJobRecord): Promise<void> {
     const liveProcessMayStillReadArtifacts =
       job.transport === "process" && job.process !== null && !job.exited;
     // A signal request is not death proof. In particular, a child can ignore
@@ -4717,7 +4741,15 @@ export class AsyncJobManager {
           idleTimeoutMs,
         });
       } catch (err) {
-        const launchError = describeProcessLaunchError(cli, err as Error);
+        const launchError = job.terminationRequested
+          ? {
+              exitCode: job.exitCode ?? 1,
+              message:
+                job.error ?? "Gateway shutdown requested before provider process reached close",
+              errorCategory: job.errorCategory,
+              retryable: job.retryable,
+            }
+          : describeProcessLaunchError(cli, err as Error);
         job.status = "failed";
         job.exitCode = launchError.exitCode;
         job.error = launchError.message;
@@ -4887,6 +4919,13 @@ export class AsyncJobManager {
     const correlationId = job.correlationId;
     const command = providerCommandName(cli);
     const baseEnv = envWithExtendedPath(process.env, getExtendedPath());
+    // A queued launch can spend time flushing its running progress transition.
+    // Shutdown may fence it during that await and complete its process-signal
+    // pass while no child exists yet. Recheck at the final spawn boundary so a
+    // late progress write can never create a process after disposal.
+    if (this.disposed || job.terminationRequested || job.status !== "running") {
+      throw new Error("Gateway shutdown fenced this job before process spawn");
+    }
     const child = spawnCliProcess(command, args, {
       cwd,
       stdio: stdin === undefined ? ["ignore", "pipe", "pipe"] : ["pipe", "pipe", "pipe"],
