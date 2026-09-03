@@ -406,7 +406,7 @@ describe("the five states", () => {
     try {
       const storage = await collectStorageHealth();
       expect(storage.job_store.backend).toBe("postgres");
-      expect(storage.flight_recorder.path).toBe("postgresql");
+      expect(storage.flight_recorder.path).toMatch(/^postgresql (?:host|socket) /);
       expect(storage.flight_recorder.error).toBe("PostgreSQL operation failed");
       expect(storage.warnings.join(" ")).not.toContain(marker);
       expect(storage.warnings.join(" ")).toContain("PostgreSQL operation failed");

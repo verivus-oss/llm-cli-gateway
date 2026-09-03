@@ -103,7 +103,7 @@ describe("llm_process_health discloses storage disposition", () => {
       end: async (): Promise<void> => {},
     };
     return new PostgresFlightRecorder(
-      { app: "postgresql://app@127.0.0.1/gateway" },
+      { app: "postgresql://app@127.0.0.1:5432/gateway" },
       { poolFactory: () => pool, logger }
     );
   }
@@ -155,7 +155,9 @@ describe("llm_process_health discloses storage disposition", () => {
     const recorder = postgresRecorder(new Error(marker));
     try {
       const storage = await collectStorageHealth(recorder);
-      expect(storage.flight_recorder.path).toBe("postgresql");
+      expect(storage.flight_recorder.path).toBe(
+        "postgresql host 127.0.0.1 port 5432 database gateway"
+      );
       expect(storage.flight_recorder.error).toBe("PostgreSQL operation failed");
       expect(storage.warnings.join(" ")).toContain("PostgreSQL operation failed");
       expect(storage.warnings.join(" ")).not.toContain(marker);
@@ -192,7 +194,7 @@ describe("llm_process_health discloses storage disposition", () => {
 
       // The recorder block supplies what was missing.
       expect(res.flightRecorder.engine).toBe("postgres");
-      expect(res.flightRecorder.path).toBe("postgresql");
+      expect(res.flightRecorder.path).toBe("postgresql host 127.0.0.1 port 5432 database gateway");
       expect(res.flightRecorder.enabled).toBe(true);
       expect(res.flightRecorder.followsPersistenceBackend).toBe(true);
     } finally {
