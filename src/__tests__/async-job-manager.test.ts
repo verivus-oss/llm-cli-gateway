@@ -1,5 +1,26 @@
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { dirname, join } from "node:path";
 import { describe, it, expect, vi } from "vitest";
 import { AsyncJobManager, type LlmCli } from "../async-job-manager.js";
+import { MemoryJobStore } from "../job-store.js";
+import { ensureDevinTranscriptPath } from "../devin-transcript.js";
+import { DEFAULT_JOB_LIMITS } from "../config.js";
+
+class LostTerminalAcknowledgementStore extends MemoryJobStore {
+  private loseFirstAcknowledgement = true;
+
+  override async recordComplete(
+    input: Parameters<MemoryJobStore["recordComplete"]>[0]
+  ): Promise<boolean> {
+    const applied = await super.recordComplete(input);
+    if (applied && this.loseFirstAcknowledgement) {
+      this.loseFirstAcknowledgement = false;
+      throw new Error("terminal acknowledgement lost after commit");
+    }
+    return applied;
+  }
+}
 
 /** Poll until predicate returns true, or reject after timeoutMs. */
 function waitFor(
@@ -43,6 +64,49 @@ describe("AsyncJobManager", () => {
       expect(result.stdout.trim()).toBe("hello");
     });
 
+    it("forwards a resolved cwd scope through the backwards-compatible startJob wrapper", async () => {
+      const cwd = mkdtempSync(join(tmpdir(), "async-cwd-scope-"));
+      const store = new MemoryJobStore();
+      const manager = new AsyncJobManager(undefined, undefined, store);
+      const parameters: Parameters<AsyncJobManager["startJob"]> = [
+        "pwd" as LlmCli,
+        [],
+        "corr-cwd-scope",
+        cwd,
+        undefined,
+        undefined,
+        true,
+        undefined,
+        undefined,
+        undefined,
+        undefined,
+        undefined,
+        undefined,
+        undefined,
+        undefined,
+        undefined,
+        undefined,
+        undefined,
+        undefined,
+        undefined,
+        undefined,
+        { effectiveWorkingDir: cwd },
+      ];
+
+      try {
+        const job = await manager.startJob(...parameters);
+        await waitForJobDone(manager, job.id);
+        expect((await manager.getJobResult(job.id))?.executionContext?.cwd).toEqual({
+          scope: "caller",
+          path: cwd,
+          workspaceAlias: null,
+        });
+      } finally {
+        await manager.dispose();
+        rmSync(cwd, { recursive: true, force: true });
+      }
+    });
+
     it("should track a failed job", async () => {
       const manager = new AsyncJobManager();
       const job = await manager.startJob("sh" as LlmCli, ["-c", "exit 42"], "corr-2");
@@ -69,10 +133,243 @@ describe("AsyncJobManager", () => {
       expect(result.stderr).toContain("command was not found");
     });
 
+    it("reconciles an atomic terminal capture whose acknowledgement is lost", async () => {
+      const store = new LostTerminalAcknowledgementStore();
+      const manager = new AsyncJobManager(undefined, undefined, store);
+      try {
+        const job = await manager.startJob("echo" as LlmCli, ["whole"], "capture-ack-lost");
+        await waitFor(async () => (await store.getById(job.id))?.status === "completed", 5000, 10);
+        expect(await store.getById(job.id)).toMatchObject({
+          status: "completed",
+          captureStatus: "not_captured",
+        });
+      } finally {
+        await manager.dispose();
+      }
+    });
+
     it("should return null for unknown job ID", async () => {
       const manager = new AsyncJobManager();
       expect(await manager.getJobSnapshot("nonexistent")).toBeNull();
       expect(await manager.getJobResult("nonexistent")).toBeNull();
+    });
+
+    it("harvests, persists, and removes the exact gateway-owned Devin transcript", async () => {
+      const temp = mkdtempSync(join(tmpdir(), "devin-capture-"));
+      const fakeDevin = join(temp, "devin");
+      const correlationId = `capture-${process.pid}-${Date.now()}`;
+      const originalHome = process.env.HOME;
+      process.env.HOME = temp;
+      const transcriptPath = ensureDevinTranscriptPath(correlationId, temp);
+      if (!transcriptPath) throw new Error("failed to mint Devin transcript path");
+      const store = new MemoryJobStore();
+      const manager = new AsyncJobManager(undefined, undefined, store);
+      writeFileSync(
+        fakeDevin,
+        `#!/bin/sh
+out=""
+while [ "$#" -gt 0 ]; do
+  if [ "$1" = "--export" ]; then
+    out="$2"
+    shift 2
+  else
+    shift
+  fi
+done
+printf '%s' '{"version":"ATIF-v1.7","messages":[{"role":"assistant","content":"whole"}]}' > "$out"
+printf '%s\n' 'done'
+`
+      );
+      chmodSync(fakeDevin, 0o755);
+
+      try {
+        const job = await manager.startJob(
+          "devin",
+          ["--export", transcriptPath, "-p", "capture"],
+          correlationId,
+          undefined,
+          undefined,
+          "text",
+          true,
+          { PATH: `${temp}:${process.env.PATH ?? ""}` }
+        );
+        await waitFor(async () => {
+          const current = await manager.getJobSnapshot(job.id);
+          return Boolean(current && !["queued", "running"].includes(current.status));
+        }, 5000);
+
+        const result = await manager.getJobResult(job.id);
+        const durable = await store.getById(job.id);
+        expect(result?.nativeTranscript).toContain('"version":"ATIF-v1.7"');
+        expect(result?.executionContext?.capture.status).toBe("captured_whole");
+        expect(durable?.nativeTranscript).toContain('"content":"whole"');
+        expect(durable?.captureStatus).toBe("captured_whole");
+        expect(durable?.captureError).toBeNull();
+        expect(existsSync(transcriptPath)).toBe(false);
+      } finally {
+        await manager.dispose();
+        rmSync(transcriptPath, { force: true });
+        rmSync(temp, { recursive: true, force: true });
+        if (originalHome === undefined) delete process.env.HOME;
+        else process.env.HOME = originalHome;
+      }
+    });
+
+    it("removes an oversized Devin export after bounded capture is durable", async () => {
+      const temp = mkdtempSync(join(tmpdir(), "devin-capture-limit-"));
+      const fakeDevin = join(temp, "devin");
+      const correlationId = `capture-limit-${process.pid}-${Date.now()}`;
+      const originalHome = process.env.HOME;
+      process.env.HOME = temp;
+      const transcriptPath = ensureDevinTranscriptPath(correlationId, temp);
+      if (!transcriptPath) throw new Error("failed to mint Devin transcript path");
+      const store = new MemoryJobStore();
+      const manager = new AsyncJobManager(undefined, undefined, store, undefined, {
+        ...DEFAULT_JOB_LIMITS,
+        maxJobOutputBytes: 128,
+      });
+      writeFileSync(
+        fakeDevin,
+        `#!/usr/bin/env node
+const fs = require("node:fs");
+const args = process.argv.slice(2);
+const at = args.indexOf("--export");
+fs.writeFileSync(args[at + 1], JSON.stringify({ version: "ATIF-v1.7", messages: [{ role: "assistant", content: "x".repeat(4096) }] }));
+process.stdout.write("done\\n");
+`
+      );
+      chmodSync(fakeDevin, 0o755);
+
+      try {
+        const job = await manager.startJob(
+          "devin",
+          ["--export", transcriptPath, "-p", "capture"],
+          correlationId,
+          undefined,
+          undefined,
+          "text",
+          true,
+          { PATH: `${temp}:${process.env.PATH ?? ""}` }
+        );
+        await waitFor(async () => (await store.getById(job.id))?.captureStatus !== null, 5000, 10);
+        expect(await store.getById(job.id)).toMatchObject({
+          captureStatus: "captured_to_limit",
+          nativeTranscriptTruncated: true,
+        });
+        expect(existsSync(transcriptPath)).toBe(false);
+      } finally {
+        await manager.dispose();
+        rmSync(transcriptPath, { force: true });
+        rmSync(temp, { recursive: true, force: true });
+        if (originalHome === undefined) delete process.env.HOME;
+        else process.env.HOME = originalHome;
+      }
+    });
+
+    it("accounts for a Devin export when streams consume the entire capture budget", async () => {
+      const temp = mkdtempSync(join(tmpdir(), "devin-capture-zero-budget-"));
+      const fakeDevin = join(temp, "devin");
+      const correlationId = `capture-zero-budget-${process.pid}-${Date.now()}`;
+      const originalHome = process.env.HOME;
+      process.env.HOME = temp;
+      const transcriptPath = ensureDevinTranscriptPath(correlationId, temp);
+      if (!transcriptPath) throw new Error("failed to mint Devin transcript path");
+      const store = new MemoryJobStore();
+      const manager = new AsyncJobManager(undefined, undefined, store, undefined, {
+        ...DEFAULT_JOB_LIMITS,
+        maxJobOutputBytes: 5,
+      });
+      writeFileSync(
+        fakeDevin,
+        `#!/usr/bin/env node
+const fs = require("node:fs");
+const args = process.argv.slice(2);
+const at = args.indexOf("--export");
+fs.writeFileSync(args[at + 1], JSON.stringify({ version: "ATIF-v1.7", messages: [{ role: "assistant", content: "whole" }] }));
+process.stdout.write("done\\n");
+`
+      );
+      chmodSync(fakeDevin, 0o755);
+
+      try {
+        const job = await manager.startJob(
+          "devin",
+          ["--export", transcriptPath, "-p", "capture"],
+          correlationId,
+          undefined,
+          undefined,
+          "text",
+          true,
+          { PATH: `${temp}:${process.env.PATH ?? ""}` }
+        );
+        await waitFor(async () => (await store.getById(job.id))?.captureStatus !== null, 5000, 10);
+        expect(await store.getById(job.id)).toMatchObject({
+          captureStatus: "not_captured",
+          nativeTranscript: null,
+          nativeTranscriptTruncated: true,
+          nativeTranscriptDroppedBytes: expect.any(Number),
+          captureError: "Provider native transcript exceeded the remaining capture budget",
+        });
+        expect((await store.getById(job.id))!.nativeTranscriptDroppedBytes).toBeGreaterThan(0);
+        expect(existsSync(transcriptPath)).toBe(false);
+      } finally {
+        await manager.dispose();
+        rmSync(transcriptPath, { force: true });
+        rmSync(temp, { recursive: true, force: true });
+        if (originalHome === undefined) delete process.env.HOME;
+        else process.env.HOME = originalHome;
+      }
+    });
+
+    it("retries a transient Devin export unlink failure", async () => {
+      if (process.platform === "win32" || (process.getuid?.() ?? 1) === 0) return;
+      const temp = mkdtempSync(join(tmpdir(), "devin-capture-unlink-retry-"));
+      const fakeDevin = join(temp, "devin");
+      const correlationId = `capture-unlink-retry-${process.pid}-${Date.now()}`;
+      const originalHome = process.env.HOME;
+      process.env.HOME = temp;
+      const transcriptPath = ensureDevinTranscriptPath(correlationId, temp);
+      if (!transcriptPath) throw new Error("failed to mint Devin transcript path");
+      const store = new MemoryJobStore();
+      const manager = new AsyncJobManager(undefined, undefined, store);
+      writeFileSync(
+        fakeDevin,
+        `#!/usr/bin/env node
+const fs = require("node:fs");
+const path = require("node:path");
+const args = process.argv.slice(2);
+const at = args.indexOf("--export");
+const out = args[at + 1];
+fs.writeFileSync(out, JSON.stringify({ version: "ATIF-v1.7", messages: [{ role: "assistant", content: "whole" }] }));
+fs.chmodSync(path.dirname(out), 0o500);
+process.stdout.write("done\\n");
+`
+      );
+      chmodSync(fakeDevin, 0o755);
+
+      try {
+        const job = await manager.startJob(
+          "devin",
+          ["--export", transcriptPath, "-p", "capture"],
+          correlationId,
+          undefined,
+          undefined,
+          "text",
+          true,
+          { PATH: `${temp}:${process.env.PATH ?? ""}` }
+        );
+        await waitFor(async () => (await store.getById(job.id))?.captureStatus !== null, 5000, 10);
+        expect(existsSync(transcriptPath)).toBe(true);
+        chmodSync(dirname(transcriptPath), 0o700);
+        await waitFor(() => !existsSync(transcriptPath), 5000, 25);
+      } finally {
+        chmodSync(dirname(transcriptPath), 0o700);
+        await manager.dispose();
+        rmSync(transcriptPath, { force: true });
+        rmSync(temp, { recursive: true, force: true });
+        if (originalHome === undefined) delete process.env.HOME;
+        else process.env.HOME = originalHome;
+      }
     });
 
     it("should truncate job results from the beginning of each stream", async () => {

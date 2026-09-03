@@ -1,7 +1,7 @@
 {
   "schemaVersion": "upstream-scan-snapshot.v2",
   "cli": "grok",
-  "fetchedAt": "2026-08-13T12:24:54.826Z",
+  "fetchedAt": "2026-09-03T01:22:57.874Z",
   "sources": [
     {
       "url": "https://docs.x.ai/developers/release-notes.md",
@@ -13,10 +13,10 @@
     }
   ],
   "helpSurface": {
-    "probedAt": "2026-08-13T12:24:54.374Z",
+    "probedAt": "2026-09-03T01:22:57.118Z",
     "available": true,
-    "version": "grok 1.0.3 (1a29d5bc12)",
-    "targetVersion": "grok 1.0.3 (1a29d5bc12)",
+    "version": "grok 1.0.13 (5e9a58528b76)",
+    "targetVersion": "grok 1.0.13 (5e9a58528b76)",
     "versionMatchesTarget": true,
     "discoveredFlags": [
       "--agent",
@@ -30,7 +30,6 @@
       "--deny",
       "--disable-web-search",
       "--disallowed-tools",
-      "--experimental-memory",
       "--fork-session",
       "--fullscreen",
       "--include-partial-messages",
@@ -40,7 +39,6 @@
       "--minimal",
       "--model",
       "--no-alt-screen",
-      "--no-memory",
       "--no-plan",
       "--no-subagents",
       "--oauth",
@@ -62,14 +60,20 @@
       "--worktree",
       "--worktree-ref"
     ],
-    "helpHash": "401b7d184983908f66168a1295c18b4e39ea82d78bc5319ff44d2e5e2a43e374",
+    "helpHash": "966f4c04e49d33a303f55f31a35fec325b2944cdda3b74d152614e9c0c870e39",
     "extraVsContract": [],
-    "missingFromBinary": [],
+    "missingFromBinary": [
+      "--best-of-n",
+      "--check",
+      "--experimental-memory",
+      "--no-memory"
+    ],
     "arityMismatches": [],
     "enumMismatches": []
   },
   "rootCommands": [
     "agent",
+    "clone",
     "completions",
     "dashboard",
     "doctor",
@@ -97,7 +101,7 @@
       "commandPath": [
         "agent"
       ],
-      "probedAt": "2026-08-13T12:24:43.055Z",
+      "probedAt": "2026-09-03T01:22:42.905Z",
       "available": true,
       "existence": "present",
       "discoveredFlags": [
@@ -117,7 +121,7 @@
         "--reauth",
         "--xai-api-base-url"
       ],
-      "helpHash": "c1564f0df5e072c7c29c43f1be78c513cb7142ee57b23b42dc407857e96e8800",
+      "helpHash": "f8f9ebebf079f386bbb77ac747aa26054ca07c8ab4112c24315967d545645115",
       "extraVsContract": [],
       "missingFromBinary": [],
       "arityMismatches": [],
@@ -132,7 +136,7 @@
         "agent",
         "headless"
       ],
-      "probedAt": "2026-08-13T12:24:43.962Z",
+      "probedAt": "2026-09-03T01:22:43.965Z",
       "available": true,
       "existence": "present",
       "discoveredFlags": [
@@ -157,7 +161,7 @@
         "agent",
         "leader"
       ],
-      "probedAt": "2026-08-13T12:24:44.434Z",
+      "probedAt": "2026-09-03T01:22:44.475Z",
       "available": true,
       "existence": "present",
       "discoveredFlags": [
@@ -170,7 +174,7 @@
         "--no-exit-on-disconnect",
         "--relay-on-demand"
       ],
-      "helpHash": "5658bb634617b3e8a8649e1f2b836b7101081acccc79d4af3580c6c3394b764b",
+      "helpHash": "9026a1343dcfe1b79bd8da1b373ed0547db0fa8911e0d8c424d908d9d944e21e",
       "extraVsContract": [],
       "missingFromBinary": [],
       "arityMismatches": [],
@@ -185,7 +189,7 @@
         "agent",
         "serve"
       ],
-      "probedAt": "2026-08-13T12:24:44.879Z",
+      "probedAt": "2026-09-03T01:22:45.000Z",
       "available": true,
       "existence": "present",
       "discoveredFlags": [
@@ -213,7 +217,7 @@
         "agent",
         "stdio"
       ],
-      "probedAt": "2026-08-13T12:24:45.335Z",
+      "probedAt": "2026-09-03T01:22:45.531Z",
       "available": true,
       "existence": "present",
       "discoveredFlags": [
@@ -231,11 +235,36 @@
       "tier": "catalog",
       "summary": "Run Grok agent stdio mode."
     },
+    "clone": {
+      "commandPath": [
+        "clone"
+      ],
+      "probedAt": "2026-09-03T01:22:46.084Z",
+      "available": true,
+      "existence": "present",
+      "discoveredFlags": [
+        "--branch",
+        "--cone",
+        "--debug",
+        "--debug-file",
+        "--full-history",
+        "--leader-socket"
+      ],
+      "helpHash": "afb37b11063b291a8f8e9a3ed3371045d604c7126d3bdf7d132462ebbca7adb4",
+      "extraVsContract": [],
+      "missingFromBinary": [],
+      "arityMismatches": [],
+      "enumMismatches": [],
+      "risk": "writes_local_config",
+      "exposure": "tracked_only",
+      "tier": "catalog",
+      "summary": "Upstream-declared grok command (auto-catalogued, unverified)."
+    },
     "completions": {
       "commandPath": [
         "completions"
       ],
-      "probedAt": "2026-08-13T12:24:45.791Z",
+      "probedAt": "2026-09-03T01:22:46.710Z",
       "available": true,
       "existence": "present",
       "discoveredFlags": [
@@ -257,7 +286,7 @@
       "commandPath": [
         "dashboard"
       ],
-      "probedAt": "2026-08-13T12:24:46.244Z",
+      "probedAt": "2026-09-03T01:22:47.329Z",
       "available": true,
       "existence": "present",
       "discoveredFlags": [
@@ -265,7 +294,7 @@
         "--debug-file",
         "--leader-socket"
       ],
-      "helpHash": "b1c8012a0988e753da5bf16ba5727a2fa97bebd36869f789f2cef213ccb0f424",
+      "helpHash": "688ae98469a8c1d733a77de2a0c0742ea5cd79475baa777a79bb29f801a290d0",
       "extraVsContract": [],
       "missingFromBinary": [],
       "arityMismatches": [],
@@ -279,7 +308,7 @@
       "commandPath": [
         "doctor"
       ],
-      "probedAt": "2026-08-13T12:24:46.691Z",
+      "probedAt": "2026-09-03T01:22:47.944Z",
       "available": true,
       "existence": "present",
       "discoveredFlags": [
@@ -302,7 +331,7 @@
       "commandPath": [
         "du"
       ],
-      "probedAt": "2026-08-13T12:24:47.144Z",
+      "probedAt": "2026-09-03T01:22:48.532Z",
       "available": true,
       "existence": "present",
       "discoveredFlags": [
@@ -311,7 +340,7 @@
         "--json",
         "--leader-socket"
       ],
-      "helpHash": "65ab7deb5affdc1178bc4d3e3856eb78048bdd339d3d0053bcd25576896d0ffa",
+      "helpHash": "e496a82da81908d2cfa726a5c6686a743cefa654030193023902057bd85ef0cf",
       "extraVsContract": [],
       "missingFromBinary": [],
       "arityMismatches": [],
@@ -325,7 +354,7 @@
       "commandPath": [
         "export"
       ],
-      "probedAt": "2026-08-13T12:24:47.595Z",
+      "probedAt": "2026-09-03T01:22:49.129Z",
       "available": true,
       "existence": "present",
       "discoveredFlags": [
@@ -348,7 +377,7 @@
       "commandPath": [
         "inspect"
       ],
-      "probedAt": "2026-08-13T12:24:48.062Z",
+      "probedAt": "2026-09-03T01:22:49.745Z",
       "available": true,
       "existence": "present",
       "discoveredFlags": [
@@ -371,7 +400,7 @@
       "commandPath": [
         "leader"
       ],
-      "probedAt": "2026-08-13T12:24:48.537Z",
+      "probedAt": "2026-09-03T01:22:50.257Z",
       "available": true,
       "existence": "present",
       "discoveredFlags": [
@@ -393,7 +422,7 @@
       "commandPath": [
         "login"
       ],
-      "probedAt": "2026-08-13T12:24:48.983Z",
+      "probedAt": "2026-09-03T01:22:50.790Z",
       "available": true,
       "existence": "present",
       "discoveredFlags": [
@@ -417,7 +446,7 @@
       "commandPath": [
         "logout"
       ],
-      "probedAt": "2026-08-13T12:24:49.412Z",
+      "probedAt": "2026-09-03T01:22:51.269Z",
       "available": true,
       "existence": "present",
       "discoveredFlags": [
@@ -439,7 +468,7 @@
       "commandPath": [
         "mcp"
       ],
-      "probedAt": "2026-08-13T12:24:49.867Z",
+      "probedAt": "2026-09-03T01:22:51.774Z",
       "available": true,
       "existence": "present",
       "discoveredFlags": [
@@ -461,7 +490,7 @@
       "commandPath": [
         "memory"
       ],
-      "probedAt": "2026-08-13T12:24:50.316Z",
+      "probedAt": "2026-09-03T01:22:52.330Z",
       "available": true,
       "existence": "present",
       "discoveredFlags": [
@@ -483,7 +512,7 @@
       "commandPath": [
         "models"
       ],
-      "probedAt": "2026-08-13T12:24:50.767Z",
+      "probedAt": "2026-09-03T01:22:52.846Z",
       "available": true,
       "existence": "present",
       "discoveredFlags": [
@@ -505,7 +534,7 @@
       "commandPath": [
         "plugin"
       ],
-      "probedAt": "2026-08-13T12:24:51.239Z",
+      "probedAt": "2026-09-03T01:22:53.327Z",
       "available": true,
       "existence": "present",
       "discoveredFlags": [
@@ -527,7 +556,7 @@
       "commandPath": [
         "sessions"
       ],
-      "probedAt": "2026-08-13T12:24:51.714Z",
+      "probedAt": "2026-09-03T01:22:53.835Z",
       "available": true,
       "existence": "present",
       "discoveredFlags": [
@@ -549,7 +578,7 @@
       "commandPath": [
         "setup"
       ],
-      "probedAt": "2026-08-13T12:24:52.157Z",
+      "probedAt": "2026-09-03T01:22:54.326Z",
       "available": true,
       "existence": "present",
       "discoveredFlags": [
@@ -572,7 +601,7 @@
       "commandPath": [
         "trace"
       ],
-      "probedAt": "2026-08-13T12:24:52.593Z",
+      "probedAt": "2026-09-03T01:22:54.829Z",
       "available": true,
       "existence": "present",
       "discoveredFlags": [
@@ -597,7 +626,7 @@
       "commandPath": [
         "update"
       ],
-      "probedAt": "2026-08-13T12:24:53.031Z",
+      "probedAt": "2026-09-03T01:22:55.334Z",
       "available": true,
       "existence": "present",
       "discoveredFlags": [
@@ -625,7 +654,7 @@
       "commandPath": [
         "version"
       ],
-      "probedAt": "2026-08-13T12:24:53.473Z",
+      "probedAt": "2026-09-03T01:22:55.845Z",
       "available": true,
       "existence": "present",
       "discoveredFlags": [
@@ -648,7 +677,7 @@
       "commandPath": [
         "worktree"
       ],
-      "probedAt": "2026-08-13T12:24:53.922Z",
+      "probedAt": "2026-09-03T01:22:56.304Z",
       "available": true,
       "existence": "present",
       "discoveredFlags": [
@@ -656,7 +685,7 @@
         "--debug-file",
         "--leader-socket"
       ],
-      "helpHash": "a8c64eca08292b13fb08c6cb5e8337c114a36234bc847567e09546a7fa1122fe",
+      "helpHash": "365783698dd6908f5f9e1c41f5a4f80fb44df242690bfc9d249d15036aa3964f",
       "extraVsContract": [],
       "missingFromBinary": [],
       "arityMismatches": [],
@@ -670,7 +699,7 @@
       "commandPath": [
         "wrap"
       ],
-      "probedAt": "2026-08-13T12:24:54.373Z",
+      "probedAt": "2026-09-03T01:22:57.118Z",
       "available": true,
       "existence": "present",
       "discoveredFlags": [

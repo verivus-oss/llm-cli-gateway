@@ -1,7 +1,7 @@
 {
   "name": "llm-cli-gateway",
-  "version": "3.2.0-rc.1",
-  "publicSiteVersion": "3.0.0",
+  "version": "3.2.0",
+  "publicSiteVersion": "3.2.0",
   "mcpName": "io.github.verivus-oss/llm-cli-gateway",
   "description": "Secure local control plane for AI coding agents across supported MCP clients, with workspace-scoped remote access, approval gates, durable jobs, sessions, and audit receipts.",
   "license": "MIT",
@@ -106,7 +106,8 @@
     "supply-chain:baseline:refresh": "node scripts/supply-chain/refresh-baseline.mjs",
     "supply-chain:baseline:check": "node scripts/supply-chain/refresh-baseline.mjs --check",
     "test:supply-chain": "vitest run scripts/supply-chain/dep-drift-scan.test.mjs",
-    "lint": "eslint src scripts --ignore-pattern 'src/__tests__/**'",
+    "lint": "eslint src scripts site/js .github/scripts docs/plans --ignore-pattern 'src/__tests__/**'",
+    "fs:path:scope:check": "node scripts/check-fs-path-scope.mjs",
     "lint:fix": "eslint src scripts --ignore-pattern 'src/__tests__/**' --fix",
     "format": "prettier --write 'src/**/*.ts' 'scripts/**/*.{js,mjs}'",
     "format:check": "prettier --check 'src/**/*.ts' 'scripts/**/*.{js,mjs}'",
@@ -116,7 +117,7 @@
     "search:google:submit:dry-run": "node scripts/submit-google-search-console.mjs --dry-run",
     "search:submit": "node scripts/submit-indexnow.mjs",
     "search:submit:dry-run": "node scripts/submit-indexnow.mjs --dry-run",
-    "check": "npm run build && npm run lint && npm run format:check && npm run provider:surfaces:check && npm run storage:port:check && npm run transcript:schema:parity:check && npm run promise:conditions:check && npm run capability:floor:check && npm run seed:check && npm run dag:launch-surface:check && npm run plans:density:check && npm run plans:citations:check && npm run upstream:contracts && npm run site:version:check && npm run site:generate:check && npm run site:validate && npm run interface:floor:check && npm run surface:invariance:check && npm run test:collection:check && npm test && npm run security:audit && npm run verify:no-internal-mcp:check",
+    "check": "node scripts/check.mjs",
     "release:build": "bash installer/build-release.sh",
     "release:checksums": "cd installer/dist && sha256sum --check SHA256SUMS",
     "release:docker": "docker compose -f docker/personal.compose.yml build",
@@ -146,7 +147,7 @@
     "zod": "^4.4.3"
   },
   "peerDependencies": {
-    "pg": "^8.12.0"
+    "pg": "^8.22.0"
   },
   "peerDependenciesMeta": {
     "pg": {
@@ -166,7 +167,8 @@
     "eslint-config-prettier": "^10.1.8",
     "eslint-plugin-security": "^4.0.1",
     "fast-check": "^4.8.0",
-    "pg": "^8.12.0",
+    "pg": "^8.23.0",
+    "pg-connection-string": "2.14.0",
     "prettier": "^3.8.4",
     "typescript": "^6.0.3",
     "vitest": "^4.0.18"
@@ -174,7 +176,8 @@
   "overrides": {
     "body-parser": "2.3.0",
     "type-is": "2.1.0",
-    "fast-uri": "3.1.5",
+    "fast-uri": "3.1.7",
+    "qs": "6.16.0",
     "brace-expansion": "5.0.9",
     "hono": "4.12.34",
     "@hono/node-server": "2.0.11",

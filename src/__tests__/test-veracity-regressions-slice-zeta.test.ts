@@ -457,7 +457,7 @@ describe("REGRESSIONS Zε — slice ζ contract entries + fixtures", () => {
     const flag = UPSTREAM_CLI_CONTRACTS.gemini.flags["--add-dir"];
     expect(flag, "gemini.flags['--add-dir'] must be registered").toBeDefined();
     expect(flag.arity).toBe("one");
-    const validation = validateUpstreamCliArgs("gemini", ["--print", "x", "--add-dir", "/tmp/a"]);
+    const validation = validateUpstreamCliArgs("gemini", ["--print=x", "--add-dir", "/tmp/a"]);
     expect(validation.ok, JSON.stringify(validation.violations)).toBe(true);
   });
 });

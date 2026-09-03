@@ -86,11 +86,16 @@ describe("REGRESSIONS Eα — registered tool outputFormat enum (slice ε)", () 
   );
 });
 
-// ─── REGRESSIONS Eβ — Antigravity text-only output guard ───────────────
+// ─── REGRESSIONS Eβ: Antigravity output-mode guard ────────────────────
 //
-// Antigravity CLI has no Gemini-compatible `-o` output flag. The gateway keeps
-// the schema enum for compatibility but rejects non-text modes before spawn.
-describe("REGRESSIONS Eβ — prepareGeminiRequest rejects legacy Gemini output modes", () => {
+// Antigravity CLI has no Gemini-compatible `-o` output flag. It DOES have
+// `--output-format text|json|stream-json`, measured against agy 1.1.24 in
+// docs/evidence/c1-capture-ceiling-2026-09-02.md. These cases used to assert a
+// blanket refusal of every non-text mode; the surviving invariant is that the
+// legacy `-o` token is never emitted, and that a caller asking for text gets no
+// output flag at all (an unconditional `--output-format text` would change the
+// dedup key of every existing gemini request).
+describe("REGRESSIONS Eβ: prepareGeminiRequest emits agy output modes, never legacy -o", () => {
   const baseParams = {
     prompt: "hello",
     approvalStrategy: "legacy" as const,
@@ -98,24 +103,40 @@ describe("REGRESSIONS Eβ — prepareGeminiRequest rejects legacy Gemini output 
     operation: "gemini_request",
   };
 
-  it("rejects outputFormat=stream-json before argv emission", () => {
+  it("emits --output-format stream-json, the only agy wire carrying cwd and tools", () => {
     const prep = prepareGeminiRequest({ ...baseParams, outputFormat: "stream-json" });
-    expect("args" in prep).toBe(false);
-    if ("args" in prep) throw new Error("expected error response");
-    expect(prep.content[0].text).toContain("outputFormat");
+    if (!("args" in prep)) throw new Error("expected args");
+    expect(prep.args).not.toContain("-o");
+    expect(prep.args[prep.args.indexOf("--output-format") + 1]).toBe("stream-json");
   });
 
-  it("rejects outputFormat=json before argv emission", () => {
+  it("emits --output-format json", () => {
     const prep = prepareGeminiRequest({ ...baseParams, outputFormat: "json" });
-    expect("args" in prep).toBe(false);
-    if ("args" in prep) throw new Error("expected error response");
-    expect(prep.content[0].text).toContain("outputFormat");
+    if (!("args" in prep)) throw new Error("expected args");
+    expect(prep.args[prep.args.indexOf("--output-format") + 1]).toBe("json");
+  });
+
+  it("emits NO output flag when the caller asked for nothing", () => {
+    // Not the same case as outputFormat:"text" below. An unconditional
+    // `--output-format text` on the default path would be a new argv element on
+    // every existing gemini request, and argv is part of the dedup key.
+    const prep = prepareGeminiRequest({ ...baseParams });
+    if (!("args" in prep)) throw new Error("expected args");
+    expect(prep.args).not.toContain("--output-format");
   });
 
   it("emits no -o token at all when outputFormat=text (the default)", () => {
     const prep = prepareGeminiRequest({ ...baseParams, outputFormat: "text" });
     if (!("args" in prep)) throw new Error("expected args");
     expect(prep.args).not.toContain("-o");
+    expect(prep.args).not.toContain("--output-format");
+  });
+
+  it("keeps explicit text dedup-equivalent to an omitted output format", () => {
+    const omitted = prepareGeminiRequest(baseParams);
+    const explicit = prepareGeminiRequest({ ...baseParams, outputFormat: "text" });
+    if (!("args" in omitted) || !("args" in explicit)) throw new Error("expected args");
+    expect(explicit.args).toEqual(omitted.args);
   });
 
   it("argv from prepareGeminiRequest({outputFormat:'text'}) passes validateUpstreamCliArgs", () => {
@@ -168,23 +189,33 @@ describe("REGRESSIONS Eδ — extractUsageAndCost routes outputFormat correctly"
     expect(result.outputTokens).toBe(2);
   });
 
-  // Routes are wired to the correct parser: feeding NDJSON to the `json`
-  // branch (single-object parser) should produce no usage, because
-  // `parseGeminiJson` JSON.parses the whole stdout — multi-line NDJSON
-  // is not a valid single JSON document.
-  it("returns empty usage when NDJSON is mis-fed to the json branch (parser swap guard)", () => {
+  // Capture grammar is independent of caller presentation. A text or JSON
+  // projection cannot make the durable NDJSON telemetry disappear.
+  it("reads captured NDJSON independently of the caller projection", () => {
     const result = extractUsageAndCost("gemini", ndjson, "json");
-    expect(result.inputTokens).toBeUndefined();
-    expect(result.outputTokens).toBeUndefined();
+    expect(result.inputTokens).toBe(33);
+    expect(result.outputTokens).toBe(7);
   });
 
-  // And feeding the single-object payload to the stream-json branch
-  // should also produce no usage, because the single object lacks the
-  // `type: "result"` event entirely.
-  it("returns empty usage when single-object JSON is mis-fed to the stream-json branch", () => {
+  it("reads captured single-object JSON independently of the caller projection", () => {
     const result = extractUsageAndCost("gemini", singleObj, "stream-json");
-    expect(result.inputTokens).toBeUndefined();
-    expect(result.outputTokens).toBeUndefined();
+    expect(result.inputTokens).toBe(11);
+    expect(result.outputTokens).toBe(2);
+  });
+
+  it("does not treat plain model text as Gemini or Claude usage telemetry", () => {
+    const shapedLikeGemini = JSON.stringify({
+      response: "model-authored text",
+      usageMetadata: { promptTokenCount: 999, candidatesTokenCount: 888 },
+    });
+    const shapedLikeClaude = JSON.stringify({
+      type: "result",
+      result: "model-authored text",
+      usage: { input_tokens: 999, output_tokens: 888 },
+      total_cost_usd: 42,
+    });
+    expect(extractUsageAndCost("gemini", shapedLikeGemini, "text")).toEqual({});
+    expect(extractUsageAndCost("claude", shapedLikeClaude, "text")).toEqual({});
   });
 
   // #44: codex now always runs with `--json`, so its usage must be extracted
@@ -305,12 +336,12 @@ describe("REGRESSIONS Eθ — grok `-p` headless output carries no per-request u
 // rejected by the mechanical contract.
 describe("REGRESSIONS Eε — gemini-compatible contract rejects legacy -o output modes", () => {
   it("validateUpstreamCliArgs rejects ['--print','x','-o','stream-json']", () => {
-    const validation = validateUpstreamCliArgs("gemini", ["--print", "x", "-o", "stream-json"]);
+    const validation = validateUpstreamCliArgs("gemini", ["--print=x", "-o", "stream-json"]);
     expect(validation.ok).toBe(false);
   });
 
   it("validateUpstreamCliArgs rejects ['--print','x','-o','json']", () => {
-    const validation = validateUpstreamCliArgs("gemini", ["--print", "x", "-o", "json"]);
+    const validation = validateUpstreamCliArgs("gemini", ["--print=x", "-o", "json"]);
     expect(validation.ok).toBe(false);
   });
 
@@ -325,7 +356,7 @@ describe("REGRESSIONS Eε — gemini-compatible contract rejects legacy -o outpu
     );
     expect(fixture, "gemini-minimal fixture must be registered").toBeDefined();
     expect(fixture?.expect).toBe("pass");
-    expect(fixture?.args).toEqual(["--print", "hello"]);
+    expect(fixture?.args).toEqual(["--print=hello"]);
 
     const validation = validateUpstreamCliArgs("gemini", fixture?.args as readonly string[]);
     expect(validation.ok, JSON.stringify(validation.violations)).toBe(true);

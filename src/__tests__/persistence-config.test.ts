@@ -138,6 +138,51 @@ describe("loadPersistenceConfig", () => {
     expect(() => loadPersistenceConfig(noopLogger)).toThrow(/dsn/);
   });
 
+  it("loads every PostgreSQL role and retention bound from the configured file", () => {
+    const app = "postgresql://app:app-secret@db.invalid/gateway";
+    const reader = "postgresql://reader:reader-secret@db.invalid/gateway";
+    const analytics = "postgresql://analytics:analytics-secret@db.invalid/gateway";
+    const retention = "postgresql://retention:retention-secret@db.invalid/gateway";
+    const configFile = pointToFile(
+      [
+        "[persistence]",
+        'backend = "postgres"',
+        `dsn = "${app}"`,
+        "",
+        "[persistence.roles]",
+        `reader = "${reader}"`,
+        `analytics = "${analytics}"`,
+        `retention = "${retention}"`,
+        "",
+        "[persistence.retention]",
+        "jobs = 11",
+        "requests = 12",
+        "wedgedValidationRuns = 13",
+        "",
+      ].join("\n")
+    );
+    vi.stubEnv("DATABASE_URL", "");
+
+    const cfg = loadPersistenceConfig(noopLogger);
+    expect(cfg.roleDsns).toEqual({ app, reader, analytics, retention });
+    expect(cfg.retention?.days).toEqual({ jobs: 11, requests: 12, wedgedValidationRuns: 13 });
+    expect(cfg.sources).toEqual({ configFile, envOverrides: [] });
+  });
+
+  it("records DATABASE_URL as the source of a legacy PostgreSQL selection", () => {
+    pointToMissing();
+    const databaseUrl = "postgresql://legacy:secret@db.invalid/gateway";
+    vi.stubEnv("DATABASE_URL", databaseUrl);
+
+    const cfg = loadPersistenceConfig(noopLogger);
+    expect(cfg).toMatchObject({
+      backend: "postgres",
+      dsn: databaseUrl,
+      roleDsns: { app: databaseUrl },
+      sources: { configFile: null, envOverrides: ["DATABASE_URL"] },
+    });
+  });
+
   it("an explicit backend wins over LLM_GATEWAY_LOGS_DB=none for persistence", () => {
     pointToFile(
       [
@@ -199,6 +244,13 @@ describe("loadPersistenceConfig", () => {
     const cfg = loadPersistenceConfig(noopLogger);
     expect(cfg.retentionDays).toBe(5);
     expect(cfg.sources.envOverrides).toContain("LLM_GATEWAY_JOB_RETENTION_DAYS");
+  });
+
+  it("rejects an invalid LLM_GATEWAY_JOB_RETENTION_DAYS override", () => {
+    pointToMissing();
+    vi.stubEnv("LLM_GATEWAY_LOGS_DB", "");
+    vi.stubEnv("LLM_GATEWAY_JOB_RETENTION_DAYS", "forever");
+    expect(() => loadPersistenceConfig(noopLogger)).toThrow(/must be a positive number/);
   });
 });
 

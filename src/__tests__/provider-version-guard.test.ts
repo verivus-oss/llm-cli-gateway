@@ -10,7 +10,7 @@ import { PROVIDER_TARGET_VERSIONS } from "../provider-definitions.js";
 import { CLI_TYPES } from "../provider-types.js";
 
 /**
- * Versions exactly as this host reported them on 2026-08-13, captured from
+ * Versions exactly as this host reported them on 2026-09-03, captured from
  * `cli_versions` against the seven installed CLIs. These are the real strings,
  * not invented ones: the whole point of the normalizer is that the reported
  * spelling differs from the contracted spelling for several providers.
@@ -21,10 +21,10 @@ import { CLI_TYPES } from "../provider-types.js";
  * test below meaningful.
  */
 const REAL_INSTALLED: Record<string, string> = {
-  claude: "2.1.239 (Claude Code)",
-  codex: "codex-cli 0.149.0",
+  claude: "2.1.259 (Claude Code)",
+  codex: "codex-cli 0.153.0",
   // agy reports a bare version with no product prefix, unlike codex and mistral.
-  gemini: "1.1.17",
+  gemini: "1.1.25",
   // Verbatim from `grok --version` on this host. 1.0.4 appended a
   // release-channel marker AFTER the build hash and 1.0.5 does NOT, so this
   // entry no longer carries the `[stable]` spelling it was pinned for. That
@@ -32,10 +32,10 @@ const REAL_INSTALLED: Record<string, string> = {
   // is why updating this fixture to reality does not delete the coverage: it
   // was never the only place the marker was tested. See the comment on
   // PROVIDER_TARGET_VERSIONS.grok for what the hash-less target cost.
-  grok: "grok 1.0.5 (5115b46bc9)",
-  mistral: "vibe 2.24.3",
-  devin: "devin 3000.4.25 (7e8e528a)",
-  cursor: "2026.08.11-e8db854",
+  grok: "grok 1.0.13 (5e9a58528b76)",
+  mistral: "vibe 2.24.5",
+  devin: "devin 3000.6.14 (18033302)",
+  cursor: "2026.09.02-c22c1a3",
 };
 
 // Refresh this alongside `npm run providers:rebaseline:apply`. It deliberately

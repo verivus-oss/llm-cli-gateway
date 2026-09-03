@@ -1,0 +1,192 @@
+/**
+ * Where a devin run's conversation export goes, and why it is on by default.
+ *
+ * Measured in docs/evidence/c1-capture-ceiling-2026-09-02.md: for a one-line
+ * task devin wrote 23 bytes to stdout and 92,093 bytes to `--export`. The
+ * export is an ATIF document carrying the system prompt, the tool definitions,
+ * the token totals, and the instruction files in force VERBATIM with their
+ * paths. It is the only devin record a run can be reconstructed from, and the
+ * gateway was not asking for it.
+ *
+ * A bare `--export` was measured to produce no file this gateway could find, so
+ * the path is supplied rather than left to the CLI's default.
+ *
+ * The async job manager harvests the exact correlation-keyed file after close,
+ * copies it into the bounded durable record, and removes the source only after
+ * the owner-fenced store write succeeds.
+ */
+import { createHash, randomUUID } from "node:crypto";
+import { lstatSync, mkdirSync, readdirSync, unlinkSync } from "node:fs";
+import { homedir } from "node:os";
+import { dirname, join } from "node:path";
+
+export const DEVIN_TRANSCRIPT_DIRNAME = "devin-transcripts";
+export const DEVIN_TRANSCRIPT_STALE_MS = 2 * 60 * 60 * 1000;
+
+const GATEWAY_TRANSCRIPT_NAME = /^[A-Za-z0-9._-]*-[a-f0-9]{12}\.json$/;
+const activeGatewayTranscripts = new Set<string>();
+
+/** The gateway-owned directory devin exports are written into. */
+export function devinTranscriptDirectory(home: string = homedir()): string {
+  return join(home, ".llm-cli-gateway", DEVIN_TRANSCRIPT_DIRNAME);
+}
+
+/**
+ * A correlation id is caller-supplied, so it is never used as a path segment
+ * unaltered: the readable part is reduced to a safe alphabet for a human
+ * looking for one file, and a digest of the ORIGINAL carries the identity that
+ * the reduction would otherwise collide away.
+ */
+export function devinTranscriptFilename(correlationId: string): string {
+  const readable = correlationId.replace(/[^A-Za-z0-9._-]/g, "_").slice(0, 64);
+  const digest = createHash("sha256").update(correlationId).digest("hex").slice(0, 12);
+  return `${readable}-${digest}.json`;
+}
+
+export function devinTranscriptPath(correlationId: string, home: string = homedir()): string {
+  return join(devinTranscriptDirectory(home), devinTranscriptFilename(correlationId));
+}
+
+/**
+ * Create the directory, 0o700. Returns the path, or null when the directory
+ * cannot be made: a transcript is evidence, not a precondition, so a request
+ * still runs without one rather than failing on a filesystem problem.
+ */
+export function ensureDevinTranscriptPath(
+  correlationId: string,
+  home: string = homedir()
+): string | null {
+  try {
+    mkdirSync(devinTranscriptDirectory(home), { recursive: true, mode: 0o700 });
+    pruneStaleDevinTranscripts(Date.now(), home);
+    const path = devinTranscriptPath(`${correlationId}-${randomUUID()}`, home);
+    activeGatewayTranscripts.add(path);
+    return path;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Return the exact gateway-minted export carried by `--export`, if this process
+ * minted it. The registry prevents a caller-selected lookalike filename from
+ * gaining gateway cleanup or harvest ownership.
+ */
+export function gatewayDevinTranscriptPathFromArgs(
+  args: readonly string[],
+  home: string = homedir()
+): string | null {
+  const optionEnd = args.indexOf("--");
+  const searchEnd = optionEnd >= 0 ? optionEnd : args.length;
+  for (let index = 0; index < searchEnd; index += 1) {
+    if (args[index] !== "--export" || index + 1 >= searchEnd) continue;
+    const candidate = args[index + 1];
+    if (
+      activeGatewayTranscripts.has(candidate) &&
+      dirname(candidate) === devinTranscriptDirectory(home)
+    ) {
+      return candidate;
+    }
+  }
+  return null;
+}
+
+/** Stop treating a completed invocation's export as active. */
+export function releaseGatewayDevinTranscriptPath(path: string | undefined): void {
+  if (path) activeGatewayTranscripts.delete(path);
+}
+
+export interface DevinTranscriptPruneResult {
+  inspected: number;
+  removed: number;
+  failed: number;
+}
+
+/** Minimum structural proof required before an export is called complete. */
+export function isCompleteAtifDocument(value: unknown): boolean {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return false;
+  const document = value as Record<string, unknown>;
+  if (document.version !== "ATIF-v1.7" || !Array.isArray(document.messages)) return false;
+  return document.messages.every(
+    message =>
+      Boolean(message) &&
+      typeof message === "object" &&
+      !Array.isArray(message) &&
+      typeof (message as Record<string, unknown>).role === "string" &&
+      Object.prototype.hasOwnProperty.call(message, "content")
+  );
+}
+
+/**
+ * Remove stale gateway-minted exports without following links or touching
+ * caller-selected files. Two hours exceeds the provider's one-hour process
+ * ceiling, so a live managed export is not eligible. Running this at startup,
+ * every five minutes, and before each new export bounds leftovers from crashes,
+ * missing close events, and failed capture writes.
+ */
+export function pruneStaleDevinTranscripts(
+  nowMs: number = Date.now(),
+  home: string = homedir()
+): DevinTranscriptPruneResult {
+  const result = { inspected: 0, removed: 0, failed: 0 };
+  const directory = devinTranscriptDirectory(home);
+  let entries;
+  try {
+    entries = readdirSync(directory, { withFileTypes: true });
+  } catch {
+    return result;
+  }
+
+  for (const entry of entries) {
+    if (!entry.isFile() || !GATEWAY_TRANSCRIPT_NAME.test(entry.name)) continue;
+    result.inspected += 1;
+    const path = join(directory, entry.name);
+    if (activeGatewayTranscripts.has(path)) continue;
+    try {
+      const info = lstatSync(path);
+      if (!info.isFile() || info.isSymbolicLink()) continue;
+      if (nowMs - info.mtimeMs < DEVIN_TRANSCRIPT_STALE_MS) continue;
+      unlinkSync(path);
+      result.removed += 1;
+    } catch {
+      result.failed += 1;
+    }
+  }
+  return result;
+}
+
+/** Remove only the exact export path the gateway minted for this invocation. */
+export function removeInlineDevinTranscript(
+  _correlationId: string,
+  args: readonly string[],
+  home: string = homedir()
+): boolean {
+  const expected = gatewayDevinTranscriptPathFromArgs(args, home);
+  if (!expected) return false;
+  try {
+    unlinkSync(expected);
+    activeGatewayTranscripts.delete(expected);
+    return true;
+  } catch {
+    activeGatewayTranscripts.delete(expected);
+    return false;
+  }
+}
+
+/**
+ * Canonicalise the export path out of the dedup identity.
+ *
+ * The path contains the correlation id, which is different on every request, so
+ * leaving it in argv would make two identical requests look different and
+ * silently disable dedup for devin. Same reasoning as the Claude MCP config
+ * path, and the same shape of fix: replace that ONE argv element, keep the
+ * rest, and keep the launched argv untouched.
+ */
+export function devinTranscriptDedupArgs(args: readonly string[], path: string | null): string[] {
+  if (!path) return [...args];
+  const at = args.indexOf(path);
+  if (at < 0) return [...args];
+  const canonical = [...args];
+  canonical[at] = "[gateway-devin-transcript]";
+  return canonical;
+}

@@ -8,7 +8,7 @@ This file is generated from the gateway's actual MCP `tools/list` response, not 
 npm run site:generate
 ```
 
-- Public site version: `3.0.0`
+- Public site version: `3.2.0`
 - Tool count: 65
 - Source: runtime MCP tools/list from dist/index.js over in-memory MCP transport
 - Capture command: `node scripts/generate-site-discovery.mjs`
@@ -38,7 +38,7 @@ npm run site:generate
 - `llm_job_result` - Retrieve captured stdout/stderr for a gateway async or deferred-sync job by jobId. Use rawOutput:true with independent stream offsets for resumable pages.
 - `llm_job_status` - Check lifecycle status and bounded privacy-safe normalized progress for a gateway async or deferred-sync job by jobId.
 - `llm_job_watch` - Wait briefly for privacy-safe normalized progress on an owned async job. When the MCP request carries a progress token, notifications are emitted only while this watch request remains active.
-- `llm_request_result` - Read back any persisted request (sync or async) from the flight recorder by correlationId, including prompt and response.
+- `llm_request_result` - Read back any persisted request (sync or async) from the flight recorder by correlationId, including prompt and response. Local callers can also include the linked complete job record.
 
 ## Sessions
 

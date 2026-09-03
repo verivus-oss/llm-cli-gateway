@@ -576,7 +576,9 @@ The non-expiring flight recorder does not receive repository-review prompts.
 Configured HTTP/API reviewer seats require explicit `allowApiUpload:true`
 because the complete artifact leaves the local CLI boundary. Remote HTTP/OAuth
 workspace reviews reject API reviewer uploads even with that flag. Treat the
-durable job store as sensitive until the configured job retention expires.
+durable job store as sensitive. Its retention is unbounded by default, and an
+operator can set `[persistence.retention].jobs` when a bounded record is
+required.
 When `judgeModel` is an HTTP/API provider, `review_changes` binds that explicit
 consent, the judge provider, the resolved repository, and the caller identity to
 the durable `validationId`. The later `synthesize_validation` call must provide
@@ -746,7 +748,7 @@ Execute a Google Antigravity CLI (`agy`) request with session support.
   adds read paths but does not select cwd.
 - `workspace` (string, optional): Registered gateway workspace alias that selects
   the Antigravity process cwd for remote HTTP/OAuth callers.
-- `outputFormat` (string, optional): `text` only. Antigravity print mode emits text; `json` and `stream-json` are rejected.
+- `outputFormat` (string, optional): `text` (default), `json`, or `stream-json`. The async job recorder launches the transcript-capable `stream-json` wire independently of the requested presentation.
 - `mcpServers` (string[], optional): Metadata only. Antigravity manages its own MCP configuration; this field does not create an allowlist.
 - `allowedTools`, `policyFiles`, `adminPolicyFiles`, `attachments` (string[], optional) and `skipTrust` (boolean, optional): **Unsupported by Antigravity CLI**. Non-empty values, or `skipTrust: true`, are rejected with an explanatory error.
 - `yolo` (boolean, optional): Auto-approve all; equivalent to `approvalMode: "yolo"`. Emits `--dangerously-skip-permissions` in legacy mode.
@@ -841,7 +843,7 @@ Execute a Grok CLI (xAI) request with session support.
 Every async job is persisted to a job store as it transitions through running → completed/failed/canceled. This makes the gateway a durable collection layer:
 
 - **Re-issuing a request is safe.** Identical `*_request` / `*_request_async` calls within the dedup window (default 1 hour) short-circuit onto the existing running or completed job — the caller gets back the same job ID instead of starting a duplicate run. This directly fixes the "agent times out polling, re-issues, and the whole job starts over" failure mode.
-- **`llm_job_status` and `llm_job_result` work across gateway restarts.** Job rows live for 30 days by default; callers can collect results long after the in-memory cache has evicted them.
+- **`llm_job_status` and `llm_job_result` work across gateway restarts.** Job rows are retained until an operator configures a bound; callers can collect results long after the in-memory cache has evicted them.
 - **A job is marked `orphaned` only when its owning gateway instance is provably gone**, never because another instance restarted. Each instance holds a periodic heartbeat lease and stamps every job it owns; the recovery sweep orphans a `queued`/`running` job only when that job's own lease has expired. On a shared store (`backend = "postgres"`) this means a fresh instance never orphans another live instance's in-flight jobs. The captured partial output of a genuinely orphaned job remains readable, and a stale-then-reviving owner that later finishes self-heals to the correct terminal state (issue #139).
 - **Pass `forceRefresh: true`** on any request tool to bypass dedup and force a fresh CLI run.
 
@@ -854,14 +856,14 @@ The durable backend is configured by `~/.llm-cli-gateway/config.toml` (override 
 backend = "sqlite"                          # "sqlite" | "memory" | "postgres" | "none"
 path = "~/.llm-cli-gateway/logs.db"         # for sqlite
 # dsn = "postgresql://user:pw@host/db"      # for postgres
-retentionDays = 30                          # the JOB store only; see [persistence.retention]
+# retentionDays = 30                       # optional legacy JOB-store bound; omitted means unbounded
 dedupWindowMs = 3600000
 acknowledgeEphemeral = false                # required to enable async tools with memory backend
 
-# One retention policy, over every subsystem. `jobs` keeps the 30-day default
-# above; the other two are OFF unless you write a number, because deleting
-# prompt and response history is destructive and no upgrade should do it for
-# you. Unknown keys are refused rather than silently applying no bound.
+# One retention policy, over every subsystem. Every destructive bound is OFF
+# unless you write a number, because deleting prompt, response, or transcript
+# history is destructive and no upgrade should do it for you. Unknown keys are
+# refused rather than silently applying no bound.
 # `llm-cli-gateway doctor --json` -> .storage.retention reports what each bound
 # would delete BEFORE you set it.
 [persistence.retention]
@@ -963,7 +965,7 @@ Failure modes (all deterministic and safe to retry):
 - **Job limiter saturated**: when the running limit is reached and the queue is full, `*_request` / `*_request_async` and the direct-sync fallback return a retryable `saturated` error (`structuredContent.errorCategory = "saturated"`, `retryable: true`). Nothing is spawned. When the queue has room the job waits (FIFO, per-provider fair) up to `queue_timeout_ms`, then fails with the same category.
 - **Sync direct execution**: the `SYNC_DEADLINE_MS=0` and storeless/`backend="none"` paths acquire the same process permit before spawning, so no execution bypasses the limiter.
 - **Output overflow**: a job whose combined stdout+stderr exceeds `max_job_output_bytes` is failed (exit code 126), its process terminated, its completion persisted, and its run slot released.
-- **In-memory vs durable retention**: `completed_job_memory_ttl_ms` only ages finished jobs out of the in-memory map; the durable job store keeps its own (longer) `[persistence].retentionDays` retention, so results stay readable via `llm_job_result` / `llm_request_result` after in-memory eviction.
+- **In-memory vs durable retention**: `completed_job_memory_ttl_ms` only ages finished jobs out of the in-memory map. The durable job store is unbounded by default and can be bounded with `[persistence.retention].jobs` or the legacy `[persistence].retentionDays`, so results stay readable via `llm_job_result` / `llm_request_result` after in-memory eviction.
 
 Live counters are exposed on `GET /healthz` (unauthenticated, HTTP transport) and via the `llm_process_health` tool `backpressure` block: session current/max/oldest-age/idle-TTL/saturation, running and queued job counts globally and per provider, limiter saturation counters, configured TTL/output caps, and parent-process RSS/heap. These surfaces report **counts, ages, and bytes only**, never prompt text, response content, tokens, session IDs, bearer/OAuth tokens, API keys, or machine secrets.
 
@@ -993,7 +995,7 @@ after restart and `llm_process_health.backpressure` should be used to tune
 
 By default, **gateway state is global per user**, not per project. With no overrides, every Claude Code window across every repo spawns its own gateway subprocess but they all read and write the same state:
 
-- `~/.llm-cli-gateway/logs.db` when `[persistence].backend = "sqlite"` (async jobs + flight recorder). With `backend = "postgres"`, those rows live in the configured database instead. **Two of the three halves are bounded, and only one of them by default.** `[persistence].retentionDays` prunes `jobs`. `[persistence.retention].requests` prunes the flight recorder's `requests` and `gateway_metadata` tables, which store full prompt and response bodies, and `[persistence.retention].wedgedValidationRuns` prunes validation runs that can never be finalized, with their `validation_run_jobs` links. **Both default to OFF**: an upgrade deletes nothing, and an operator opts in. `validation_receipts` is immutable by design and is never pruned; a finalized run is never pruned either, so no receipt is ever orphaned.
+- `~/.llm-cli-gateway/logs.db` when `[persistence].backend = "sqlite"` (async jobs + flight recorder). With `backend = "postgres"`, those rows live in the configured database instead. **All destructive retention bounds default to OFF.** `[persistence.retention].jobs` prunes complete job records, `[persistence.retention].requests` prunes the flight recorder's `requests` and `gateway_metadata` tables, and `[persistence.retention].wedgedValidationRuns` prunes validation runs that can never be finalized with their `validation_run_jobs` links. An operator must opt in to each bound. `validation_receipts` is immutable by design and is never pruned; a finalized run is never pruned either, so no receipt is ever orphaned.
 
   Deleting rows frees SQLite pages but never bytes, so the file does not shrink. `llm-cli-gateway storage compact --yes` returns the space, with the gateway stopped, because a `VACUUM` holds an exclusive lock for the length of a full rewrite. `doctor --json` -> `.storage.retention` reports the resolved bounds, what a sweep would delete, and how many bytes a compaction would return. See `docs/plans/durable-state-lifecycle.dag.toml`.
 
@@ -1310,8 +1312,9 @@ the highest sequence observed for the job, while `hasMore` reports whether
 another retained page is immediately available. The progress snapshot reports
 `capability` (`structured`, `activity_only`, or `lifecycle_only`),
 `lastActivityAt`, cursor/high-water metadata, `droppedCount`, and events with a phase, kind,
-timestamp, safe message, and source. Claude stream-JSON, Codex JSONL, and Grok
-streaming-JSON expose structured activity. Codex validation and repository
+timestamp, safe message, and source. Claude stream-JSON, Codex JSONL, Grok
+streaming-JSON, Gemini stream-JSON, Mistral streaming, and Cursor stream-JSON
+expose structured activity. Codex validation and repository
 review calls do not request JSONL and therefore report `activity_only`. HTTP/API
 jobs report `lifecycle_only`; other process output modes expose only privacy-safe
 activity/lifecycle signals. Raw reasoning, provider-supplied tool names, tool
@@ -1352,6 +1355,17 @@ slice of the captured stream cannot safely resume or concatenate the displayed
 result. Use `rawOutput:true` whenever an application must resume output
 collection.
 
+Every non-Kit CLI job records the exact launched argv, the resolved cwd scope,
+the repository HEAD when available, bounded SHA-256 instruction-file evidence,
+the capture grammar, and whether the transcript was captured whole, captured to
+the stated 50 MiB aggregate ceiling, or not captured. Claude, Codex, Gemini,
+Grok, Mistral, and Cursor are launched with their richest transcript-capable
+wires. Devin is launched with a gateway-owned ATIF export path; the regular,
+non-symlink export is copied into the durable job row after process exit and the
+source is then removed. Local stdio callers can page the native transcript in
+raw mode. Remote HTTP/OAuth callers cannot retrieve raw job results, native
+transcripts, instruction paths, or replay context.
+
 ##### `llm_job_cancel`
 
 Cancel a running async job.
@@ -1376,10 +1390,11 @@ Read back any persisted request — sync or async — by its correlation ID. Eve
 - `correlationId` (string, required): Correlation ID from a prior request
 - `maxChars` (number, optional): Max chars of the persisted response to return (1,000-2,000,000)
 - `includePrompt` (boolean, optional): Include the full persisted prompt text, default: false
+- `includeJobRecord` (boolean, optional): Include the linked raw provider capture and replay context for local stdio callers, default: false. Remote callers receive neither transcripts nor host paths.
 
 ##### `llm_request_list`
 
-List recent persisted requests newest-first **without** a correlation ID, which is how you find one. Every other flight-recorder read is keyed by an id handed out inline to the caller that made the request, so an agent that did not make the call (or whose context was compacted since) starts here. Returns metadata only: pass a returned `correlationId` to `llm_request_result` for the bodies, or a returned `asyncJobId` to `llm_job_status`. A caller only ever sees its own requests. An empty list is not proof nothing ran: cross-LLM validation seats write no flight-recorder row, and flight recording can be disabled.
+List recent persisted requests newest-first **without** a correlation ID, which is how you find one. Every other flight-recorder read is keyed by an id handed out inline to the caller that made the request, so an agent that did not make the call (or whose context was compacted since) starts here. Returns metadata only: pass a returned `correlationId` to `llm_request_result` for the bodies, or a returned `asyncJobId` to `llm_job_status`. A caller only ever sees its own requests. An empty list is not proof nothing ran, and it does not mean the work left no record: cross-LLM validation seats write no row here, but they write `validation_runs` and `validation_run_jobs`, and each of those links a job row holding the launched argv and the provider output (read it with `validation_receipt`, then `llm_job_result`). Flight recording can also be disabled. Jobs and requests are both unbounded by default; an operator can configure their bounds independently.
 
 **Parameters:**
 

@@ -50,6 +50,9 @@ describe("upstream contract upgrade regressions", () => {
         permissionMode: "accept-edits",
         optimizePrompt: false,
         operation: "devin_request",
+        // The subject is the permission mode, not #296's transcript export;
+        // decline the export so this argv equality stays exact.
+        exportSession: false,
       } as never,
       {} as never
     );
@@ -138,7 +141,7 @@ describe("upstream contract upgrade regressions", () => {
     const contract = UPSTREAM_CLI_CONTRACTS.gemini;
     expect(contract.acknowledgedUpstreamFlags).toContain("--agent");
     expect(contract.flags["--agent"]).toBeUndefined();
-    expect(validateUpstreamCliArgs("gemini", ["--print", "hello", "--agent", "reviewer"]).ok).toBe(
+    expect(validateUpstreamCliArgs("gemini", ["--print=hello", "--agent", "reviewer"]).ok).toBe(
       false
     );
 

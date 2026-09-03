@@ -19,6 +19,8 @@ import { PostgresFlightRecorder } from "../flight-recorder-pg.js";
 import type { FlightLogResult, FlightLogStart } from "../flight-recorder.js";
 import { collectStorageHealth } from "../doctor.js";
 import { TEST_DATABASE_URL } from "./setup.js";
+// @ts-expect-error - plain ESM helper shared with the static parity gate
+import { transcriptMigrationText } from "../../scripts/transcript-migration-selection.mjs";
 
 const BASE_DSN = TEST_DATABASE_URL;
 const SCHEMA = `flight_pg_${process.pid}`;
@@ -100,17 +102,14 @@ afterAll(async () => {
 });
 
 /**
- * Every transcript migration, 022 onward, concatenated in version order. The
- * selection matches `scripts/check-transcript-schema-parity.mjs`, so a 024
- * lands in the mirror without anyone remembering to add it here.
+ * Every flight-recorder migration, concatenated in version order. The selection
+ * is the one `scripts/check-transcript-schema-parity.mjs` uses, imported rather
+ * than restated, so a later recorder migration lands in the mirror without
+ * anyone remembering to add it here and a migration for another subsystem stays
+ * out of a schema that has none of its tables.
  */
 function transcriptMigrations(): string {
-  const dir = join(process.cwd(), "migrations");
-  const files = readdirSync(dir)
-    .filter(name => /^\d+_.*\.sql$/.test(name) && Number(name.slice(0, 3)) >= 22)
-    .sort();
-  if (files.length === 0) throw new Error("no transcript migrations found from 022 onward");
-  return files.map(name => readFileSync(join(dir, name), "utf8")).join("\n");
+  return transcriptMigrationText(join(process.cwd(), "migrations"));
 }
 
 /** The stored rank, read on a connection the recorder does not own. */
@@ -334,8 +333,14 @@ describe("a whole transcript round trip", () => {
     expect(recorder.health().closed).toBe(true);
   });
 
-  it("uses an opaque identity on health surfaces", () => {
-    expect(recorder.health().path).toBe("postgresql");
+  it("uses the safe target projection on health surfaces", () => {
+    const path = recorder.health().path;
+    const target = new URL(BASE_DSN);
+    expect(path).toBe(
+      `postgresql host ${target.hostname} port ${target.port} database ${target.pathname.slice(1)}`
+    );
+    expect(path).not.toContain("://");
+    expect(path).not.toContain("@");
   });
 });
 
@@ -362,8 +367,8 @@ describe("the five states", () => {
     }
   });
 
-  it("does not copy a DSN-derived socket path into health", async () => {
-    const marker = "dsn-health-secret";
+  it("names a socket target while keeping its operation error opaque", async () => {
+    const marker = "dsn-health-target";
     const url = new URL(BASE_DSN);
     url.searchParams.set("host", `/tmp/${marker}`);
     const logError = vi.fn();
@@ -375,8 +380,13 @@ describe("the five states", () => {
       await expect(broken.readStorageStats()).rejects.toThrow();
       const health = broken.health();
       expect(health.state).toBe("degraded");
+      expect(health.path).toBe(
+        `postgresql socket /tmp/${marker} port ${url.port} database ${url.pathname.slice(1)}`
+      );
       expect(health.error).toBe("PostgreSQL operation failed");
       expect(health.error).not.toContain(marker);
+      expect(health.path).not.toContain("://");
+      expect(health.path).not.toContain("@");
       expect(health.failureCount).toBeGreaterThan(0);
       const logs = logError.mock.calls
         .flat()
@@ -388,8 +398,8 @@ describe("the five states", () => {
     }
   });
 
-  it("keeps doctor warnings opaque when its configured PostgreSQL recorder fails", async () => {
-    const marker = "doctor-dsn-health-secret";
+  it("names the configured target while keeping doctor operation errors opaque", async () => {
+    const marker = "doctor-dsn-health-target";
     const url = new URL(BASE_DSN);
     url.searchParams.set("host", `/tmp/${marker}`);
     const dir = mkdtempSync(join(tmpdir(), "doctor-pg-health-"));
@@ -407,9 +417,13 @@ describe("the five states", () => {
     try {
       const storage = await collectStorageHealth();
       expect(storage.job_store.backend).toBe("postgres");
-      expect(storage.flight_recorder.path).toBe("postgresql");
+      expect(storage.flight_recorder.path).toBe(
+        `postgresql socket /tmp/${marker} port ${url.port} database ${url.pathname.slice(1)}`
+      );
+      expect(storage.flight_recorder.path).not.toContain("://");
+      expect(storage.flight_recorder.path).not.toContain("@");
       expect(storage.flight_recorder.error).toBe("PostgreSQL operation failed");
-      expect(storage.warnings.join(" ")).not.toContain(marker);
+      expect(storage.warnings.join(" ")).toContain(marker);
       expect(storage.warnings.join(" ")).toContain("PostgreSQL operation failed");
     } finally {
       if (savedConfig === undefined) delete process.env.LLM_GATEWAY_CONFIG;
@@ -705,6 +719,8 @@ describe("s11: the transcript termination on PostgreSQL", () => {
     const stats = await recorder.readStorageStats(CUTOFF);
     expect(stats.requestRows).toBe(2);
     expect(stats.requestsBeyondRetention).toBe(1);
+    expect(stats.oldestRequest).toBe("2020-01-01T00:00:00.000Z");
+    expect(stats.newestRequest).toBe("2099-01-01T00:00:00.000Z");
   });
 
   it("reports NO reclaimable bytes, because that is not a question here", async () => {

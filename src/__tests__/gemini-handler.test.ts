@@ -163,9 +163,8 @@ describe("U27 prepareGeminiRequest end-to-end", () => {
       })
     );
     if (!("args" in prep)) throw new Error("expected args");
-    expect(prep.args[0]).toBe("--print");
-    expect(prep.args[1]).toBe("hello");
-    const remainder = prep.args.slice(2);
+    expect(prep.args[0]).toBe("--print=hello");
+    const remainder = prep.args.slice(1);
     expect(remainder).toContain("--model");
     expect(remainder).toContain("--sandbox");
   });

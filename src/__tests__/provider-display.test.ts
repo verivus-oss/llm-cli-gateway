@@ -6,13 +6,10 @@
 /**
  * Per-path goldens for the shared `applyProviderDisplayText` helper (design v5
  * section 5.4). Locks the display-swap routing for both response surfaces and,
- * critically, the deliberate grok-readback asymmetry: the inline path (buildCli
- * Response) applies the grok streaming-json swap; the llm_job_result readback
- * path does not. A future change that flips the readback flag must update the
- * asymmetry case here on purpose.
+ * the explicit Grok projection switch used by low-level callers.
  */
 import { describe, expect, it } from "vitest";
-import { applyProviderDisplayText } from "../provider-display.js";
+import { applyProviderDisplayText, projectRemoteProviderOutput } from "../provider-display.js";
 import { codexDisplayText } from "../codex-json-parser.js";
 import { grokDisplayText } from "../grok-json-parser.js";
 
@@ -26,6 +23,70 @@ const GROK_NDJSON = [
   JSON.stringify({ type: "text", text: "hel" }),
   JSON.stringify({ type: "text", text: "lo grok" }),
 ].join("\n");
+
+const CAPTURED_JSON_CASES = [
+  {
+    cli: "claude",
+    captureFormat: "stream-json",
+    stdout: [
+      JSON.stringify({ type: "system", subtype: "init", session_id: "s1" }),
+      JSON.stringify({ type: "result", result: "hello", session_id: "s1" }),
+    ].join("\n"),
+    expected: { type: "result", result: "hello", session_id: "s1" },
+  },
+  {
+    cli: "gemini",
+    captureFormat: "stream-json",
+    stdout: [
+      JSON.stringify({ event: "init", conversation_id: "g1" }),
+      JSON.stringify({ event: "result", result: { response: "hello", status: "DONE" } }),
+    ].join("\n"),
+    expected: { response: "hello", status: "DONE" },
+  },
+  {
+    cli: "grok",
+    captureFormat: "streaming-json",
+    stdout: [
+      JSON.stringify({ type: "thought", data: "considering" }),
+      JSON.stringify({ type: "text", data: "hello" }),
+      JSON.stringify({ type: "end", stopReason: "end_turn", sessionId: "gr1" }),
+    ].join("\n"),
+    expected: {
+      text: "hello",
+      stopReason: "end_turn",
+      sessionId: "gr1",
+      thought: "considering",
+    },
+  },
+  {
+    cli: "mistral",
+    captureFormat: "streaming",
+    stdout: [
+      JSON.stringify({ type: "reasoning", text: "considering", sessionId: "m1" }),
+      JSON.stringify({
+        type: "message",
+        role: "assistant",
+        content: [{ type: "text", text: "hello" }],
+        sessionId: "m1",
+      }),
+    ].join("\n"),
+    expected: {
+      type: "message",
+      role: "assistant",
+      content: [{ type: "text", text: "hello" }],
+      sessionId: "m1",
+    },
+  },
+  {
+    cli: "cursor",
+    captureFormat: "stream-json",
+    stdout: [
+      JSON.stringify({ type: "thinking", text: "considering", session_id: "c1" }),
+      JSON.stringify({ type: "result", result: "hello", session_id: "c1" }),
+    ].join("\n"),
+    expected: { type: "result", result: "hello", session_id: "c1" },
+  },
+] as const;
 
 describe("applyProviderDisplayText", () => {
   it("codex non-json: reconstructs the agent_message (both paths)", () => {
@@ -54,6 +115,21 @@ describe("applyProviderDisplayText", () => {
       })
     ).toBe(CODEX_JSONL);
   });
+
+  it.each(CAPTURED_JSON_CASES)(
+    "$cli JSON presentation is projected from the rich capture",
+    ({ cli, captureFormat, stdout, expected }) => {
+      const projected = applyProviderDisplayText({
+        cli,
+        outputFormat: "json",
+        captureFormat,
+        stdout,
+        applyGrokDisplay: true,
+      });
+      expect(JSON.parse(projected)).toEqual(expected);
+      expect(projected).not.toBe(stdout);
+    }
+  );
 
   it("grok streaming-json INLINE (applyGrokDisplay=true): concatenates deltas", () => {
     const expected = grokDisplayText("streaming-json", GROK_NDJSON);
@@ -95,5 +171,66 @@ describe("applyProviderDisplayText", () => {
         })
       ).toBe(text);
     }
+  });
+
+  it("does not return an incomplete rich stream when no reply can be projected", () => {
+    const incomplete = JSON.stringify({
+      type: "item.started",
+      item: { type: "command_execution", command: "/usr/bin/private-tool" },
+    });
+    expect(
+      applyProviderDisplayText({
+        cli: "codex",
+        outputFormat: "text",
+        captureFormat: "json",
+        stdout: incomplete,
+        applyGrokDisplay: true,
+      })
+    ).toBe("[provider transcript withheld: response projection unavailable]");
+  });
+
+  it("projects only the terminal reply for a remote rich capture", () => {
+    const capture = [
+      JSON.stringify({ type: "system", subtype: "init", cwd: "/home/alice/private" }),
+      JSON.stringify({
+        type: "assistant",
+        message: {
+          content: [{ type: "tool_use", name: "Read", input: { file: "/etc/shadow" } }],
+        },
+      }),
+      JSON.stringify({ type: "result", result: "safe answer" }),
+    ].join("\n");
+    expect(projectRemoteProviderOutput("claude", capture, "stream-json")).toBe("safe answer");
+  });
+
+  it("withholds an incomplete rich capture from a remote caller", () => {
+    const capture = JSON.stringify({
+      type: "assistant",
+      message: { content: [{ type: "thinking", thinking: "private reasoning" }] },
+    });
+    expect(projectRemoteProviderOutput("claude", capture, "stream-json")).toBe(
+      "[provider transcript withheld: terminal response unavailable]"
+    );
+  });
+
+  it("preserves plain fallback text when a provider did not emit its requested rich wire", () => {
+    const response = "provider diagnostic: retrying the same operation";
+    expect(projectRemoteProviderOutput("claude", response, "stream-json")).toBe(response);
+    expect(
+      applyProviderDisplayText({
+        cli: "claude",
+        outputFormat: "text",
+        captureFormat: "stream-json",
+        stdout: response,
+        applyGrokDisplay: true,
+      })
+    ).toBe(response);
+  });
+
+  it.each([
+    '{"answer":"ordinary JSON-shaped prose"}',
+    "See https://example.invalid/a and /workspace/readme.md",
+  ])("preserves an already-projected flight-recorder response: %s", response => {
+    expect(projectRemoteProviderOutput("claude", response)).toBe(response);
   });
 });

@@ -38,6 +38,8 @@ import {
 } from "./provider-output-metadata.js";
 import { parseGeminiJson, parseGeminiStreamJson } from "./gemini-json-parser.js";
 import { parseVibeMetaJson } from "./mistral-meta-json-parser.js";
+import { parseVibeStream } from "./vibe-stream-parser.js";
+import { parseCursorStreamJson } from "./cursor-stream-parser.js";
 import {
   createMistralKitIsolationPlan,
   mistralKitSpawnEnvFragment,
@@ -158,7 +160,7 @@ import {
 } from "./least-cost-router.js";
 import { loadGatewaySkills, type SkillEntry } from "./skill-loader.js";
 import { runAcpRequest } from "./acp/runtime.js";
-import { isAcpError } from "./acp/errors.js";
+import { isAcpError, redactAcpMessage } from "./acp/errors.js";
 import { redactSecrets } from "./secret-redaction.js";
 import {
   createApiProvider,
@@ -217,6 +219,14 @@ import {
   type StartJobOutcome,
 } from "./async-job-manager.js";
 import { createJobStore, isValidationRunStore, type JobStore } from "./job-store.js";
+import type { JobCwdResolution } from "./job-cwd-scope.js";
+import { projectJobReadback } from "./job-readback-projection.js";
+import {
+  devinTranscriptDedupArgs,
+  ensureDevinTranscriptPath,
+  removeInlineDevinTranscript,
+} from "./devin-transcript.js";
+import { planProviderCapture } from "./provider-capture.js";
 import {
   MCP_ARTIFACT_RECOVERY_ACKNOWLEDGEMENT,
   recoverMcpArtifactCleanupPin,
@@ -334,7 +344,7 @@ import {
 } from "./storage/retention.js";
 import { redactDiagnosticUrl } from "./endpoint-exposure.js";
 import { PrepPhase, PrepPipeline, type PrepStage } from "./prep-pipeline.js";
-import { applyProviderDisplayText } from "./provider-display.js";
+import { applyProviderDisplayText, projectRemoteProviderOutput } from "./provider-display.js";
 import { buildRemoteConnectorUrls } from "./remote-url.js";
 import {
   gatherConnectorSetupPacket,
@@ -1706,6 +1716,8 @@ interface InlineJobResponse {
   errorCategory?: AsyncJobErrorCategory;
   /** Whether the same unchanged request can succeed when retried. */
   retryable?: boolean;
+  /** Actual provider grammar captured before caller-facing projection. */
+  captureFormat?: string | null;
   /** Present only when AsyncJobManager owned this completed invocation. */
   jobId?: string;
 }
@@ -1801,7 +1813,14 @@ async function awaitJobOrDefer(
    * contract assertion on the deferred path. Omitting it re-refuses every
    * pass-through flag the sync handler already admitted.
    */
-  passthroughFlags?: Readonly<Record<string, unknown>>
+  passthroughFlags?: Readonly<Record<string, unknown>>,
+  /**
+   * #296: the request scope `cwd` came out of, so the durable job row records
+   * HOW the directory was chosen and not only that one was. Omitting it stores
+   * `unknown` when a cwd was supplied, which is a visible gap rather than a
+   * wrong answer.
+   */
+  cwdResolution?: JobCwdResolution
 ): Promise<InlineJobResponse | DeferredJobResponse> {
   // U26 fix: ownership of onComplete is a contract. Once this function returns
   // OR throws, the caller MUST consider onComplete consumed — i.e. it has
@@ -1887,17 +1906,20 @@ async function awaitJobOrDefer(
       throw err;
     }
     try {
-      return await executeCli(command, args, {
+      const capturePlan = planProviderCapture(cli, args, outputFormat);
+      const executed = await executeCli(command, capturePlan.args, {
         idleTimeout: idleTimeoutMs,
         logger: runtime.logger,
         env: env ? ({ ...process.env, ...env } as NodeJS.ProcessEnv) : undefined,
         stdin,
         cwd,
       });
+      return { ...executed, captureFormat: capturePlan.captureFormat };
     } finally {
       // Release the run slot and per-request resources (outputSchema temp
       // files) as soon as the inline execution settles.
       slot.release();
+      if (cli === "devin") removeInlineDevinTranscript(corrId, args);
       consumeOnComplete();
     }
   }
@@ -1916,6 +1938,7 @@ async function awaitJobOrDefer(
   try {
     outcome = await runtime.asyncJobManager.startJobWithDedup(cli, args, corrId, {
       cwd,
+      cwdResolution,
       idleTimeoutMs,
       outputFormat,
       forceRefresh,
@@ -1978,6 +2001,7 @@ async function awaitJobOrDefer(
         code: result.exitCode ?? 1,
         ...(result.errorCategory ? { errorCategory: result.errorCategory } : {}),
         ...(typeof result.retryable === "boolean" ? { retryable: result.retryable } : {}),
+        captureFormat: runtime.asyncJobManager.getJobCaptureFormat(job.id),
         jobId: job.id,
       };
     }
@@ -2900,6 +2924,7 @@ interface KitTerminalHooks<TFacts = undefined> {
     stdout: string;
     durationMs: number;
     facts: TFacts;
+    result: KitTerminalInlineResult;
   }): Promise<ExtendedToolResponse> | ExtendedToolResponse;
 }
 
@@ -2988,7 +3013,13 @@ async function runKitTerminalEnvelope<TFacts>(
     if (kit && kitSession && !result.jobId) {
       await hooks.finalizeKit({ completed: true, stdout, result });
     }
-    return await hooks.buildSuccessResponse({ worktreeResolution, stdout, durationMs, facts });
+    return await hooks.buildSuccessResponse({
+      worktreeResolution,
+      stdout,
+      durationMs,
+      facts,
+      result,
+    });
   } catch (error) {
     await ledger.rollbackOnException(kitSession, env.exceptionRollbackManager);
     await ledger.cleanupOnException(
@@ -3665,6 +3696,26 @@ async function resolveWorkspaceAndWorktreeForRequest(args: {
  * Use `formatWorktreePrefix(resolution.worktreePath)` once per tool, at
  * the moment a successful response is constructed.
  */
+/**
+ * #296: project a resolved request scope for the durable job row.
+ *
+ * Returns undefined unless this resolution IS the directory that will be
+ * spawned in. Several handlers pick a Kit, cursor, or isolation directory ahead
+ * of the resolution, and describing the job with a resolution that lost would
+ * record a confident wrong scope; an omission records `unknown` instead.
+ */
+export function jobCwdResolutionOf(
+  cwd: string | undefined,
+  resolution?: ResolvedWorktree
+): JobCwdResolution | undefined {
+  if (cwd === undefined || !resolution || resolution.cwd !== cwd) return undefined;
+  return {
+    worktreePath: resolution.worktreePath,
+    effectiveWorkingDir: resolution.effectiveWorkingDir,
+    workspaceAlias: resolution.workspace?.alias ?? resolution.workspaceAlias,
+  };
+}
+
 export function formatWorktreePrefix(worktreePath?: string): string {
   return worktreePath ? `[gateway] worktree=${worktreePath}\n` : "";
 }
@@ -4118,7 +4169,8 @@ export function extractUsageAndCost(
   // a single JSON object in `--output-format json` and the last NDJSON line in
   // `stream-json`. parseStreamJson handles both (it scans lines for the result
   // event), so json-mode requests no longer silently lose all telemetry.
-  if (cli === "claude" && (outputFormat === "stream-json" || outputFormat === "json")) {
+  if (cli === "claude") {
+    if (outputFormat !== "json" && outputFormat !== "stream-json") return {};
     const parsed = parseStreamJson(output);
     if (!parsed.usage) {
       return { costUsd: parsed.costUsd ?? undefined };
@@ -4149,9 +4201,17 @@ export function extractUsageAndCost(
       costUsd: parsed.usage.cost_usd,
     };
   }
-  if (cli === "gemini" && (outputFormat === "json" || outputFormat === "stream-json")) {
+  if (cli === "gemini") {
+    if (outputFormat !== "json" && outputFormat !== "stream-json") return {};
+    const streamed = parseGeminiStreamJson(output);
     const parsed =
-      outputFormat === "stream-json" ? parseGeminiStreamJson(output) : parseGeminiJson(output);
+      streamed &&
+      (streamed.response !== undefined ||
+        streamed.sessionId !== undefined ||
+        streamed.stopReason !== undefined ||
+        streamed.usage !== undefined)
+        ? streamed
+        : parseGeminiJson(output);
     if (!parsed || !parsed.usage) {
       return {};
     }
@@ -4167,7 +4227,18 @@ export function extractUsageAndCost(
   // missing/malformed, the parser returns `{}` and the FR row simply lacks
   // usage data — matching pre-slice behaviour. No stdout fallback exists.
   if (cli === "mistral") {
-    return parseVibeMetaJson(ctx?.home ?? homedir(), ctx?.sessionId);
+    const nativeSessionId = parseVibeStream(output)?.sessionId ?? ctx?.sessionId;
+    return parseVibeMetaJson(ctx?.home ?? homedir(), nativeSessionId);
+  }
+  if (cli === "cursor") {
+    const usage = parseCursorStreamJson(output)?.usage;
+    return usage
+      ? {
+          inputTokens: usage.input_tokens,
+          outputTokens: usage.output_tokens,
+          cacheReadTokens: usage.cache_read_tokens,
+        }
+      : {};
   }
   // Grok CLI (`grok_request`): no grok branch by design. The gateway invokes
   // grok via its HEADLESS `-p` surface (`prepareGrokRequest` builds
@@ -4263,7 +4334,17 @@ function buildAsyncFlightRecorderHandoff(
     // reports counts but no dollar cost gets its cost DERIVED and stamped
     // derived-from-tokens on completion, for BOTH routed and direct async jobs.
     extractUsage: (stdout: string) => {
-      const usage = extractUsageAndCost(cli, stdout, fmt, { sessionId: sid, home });
+      const captureFormat =
+        cli === "claude" || cli === "gemini"
+          ? "stream-json"
+          : cli === "grok"
+            ? "streaming-json"
+            : cli === "mistral"
+              ? "streaming"
+              : cli === "cursor"
+                ? "stream-json"
+                : fmt;
+      const usage = extractUsageAndCost(cli, stdout, captureFormat, { sessionId: sid, home });
       const { costUsd, costBasis } = deriveCostBasis(cli, model, usage);
       return { ...usage, costUsd, costBasis };
     },
@@ -5009,6 +5090,19 @@ interface CliRequestPrep {
   approvalDecision: ApprovalRecord | null;
   reviewIntegrity?: ReviewIntegrityResult;
   args: string[];
+  /**
+   * `args` with request-local artifact paths replaced by a fixed token, for use
+   * as the dedup identity and NOWHERE else. A gateway-minted path carries the
+   * correlation id, so it differs on every request; left in the key it makes two
+   * identical requests look different and silently disables dedup.
+   *
+   * Every site that computes a dedup key must prefer this over `args`. It is a
+   * field rather than a call each handler remembers to make because the one that
+   * did remember was the only one of four that did.
+   * `src/__tests__/dedup-canonicalisation-sites.test.ts` derives the set of
+   * those sites from this file and fails when one of them reads `args`.
+   */
+  dedupArgs?: readonly string[];
   /**
    * Sha256 of the assembled prompt's stable prefix bytes when the caller
    * supplied `promptParts`. Null when the legacy `prompt` field was used.
@@ -6952,9 +7046,13 @@ export function prepareGeminiRequest(
   }
   // Antigravity (agy) owns its own MCP configuration, so the gateway never
   // emits an MCP allowlist to argv. This legacy metadata is returned unchanged.
-  if (params.outputFormat && params.outputFormat !== "text") {
-    return unsupported("outputFormat", "agy print mode currently emits text only");
-  }
+  // agy 1.1.25 accepts text|json|stream-json in print mode. This used to refuse
+  // everything but text on the claim that the headless path emits text only,
+  // which was false at this version: stream-json is the only gemini wire that
+  // carries the working directory, the tool list and per-tool parameters.
+  // The Zod enum already bounds the value; validateUpstreamCliArgs bounds it
+  // again against the contract.
+  const geminiOutputFormat = params.outputFormat;
   if (params.policyFiles && params.policyFiles.length > 0) {
     return unsupported("policyFiles", "agy has no --policy flag");
   }
@@ -6968,9 +7066,9 @@ export function prepareGeminiRequest(
     return unsupported("skipTrust", "agy has no --skip-trust flag");
   }
 
-  // agy does not honor an end-of-options marker or --print=<prompt>. Its
-  // verified print mode requires a separate positional prompt, so reject the
-  // one form that would be parsed as another option.
+  // agy 1.1.25 parses the token after a bare --print as that flag's prompt.
+  // Keep the prompt attached so a following gateway flag cannot be consumed as
+  // prompt text. The CLI's own diagnostic explicitly requires this form.
   try {
     sanitizeCliArgValue(effectivePrompt, "prompt");
     assertCliArgUtf8Size(effectivePrompt, {
@@ -6995,7 +7093,19 @@ export function prepareGeminiRequest(
   } catch (error) {
     return createErrorResponse(params.operation, 1, "", corrId, error as Error);
   }
-  const args = ["--print", effectivePrompt];
+  const printArg = `--print=${effectivePrompt}`;
+  try {
+    assertCliArgUtf8Size(printArg, { provider: "gemini", inputName: "prompt argv element" });
+  } catch (error) {
+    return createErrorResponse(params.operation, 1, "", corrId, error as Error);
+  }
+  const args = [printArg];
+  // Emitted only when the caller asked for one: an explicit `--output-format
+  // text` would be a new argv element on every default request, which changes
+  // the dedup key for every existing gemini caller.
+  if (geminiOutputFormat && geminiOutputFormat !== "text") {
+    args.push("--output-format", geminiOutputFormat);
+  }
   if (resolvedModel) args.push("--model", resolvedModel);
   if (params.includeDirs && params.includeDirs.length > 0) {
     sanitizeCliArgValues(params.includeDirs, "includeDirs");
@@ -7711,7 +7821,8 @@ export function buildCliResponse(
   // (request param ?? config, AND outputFormat/output-schema guards already
   // folded in by resolveEffectiveCompression). Default false: off-path
   // behavior is byte-identical to pre-compressor builds.
-  compressResponse = false
+  compressResponse = false,
+  captureFormat?: string | null
 ): ExtendedToolResponse {
   const trackingOnlySession = isGatewayTrackingOnlySession(cli, sessionId);
   // Provider display swap (design 5.4): codex reconstructs the final
@@ -7721,7 +7832,13 @@ export function buildCliResponse(
   // before optimize / compress / review-integrity so they operate on the human
   // reply. The inline path applies grok display (applyGrokDisplay: true); the
   // llm_job_result readback passes false, keeping its current asymmetry.
-  let finalStdout = applyProviderDisplayText({ cli, outputFormat, stdout, applyGrokDisplay: true });
+  let finalStdout = applyProviderDisplayText({
+    cli,
+    outputFormat,
+    captureFormat,
+    stdout,
+    applyGrokDisplay: true,
+  });
   // Skip response optimization for JSON output to prevent corrupting structured data
   if (optimizeResponse && outputFormat !== "json") {
     const optimized = optimizeResponseText(finalStdout);
@@ -7859,7 +7976,10 @@ export function buildCliResponse(
       // Phase 4 slice β: thread sessionId + home so the Mistral branch of
       // extractUsageAndCost can read `~/.vibe/logs/session/<dir>/meta.json`.
       // Other CLIs ignore the ctx (their usage source is stdout).
-      ...extractUsageAndCost(cli, stdout, outputFormat, { sessionId, home: homedir() }),
+      ...extractUsageAndCost(cli, stdout, captureFormat ?? outputFormat, {
+        sessionId,
+        home: homedir(),
+      }),
       exitCode: 0,
       retryCount: 0,
     },
@@ -11240,7 +11360,11 @@ export async function handleClaudeRequest(
             mcpConfig?.cleanup ? mcpConfig.path : undefined,
             mcpConfig?.cleanup ? mcpConfig.artifactScope : undefined,
             undefined,
-            params.providerFlags
+            params.providerFlags,
+            jobCwdResolutionOf(
+              kit?.context.scope.cwd ?? worktreeResolution.cwd ?? workingDir,
+              worktreeResolution
+            )
           ),
       });
     },
@@ -11287,7 +11411,7 @@ export async function handleClaudeRequest(
       }
       return errResp;
     },
-    buildSuccessResponse: async ({ worktreeResolution, stdout, durationMs }) => {
+    buildSuccessResponse: async ({ worktreeResolution, stdout, durationMs, result }) => {
       // Parse stream-json NDJSON output to extract result text
       if (outputFormat === "stream-json") {
         const parsed = parseStreamJson(stdout);
@@ -11339,7 +11463,8 @@ export async function handleClaudeRequest(
           undefined,
           outputFormat ?? "stream-json",
           warnings,
-          effectiveCompress
+          effectiveCompress,
+          result.captureFormat
         );
         await safeRecordCompression(corrId, streamResponse.compression, runtime, kit !== null);
         if (worktreeResolution.worktreePath) {
@@ -11354,7 +11479,13 @@ export async function handleClaudeRequest(
       // single json result object; plain text yields no fields (capability fact).
       const claudeMeta = extractProviderOutputMetadata("claude", stdout, outputFormat);
       await flight.completeInline({
-        response: stdout,
+        response: applyProviderDisplayText({
+          cli: "claude",
+          outputFormat,
+          captureFormat: result.captureFormat,
+          stdout,
+          applyGrokDisplay: true,
+        }),
         durationMs,
         retryCount: 0,
         circuitBreakerState: "closed",
@@ -11375,7 +11506,8 @@ export async function handleClaudeRequest(
         undefined,
         outputFormat,
         warnings,
-        effectiveCompress
+        effectiveCompress,
+        result.captureFormat
       );
       await safeRecordCompression(corrId, nonStreamResponse.compression, runtime, kit !== null);
       if (worktreeResolution.worktreePath) {
@@ -11883,7 +12015,11 @@ export async function handleCodexRequest(
             undefined,
             undefined,
             undefined,
-            params.providerFlags
+            params.providerFlags,
+            jobCwdResolutionOf(
+              kit?.codexIsolation?.cwd ?? worktreeResolution.cwd,
+              worktreeResolution
+            )
           ),
       });
     },
@@ -11946,7 +12082,7 @@ export async function handleCodexRequest(
         result
       );
     },
-    buildSuccessResponse: async ({ worktreeResolution, stdout, durationMs, facts }) => {
+    buildSuccessResponse: async ({ worktreeResolution, stdout, durationMs, facts, result }) => {
       // #44: usage is parsed from the raw JSONL `stdout`, but the FR response
       // column stores the reconstructed reply (== text-mode stdout) so
       // read-back surfaces (llm_request_result, cache-stats) get plain text,
@@ -11982,7 +12118,8 @@ export async function handleCodexRequest(
         undefined,
         effectiveOutputFormat,
         undefined,
-        effectiveCompress
+        effectiveCompress,
+        result.captureFormat
       );
       await safeRecordCompression(corrId, codexResponse.compression, runtime, kit !== null);
       if (worktreeResolution.worktreePath) {
@@ -12240,17 +12377,26 @@ export async function handleGeminiRequest(
         undefined,
         undefined,
         undefined,
-        params.providerFlags
+        params.providerFlags,
+        jobCwdResolutionOf(worktreeResolution.cwd, worktreeResolution)
       );
     },
-    computeSuccessFacts: stdout => {
-      const geminiUsage = extractUsageAndCost("gemini", stdout, params.outputFormat);
+    computeSuccessFacts: (stdout, result) => {
+      const geminiUsage = extractUsageAndCost(
+        "gemini",
+        stdout,
+        result.captureFormat ?? params.outputFormat
+      );
       // LCR: label cost_basis (gemini is T2, so a counts-only completion is
       // derived-from-tokens); parity with the async/deferred handoff.
       const cost = deriveCostBasis("gemini", prep.resolvedModel || "default", geminiUsage);
       // Phase 7: Gemini stream-json carries a session id (init event) + result
       // status; persist them so a deferred/fresh session stays resumable.
-      const geminiMeta = extractProviderOutputMetadata("gemini", stdout, params.outputFormat);
+      const geminiMeta = extractProviderOutputMetadata(
+        "gemini",
+        stdout,
+        result.captureFormat ?? params.outputFormat
+      );
       return { geminiUsage, cost, geminiMeta };
     },
     finalizeKit: async () => {},
@@ -12267,7 +12413,7 @@ export async function handleGeminiRequest(
         },
         result
       ),
-    buildSuccessResponse: async ({ worktreeResolution, stdout, durationMs, facts }) => {
+    buildSuccessResponse: async ({ worktreeResolution, stdout, durationMs, facts, result }) => {
       const response = buildCliResponse(
         "gemini",
         stdout,
@@ -12279,7 +12425,8 @@ export async function handleGeminiRequest(
         userProvidedSession,
         params.outputFormat,
         undefined,
-        effectiveCompress
+        effectiveCompress,
+        result.captureFormat
       );
       await safeRecordCompression(corrId, response.compression, runtime);
       if (worktreeResolution.worktreePath) {
@@ -12289,7 +12436,13 @@ export async function handleGeminiRequest(
         }
       }
       await flight.completeInline({
-        response: stdout,
+        response: applyProviderDisplayText({
+          cli: "gemini",
+          outputFormat: params.outputFormat,
+          captureFormat: result.captureFormat,
+          stdout,
+          applyGrokDisplay: true,
+        }),
         durationMs,
         retryCount: 0,
         circuitBreakerState: "closed",
@@ -12513,7 +12666,10 @@ export async function handleGeminiRequestAsync(
         undefined,
         undefined,
         undefined,
-        sessionBoundDedupArgs(args, effectiveSessionId)
+        sessionBoundDedupArgs(args, effectiveSessionId),
+        undefined,
+        undefined,
+        jobCwdResolutionOf(worktreeResolution.cwd, worktreeResolution)
       );
     },
     buildSuccessResponse: ({ job, value: { worktreeResolution } }) => {
@@ -12979,7 +13135,8 @@ export async function handleGrokRequest(
         undefined,
         undefined,
         undefined,
-        params.providerFlags
+        params.providerFlags,
+        jobCwdResolutionOf(worktreeResolution.cwd, worktreeResolution)
       );
     },
     // Grok json/streaming-json carries a provider-native session id and stop
@@ -13003,7 +13160,7 @@ export async function handleGrokRequest(
         },
         result
       ),
-    buildSuccessResponse: async ({ worktreeResolution, stdout, durationMs, facts }) => {
+    buildSuccessResponse: async ({ worktreeResolution, stdout, durationMs, facts, result }) => {
       const response = buildCliResponse(
         "grok",
         stdout,
@@ -13015,7 +13172,8 @@ export async function handleGrokRequest(
         sessionResult.userProvidedSession,
         params.outputFormat,
         undefined,
-        effectiveCompress
+        effectiveCompress,
+        result.captureFormat
       );
       await safeRecordCompression(corrId, response.compression, runtime);
       if (worktreeResolution.worktreePath) {
@@ -13025,7 +13183,13 @@ export async function handleGrokRequest(
         }
       }
       await flight.completeInline({
-        response: stdout,
+        response: applyProviderDisplayText({
+          cli: "grok",
+          outputFormat: params.outputFormat,
+          captureFormat: result.captureFormat,
+          stdout,
+          applyGrokDisplay: true,
+        }),
         durationMs,
         retryCount: 0,
         circuitBreakerState: "closed",
@@ -13282,7 +13446,10 @@ export async function handleGrokRequestAsync(
         undefined,
         undefined,
         undefined,
-        sessionBoundDedupArgs(args, effectiveSessionId)
+        sessionBoundDedupArgs(args, effectiveSessionId),
+        undefined,
+        undefined,
+        jobCwdResolutionOf(worktreeResolution.cwd, worktreeResolution)
       );
     },
     buildSuccessResponse: ({ job, value: { worktreeResolution, effectiveSessionId } }) => {
@@ -13451,11 +13618,24 @@ export function prepareDevinRequest(
   if (params.config) args.push("--config", params.config);
   // `--sandbox` is a safety control: bare boolean flag, never defaulted on.
   if (params.sandbox) args.push("--sandbox");
+  // Set only when the GATEWAY mints the export path. A caller-supplied one stays
+  // in the dedup key: two requests exporting to different destinations differ in
+  // an effect the caller can observe, so they are not the same request.
+  let gatewayTranscriptPath: string | null = null;
   // `--export` takes an optional path: `true` -> bare flag; string -> flag + path.
+  //
+  // DEFAULT ON. Without it a devin job records 23 bytes of final text and the
+  // run is unreconstructable; with it the ATIF export carries the system
+  // prompt, the tool definitions and the instruction files in force. The
+  // gateway supplies the path because a bare `--export` was measured to leave
+  // no file this gateway could find. `false` is the opt-out.
   if (typeof params.exportSession === "string") {
     args.push("--export", params.exportSession);
   } else if (params.exportSession === true) {
     args.push("--export");
+  } else if (params.exportSession === undefined) {
+    gatewayTranscriptPath = ensureDevinTranscriptPath(corrId);
+    if (gatewayTranscriptPath) args.push("--export", gatewayTranscriptPath);
   }
   // `--respect-workspace-trust` takes an optional value; emit the explicit bool.
   if (params.respectWorkspaceTrust !== undefined) {
@@ -13504,6 +13684,7 @@ export function prepareDevinRequest(
     approvalDecision,
     reviewIntegrity,
     args,
+    dedupArgs: devinTranscriptDedupArgs(args, gatewayTranscriptPath),
     stablePrefixHash: null,
     stablePrefixTokens: null,
   };
@@ -13745,12 +13926,13 @@ export async function handleDevinRequest(
         undefined,
         undefined,
         undefined,
-        sessionBoundDedupArgs(args, effectiveSessionId),
+        sessionBoundDedupArgs(prep.dedupArgs ?? args, effectiveSessionId),
         undefined,
         undefined,
         undefined,
         undefined,
-        params.providerFlags
+        params.providerFlags,
+        jobCwdResolutionOf(worktreeResolution.cwd ?? params.workingDir, worktreeResolution)
       );
     },
     decorateDeferred: deferred => {
@@ -13775,7 +13957,7 @@ export async function handleDevinRequest(
         },
         result
       ),
-    buildSuccessResponse: async ({ stdout, durationMs }) => {
+    buildSuccessResponse: async ({ stdout, durationMs, result }) => {
       const response = buildCliResponse(
         "devin",
         stdout,
@@ -13787,11 +13969,18 @@ export async function handleDevinRequest(
         sessionResult.userProvidedSession,
         undefined,
         undefined,
-        effectiveCompress
+        effectiveCompress,
+        result.captureFormat
       );
       await safeRecordCompression(corrId, response.compression, runtime);
       await flight.completeInline({
-        response: stdout,
+        response: applyProviderDisplayText({
+          cli: "devin",
+          outputFormat: undefined,
+          captureFormat: result.captureFormat,
+          stdout,
+          applyGrokDisplay: true,
+        }),
         durationMs,
         retryCount: 0,
         circuitBreakerState: "closed",
@@ -14000,7 +14189,10 @@ export async function handleDevinRequestAsync(
         undefined,
         undefined,
         undefined,
-        sessionBoundDedupArgs(args, effectiveSessionId)
+        sessionBoundDedupArgs(prep.dedupArgs ?? args, effectiveSessionId),
+        undefined,
+        undefined,
+        jobCwdResolutionOf(worktreeResolution.cwd ?? params.workingDir, worktreeResolution)
       );
     },
     buildSuccessResponse: ({ job, value: { worktreeResolution, effectiveSessionId } }) => {
@@ -14547,7 +14739,8 @@ export async function handleCursorRequest(
         undefined,
         undefined,
         undefined,
-        params.providerFlags
+        params.providerFlags,
+        jobCwdResolutionOf(cursorWorkspace.cwd ?? worktreeResolution.cwd, worktreeResolution)
       );
     },
     computeSuccessFacts: () => undefined,
@@ -14565,7 +14758,7 @@ export async function handleCursorRequest(
         },
         result
       ),
-    buildSuccessResponse: async ({ stdout, durationMs }) => {
+    buildSuccessResponse: async ({ stdout, durationMs, result }) => {
       const response = buildCliResponse(
         "cursor",
         stdout,
@@ -14577,11 +14770,18 @@ export async function handleCursorRequest(
         sessionResult.userProvidedSession,
         params.outputFormat,
         undefined,
-        effectiveCompress
+        effectiveCompress,
+        result.captureFormat
       );
       await safeRecordCompression(corrId, response.compression, runtime);
       await flight.completeInline({
-        response: stdout,
+        response: applyProviderDisplayText({
+          cli: "cursor",
+          outputFormat: params.outputFormat,
+          captureFormat: result.captureFormat,
+          stdout,
+          applyGrokDisplay: true,
+        }),
         durationMs,
         retryCount: 0,
         circuitBreakerState: "closed",
@@ -14795,7 +14995,10 @@ export async function handleCursorRequestAsync(
         undefined,
         undefined,
         undefined,
-        sessionBoundDedupArgs(args, effectiveSessionId)
+        sessionBoundDedupArgs(args, effectiveSessionId),
+        undefined,
+        undefined,
+        jobCwdResolutionOf(cursorWorkspace.cwd ?? worktreeResolution.cwd, worktreeResolution)
       );
     },
     buildSuccessResponse: ({ job, value: { effectiveSessionId } }) => ({
@@ -15345,7 +15548,8 @@ export async function handleMistralRequest(
           undefined,
           undefined,
           kit?.mistralIsolation?.sessionDir,
-          params.providerFlags
+          params.providerFlags,
+          jobCwdResolutionOf(dispatchCwd, worktreeResolution)
         );
       // The Kit heartbeat keeps the attempt lease alive until deferral or terminal
       // state; a null kitSession runs the dispatch directly.
@@ -15410,7 +15614,8 @@ export async function handleMistralRequest(
             undefined,
             undefined,
             undefined,
-            params.providerFlags
+            params.providerFlags,
+            jobCwdResolutionOf(worktreeResolution.cwd, worktreeResolution)
           );
           if (isDeferredResponse(result)) return result;
           prep.resolvedModel = recoveryModel;
@@ -15449,7 +15654,7 @@ export async function handleMistralRequest(
         },
         result
       ),
-    buildSuccessResponse: async ({ worktreeResolution, stdout, durationMs }) => {
+    buildSuccessResponse: async ({ worktreeResolution, stdout, durationMs, result }) => {
       const response = buildCliResponse(
         "mistral",
         stdout,
@@ -15461,7 +15666,8 @@ export async function handleMistralRequest(
         sessionResult.userProvidedSession,
         params.outputFormat,
         undefined,
-        effectiveCompress
+        effectiveCompress,
+        result.captureFormat
       );
       await safeRecordCompression(corrId, response.compression, runtime, kit !== null);
       if (worktreeResolution.worktreePath) {
@@ -15471,7 +15677,13 @@ export async function handleMistralRequest(
         }
       }
       await flight.completeInline({
-        response: stdout,
+        response: applyProviderDisplayText({
+          cli: "mistral",
+          outputFormat: params.outputFormat,
+          captureFormat: result.captureFormat,
+          stdout,
+          applyGrokDisplay: true,
+        }),
         durationMs,
         retryCount: 0,
         circuitBreakerState: "closed",
@@ -15674,7 +15886,10 @@ export async function handleMistralRequestAsync(
       undefined,
       undefined,
       undefined,
-      sessionBoundDedupArgs(args, effectiveSessionId)
+      sessionBoundDedupArgs(args, effectiveSessionId),
+      undefined,
+      undefined,
+      jobCwdResolutionOf(worktreeResolution.cwd, worktreeResolution)
     );
     jobHandedOff = true;
     if (sessionAdmission) worktreeLifecycle.transfer();
@@ -16071,7 +16286,10 @@ export async function handleCodexRequestAsync(
             : undefined,
           kitSession?.gatewaySessionId,
           kitSession?.attemptId,
-          sessionBoundDedupArgs(args, effectiveSessionId)
+          sessionBoundDedupArgs(args, effectiveSessionId),
+          undefined,
+          undefined,
+          jobCwdResolutionOf(kit?.codexIsolation?.cwd ?? worktreeResolution.cwd, worktreeResolution)
         ),
     });
     jobHandedOff = true;
@@ -16338,12 +16556,13 @@ async function dispatchRoutedCli(
       undefined,
       undefined,
       undefined,
+      prep.dedupArgs ? [...prep.dedupArgs] : undefined,
       undefined,
       undefined,
       undefined,
       undefined,
       undefined,
-      undefined
+      jobCwdResolutionOf(workspaceResolution.cwd, workspaceResolution)
     );
 
     if (isDeferredResponse(result)) {
@@ -16385,7 +16604,7 @@ async function dispatchRoutedCli(
 
     // claude stream-json carries usage/cost + text in NDJSON; all other CLIs go
     // through the shared extractUsageAndCost parser and return stdout verbatim.
-    const claudeStream = cli === "claude" && outputFormat === "stream-json";
+    const claudeStream = cli === "claude" && result.captureFormat === "stream-json";
     const parsedClaude = claudeStream ? parseStreamJson(stdout) : null;
     const responseText = parsedClaude ? parsedClaude.text : stdout;
     const usage = parsedClaude
@@ -16396,8 +16615,8 @@ async function dispatchRoutedCli(
           cacheCreationTokens: parsedClaude.usage?.cacheCreationInputTokens || undefined,
           costUsd: parsedClaude.costUsd ?? undefined,
         }
-      : extractUsageAndCost(cli, stdout, outputFormat);
-    const meta = extractProviderOutputMetadata(cli, stdout, outputFormat);
+      : extractUsageAndCost(cli, stdout, result.captureFormat ?? outputFormat);
+    const meta = extractProviderOutputMetadata(cli, stdout, result.captureFormat ?? outputFormat);
     // Label the recorded cost with its basis and, for a T2 provider that
     // reported counts but no dollar cost, backfill the derived cost.
     const { costUsd: recordedCostUsd, costBasis } = deriveCostBasis(
@@ -16408,7 +16627,13 @@ async function dispatchRoutedCli(
     await safeFlightComplete(
       corrId,
       {
-        response: cli === "codex" ? codexFrResponse(outputFormat, stdout) : responseText,
+        response: applyProviderDisplayText({
+          cli,
+          outputFormat,
+          captureFormat: result.captureFormat,
+          stdout,
+          applyGrokDisplay: true,
+        }),
         durationMs,
         retryCount: 0,
         circuitBreakerState: "closed",
@@ -16437,7 +16662,8 @@ async function dispatchRoutedCli(
       undefined,
       outputFormat,
       undefined,
-      effectiveCompress
+      effectiveCompress,
+      result.captureFormat
     );
     await safeRecordCompression(corrId, response.compression, runtime);
     return response;
@@ -16970,7 +17196,15 @@ async function dispatchRoutedCliAsync(
       frHandoff.extractUsage,
       true,
       prep.stdinPayload,
-      effectiveCompress
+      effectiveCompress,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      prep.dedupArgs ? [...prep.dedupArgs] : undefined,
+      undefined,
+      undefined,
+      jobCwdResolutionOf(workspaceResolution.cwd, workspaceResolution)
     );
     cleanupHandedOff = true;
     return {
@@ -18660,7 +18894,8 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
           undefined,
           undefined,
           undefined,
-          undefined
+          undefined,
+          jobCwdResolutionOf(worktreeResolution.cwd, worktreeResolution)
         );
 
         if (isDeferredResponse(result)) {
@@ -18818,7 +19053,7 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
         .enum(["text", "json", "stream-json"])
         .default("text")
         .describe(
-          "Output format. The Antigravity agy headless path emits text only; json and stream-json are rejected at request time. Per-request token usage and cost are therefore not available for gemini."
+          "Output format (text|json|stream-json), default text. stream-json is the only agy wire that carries the working directory, the tool list, per-tool parameters and per-step token usage; text carries none of them, so per-request usage and cost are unavailable on the default."
         ),
       sandbox: GEMINI_HIGH_IMPACT_PARAMS_SCHEMA.shape.sandbox.describe(
         "Run Antigravity in sandbox mode (--sandbox)"
@@ -19271,7 +19506,7 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
         .union([z.boolean(), CLI_OPTION_VALUE_SCHEMA])
         .optional()
         .describe(
-          "Export the session (Devin --export [<PATH>]). true emits a bare --export; a string path emits --export <path>."
+          "Export the conversation (Devin --export [<PATH>]). ON BY DEFAULT to a gateway-owned path under ~/.llm-cli-gateway/devin-transcripts: devin writes only its final text to stdout, so without the export a run leaves no reconstructable record. Pass false to opt out, true for a bare --export (devin picks the path), or a string for your own path."
         ),
       respectWorkspaceTrust: z
         .boolean()
@@ -20520,7 +20755,11 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
                 kitSession?.attemptId,
                 sessionBoundDedupArgs(buildClaudeMcpDedupArgs(args, mcpConfig), effectiveSessionId),
                 mcpConfig?.cleanup ? mcpConfig.path : undefined,
-                mcpConfig?.cleanup ? mcpConfig.artifactScope : undefined
+                mcpConfig?.cleanup ? mcpConfig.artifactScope : undefined,
+                jobCwdResolutionOf(
+                  kit?.context.scope.cwd ?? worktreeResolution.cwd ?? workingDir,
+                  worktreeResolution
+                )
               ),
           });
           requestCleanupHandedOff = true;
@@ -20924,7 +21163,7 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
           .enum(["text", "json", "stream-json"])
           .default("text")
           .describe(
-            "Output format. The Antigravity agy headless path emits text only; json and stream-json are rejected at request time. Per-request token usage and cost are therefore not available for gemini."
+            "Output format (text|json|stream-json), default text. stream-json is the only agy wire that carries the working directory, the tool list, per-tool parameters and per-step token usage; text carries none of them, so per-request usage and cost are unavailable on the default."
           ),
         sandbox: GEMINI_HIGH_IMPACT_PARAMS_SCHEMA.shape.sandbox.describe(
           "Run Antigravity in sandbox mode (--sandbox)"
@@ -21499,7 +21738,7 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
           .union([z.boolean(), CLI_OPTION_VALUE_SCHEMA])
           .optional()
           .describe(
-            "Export the session (Devin --export [<PATH>]). true emits a bare --export; a string path emits --export <path>."
+            "Export the conversation (Devin --export [<PATH>]). ON BY DEFAULT to a gateway-owned path under ~/.llm-cli-gateway/devin-transcripts: devin writes only its final text to stdout, so without the export a run leaves no reconstructable record. Pass false to opt out, true for a bare --export (devin picks the path), or a string for your own path."
           ),
         respectWorkspaceTrust: z
           .boolean()
@@ -22001,7 +22240,7 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
         openWorldHint: false,
       },
       async ({ jobId, afterProgressSeq, progressLimit }) => {
-        const job = await asyncJobManager.getJobSnapshot(jobId, {
+        let job = await asyncJobManager.getJobSnapshot(jobId, {
           afterProgressSeq,
           progressLimit,
         });
@@ -22027,6 +22266,8 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
             isError: true,
           };
         }
+
+        job = projectJobReadback(job, { remote: callerIsRemote() });
 
         return {
           content: [
@@ -22119,6 +22360,8 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
           };
         }
 
+        job = projectJobReadback(job, { remote: callerIsRemote() });
+
         const progressToken = extra._meta?.progressToken;
         if (progressToken !== undefined) {
           for (const event of job.progress.events) {
@@ -22173,11 +22416,19 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
           .describe(
             "Captured stderr character offset for resumable retrieval. Non-zero offsets require rawOutput:true."
           ),
+        nativeTranscriptOffsetChars: z
+          .number()
+          .int()
+          .min(0)
+          .default(0)
+          .describe(
+            "Provider-native transcript character offset for resumable retrieval. Non-zero offsets require rawOutput:true."
+          ),
         rawOutput: z
           .boolean()
           .default(false)
           .describe(
-            "Return captured provider streams without display parsing or compression. Local stdio pages concatenate to the captured streams; remote pages redact provider session IDs. Required for resumable offsets."
+            "Return captured provider streams without display parsing or compression. Available only to local stdio callers. Required for resumable offsets."
           ),
       },
       {
@@ -22187,11 +22438,19 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
         idempotentHint: true,
         openWorldHint: false,
       },
-      async ({ jobId, maxChars, stdoutOffsetChars, stderrOffsetChars, rawOutput }) => {
+      async ({
+        jobId,
+        maxChars,
+        stdoutOffsetChars,
+        stderrOffsetChars,
+        nativeTranscriptOffsetChars,
+        rawOutput,
+      }) => {
         const remoteCaller = callerIsRemote();
-        const result = await asyncJobManager.getJobResult(jobId, maxChars, {
+        let result = await asyncJobManager.getJobResult(jobId, maxChars, {
           stdoutOffsetChars,
           stderrOffsetChars,
+          nativeTranscriptOffsetChars,
           redactProviderSessionIds: remoteCaller,
         });
         // F3b: own-or-not-found (no cross-principal readback of job output).
@@ -22216,7 +22475,35 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
           };
         }
 
-        if (!rawOutput && (stdoutOffsetChars > 0 || stderrOffsetChars > 0)) {
+        if (remoteCaller && rawOutput) {
+          return {
+            content: [
+              {
+                type: "text",
+                text: JSON.stringify(
+                  {
+                    success: false,
+                    error: "Raw provider transcripts are available only on the local stdio surface",
+                    jobId,
+                  },
+                  null,
+                  2
+                ),
+              },
+            ],
+            isError: true,
+          };
+        }
+
+        result = projectJobReadback(result, {
+          remote: remoteCaller,
+          includeNativeTranscript: rawOutput,
+        });
+
+        if (
+          !rawOutput &&
+          (stdoutOffsetChars > 0 || stderrOffsetChars > 0 || nativeTranscriptOffsetChars > 0)
+        ) {
           return {
             content: [
               {
@@ -22239,8 +22526,10 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
 
         // Parse stream-json output for Claude async jobs
         const outputFormat = asyncJobManager.getJobOutputFormat(jobId);
+        const captureFormat = asyncJobManager.getJobCaptureFormat(jobId) ?? outputFormat;
+        const jobCli = asyncJobManager.getJobCli(jobId) ?? "unknown";
         let parsed: ReturnType<typeof parseStreamJson> | undefined;
-        if (!rawOutput && outputFormat === "stream-json" && result.stdout) {
+        if (!rawOutput && jobCli === "claude" && captureFormat === "stream-json" && result.stdout) {
           parsed = parseStreamJson(result.stdout);
         }
 
@@ -22256,15 +22545,22 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
         // mode returns the raw JSONL.
         if (!rawOutput && result.stdout) {
           // Same shared display helper the sync path uses (design 5.4), but with
-          // applyGrokDisplay: false so the readback keeps its current behavior
-          // (codex reconstructs; grok stays raw). A codex job swaps; grok/claude
-          // are unchanged, byte-identical to the former codex-only branch.
-          result.stdout = applyProviderDisplayText({
-            cli: asyncJobManager.getJobCli(jobId) ?? "unknown",
-            outputFormat,
-            stdout: result.stdout,
-            applyGrokDisplay: false,
-          });
+          // Apply the same provider presentation projection used by the inline
+          // path. The durable raw stream remains available to local callers
+          // through rawOutput.
+          result.stdout = remoteCaller
+            ? projectRemoteProviderOutput(jobCli, result.stdout, captureFormat)
+            : applyProviderDisplayText({
+                cli: jobCli,
+                outputFormat,
+                captureFormat,
+                stdout: result.stdout,
+                applyGrokDisplay: true,
+              });
+        }
+        if (remoteCaller) {
+          result.stderr = redactAcpMessage(result.stderr);
+          if (result.error) result.error = redactAcpMessage(result.error);
         }
 
         // Native compressor (spec 5.2): honor the job's PERSISTED effective
@@ -22293,7 +22589,7 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
         // coercion callees too.
         const personalKitJob = Boolean(await asyncJobManager.getJobKitExecution(jobId));
         if (compressJob && result.stdout) {
-          if (outputFormat === "stream-json" && parsed) {
+          if (!remoteCaller && captureFormat === "stream-json" && parsed) {
             result.stdout = parsed.text;
           }
           const compressed = compressDisplayText(result.stdout, {
@@ -22462,7 +22758,7 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
   // query yields no rows and this returns the "not found" shape.
   server.tool(
     "llm_request_result",
-    "Read back any persisted request (sync or async) from the flight recorder by correlationId, including prompt and response.",
+    "Read back any persisted request (sync or async) from the flight recorder by correlationId, including prompt and response. Local callers can also include the linked complete job record.",
     {
       correlationId: z
         .string()
@@ -22481,6 +22777,12 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
         .boolean()
         .default(false)
         .describe("Include the full persisted prompt text in the result"),
+      includeJobRecord: z
+        .boolean()
+        .default(false)
+        .describe(
+          "Include the linked raw provider capture and replay context when called over local stdio. Remote callers receive no transcript or host paths."
+        ),
     },
     {
       title: "Persisted request lookup",
@@ -22489,7 +22791,7 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
       idempotentHint: true,
       openWorldHint: false,
     },
-    async ({ correlationId, maxChars, includePrompt }) => {
+    async ({ correlationId, maxChars, includePrompt, includeJobRecord }) => {
       const remoteCaller = callerIsRemote();
       const record = await readPersistedRequest(flightRecorder, correlationId, {
         maxChars,
@@ -22523,11 +22825,35 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
         };
       }
 
+      let jobRecord: Awaited<ReturnType<AsyncJobManager["getJobResult"]>> = null;
+      if (includeJobRecord && !remoteCaller && record.asyncJobId) {
+        const jobOwner = await asyncJobManager.getJobOwner(record.asyncJobId);
+        if (principalCanAccess(jobOwner, caller)) {
+          jobRecord = await asyncJobManager.getJobResult(record.asyncJobId, maxChars);
+        }
+      }
+
       return {
         content: [
           {
             type: "text",
-            text: JSON.stringify({ success: true, request: record }, null, 2),
+            text: JSON.stringify(
+              {
+                success: true,
+                request: record,
+                ...(includeJobRecord
+                  ? remoteCaller
+                    ? {
+                        jobRecord: null,
+                        jobRecordWithheld:
+                          "Complete provider transcripts and host replay context are available only on the local stdio surface",
+                      }
+                    : { jobRecord }
+                  : {}),
+              },
+              null,
+              2
+            ),
           },
         ],
       };
@@ -22594,7 +22920,7 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
                 success: true,
                 count: requests.length,
                 requests,
-                hint: "Pass correlationId to llm_request_result for prompt/response, or asyncJobId to llm_job_status. An empty list is not proof nothing ran: cross-LLM validation seats write no flight-recorder row, and flight recording can be disabled (LLM_GATEWAY_LOGS_DB=none).",
+                hint: "Pass correlationId to llm_request_result for prompt/response, or asyncJobId to llm_job_status. An empty list is not proof nothing ran, and it does not mean the work left no record: cross-LLM validation seats write no row HERE, but they write validation_runs and validation_run_jobs, and each of those links a job row holding the launched argv and the provider output (read it with validation_receipt, then llm_job_result). Flight recording can also be disabled (LLM_GATEWAY_LOGS_DB=none). Jobs and requests are both unbounded by default; an operator can configure their bounds independently.",
                 // obs: the hint above lists ONE reason a list can be empty and
                 // there are five. This says which one is true right now, so an
                 // empty result from an unreadable database stops looking the
@@ -22638,6 +22964,7 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
       // block and the disposition cannot disagree about the same recorder.
       const recorderHealth = flightRecorderHealth(flightRecorder);
       const disposition = storageDisposition(persistence, recorderHealth);
+      const remoteHealthCaller = callerIsRemote();
       // s11: the resolved policy, what the last sweep did, and what a bound
       // WOULD delete on the subsystems that have none. The hypothetical is the
       // useful number on an unchanged host: every destructive bound is off by
@@ -22668,7 +22995,8 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
       };
       const persistenceBlock = {
         backend: persistence.backend,
-        dbPath: persistence.path,
+        dbPath:
+          remoteHealthCaller && persistence.path !== null ? persistence.backend : persistence.path,
         retentionDays: persistence.retentionDays,
         retention: retentionBlock,
         dsn: persistence.dsn ? "[redacted]" : null,
@@ -22678,7 +23006,12 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
         asyncJobsEnabled: asyncJobsEffective,
         durableAdmission,
         acknowledgeEphemeral: persistence.acknowledgeEphemeral,
-        sources: persistence.sources,
+        sources: remoteHealthCaller
+          ? {
+              configFile: persistence.sources.configFile ? "[configured]" : null,
+              envOverrides: persistence.sources.envOverrides,
+            }
+          : persistence.sources,
         // Reachable per-role credentials, and which operation classes are
         // running wider than they asked for. Without this, "role separation is
         // configured" and "role separation is in force" are indistinguishable
@@ -22704,18 +23037,30 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
       // LLM_GATEWAY_LOGS_DB in both cases.
       const recorderEnabled = disposition.requestHistory.enabled;
       const recorderEngine = flightRecorderEngineDecision(persistence.backend);
-      const recorderMessage = flightRecorderHealthMessage(recorderHealth);
+      const rawRecorderTarget =
+        recorderHealth.path ??
+        (recorderEnabled
+          ? recorderEngine.engine === "postgres"
+            ? POSTGRES_RECORDER_TARGET
+            : resolveFlightRecorderDbPath()
+          : null);
+      const recorderTarget =
+        rawRecorderTarget === null
+          ? null
+          : recorderEngine.engine === "postgres"
+            ? POSTGRES_RECORDER_TARGET
+            : remoteHealthCaller
+              ? "sqlite"
+              : rawRecorderTarget;
+      const recorderMessage = flightRecorderHealthMessage({
+        ...recorderHealth,
+        path: recorderTarget,
+      });
       const flightRecorderBlock = {
         engine: recorderEnabled ? recorderEngine.engine : null,
-        // The recorder's OWN target, so a postgres host is not shown the SQLite
-        // file it stopped writing to.
-        path:
-          recorderHealth.path ??
-          (recorderEnabled
-            ? recorderEngine.engine === "postgres"
-              ? POSTGRES_RECORDER_TARGET
-              : resolveFlightRecorderDbPath()
-            : null),
+        // PostgreSQL diagnostics are deliberately opaque. Remote callers also
+        // receive an opaque SQLite engine label instead of a host path.
+        path: recorderTarget,
         enabled: recorderEnabled,
         // The five-way answer. `enabled: false` alone could not tell an
         // operator whether to change a setting or to go and look at a file.
@@ -22735,7 +23080,7 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
           [
             recorderMessage,
             recorderEnabled && recorderEngine.engine === "postgres"
-              ? `Request history is using PostgreSQL. Rows written to the previous SQLite recorder, if any, are still in ${resolveFlightRecorderDbPath()} and were NOT migrated; nothing reads them from here.`
+              ? "Request history is using PostgreSQL. Rows written to the previous SQLite recorder, if any, were NOT migrated; nothing reads them from here."
               : null,
           ]
             .filter((line): line is string => line !== null)

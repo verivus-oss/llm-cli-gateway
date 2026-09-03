@@ -257,20 +257,48 @@ Commands:
       risk: "executes_agent",
       mutating: false,
     });
-    // Archive/unarchive stay approval-gated, but delete is catalog-only: an
-    // explicit contract `not_exposed` ceiling must override the generic admin
-    // family declaration rather than reopening a destructive command.
-    expect(byId.get("archive")).toMatchObject({ available: true, mutating: true });
+    // Auto-catalogued, unreviewed families cannot become available from a verb
+    // heuristic. These three carry the stricter not_exposed contract ceiling.
+    expect(byId.get("archive")).toMatchObject({
+      available: false,
+      exposure: "not_exposed",
+      mutating: false,
+    });
     expect(byId.get("delete")).toMatchObject({
       available: false,
       exposure: "not_exposed",
       risk: "destructive",
       mutating: false,
     });
-    expect(byId.get("unarchive")).toMatchObject({ available: true, mutating: true });
+    expect(byId.get("unarchive")).toMatchObject({
+      available: false,
+      exposure: "not_exposed",
+      mutating: false,
+    });
     // `fork` is executes_agent per the upstream contract, so it stays NOT exposed:
     // a verb heuristic must never downgrade a not-exposed family into a mutating op.
     expect(byId.get("fork")).toMatchObject({ available: false });
+  });
+
+  it("does not expose a discovered command whose contract is catalog-only", async () => {
+    const set = await discoverProviderCapabilities(getProviderDefinition("codex"), {
+      runner: makeRunner({
+        "codex --version": "codex-cli 0.153.0",
+        "codex --help": "Usage: codex\n\nCommands:\n  agents  Manage agents\n",
+        "codex agents --help": "Usage: codex agents\n",
+      }),
+      gatewayVersion: "test-gw",
+      resolveExecutablePath: () => "/abs/bin/codex",
+    });
+    const operation = projectProviderAdminOperations(getProviderDefinition("codex"), set).find(
+      candidate => candidate.operationId === "agents"
+    );
+
+    expect(operation).toMatchObject({
+      exposure: "tracked_only",
+      available: false,
+      mutating: false,
+    });
   });
 });
 

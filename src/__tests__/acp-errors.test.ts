@@ -28,6 +28,10 @@ const BEARER = "Authorization: Bearer sk-abcdef0123456789deadbeef";
 const EMAIL = "werner@verivus.com";
 
 describe("redactAcpMessage", () => {
+  it("preserves non-JSON diagnostic placeholders", () => {
+    expect(redactAcpMessage("failed [redacted-session-id]")).toBe("failed [redacted-session-id]");
+  });
+
   it("strips raw JSON-RPC bodies", () => {
     const out = redactAcpMessage(`agent said ${RAW_JSON_RPC}`);
     expect(out).not.toContain("leak this secret prompt text");

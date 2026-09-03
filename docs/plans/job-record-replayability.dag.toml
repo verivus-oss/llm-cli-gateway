@@ -1,0 +1,106 @@
+# Issue #296. What a dispatched job durably records, and what it cannot.
+# Subordinate to durable-state-lifecycle.dag.toml (same tables, same bounds).
+
+[meta]
+surface = "the jobs table, its two drivers, and the doctor/retention surfaces that report on it"
+status = "done 2026-09-03 at d64ba20. Superseded in scope by complete-flight-record.dag.toml, which is also complete."
+issue = "https://github.com/verivusai-labs/llm-cli-gateway/issues/296"
+
+# WHY THIS EXISTS
+#
+# Replaying a dispatched job against a modified instruction set needs four
+# inputs: argv, prompt, the working directory, and the ambient instruction files
+# the harness loaded. Commit d64ba20 makes all four durable without storing the
+# instruction bodies.
+
+[facts]
+measured_at = "implemented and source-verified at d64ba20; the original row counts in #296 remain measurements from one private Postgres deployment"
+cwd_is_durable = "JobRecord and both durable drivers carry cwd_scope, cwd_path and workspace_alias; neutral paths stay null because the directory is removed on close"
+argv_is_exact = "args_json holds the exact launched vector, including the provider-rich capture format, while Devin dedup uses a separately canonicalized vector"
+instruction_evidence_is_durable = "replay_context_json carries only effective-byte digests, byte counts, provider limits and repository HEAD at admission; it never carries instruction bodies"
+capture_is_accounted = "capture_format, capture_status, output_dropped_bytes and the native transcript fields distinguish whole, limited and unavailable capture"
+retention_decision = "jobs and requests are both unbounded by default; an operator can configure either bound independently"
+
+[non_goals]
+no_instruction_bodies = "store a digest and a byte count, never the file contents. The bodies are the operator's private repository and the record must stay safe to ship to a health surface."
+no_hidden_retention = "an upgrade deletes no rows by default. Bounded retention is an explicit operator decision reported by doctor and storage status."
+no_gemini_native_session_claim = "the rich Gemini wire is captured and projected, but the gateway does not claim a native session id that the provider has not supplied. r7 documents the bounded cwd and start-time join instead."
+no_new_table = "columns on jobs. A second table would need its own retention bound, which is the problem this is about."
+no_replay_command = "this makes the record sufficient. Executing a replay from it is separate work and should not be designed against an incomplete record."
+
+[[node]]
+id = "r1.cwd-scope-on-the-job"
+critical = true
+depends_on = []
+role = "The directory is the input that decides which AGENTS.md or CLAUDE.md was in force. Without it, #190's contamination class is invisible in the record and detectable only in the output."
+action = "DONE. Three columns: cwd_scope (caller|workspace|worktree|neutral|unknown), cwd_path, workspace_alias, plus migration 024 and the SQLite ALTER path."
+constraint = "cwd_path is NULL for neutral by construction. MEASURED CORRECTION to an earlier draft of this node: the record is written at enqueue, not at recordStart. The neutral directory does not exist until spawn, but its PATH is never stored, and whether the job is unscoped is decided by whether a cwd was supplied, which is known at enqueue."
+constraint_2 = "For scope=workspace and scope=worktree also record the binding alias. A path is not a workspace identity; the binding can be repointed."
+constraint_3 = "unknown is a fifth value and it is load-bearing: several handlers pick a Kit, cursor or isolation directory ahead of the resolution, and a resolution that lost must not describe the job. Kit rows record nothing, on the same ground that redacts their argv."
+affects = ["r3.three-declarations-one-schema", "r4.reachable-through-the-tools", "r7.gemini-joins-on-cwd"]
+
+[[node]]
+id = "r2.instruction-set-digest"
+critical = true
+depends_on = ["r1.cwd-scope-on-the-job"]
+role = "The harness-neutral half of 'what did the instructions say when this ran'. Which files count is per provider and the launcher already knows the directory; the hash is common."
+action = "DONE at d64ba20. JobReplayContext records each logical absolute path, SHA-256 over the effective bytes, source and effective byte counts, the provider limit, truncation state and repository HEAD at admission. It stores no instruction body."
+constraint = "A digest over the WHOLE file is a false record when the provider truncates. #296 measured a 44 KB repository AGENTS.md arriving at 32,202 bytes under codex's 32 KiB project_doc_max_bytes default. Record the effective cap alongside the digest, or hash the truncated prefix and say which."
+constraint_2 = "Hashing is I/O on the request path. Bound it: refuse to hash above a size ceiling and record the refusal rather than blocking a dispatch."
+constraint_3 = "scope=neutral has no repository file. Its digest list is the global file alone, and that is the evidence that nothing repository-local was loaded."
+affects = ["r3.three-declarations-one-schema", "r4.reachable-through-the-tools"]
+
+[[node]]
+id = "r3.three-declarations-one-schema"
+critical = true
+depends_on = ["r1.cwd-scope-on-the-job", "r2.instruction-set-digest"]
+role = "The jobs schema is written down in three places and a fourth asserts on it. All four move together or the Postgres driver ships a column the SQLite one does not have."
+action = "DONE at d64ba20. Migration 025, both driver declarations, both write paths, bootstrap repair and the required-column manifest carry the replay and capture fields together."
+constraint = "Migration 024 remains the earlier cwd-scope migration. Complete capture uses immutable migration 025."
+constraint_2 = "Legacy capture identity and status fields are nullable so they read as NOT MEASURED. Byte counters use zero and truncation flags use false because legacy rows captured no rejected native bytes."
+constraint_3 = "The parity control that actually compares two declarations by information_schema is a *-pg test, and npm run check does not run those. Assume this ships unchecked unless test:pg is run."
+affects = ["r4.reachable-through-the-tools"]
+
+[[node]]
+id = "r4.reachable-through-the-tools"
+critical = true
+depends_on = ["r3.three-declarations-one-schema"]
+role = "A column no tool projects is a column an agent finds by opening the database, which is the habit llm_request_list exists to end."
+action = "DONE at d64ba20. llm_job_status and llm_job_result project executionContext to the owning local caller. llm_request_result includes the linked job record only when includeJobRecord is true, defaults it off, and withholds the complete record from remote callers."
+constraint = "Digest entries name absolute paths on the operator's disk. Decide once whether those ship on a health surface or only to the owning principal, and write the decision down beside the projection."
+affects = []
+
+[[node]]
+id = "r5.retention-inversion"
+depends_on = []
+role = "The previous defaults swept the complete record in 30 days and kept the partial one forever. The decision had to cover both stores together."
+action = "DONE at d64ba20. Jobs and requests now both default to unbounded retention. Doctor still warns when an operator explicitly configures the earlier inverted shape."
+constraint = "Existing explicit operator bounds remain effective. Omitting the job bound on upgrade deletes nothing."
+affects = []
+
+[[node]]
+id = "r6.request-list-hint-names-the-record"
+depends_on = []
+role = "The llm_request_list hint says validation seats write no flight-recorder row. True, and it steers the reader away from the richer record rather than towards it."
+action = "DONE. Name validation_runs, validation_run_jobs and the jobs rows those link to, so a reader who gets an empty list knows where to look next."
+constraint = "The hint states that jobs and requests are both unbounded by default and that an operator can configure their bounds independently."
+affects = []
+
+[[node]]
+id = "r7.gemini-joins-on-cwd"
+depends_on = ["r1.cwd-scope-on-the-job"]
+role = "gemini reaches the store with no session key at all. #296 proposes emitting one; the cheaper half is that its native store is keyed by project root and start time."
+action = "DONE at d64ba20. The durable cwd record and startedAt provide the documented Gemini native-history join. Scope-neutral work remains unjoinable, and concurrent jobs in one directory make the join non-unique, so no native session identifier is claimed."
+constraint = "This REDUCES the gap, it does not close it. A scope=neutral gemini job is still unjoinable, and the join is not unique under concurrent dispatches into one directory."
+affects = []
+
+[[node]]
+id = "r8.applied-and-the-set-it-broke"
+depends_on = ["r3.three-declarations-one-schema"]
+status = "done"
+role = "r3 constraint_3 predicted this ships unchecked because npm run check does not run the -pg suites. Running them found two defects, so the prediction is now a measurement."
+action = "DONE. Migration 024 applied to the development PostgreSQL; ledger pin recorded at authorship; init() gained the three ADD COLUMN repairs; the recorder's migration selection now derives from what a file targets."
+constraint = "Two readers spelled the recorder's migration set as 'numbered 022 or higher'. The static parity gate survived it by filtering on table while parsing; the dynamic mirror executes what it selects and failed with relation \"jobs\" does not exist. One derivation now serves both, in scripts/transcript-migration-selection.mjs."
+constraint_2 = "The schema-parity pin named init() as the thing that closes the bootstrap gap and asserted nothing about it, so a column could join the gap without joining the repair. The gap is now measured by running a store against a bootstrap-only schema, and the mutant that removes the three repairs is killed by exactly that test."
+constraint_3 = "Pinning 024's digest at authorship follows 022's recorded reason: a host has recorded the checksum, so an edit to the file now breaks npm run migrate there rather than the build here."
+affects = []

@@ -27,8 +27,8 @@
 [meta]
 surface = "validation provider launch + cursor trust"
 branch = "master"
-last_reviewed_head = "801950d"
-generated_from = "TypeScript AST caller inspection plus checked source coordinates"
+measured_against = "a4bfe3c0ee0b0b96bc21947b6ff898544183c7a0"
+generated_from = "TypeScript AST declarations, caller inspection, and quoted source evidence"
 node_count = 17
 invariant_count = 6
 flow_count = 9
@@ -39,12 +39,12 @@ flow_count = 9
 # Four more ask-path tools reach fn.startValidationRun and are deliberately not
 # given their own nodes, because the checker pins node_count and adding them
 # would fail coverage without a matching checker edit: second_opinion
-# (validation-tools.ts:686), red_team_review (:754), consensus_check (:796) and
-# ask_model (:833). They behave exactly as tool.validate_with_models does.
-# compare_answers (:724) is local-only and never reaches this surface at all.
+# (`second_opinion`, `red_team_review`, `consensus_check`, and `ask_model`). They
+# behave exactly as tool.validate_with_models does.
+# compare_answers is local-only and never reaches this surface at all.
 #
-# Also absent, and more important: job_result (validation-tools.ts:1132) and
-# validation_receipt (:1184). Those are two of the only three callers that can
+# Also absent, and more important: `job_result` and `validation_receipt` in
+# `src/validation-tools.ts`. Those are two of the only three callers that can
 # move a run to `finalized`, so the finalization half of this surface is not
 # mapped here. See docs/plans/durable-state-lifecycle.dag.toml.
 #
@@ -57,7 +57,7 @@ flow_count = 9
 id = "tool.review_changes"
 kind = "mcp_tool"
 file = "src/validation-tools.ts"
-line = 420
+symbol = "review_changes"
 role = "Captures the Git artifact and starts the reviewer roster. Owns the trust CONSENT input."
 affects = ["fn.startReviewRun", "state.reviewRunAuthorization"]
 
@@ -65,7 +65,7 @@ affects = ["fn.startReviewRun", "state.reviewRunAuthorization"]
 id = "tool.synthesize_validation"
 kind = "mcp_tool"
 file = "src/validation-tools.ts"
-line = 873
+symbol = "synthesize_validation"
 role = "Starts the judge in a LATER tool call than review_changes. This separation is what hid round 4: it cannot see the kickoff arguments, only durable state."
 affects = ["fn.startJudgeSynthesis", "state.reviewRunAuthorization"]
 
@@ -73,7 +73,7 @@ affects = ["fn.startJudgeSynthesis", "state.reviewRunAuthorization"]
 id = "tool.validate_with_models"
 kind = "mcp_tool"
 file = "src/validation-tools.ts"
-line = 639
+symbol = "validate_with_models"
 role = "Ask-path roster. review=false, so no trust is ever granted."
 affects = ["fn.startValidationRun"]
 
@@ -85,7 +85,7 @@ affects = ["fn.startValidationRun"]
 id = "fn.startValidationRun"
 kind = "function"
 file = "src/validation-orchestrator.ts"
-line = 317
+symbol = "startValidationRun"
 role = "Ask roster. Maps a refusal to normalizeSkippedProvider."
 affects = ["fn.startProviderJob"]
 
@@ -93,7 +93,7 @@ affects = ["fn.startProviderJob"]
 id = "fn.startReviewRun"
 kind = "function"
 file = "src/validation-orchestrator.ts"
-line = 400
+symbol = "startReviewRun"
 role = "Review roster. Reads the trust consent from the DURABLE authorization, not from its own argument."
 affects = ["fn.startProviderJob"]
 reads = ["state.reviewRunAuthorization"]
@@ -102,7 +102,7 @@ reads = ["state.reviewRunAuthorization"]
 id = "fn.startJudgeSynthesis"
 kind = "function"
 file = "src/validation-orchestrator.ts"
-line = 511
+symbol = "startJudgeSynthesis"
 role = "Judge seat. Maps a refusal to a skipped synthesis. Historically the SECOND path; it now decides representation only, never launching."
 affects = ["fn.launchProviderSeat"]
 reads = ["state.reviewRunAuthorization"]
@@ -111,7 +111,7 @@ reads = ["state.reviewRunAuthorization"]
 id = "fn.startProviderJob"
 kind = "function"
 file = "src/validation-orchestrator.ts"
-line = 789
+symbol = "startProviderJob"
 role = "Roster seat. Maps a refusal to normalizeSkippedProvider."
 affects = ["fn.launchProviderSeat"]
 
@@ -119,7 +119,7 @@ affects = ["fn.launchProviderSeat"]
 id = "fn.launchProviderSeat"
 kind = "function"
 file = "src/validation-orchestrator.ts"
-line = 706
+symbol = "launchProviderSeat"
 role = "THE launch path. Computes the gates itself and is the only caller of dispatchProviderJob. A new seat MUST call this, never dispatch directly."
 affects = ["fn.providerPreflight", "fn.dispatchProviderJob"]
 critical = true
@@ -128,7 +128,7 @@ critical = true
 id = "fn.dispatchProviderJob"
 kind = "function"
 file = "src/validation-orchestrator.ts"
-line = 155
+symbol = "dispatchProviderJob"
 role = "Builds argv and starts the job. Private to launchProviderSeat."
 affects = ["fn.buildProviderInvocation", "ext.startJobWithDedup", "ext.startHttpJob"]
 
@@ -136,7 +136,7 @@ affects = ["fn.buildProviderInvocation", "ext.startJobWithDedup", "ext.startHttp
 id = "fn.buildProviderInvocation"
 kind = "function"
 file = "src/validation-orchestrator.ts"
-line = 1179
+symbol = "buildProviderInvocation"
 role = "Emits provider argv, INCLUDING --trust. Only ever reflects the verdict it is handed; it must not decide trust."
 affects = ["argv.cursor_trust", "argv.devin_sandbox"]
 
@@ -148,7 +148,7 @@ affects = ["argv.cursor_trust", "argv.devin_sandbox"]
 id = "fn.providerPreflight"
 kind = "function"
 file = "src/validation-orchestrator.ts"
-line = 1169
+symbol = "providerPreflight"
 role = "Every launch gate in one call. THE extension point: a new gate goes here."
 affects = ["fn.reviewSandboxGap", "fn.cursorTrustGap"]
 critical = true
@@ -157,7 +157,7 @@ critical = true
 id = "fn.reviewSandboxGap"
 kind = "function"
 file = "src/validation-orchestrator.ts"
-line = 1104
+symbol = "reviewSandboxGap"
 role = "devin --sandbox needs bubblewrap on Linux. macOS uses seatbelt, so it does not gate there; other platforms have no probe, and absence of a reading is not evidence of absence."
 affects = ["outcome.skipped"]
 
@@ -165,7 +165,7 @@ affects = ["outcome.skipped"]
 id = "fn.cursorTrustGap"
 kind = "function"
 file = "src/validation-orchestrator.ts"
-line = 1137
+symbol = "cursorTrustGap"
 role = "Decides cursor review trust. The ONLY producer of a trust verdict."
 affects = ["outcome.skipped", "argv.cursor_trust"]
 reads = ["fn.isProviderWorkspacePath", "state.reviewRunAuthorization"]
@@ -175,7 +175,7 @@ critical = true
 id = "fn.isProviderWorkspacePath"
 kind = "function"
 file = "src/workspace-registry.ts"
-line = 651
+symbol = "isProviderWorkspacePath"
 role = "The entire automatic-trust boundary. Nearest enclosing registration decides; ties fail closed; containment via isUnder (path.relative)."
 affects = ["fn.cursorTrustGap"]
 critical = true
@@ -184,7 +184,7 @@ critical = true
 id = "fn.isUnder"
 kind = "function"
 file = "src/workspace-registry.ts"
-line = 201
+symbol = "isUnder"
 role = "Containment via path.relative. Used instead of a manual separator prefix, which mishandled a filesystem root."
 affects = ["fn.isProviderWorkspacePath"]
 
@@ -197,7 +197,7 @@ affects = ["fn.isProviderWorkspacePath"]
 id = "state.reviewRunAuthorization"
 kind = "durable_schema"
 file = "src/review-run-authorization.ts"
-line = 6
+symbol = "reviewRunAuthorizationSchema"
 role = "Persisted into validation_runs.requestJson at kickoff and reloaded at synthesis. Holds trustCursorWorkspace so the roster and the judge read ONE field and cannot disagree."
 affects = ["fn.startReviewRun", "fn.startJudgeSynthesis"]
 critical = true
@@ -207,19 +207,19 @@ note = "Any consent or policy that both the roster and the judge need MUST live 
 id = "field.trustCursorWorkspace"
 kind = "durable_field"
 file = "src/review-run-authorization.ts"
-line = 24
+symbol = "trustCursorWorkspace"
 role = "Operator consent to trust an unregistered repository. Defaulted false so pre-existing runs still parse."
 affects = ["fn.startReviewRun", "fn.startJudgeSynthesis"]
 flow = [
-  { file = "src/validation-tools.ts", line = 437, token = "trustCursorWorkspace", role = "tool input schema" },
-  { file = "src/validation-tools.ts", line = 515, token = "trustCursorWorkspace", role = "handler destructure" },
-  { file = "src/validation-tools.ts", line = 581, token = "trustCursorWorkspace", role = "written into reviewAuthorization" },
-  { file = "src/review-run-authorization.ts", line = 24, token = "trustCursorWorkspace", role = "durable schema field" },
-  { file = "src/validation-orchestrator.ts", line = 926, token = "reviewAuthorization", role = "persisted into validation_runs.requestJson" },
-  { file = "src/validation-tools.ts", line = 938, token = "parseReviewRunAuthorization", role = "rehydrated for synthesis" },
-  { file = "src/validation-tools.ts", line = 1067, token = "trustCursorWorkspace", role = "passed to startJudgeSynthesis" },
-  { file = "src/validation-orchestrator.ts", line = 608, token = "trustWorkspace", role = "judge seat launch option" },
-  { file = "src/validation-orchestrator.ts", line = 459, token = "trustWorkspace", role = "roster seat launch option" },
+  { file = "src/validation-tools.ts", evidence = "trustCursorWorkspace: z", role = "tool input schema" },
+  { file = "src/validation-tools.ts", evidence = "maxPromptBytes,\n        trustCursorWorkspace,", role = "handler destructure" },
+  { file = "src/validation-tools.ts", evidence = "allowApiUpload,\n              trustCursorWorkspace,", role = "written into reviewAuthorization" },
+  { file = "src/review-run-authorization.ts", evidence = "trustCursorWorkspace: z.boolean().default(false)", role = "durable schema field" },
+  { file = "src/validation-orchestrator.ts", evidence = "reviewAuthorization: args.reviewAuthorization", role = "persisted into validation_runs.requestJson" },
+  { file = "src/validation-tools.ts", evidence = "parseReviewRunAuthorization(run.requestJson)", role = "rehydrated for synthesis" },
+  { file = "src/validation-tools.ts", evidence = "trustCursorWorkspace: reviewAuthorization?.trustCursorWorkspace ?? false", role = "passed to startJudgeSynthesis" },
+  { file = "src/validation-orchestrator.ts", evidence = "trustWorkspace: input.trustCursorWorkspace", role = "judge seat launch option" },
+  { file = "src/validation-orchestrator.ts", evidence = "trustWorkspace: input.reviewAuthorization.trustCursorWorkspace === true", role = "roster seat launch option" },
 ]
 
 # ---------------------------------------------------------------------------

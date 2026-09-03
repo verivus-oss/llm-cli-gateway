@@ -1268,14 +1268,14 @@ function todayStamp() {
 export function renderReport(cli, contract, meta, fetched, findings, helpProbe = null) {
   const stamp = todayStamp();
   const lines = [];
-  lines.push(`# Upstream scan report — ${cli} (${contract.upstream})`);
+  lines.push(`# Upstream scan report - ${cli} (${contract.upstream})`);
   lines.push("");
   lines.push(`- Date: ${stamp}`);
   lines.push(`- Executable: \`${contract.executable}\``);
-  lines.push(`- Package: ${meta.packageName ? `\`${meta.packageName}\`` : "—"}`);
-  lines.push(`- Release channel: ${meta.releaseChannel ?? "—"}`);
-  lines.push(`- Repo: ${meta.repo ?? "—"}`);
-  lines.push(`- Install docs: ${meta.installDocsUrl ?? "—"}`);
+  lines.push(`- Package: ${meta.packageName ? `\`${meta.packageName}\`` : "not declared"}`);
+  lines.push(`- Release channel: ${meta.releaseChannel ?? "not declared"}`);
+  lines.push(`- Repo: ${meta.repo ?? "not declared"}`);
+  lines.push(`- Install docs: ${meta.installDocsUrl ?? "not declared"}`);
   lines.push("");
   lines.push("## Mechanical source of truth");
   lines.push("");
@@ -1299,7 +1299,7 @@ export function renderReport(cli, contract, meta, fetched, findings, helpProbe =
     lines.push("| Source | Status | Bytes | SHA-256 (12) | Semantic SHA-256 (12) |");
     lines.push("| ------ | ------ | ----- | ------------ | --------------------- |");
     for (const f of fetched) {
-      const sha = f.sha256 ? f.sha256.slice(0, 12) : "—";
+      const sha = f.sha256 ? f.sha256.slice(0, 12) : "not recorded";
       const semanticSha = f.semantic?.sha256 ? f.semantic.sha256.slice(0, 12) : "n/a";
       const status = f.ok
         ? `${f.status} OK`
@@ -1308,7 +1308,7 @@ export function renderReport(cli, contract, meta, fetched, findings, helpProbe =
     }
   } else {
     for (const url of meta.sourceUrls) {
-      lines.push(`- ${url} _(not fetched — run with \`--live\`)_`);
+      lines.push(`- ${url} _(not fetched; run with \`--live\`)_`);
     }
   }
   lines.push("");
@@ -1365,7 +1365,7 @@ export function renderReport(cli, contract, meta, fetched, findings, helpProbe =
       lines.push("| ------------ | ----------- | ------------- |");
       for (const row of driftRows) {
         lines.push(
-          `| ${row.commandPath.join(" ")} | ${(row.extraFlags ?? []).join(", ") || "—"} | ${(row.missingFlags ?? []).join(", ") || "—"} |`
+          `| ${row.commandPath.join(" ")} | ${(row.extraFlags ?? []).join(", ") || "none"} | ${(row.missingFlags ?? []).join(", ") || "none"} |`
         );
       }
     }
@@ -1378,7 +1378,7 @@ export function renderReport(cli, contract, meta, fetched, findings, helpProbe =
     lines.push("- No findings. (Default offline scan is advisory-only.)");
   } else {
     for (const f of findings) {
-      lines.push(`- **${f.severity}** — ${f.message}`);
+      lines.push(`- **${f.severity}**: ${f.message}`);
     }
   }
   lines.push("");

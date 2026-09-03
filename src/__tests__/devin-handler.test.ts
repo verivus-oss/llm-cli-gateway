@@ -7,8 +7,26 @@
  * Session resume args (`--resume` / `--continue`) are appended by the handler
  * via resolveGrokSessionArgs and covered by that helper's own tests.
  */
-import { describe, it, expect } from "vitest";
+import { mkdtempSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { afterAll, beforeAll, describe, it, expect } from "vitest";
 import { prepareDevinRequest } from "../index.js";
+
+// #296 defaults --export on, and resolving that path creates a directory.
+// Point HOME at a temp dir so a test run writes nothing into the real home.
+let fakeHome: string;
+let realHome: string | undefined;
+beforeAll(() => {
+  fakeHome = mkdtempSync(join(tmpdir(), "devin-handler-home-"));
+  realHome = process.env.HOME;
+  process.env.HOME = fakeHome;
+});
+afterAll(() => {
+  if (realHome === undefined) delete process.env.HOME;
+  else process.env.HOME = realHome;
+  rmSync(fakeHome, { recursive: true, force: true });
+});
 
 // prepareDevinRequest ignores its runtime arg (prefixed `_runtime`); a `never`
 // cast satisfies the signature without constructing a full GatewayServerRuntime.
@@ -20,6 +38,7 @@ function prep(params: {
   permissionMode?: "auto" | "accept-edits" | "smart" | "dangerous";
   promptFile?: string;
   optimizePrompt?: boolean;
+  exportSession?: boolean | string;
 }): { args: string[] } | { content: unknown } {
   return prepareDevinRequest(
     {
@@ -28,6 +47,7 @@ function prep(params: {
       permissionMode: params.permissionMode,
       promptFile: params.promptFile,
       optimizePrompt: params.optimizePrompt ?? false,
+      exportSession: params.exportSession,
       operation: "devin_request",
     },
     RUNTIME
@@ -102,8 +122,18 @@ describe("Slice D0 prepareDevinRequest — headless argv", () => {
     expect(args[idx + 1]).toBe("/tmp/p.txt");
   });
 
-  it("emits only `-p -- <prompt>` when no optional flags are supplied", () => {
+  it("emits `-p`, the default #296 transcript export, then the prompt", () => {
+    // The export is ON by default: devin writes only its final text to stdout,
+    // so without it a run leaves no reconstructable record. The next case pins
+    // the opt-out, so the pair covers both directions.
     const args = argsOf(prep({ prompt: "just a prompt" }));
+    expect(args[0]).toBe("-p");
+    expect(args.slice(-2)).toEqual(["--", "just a prompt"]);
+    expect(args).toContain("--export");
+  });
+
+  it("emits only `-p -- <prompt>` when the export is declined", () => {
+    const args = argsOf(prep({ prompt: "just a prompt", exportSession: false }));
     expect(args).toEqual(["-p", "--", "just a prompt"]);
   });
 

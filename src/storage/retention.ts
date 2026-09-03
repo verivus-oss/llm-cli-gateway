@@ -8,9 +8,9 @@
  * surface derive from it instead of restating it, which is what stops
  * `doctor.ts` hard-coding `unbounded = ["requests"]` a second time.
  *
- * Deleting transcript history is destructive and user-visible, so the two new
- * bounds default to OFF. An upgrade deletes nothing it did not already delete;
- * what changes is that an operator can now SEE the number and choose.
+ * Deleting transcript history is destructive and user-visible. All transcript
+ * bounds default to OFF. An operator can opt into one bound for jobs and
+ * requests together, or choose different explicit bounds with full visibility.
  */
 
 /** The subsystems a retention bound can be expressed for. */
@@ -31,10 +31,10 @@ export const RETENTION_SUBSYSTEMS = {
   jobs: {
     id: "jobs",
     tables: ["jobs"],
-    defaultDays: 30,
+    defaultDays: null,
     destructive: true,
     rationale:
-      "The bound that already existed. Changing it here would change behaviour on every installed host, which is not what expressing a policy once is for.",
+      "Complete provider transcripts, launched argv and replay context remain available until an operator chooses a bound.",
   },
   requests: {
     id: "requests",
@@ -100,7 +100,7 @@ export interface RetentionPolicy {
 
 export interface RetentionInput {
   /** `[persistence].retentionDays`, which has always meant the job store. */
-  jobRetentionDays: number;
+  jobRetentionDays: number | null;
   /** `[persistence.retention]`, per subsystem. Absent keys keep the default. */
   overrides?: Partial<Record<RetentionSubsystemId, number>>;
 }
@@ -127,7 +127,7 @@ export function resolveRetentionPolicy(input: RetentionInput): RetentionPolicy {
  * rather than a second opinion about what the defaults are.
  */
 export function persistenceRetentionPolicy(persistence: {
-  retentionDays: number;
+  retentionDays: number | null;
   retention?: RetentionPolicy;
 }): RetentionPolicy {
   return (

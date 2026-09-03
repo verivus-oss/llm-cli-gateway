@@ -264,11 +264,10 @@ describe("repository review integration", () => {
       stdin: prompt,
     });
     expect(callFor(fake.calls, "gemini").args).toEqual([
-      "--print",
+      `--print=${prompt}`,
       "--mode",
       "plan",
       "--sandbox",
-      prompt,
     ]);
     expect(callFor(fake.calls, "grok").args).toEqual([`-p=${prompt}`, "--permission-mode", "plan"]);
     expect(callFor(fake.calls, "mistral").args).toEqual([`-p=${prompt}`, "--agent", "plan"]);

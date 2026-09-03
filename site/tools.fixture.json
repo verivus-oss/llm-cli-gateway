@@ -1,8 +1,8 @@
 {
   "generatedAt": "deterministic build output",
   "packageName": "llm-cli-gateway",
-  "packageVersion": "3.2.0-rc.1",
-  "siteVersion": "3.0.0",
+  "packageVersion": "3.2.0",
+  "siteVersion": "3.2.0",
   "captureCommand": "node scripts/generate-site-discovery.mjs",
   "source": "runtime MCP tools/list from dist/index.js over in-memory MCP transport",
   "toolCount": 65,
@@ -2339,7 +2339,7 @@
                 "type": "string"
               }
             ],
-            "description": "Export the session (Devin --export [<PATH>]). true emits a bare --export; a string path emits --export <path>."
+            "description": "Export the conversation (Devin --export [<PATH>]). ON BY DEFAULT to a gateway-owned path under ~/.llm-cli-gateway/devin-transcripts: devin writes only its final text to stdout, so without the export a run leaves no reconstructable record. Pass false to opt out, true for a bare --export (devin picks the path), or a string for your own path."
           },
           "respectWorkspaceTrust": {
             "type": "boolean",
@@ -2529,7 +2529,7 @@
                 "type": "string"
               }
             ],
-            "description": "Export the session (Devin --export [<PATH>]). true emits a bare --export; a string path emits --export <path>."
+            "description": "Export the conversation (Devin --export [<PATH>]). ON BY DEFAULT to a gateway-owned path under ~/.llm-cli-gateway/devin-transcripts: devin writes only its final text to stdout, so without the export a run leaves no reconstructable record. Pass false to opt out, true for a bare --export (devin picks the path), or a string for your own path."
           },
           "respectWorkspaceTrust": {
             "type": "boolean",
@@ -2851,7 +2851,7 @@
               "stream-json"
             ],
             "default": "text",
-            "description": "Output format. The Antigravity agy headless path emits text only; json and stream-json are rejected at request time. Per-request token usage and cost are therefore not available for gemini."
+            "description": "Output format (text|json|stream-json), default text. stream-json is the only agy wire that carries the working directory, the tool list, per-tool parameters and per-step token usage; text carries none of them, so per-request usage and cost are unavailable on the default."
           },
           "sandbox": {
             "type": "boolean",
@@ -3120,7 +3120,7 @@
               "stream-json"
             ],
             "default": "text",
-            "description": "Output format. The Antigravity agy headless path emits text only; json and stream-json are rejected at request time. Per-request token usage and cost are therefore not available for gemini."
+            "description": "Output format (text|json|stream-json), default text. stream-json is the only agy wire that carries the working directory, the tool list, per-tool parameters and per-step token usage; text carries none of them, so per-request usage and cost are unavailable on the default."
           },
           "sandbox": {
             "type": "boolean",
@@ -4201,10 +4201,16 @@
             "default": 0,
             "description": "Captured stderr character offset for resumable retrieval. Non-zero offsets require rawOutput:true."
           },
+          "nativeTranscriptOffsetChars": {
+            "type": "integer",
+            "minimum": 0,
+            "default": 0,
+            "description": "Provider-native transcript character offset for resumable retrieval. Non-zero offsets require rawOutput:true."
+          },
           "rawOutput": {
             "type": "boolean",
             "default": false,
-            "description": "Return captured provider streams without display parsing or compression. Local stdio pages concatenate to the captured streams; remote pages redact provider session IDs. Required for resumable offsets."
+            "description": "Return captured provider streams without display parsing or compression. Available only to local stdio callers. Required for resumable offsets."
           }
         },
         "required": [
@@ -4324,7 +4330,7 @@
     },
     {
       "name": "llm_request_result",
-      "description": "Read back any persisted request (sync or async) from the flight recorder by correlationId, including prompt and response.",
+      "description": "Read back any persisted request (sync or async) from the flight recorder by correlationId, including prompt and response. Local callers can also include the linked complete job record.",
       "inputSchema": {
         "type": "object",
         "properties": {
@@ -4344,6 +4350,11 @@
             "type": "boolean",
             "default": false,
             "description": "Include the full persisted prompt text in the result"
+          },
+          "includeJobRecord": {
+            "type": "boolean",
+            "default": false,
+            "description": "Include the linked raw provider capture and replay context when called over local stdio. Remote callers receive no transcript or host paths."
           }
         },
         "required": [

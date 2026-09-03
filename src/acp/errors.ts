@@ -125,8 +125,9 @@ function redactJsonLikeBodies(input: string): string {
     stack.pop();
     if (stack.length > 0) continue;
 
+    const body = input.slice(bodyStart, index + 1);
     out += input.slice(cursor, bodyStart);
-    out += "<redacted-json>";
+    out += isLikelyJsonPayload(body) ? "<redacted-json>" : body;
     cursor = index + 1;
     bodyStart = -1;
   }

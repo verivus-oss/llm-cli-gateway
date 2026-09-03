@@ -102,6 +102,59 @@ describe("F3b-2 job / request ownership isolation", () => {
     });
   }
 
+  async function seedJobWithHostEvidence(id: string, ownerPrincipal: string): Promise<void> {
+    const now = new Date().toISOString();
+    await store.recordStart({
+      id,
+      correlationId: `corr-${id}`,
+      requestKey: `host-evidence-${id}`,
+      cli: "devin",
+      args: [],
+      startedAt: now,
+      pid: null,
+      ownerPrincipal,
+      ownerInstance: "test-instance",
+      cwd: { scope: "caller", path: "/private/alice/workspace", workspaceAlias: null },
+      replayContext: {
+        version: 1,
+        repositoryHead: "a".repeat(40),
+        instructionFiles: [
+          {
+            path: "/private/alice/workspace/AGENTS.md",
+            sha256: "b".repeat(64),
+            sourceBytes: 18,
+            effectiveBytes: 18,
+            effectiveLimitBytes: null,
+            truncated: false,
+            status: "captured",
+          },
+        ],
+      },
+      captureFormat: "atif-v1.7",
+    });
+    await store.recordComplete({
+      id,
+      status: "completed",
+      exitCode: 0,
+      stdout: "alice result",
+      stderr: "",
+      outputTruncated: false,
+      error: null,
+      finishedAt: now,
+    });
+    await store.recordCapture({
+      id,
+      ownerInstance: "test-instance",
+      captureStatus: "captured_whole",
+      outputDroppedBytes: 0,
+      nativeTranscript: "private ATIF transcript",
+      nativeTranscriptBytes: 23,
+      nativeTranscriptTruncated: false,
+      nativeTranscriptDroppedBytes: 0,
+      captureError: null,
+    });
+  }
+
   it("llm_job_status is own-or-not-found across principals", async () => {
     await seedAliceJob();
 
@@ -150,6 +203,37 @@ describe("F3b-2 job / request ownership isolation", () => {
     expect(alice.result.stdout).toContain("alice private output");
   });
 
+  it("withholds host replay evidence on every remote job read surface", async () => {
+    await seedJobWithHostEvidence("job-alice-host-evidence", "alice");
+    const jobId = "job-alice-host-evidence";
+
+    const responses = [
+      await call("llm_job_status", { jobId }, "alice"),
+      await call("llm_job_watch", { jobId, waitMs: 0 }, "alice"),
+      await call("llm_job_result", { jobId, maxChars: 200000 }, "alice"),
+      await call("job_status", { jobId }, "alice"),
+      await call("job_result", { jobId, maxChars: 200000 }, "alice"),
+    ];
+
+    for (const response of responses) {
+      const encoded = JSON.stringify(response);
+      expect(response.success).toBe(true);
+      expect(encoded).not.toContain("/private/alice/workspace");
+      expect(encoded).not.toContain("private ATIF transcript");
+      expect(encoded).not.toContain("executionContext");
+      expect(encoded).not.toContain("nativeTranscript");
+    }
+
+    await seedJobWithHostEvidence("job-local-host-evidence", "local");
+    const local = await call("llm_job_result", {
+      jobId: "job-local-host-evidence",
+      maxChars: 200000,
+      rawOutput: true,
+    });
+    expect(local.result.executionContext.cwd.path).toBe("/private/alice/workspace");
+    expect(local.result.nativeTranscript).toBe("private ATIF transcript");
+  });
+
   it("llm_job_cancel reports another principal's job as not found", async () => {
     await seedAliceJob();
     const bob = await call("llm_job_cancel", { jobId: "job-alice" }, "bob");
@@ -191,6 +275,106 @@ describe("F3b-2 job / request ownership isolation", () => {
     );
     expect(alice.success).toBe(true);
     expect(alice.request.correlationId).toBe("req-alice");
+  });
+
+  it("llm_request_result exposes the linked complete job record only to local stdio", async () => {
+    const now = new Date().toISOString();
+    await store.recordStart({
+      id: "job-local-record",
+      correlationId: "req-local-record",
+      requestKey: "complete-record",
+      cli: "claude",
+      args: ["--output-format", "stream-json"],
+      outputFormat: "text",
+      startedAt: now,
+      pid: null,
+      ownerPrincipal: "local",
+      cwd: { scope: "caller", path: "/private/workspace", workspaceAlias: null },
+      replayContext: {
+        version: 1,
+        repositoryHead: "a".repeat(40),
+        instructionFiles: [
+          {
+            path: "/private/workspace/CLAUDE.md",
+            sha256: "b".repeat(64),
+            sourceBytes: 12,
+            effectiveBytes: 12,
+            effectiveLimitBytes: null,
+            truncated: false,
+            status: "captured",
+          },
+        ],
+      },
+      captureFormat: "stream-json",
+    });
+    await store.recordComplete({
+      id: "job-local-record",
+      status: "completed",
+      exitCode: 0,
+      stdout: '{"type":"assistant","message":{"content":[]}}',
+      stderr: "",
+      outputTruncated: false,
+      error: null,
+      finishedAt: now,
+    });
+    await flight.logStart({
+      correlationId: "req-local-record",
+      cli: "claude",
+      model: "sonnet",
+      prompt: "prompt",
+      asyncJobId: "job-local-record",
+      ownerPrincipal: "local",
+    });
+    await flight.logComplete("req-local-record", {
+      response: "response",
+      durationMs: 1,
+      retryCount: 0,
+      circuitBreakerState: "closed",
+      optimizationApplied: false,
+      exitCode: 0,
+      status: "completed",
+    });
+
+    const local = await call("llm_request_result", {
+      correlationId: "req-local-record",
+      maxChars: 200000,
+      includeJobRecord: true,
+    });
+    expect(local.jobRecord.stdout).toContain('"type":"assistant"');
+    expect(local.jobRecord.executionContext.cwd.path).toBe("/private/workspace");
+    expect(local.jobRecord.executionContext.replay.repositoryHead).toBe("a".repeat(40));
+
+    await runWithRequestContext(ctx("alice"), () =>
+      flight.logStart({
+        correlationId: "req-remote-record",
+        cli: "claude",
+        model: "sonnet",
+        prompt: "prompt",
+        asyncJobId: "job-local-record",
+      })
+    );
+    await flight.logComplete("req-remote-record", {
+      response: "response",
+      durationMs: 1,
+      retryCount: 0,
+      circuitBreakerState: "closed",
+      optimizationApplied: false,
+      exitCode: 0,
+      status: "completed",
+    });
+
+    const remote = await call(
+      "llm_request_result",
+      {
+        correlationId: "req-remote-record",
+        maxChars: 200000,
+        includeJobRecord: true,
+      },
+      "alice"
+    );
+    expect(remote.jobRecord).toBeNull();
+    expect(remote.jobRecordWithheld).toMatch(/local stdio/);
+    expect(JSON.stringify(remote)).not.toContain("/private/workspace");
   });
 
   it("llm_request_result redacts native provider ids for the remote owner before slicing", async () => {

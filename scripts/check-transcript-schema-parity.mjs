@@ -31,12 +31,13 @@
  * DECLARED_TYPE_DIVERGENCE below, so a NEW divergence has to be added here
  * consciously rather than discovered during a migration.
  */
-import { readFileSync, readdirSync } from "node:fs";
+import { readFileSync } from "node:fs";
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
+import { RECORDER_TABLES, transcriptMigrationText } from "./transcript-migration-selection.mjs";
 
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
-const TABLES = ["requests", "gateway_metadata"];
+const TABLES = RECORDER_TABLES;
 
 /**
  * SQLite stores these differently from PostgreSQL BY DESIGN, and the migration
@@ -142,13 +143,13 @@ function declarationsFrom(text, label) {
  * when the two actually agreed. Concatenating in version order lets
  * `parseAlterAdds` fold the later columns in the same way it already does for
  * the recorder's own migration path.
+ *
+ * The selection is shared with the dynamic mirror in flight-recorder-pg.test.ts
+ * so the two cannot drift into disagreeing about which migrations are the
+ * recorder's.
  */
 function migrationText() {
-  const dir = join(ROOT, "migrations");
-  const files = readdirSync(dir)
-    .filter(f => /^\d+_.*\.sql$/.test(f) && Number(f.slice(0, 3)) >= 22)
-    .sort();
-  return files.map(f => readFileSync(join(dir, f), "utf8")).join("\n");
+  return transcriptMigrationText(join(ROOT, "migrations"));
 }
 
 const sources = [

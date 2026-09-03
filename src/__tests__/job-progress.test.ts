@@ -190,7 +190,7 @@ describe("JobProgressTracker", () => {
   });
 
   it("truthfully labels providers without structured adapters as activity only", () => {
-    const tracker = new JobProgressTracker("mistral", "streaming");
+    const tracker = new JobProgressTracker("devin");
     tracker.ingest("stderr", Buffer.from("private provider log"));
     const snapshot = tracker.snapshot();
 

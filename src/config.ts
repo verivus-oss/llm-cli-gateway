@@ -10,6 +10,7 @@ import { hashSecret, isSecretHash } from "./oauth.js";
 import { isHttpsOrLoopbackUrl, isLoopbackUrl } from "./api-http.js";
 import type { ApiProviderKind } from "./api-provider.js";
 import { CLI_TYPES } from "./provider-types.js";
+import { carriesPostgresDsnScheme } from "./storage/roles.js";
 import type { StorageRoleDsns } from "./storage/roles.js";
 import {
   DEFAULT_RETENTION_SWEEP_INTERVAL_MS,
@@ -19,13 +20,9 @@ import {
 import type { QualityTier } from "./least-cost-types.js";
 
 // Zod schemas for configuration validation
-const DatabaseUrlSchema = z
-  .string()
-  .trim()
-  .min(1)
-  .refine(url => url.startsWith("postgresql://") || url.startsWith("postgres://"), {
-    message: "Database URL must start with postgresql:// or postgres://",
-  });
+const DatabaseUrlSchema = z.string().min(1).refine(carriesPostgresDsnScheme, {
+  message: "Database URL must start with postgresql:// or postgres://",
+});
 
 export interface DatabaseConfig {
   connectionString: string;
@@ -293,7 +290,7 @@ export function resetSessionDatabaseUrlWarning(): void {
 export const PERSISTENCE_BACKENDS = ["sqlite", "postgres", "memory", "none"] as const;
 export type PersistenceBackend = (typeof PERSISTENCE_BACKENDS)[number];
 
-export const DEFAULT_JOB_RETENTION_DAYS = 30;
+export const DEFAULT_JOB_RETENTION_DAYS: number | null = null;
 export const DEFAULT_DEDUP_WINDOW_MS = 60 * 60 * 1000; // 1 hour
 
 // Issue #139 (durable instance-lease orphan recovery): the lease/heartbeat/sweep
@@ -347,10 +344,8 @@ const REFUSED_ROLE_KEYS: Readonly<Record<string, string>> = {
  * under a permissive schema is silently no bound at all, and the operator has
  * no way to tell that from a bound that ran and found nothing.
  *
- * `jobs` is an override for `[persistence].retentionDays`, which keeps meaning
- * the job store and keeps its 30-day default. `requests` and
- * `wedgedValidationRuns` have NO default: leaving them out deletes nothing,
- * which is what an upgrade must do to a host that never asked for either.
+ * `jobs` is an override for the deprecated `[persistence].retentionDays` key.
+ * Every transcript bound defaults to OFF: leaving them out deletes nothing.
  */
 const PersistenceRetentionSchema = z
   .object({
@@ -366,8 +361,15 @@ const PersistenceSchema = z
     backend: z.enum(PERSISTENCE_BACKENDS).default("sqlite"),
     roles: PersistenceRolesSchema.optional(),
     path: z.string().optional(),
+    // Round 13 BLOCKER. This was a bare `z.string()`, the ONE connection string
+    // with no scheme check while `reader`, `analytics` and `retention` all had
+    // one. `redactDsn(roleDsns.app)` feeds the startup log line, and pg parses
+    // a string with no authority by putting the input in the PATH, so a
+    // leading space or a missing slash here printed the operator's password.
+    // The gate in `flight-recorder-pg.ts` now refuses the same shapes; this is
+    // the half that stops them reaching a live connection at all.
     dsn: DatabaseUrlSchema.optional(),
-    retentionDays: z.number().positive().default(DEFAULT_JOB_RETENTION_DAYS),
+    retentionDays: z.number().positive().nullable().default(DEFAULT_JOB_RETENTION_DAYS),
     retention: PersistenceRetentionSchema.default({}),
     dedupWindowMs: z.number().int().nonnegative().default(DEFAULT_DEDUP_WINDOW_MS),
     acknowledgeEphemeral: z.boolean().default(false),
@@ -434,10 +436,9 @@ export interface PersistenceConfig {
    */
   roleDsns: StorageRoleDsns;
   /**
-   * The job store's bound. Unchanged in meaning and default; `retention.days.jobs`
-   * is the same number reached through the one policy.
+   * Deprecated job-store bound. Null means unbounded; use retention.days.jobs.
    */
-  retentionDays: number;
+  retentionDays: number | null;
   /**
    * Every bound, resolved once. `doctor` and `llm_process_health` report this
    * rather than each deciding for itself which subsystems are unbounded.
@@ -648,17 +649,18 @@ function applyEnvOverrides(
   }
 
   const retEnv = process.env.LLM_GATEWAY_JOB_RETENTION_DAYS;
-  if (retEnv !== undefined) {
+  if (retEnv?.trim()) {
     const n = Number(retEnv);
-    if (Number.isFinite(n) && n > 0) {
-      out.retentionDays = n;
-      sources.envOverrides.push("LLM_GATEWAY_JOB_RETENTION_DAYS");
-      logWarn(
-        logger,
-        "LLM_GATEWAY_JOB_RETENTION_DAYS is deprecated; set [persistence].retentionDays in config.toml",
-        { retentionDays: n }
-      );
+    if (!Number.isFinite(n) || n <= 0) {
+      throw new Error("LLM_GATEWAY_JOB_RETENTION_DAYS must be a positive number when set");
     }
+    out.retentionDays = n;
+    sources.envOverrides.push("LLM_GATEWAY_JOB_RETENTION_DAYS");
+    logWarn(
+      logger,
+      "LLM_GATEWAY_JOB_RETENTION_DAYS is deprecated; set [persistence].retentionDays in config.toml",
+      { retentionDays: n }
+    );
   }
 
   const dedupEnv = process.env.LLM_GATEWAY_DEDUP_WINDOW_MS;

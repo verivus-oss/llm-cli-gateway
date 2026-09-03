@@ -218,19 +218,28 @@ export function familyBaseRisk(provider: CliType, fam: ProviderAdminFamily): Cli
  */
 function contractAdminProjectionCeiling(
   provider: CliType,
-  commandPath: readonly string[]
+  commandPath: readonly string[],
+  projectReviewedTrackedEntry: boolean
 ): CliSubcommandExposure | null {
   const exactContract = getCliSubcommandContract(provider, commandPath);
-  return exactContract?.adminProjection === "not_exposed" ? "not_exposed" : null;
+  if (exactContract?.adminProjection === "not_exposed") return "not_exposed";
+  if (exactContract?.exposure === "not_exposed") return "not_exposed";
+  if (exactContract?.exposure === "tracked_only" && !projectReviewedTrackedEntry)
+    return "tracked_only";
+  return null;
 }
 
 /** Resolve projection exposure without allowing registry metadata to widen a contract ceiling. */
 function projectedAdminExposure(
   provider: CliType,
   commandPath: readonly string[],
-  risk: CliSubcommandRisk
+  risk: CliSubcommandRisk,
+  projectReviewedTrackedEntry: boolean
 ): CliSubcommandExposure {
-  return contractAdminProjectionCeiling(provider, commandPath) ?? adminRiskToExposure(risk);
+  return (
+    contractAdminProjectionCeiling(provider, commandPath, projectReviewedTrackedEntry) ??
+    adminRiskToExposure(risk)
+  );
 }
 
 // ---------------------------------------------------------------------------
@@ -297,7 +306,17 @@ export function projectProviderAdminOperations(
     if (adminSurfaceKind(fam) !== "cli-subcommand") continue;
 
     const baseRisk = familyBaseRisk(def.id, fam);
-    const familyExposure = projectedAdminExposure(def.id, [fam.family], baseRisk);
+    // Rebaseline-generated families say UNVERIFIED until a maintainer reviews
+    // them. Their tracked_only contract is a hard catalog boundary. An
+    // established registry family may still project reviewed child operations
+    // independently from its coarse upstream catalog entry.
+    const projectReviewedTrackedEntry = !/\bUNVERIFIED\b/i.test(fam.evidence);
+    const familyExposure = projectedAdminExposure(
+      def.id,
+      [fam.family],
+      baseRisk,
+      projectReviewedTrackedEntry
+    );
 
     if (!discovered) {
       ops.push({
@@ -323,7 +342,12 @@ export function projectProviderAdminOperations(
       for (const sub of subOps) {
         if (!isSafeAdminToken(sub.name)) continue; // never build argv from junk
         const risk = classifyOperationRisk(sub.name, baseRisk, { isSubcommand: true });
-        const exposure = projectedAdminExposure(def.id, [fam.family, sub.name], risk);
+        const exposure = projectedAdminExposure(
+          def.id,
+          [fam.family, sub.name],
+          risk,
+          projectReviewedTrackedEntry
+        );
         ops.push({
           provider: def.id,
           family: fam.family,
@@ -353,7 +377,12 @@ export function projectProviderAdminOperations(
     const baseExposure = adminRiskToExposure(baseRisk);
     const risk =
       baseExposure === "not_exposed" ? baseRisk : classifyOperationRisk(fam.family, baseRisk);
-    const exposure = projectedAdminExposure(def.id, [fam.family], risk);
+    const exposure = projectedAdminExposure(
+      def.id,
+      [fam.family],
+      risk,
+      projectReviewedTrackedEntry
+    );
     ops.push({
       provider: def.id,
       family: fam.family,

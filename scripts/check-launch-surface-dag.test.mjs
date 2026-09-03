@@ -128,19 +128,40 @@ describe("launch-surface DAG checker", () => {
     );
 
     expect(problemText()).toContain(
-      'field.trustCursorWorkspace.flow[4]: src/validation-orchestrator.ts:926 no longer carries "reviewAuthorization"'
+      'field.trustCursorWorkspace.flow[4]: src/validation-orchestrator.ts no longer carries "reviewAuthorization: args.reviewAuthorization"'
     );
   });
 
-  it("rejects a node with its coordinate declaration removed", () => {
+  it("does not accept flow evidence copied into a comment", () => {
+    mutate("src/validation-orchestrator.ts", source =>
+      source.replace(
+        "...(args.reviewAuthorization ? { reviewAuthorization: args.reviewAuthorization } : {}),",
+        "...{}, // reviewAuthorization: args.reviewAuthorization"
+      )
+    );
+
+    expect(problemText()).toContain(
+      'field.trustCursorWorkspace.flow[4]: src/validation-orchestrator.ts no longer carries "reviewAuthorization: args.reviewAuthorization"'
+    );
+  });
+
+  it("rejects a node with its named symbol removed", () => {
     mutate(DAG_PATH, source =>
       source.replace(
-        'file = "src/validation-tools.ts"\nline = 420',
+        'file = "src/validation-tools.ts"\nsymbol = "review_changes"',
         'file = "src/validation-tools.ts"'
       )
     );
 
-    expect(problemText()).toContain("node[0].line: missing positive integer");
+    expect(problemText()).toContain("node[0].symbol: missing non-empty string");
+  });
+
+  it("rejects layout coordinates in the map", () => {
+    mutate(DAG_PATH, source =>
+      source.replace('symbol = "review_changes"', 'symbol = "review_changes"\nline = 420')
+    );
+
+    expect(problemText()).toContain("node[0]: layout coordinates are forbidden; use symbol");
   });
 
   it("rejects an invariant with its caller count removed", () => {

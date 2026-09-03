@@ -553,6 +553,60 @@ export const UPSTREAM_CLI_CONTRACTS: Record<CliType, CliContract> = {
       // this command. Catalogued only (exposure defaults to tracked_only, so it
       // is not reachable by callers); risk is a conservative default pending
       // maintainer verification.
+      attach: subcommand(
+        ["attach"],
+        "Upstream-declared claude command (auto-catalogued, unverified).",
+        "writes_local_config"
+      ),
+      // Auto-declared by `npm run providers:rebaseline`: upstream advertises
+      // this command. Catalogued only (exposure defaults to tracked_only, so it
+      // is not reachable by callers); risk is a conservative default pending
+      // maintainer verification.
+      kill: subcommand(
+        ["kill"],
+        "Upstream-declared claude command (auto-catalogued, unverified).",
+        "writes_local_config"
+      ),
+      // Auto-declared by `npm run providers:rebaseline`: upstream advertises
+      // this command. Catalogued only (exposure defaults to tracked_only, so it
+      // is not reachable by callers); risk is a conservative default pending
+      // maintainer verification.
+      logs: subcommand(
+        ["logs"],
+        "Upstream-declared claude command (auto-catalogued, unverified).",
+        "writes_local_config"
+      ),
+      // Auto-declared by `npm run providers:rebaseline`: upstream advertises
+      // this command. Catalogued only (exposure defaults to tracked_only, so it
+      // is not reachable by callers); risk is a conservative default pending
+      // maintainer verification.
+      respawn: subcommand(
+        ["respawn"],
+        "Upstream-declared claude command (auto-catalogued, unverified).",
+        "writes_local_config"
+      ),
+      // Auto-declared by `npm run providers:rebaseline`: upstream advertises
+      // this command. Catalogued only (exposure defaults to tracked_only, so it
+      // is not reachable by callers); risk is a conservative default pending
+      // maintainer verification.
+      rm: subcommand(
+        ["rm"],
+        "Upstream-declared claude command (auto-catalogued, unverified).",
+        "writes_local_config"
+      ),
+      // Auto-declared by `npm run providers:rebaseline`: upstream advertises
+      // this command. Catalogued only (exposure defaults to tracked_only, so it
+      // is not reachable by callers); risk is a conservative default pending
+      // maintainer verification.
+      stop: subcommand(
+        ["stop"],
+        "Upstream-declared claude command (auto-catalogued, unverified).",
+        "writes_local_config"
+      ),
+      // Auto-declared by `npm run providers:rebaseline`: upstream advertises
+      // this command. Catalogued only (exposure defaults to tracked_only, so it
+      // is not reachable by callers); risk is a conservative default pending
+      // maintainer verification.
       import: subcommand(
         ["import"],
         "Upstream-declared claude command (auto-catalogued, unverified).",
@@ -609,7 +663,11 @@ export const UPSTREAM_CLI_CONTRACTS: Record<CliType, CliContract> = {
           "--settings",
           "--strict-mcp-config",
         ],
-        { tier: "inspect", flagArities: { "--json": "none", "--strict-mcp-config": "none" } }
+        {
+          acknowledgedUpstreamFlags: ["--restricted"],
+          tier: "inspect",
+          flagArities: { "--json": "none", "--strict-mcp-config": "none" },
+        }
       ),
       auth: subcommand(["auth"], "Manage Claude authentication state.", "auth", [], {
         exposure: "not_exposed",
@@ -897,11 +955,15 @@ export const UPSTREAM_CLI_CONTRACTS: Record<CliType, CliContract> = {
       "--ide",
       "--no-chrome",
       "--print", // long form of declared -p
+      "--permission-prompt-tool",
+      "--permission-prompts",
       "--prompt-suggestions",
+      "--restricted",
       "--remote-control",
       "--remote-control-session-name-prefix",
       "--teleport",
       "--tmux",
+      "--system-prompt-snapshot",
       "--version",
       "--worktree",
     ],
@@ -1073,7 +1135,7 @@ export const UPSTREAM_CLI_CONTRACTS: Record<CliType, CliContract> = {
     ],
   },
   codex: {
-    acknowledgedUpstreamFlags: ["--approve-for-me"],
+    acknowledgedUpstreamFlags: ["--approve-for-me", "--thread-source"],
     cli: "codex",
     executable: "codex",
     upstream: "OpenAI Codex CLI",
@@ -1207,7 +1269,7 @@ export const UPSTREAM_CLI_CONTRACTS: Record<CliType, CliContract> = {
           "--version",
         ],
         {
-          acknowledgedUpstreamFlags: ["--approve-for-me"],
+          acknowledgedUpstreamFlags: ["--approve-for-me", "--thread-source"],
           children: {
             resume: subcommand(
               ["exec", "resume"],
@@ -1231,7 +1293,8 @@ export const UPSTREAM_CLI_CONTRACTS: Record<CliType, CliContract> = {
                 "--output-schema",
                 "--skip-git-repo-check",
                 "--strict-config",
-              ]
+              ],
+              { acknowledgedUpstreamFlags: ["--thread-source"] }
             ),
             review: subcommand(
               ["exec", "review"],
@@ -1256,7 +1319,8 @@ export const UPSTREAM_CLI_CONTRACTS: Record<CliType, CliContract> = {
                 "--strict-config",
                 "--title",
                 "--uncommitted",
-              ]
+              ],
+              { acknowledgedUpstreamFlags: ["--thread-source"] }
             ),
           },
         }
@@ -1878,6 +1942,17 @@ export const UPSTREAM_CLI_CONTRACTS: Record<CliType, CliContract> = {
       // this command. Catalogued only (exposure defaults to tracked_only, so it
       // is not reachable by callers); risk is a conservative default pending
       // maintainer verification.
+      "mic-serve": subcommand(
+        ["mic-serve"],
+        "Upstream-declared gemini command (auto-catalogued, unverified).",
+        "writes_local_config",
+        [],
+        { acknowledgedUpstreamFlags: ["--addr"] }
+      ),
+      // Auto-declared by `npm run providers:rebaseline`: upstream advertises
+      // this command. Catalogued only (exposure defaults to tracked_only, so it
+      // is not reachable by callers); risk is a conservative default pending
+      // maintainer verification.
       mcp: subcommand(
         ["mcp"],
         "Upstream-declared gemini command (auto-catalogued, unverified).",
@@ -1962,7 +2037,8 @@ export const UPSTREAM_CLI_CONTRACTS: Record<CliType, CliContract> = {
     flags: {
       "--print": {
         arity: "none",
-        description: "Run a single prompt non-interactively",
+        inlineValue: true,
+        description: "Run a single prompt non-interactively; attach the prompt with =",
       },
       "-p": { arity: "none", description: "Short alias for --print" },
       "--prompt": { arity: "none", description: "Alias for --print" },
@@ -1987,6 +2063,21 @@ export const UPSTREAM_CLI_CONTRACTS: Record<CliType, CliContract> = {
         arity: "none",
         description: "Create a new Antigravity project for this session",
       },
+      // Measured against agy 1.1.24 in
+      // docs/evidence/c1-capture-ceiling-2026-09-02.md. The `values` list is
+      // ENFORCED by validateUpstreamCliArgs, so a value missing here is a value
+      // the gateway refuses even though the binary accepts it.
+      "--output-format": {
+        arity: "one",
+        values: ["text", "json", "stream-json"],
+        description: "Output format for print mode",
+      },
+      "--input-format": {
+        arity: "one",
+        values: ["text", "stream-json"],
+        description:
+          "Input format for print mode. stream-json reads NDJSON turns from stdin and requires stream-json output.",
+      },
       "--print-timeout": {
         arity: "one",
         description: "Print-mode wait timeout as a Go duration string (e.g. 5m0s)",
@@ -2005,12 +2096,16 @@ export const UPSTREAM_CLI_CONTRACTS: Record<CliType, CliContract> = {
     // the bounded gateway approval profiles above.
     // `--effort` (agy 1.1.7 reasoning effort) is advertised by `agy --help` but
     // the gateway emits no gemini effort flag, so it stays acknowledge-only.
-    // `--json-schema` and `--output-format` arrived in agy 1.1.8. They are
-    // acknowledge-only for the same reason: the gemini adapter's outputFormat is
-    // text-only (the Antigravity headless path emits text, and json/stream-json
-    // are rejected at request time), so the gateway emits neither. Recording
-    // them here keeps a genuinely new upstream flag standing out as drift rather
-    // than being lost in a permanently failing probe.
+    // `--json-schema` arrived in agy 1.1.8 and stays acknowledge-only: the
+    // gateway emits no gemini output schema.
+    //
+    // `--output-format` was acknowledge-only on the claim that the Antigravity
+    // headless path emits text. That claim was FALSE at 1.1.24 and is measured
+    // false in docs/evidence/c1-capture-ceiling-2026-09-02.md: `agy --print
+    // --output-format stream-json` returns an init event carrying cwd,
+    // permission_mode and 57 tool names, one step_update per tool naming its
+    // parameters, per-step usage, and a result event with conversation_id. It
+    // is a real flag now, below.
     acknowledgedUpstreamFlags: [
       "--agent",
       "--disable-slash-commands",
@@ -2030,7 +2125,6 @@ export const UPSTREAM_CLI_CONTRACTS: Record<CliType, CliContract> = {
       // the rebaseline procedure, not a one-time fix.
       "--json-schema",
       "--log-file",
-      "--output-format",
       "--prompt-interactive",
     ],
     env: {},
@@ -2038,81 +2132,104 @@ export const UPSTREAM_CLI_CONTRACTS: Record<CliType, CliContract> = {
       {
         id: "gemini-minimal",
         description: "Minimal Antigravity print-mode prompt request",
-        args: ["--print", "hello"],
+        args: ["--print=hello"],
         expect: "pass",
+      },
+      {
+        // #296: stream-json is the only agy wire carrying the working
+        // directory, the tool list and per-tool parameters. Measured against
+        // agy 1.1.24 in docs/evidence/c1-capture-ceiling-2026-09-02.md.
+        id: "gemini-output-format-stream-json",
+        description: "Antigravity print mode accepts --output-format stream-json",
+        args: ["--print=hello", "--output-format", "stream-json"],
+        expect: "pass",
+      },
+      {
+        id: "gemini-input-format-stream-json",
+        description: "Antigravity stream-json stdin and output modes are accepted together",
+        args: ["--print", "--input-format", "stream-json", "--output-format", "stream-json"],
+        expect: "pass",
+      },
+      {
+        // `values` is ENFORCED, so a spelling the binary does not take must be
+        // refused here rather than reaching spawn.
+        id: "gemini-output-format-unknown-value",
+        description: "An undeclared --output-format value is refused before spawn",
+        args: ["--print=hello", "--output-format", "ndjson"],
+        expect: "fail",
       },
       {
         id: "gemini-unsupported-flag",
         description: "Unsupported flag is rejected before spawn",
-        args: ["--print", "hello", "--not-a-gemini-flag"],
+        args: ["--print=hello", "--not-a-gemini-flag"],
         expect: "fail",
       },
       {
         id: "gemini-agent-selection-acknowledged-not-emitted",
         description:
           "Antigravity 1.1.2 advertises --agent, but gateway request argv stays closed until its security model is explicitly wired",
-        args: ["--print", "hello", "--agent", "reviewer"],
+        args: ["--print=hello", "--agent", "reviewer"],
         expect: "fail",
       },
       {
         id: "gemini-effort-acknowledged-not-emitted",
         description:
           "Antigravity 1.1.7 advertises --effort, but the gateway emits no gemini effort flag",
-        args: ["--print", "hello", "--effort", "high"],
+        args: ["--print=hello", "--effort", "high"],
         expect: "fail",
       },
       {
         id: "gemini-antigravity-workspace-flags",
         description: "Antigravity workspace and sandbox flags are accepted",
-        args: ["--print", "hello", "--add-dir", "/tmp", "--sandbox"],
+        args: ["--print=hello", "--add-dir", "/tmp", "--sandbox"],
         expect: "pass",
       },
       {
         id: "gemini-yolo",
         description: "Antigravity permission bypass is accepted",
-        args: ["--print", "hello", "--dangerously-skip-permissions"],
+        args: ["--print=hello", "--dangerously-skip-permissions"],
         expect: "pass",
       },
       {
         id: "gemini-accept-edits-mode",
         description: "Antigravity bounded accept-edits execution mode is accepted",
-        args: ["--print", "hello", "--mode", "accept-edits"],
+        args: ["--print=hello", "--mode", "accept-edits"],
         expect: "pass",
       },
       {
         id: "gemini-plan-mode",
         description: "Antigravity plan execution mode is accepted",
-        args: ["--print", "hello", "--mode", "plan"],
+        args: ["--print=hello", "--mode", "plan"],
         expect: "pass",
       },
       {
         id: "gemini-conversation",
         description: "Antigravity conversation resume is accepted",
-        args: ["--print", "hello", "--conversation", "user-session"],
+        args: ["--print=hello", "--conversation", "user-session"],
         expect: "pass",
       },
       {
         id: "gemini-legacy-output-format-rejected",
         description: "Legacy Gemini JSON output flag is rejected",
-        args: ["--print", "hello", "-o", "json"],
+        args: ["--print=hello", "-o", "json"],
         expect: "fail",
       },
       {
         id: "gemini-project-wired",
         description: "Antigravity 1.0.14: --project <ID> is wired",
-        args: ["--print", "hello", "--project", "proj-123"],
+        args: ["--print=hello", "--project", "proj-123"],
         expect: "pass",
       },
       {
         id: "gemini-new-project-wired",
         description: "Antigravity 1.0.14: --new-project is wired",
-        args: ["--print", "hello", "--new-project"],
+        args: ["--print=hello", "--new-project"],
         expect: "pass",
       },
       {
         id: "gemini-print-timeout-wired",
         description: "Antigravity --print-timeout <DURATION> is wired",
-        args: ["--print", "hello", "--print-timeout", "30s"],
+        args: ["--print=hello", "--print-timeout", "30s"],
         expect: "pass",
       },
     ],
@@ -2130,6 +2247,19 @@ export const UPSTREAM_CLI_CONTRACTS: Record<CliType, CliContract> = {
     helpArgs: [["--help"]],
     subcommands: acknowledgeSubcommandFlags(
       {
+        // Auto-declared by `npm run providers:rebaseline`: upstream advertises
+        // this command. Catalogued only (exposure defaults to tracked_only, so it
+        // is not reachable by callers); risk is a conservative default pending
+        // maintainer verification.
+        clone: subcommand(
+          ["clone"],
+          "Upstream-declared grok command (auto-catalogued, unverified).",
+          "writes_local_config",
+          [],
+          {
+            acknowledgedUpstreamFlags: ["--branch", "--cone", "--full-history", "--leader-socket"],
+          }
+        ),
         // Auto-declared by `npm run providers:rebaseline`: upstream advertises
         // this command. Catalogued only (exposure defaults to tracked_only, so it
         // is not reachable by callers); risk is a conservative default pending
@@ -3244,6 +3374,48 @@ export const UPSTREAM_CLI_CONTRACTS: Record<CliType, CliContract> = {
     },
     helpArgs: [["--help"]],
     subcommands: {
+      // Auto-declared by `npm run providers:rebaseline`: upstream advertises
+      // this command. Catalogued only (exposure defaults to tracked_only, so it
+      // is not reachable by callers); risk is a conservative default pending
+      // maintainer verification.
+      desktop: subcommand(
+        ["desktop"],
+        "Upstream-declared devin command (auto-catalogued, unverified).",
+        "writes_local_config"
+      ),
+      // Auto-declared by `npm run providers:rebaseline`: upstream advertises
+      // this command. Catalogued only (exposure defaults to tracked_only, so it
+      // is not reachable by callers); risk is a conservative default pending
+      // maintainer verification.
+      doctor: subcommand(
+        ["doctor"],
+        "Upstream-declared devin command (auto-catalogued, unverified).",
+        "writes_local_config",
+        [],
+        { acknowledgedUpstreamFlags: ["--json"] }
+      ),
+      // Auto-declared by `npm run providers:rebaseline`: upstream advertises
+      // this command. Catalogued only (exposure defaults to tracked_only, so it
+      // is not reachable by callers); risk is a conservative default pending
+      // maintainer verification.
+      rm: subcommand(
+        ["rm"],
+        "Upstream-declared devin command (auto-catalogued, unverified).",
+        "writes_local_config",
+        [],
+        { acknowledgedUpstreamFlags: ["--force"] }
+      ),
+      // Auto-declared by `npm run providers:rebaseline`: upstream advertises
+      // this command. Catalogued only (exposure defaults to tracked_only, so it
+      // is not reachable by callers); risk is a conservative default pending
+      // maintainer verification.
+      ssh: subcommand(
+        ["ssh"],
+        "Upstream-declared devin command (auto-catalogued, unverified).",
+        "writes_local_config",
+        [],
+        { acknowledgedUpstreamFlags: ["--gateway"] }
+      ),
       acp: subcommand(
         ["acp"],
         "Run the Devin Agent Client Protocol server over stdio.",
@@ -3563,6 +3735,15 @@ export const UPSTREAM_CLI_CONTRACTS: Record<CliType, CliContract> = {
       // this command. Catalogued only (exposure defaults to tracked_only, so it
       // is not reachable by callers); risk is a conservative default pending
       // maintainer verification.
+      persist: subcommand(
+        ["persist"],
+        "Upstream-declared cursor command (auto-catalogued, unverified).",
+        "writes_local_config"
+      ),
+      // Auto-declared by `npm run providers:rebaseline`: upstream advertises
+      // this command. Catalogued only (exposure defaults to tracked_only, so it
+      // is not reachable by callers); risk is a conservative default pending
+      // maintainer verification.
       bedrock: subcommand(
         ["bedrock"],
         "Upstream-declared cursor command (auto-catalogued, unverified).",
@@ -3681,11 +3862,22 @@ export const UPSTREAM_CLI_CONTRACTS: Record<CliType, CliContract> = {
         ],
         {
           acknowledgedUpstreamFlags: [
+            "--all-pools",
+            "--api-key",
+            "--clone-git-repos",
             "--computer-use",
+            "--display",
+            "--endpoint",
             "--identity-socket",
             "--mint-github-token",
+            "--on-session-end",
+            "--on-session-start",
+            "--repository",
+            "--share-desktop",
+            "--spawn",
             "--sync-dashboard-secrets",
             "--wait",
+            "--warm-idle",
           ],
           exposure: "not_exposed",
           flagArities: { "--debug": "none", "--single-use": "none" },

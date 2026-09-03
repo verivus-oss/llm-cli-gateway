@@ -125,3 +125,41 @@ export function roleSeparationInForce(configured: ReadonlySet<StorageRole>): boo
     op => resolveStorageRole(op, configured).degradedFrom === undefined
   );
 }
+
+/**
+ * The spellings of a PostgreSQL DSN this gateway admits.
+ *
+ * ONE fact, in one place, because it answers two questions that must never
+ * diverge: what `config.ts` will ACCEPT as a connection string, and what
+ * `redactDsn` will REPORT a target for.
+ *
+ * Round 13 measured what happens when those drift. `redactDsn` had its own
+ * scheme test that accepted a leading space and a single-slash `postgres:`,
+ * while `[persistence].dsn` was an unvalidated `z.string()`. pg resolves such a
+ * string against its own base URL and puts the input in the PATH, so the
+ * startup log line
+ *
+ *     Flight recorder enabled on PostgreSQL at <target>
+ *
+ * printed the operator's password. Requiring the authority form closes it: a
+ * string that does not start with one of these prefixes never reaches pg's
+ * parser here, and never reaches the log.
+ *
+ * Case-insensitive because pg lowercases the scheme, so `POSTGRESQL://h/db` is
+ * a working DSN and refusing it would be a narrowness with nothing behind it.
+ */
+export const POSTGRES_DSN_PREFIXES: readonly string[] = ["postgresql://", "postgres://"];
+
+/**
+ * Is this string spelled like a PostgreSQL DSN?
+ *
+ * Deliberately a PREFIX test on the raw string and nothing else. It is not a
+ * parser, does not sanitise, and must never grow a second representation of the
+ * input: five rounds of defects in `redactDsn` came from exactly that, and the
+ * sixth came from replacing the sanitiser with `new URL`, whose leading-space
+ * trimming is what let the credential through.
+ */
+export function carriesPostgresDsnScheme(value: string): boolean {
+  const lower = value.toLowerCase();
+  return POSTGRES_DSN_PREFIXES.some(prefix => lower.startsWith(prefix));
+}

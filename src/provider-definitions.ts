@@ -448,9 +448,9 @@ const KIT_UNSUPPORTED: ProviderPersonalConfigKit = {
  * all follow automatically.
  */
 export const PROVIDER_TARGET_VERSIONS: Record<CliType, string> = {
-  claude: "claude 2.1.239",
-  codex: "codex-cli 0.149.0",
-  gemini: "1.1.17",
+  claude: "claude 2.1.259",
+  codex: "codex-cli 0.153.0",
+  gemini: "1.1.25",
   // The build hash here is load-bearing. grok 1.0.4 reports
   // `grok 1.0.4 (d846eb93d9) [stable]`, putting a release-channel marker after
   // the hash, and `comparableVersion` in scripts/upstream-scan.mjs reads the
@@ -461,10 +461,10 @@ export const PROVIDER_TARGET_VERSIONS: Record<CliType, string> = {
   // at end-of-string; the tool and the scan read one banner two ways and the
   // result was a baseline that reported drift forever. The normalizer is fixed
   // (see its comment) and the tool now writes this spelling itself.
-  grok: "grok 1.0.5 (5115b46bc9)",
-  mistral: "vibe 2.24.3",
-  devin: "devin 3000.4.25 (7e8e528a)",
-  cursor: "cursor-agent 2026.08.11-e8db854",
+  grok: "grok 1.0.13 (5e9a58528b76)",
+  mistral: "vibe 2.24.5",
+  devin: "devin 3000.6.14 (18033302)",
+  cursor: "cursor-agent 2026.09.02-c22c1a3",
 };
 
 const PROVIDER_DEFINITIONS = {
@@ -540,6 +540,42 @@ const PROVIDER_DEFINITIONS = {
       },
     },
     adminSubcommands: [
+      {
+        family: "attach",
+        safety: "mutating-gated",
+        evidence:
+          "2.1.259 (Claude Code) root help advertises `attach`. Auto-declared by `npm run providers:rebaseline`. safety is the conservative default: a read-only misclassification would remove a control, a gated one only adds an approval, so generated families are never `read-only`. UNVERIFIED pending maintainer review.",
+      },
+      {
+        family: "kill",
+        safety: "mutating-gated",
+        evidence:
+          "2.1.259 (Claude Code) root help advertises `kill`. Auto-declared by `npm run providers:rebaseline`. safety is the conservative default: a read-only misclassification would remove a control, a gated one only adds an approval, so generated families are never `read-only`. UNVERIFIED pending maintainer review.",
+      },
+      {
+        family: "logs",
+        safety: "mutating-gated",
+        evidence:
+          "2.1.259 (Claude Code) root help advertises `logs`. Auto-declared by `npm run providers:rebaseline`. safety is the conservative default: a read-only misclassification would remove a control, a gated one only adds an approval, so generated families are never `read-only`. UNVERIFIED pending maintainer review.",
+      },
+      {
+        family: "respawn",
+        safety: "mutating-gated",
+        evidence:
+          "2.1.259 (Claude Code) root help advertises `respawn`. Auto-declared by `npm run providers:rebaseline`. safety is the conservative default: a read-only misclassification would remove a control, a gated one only adds an approval, so generated families are never `read-only`. UNVERIFIED pending maintainer review.",
+      },
+      {
+        family: "rm",
+        safety: "mutating-gated",
+        evidence:
+          "2.1.259 (Claude Code) root help advertises `rm`. Auto-declared by `npm run providers:rebaseline`. safety is the conservative default: a read-only misclassification would remove a control, a gated one only adds an approval, so generated families are never `read-only`. UNVERIFIED pending maintainer review.",
+      },
+      {
+        family: "stop",
+        safety: "mutating-gated",
+        evidence:
+          "2.1.259 (Claude Code) root help advertises `stop`. Auto-declared by `npm run providers:rebaseline`. safety is the conservative default: a read-only misclassification would remove a control, a gated one only adds an approval, so generated families are never `read-only`. UNVERIFIED pending maintainer review.",
+      },
       {
         family: "import",
         safety: "mutating-gated",
@@ -863,6 +899,12 @@ const PROVIDER_DEFINITIONS = {
     },
     adminSubcommands: [
       {
+        family: "mic-serve",
+        safety: "mutating-gated",
+        evidence:
+          "1.1.24 root help advertises `mic-serve`. Auto-declared by `npm run providers:rebaseline`. safety is the conservative default: a read-only misclassification would remove a control, a gated one only adds an approval, so generated families are never `read-only`. UNVERIFIED pending maintainer review.",
+      },
+      {
         family: "mcp",
         safety: "mutating-gated",
         evidence:
@@ -892,7 +934,15 @@ const PROVIDER_DEFINITIONS = {
       trust: false,
       flags: ["--sandbox", "--mode", "--dangerously-skip-permissions"],
     },
-    outputFormats: ["text"],
+    // agy 1.1.25 accepts --output-format text|json|stream-json in print mode.
+    // stream-json is the only wire that carries the working directory, the tool
+    // list, per-tool parameters and usage; measured in
+    // docs/evidence/c1-capture-ceiling-2026-09-02.md.
+    outputFormats: ["text", "json", "stream-json"],
+    // NOT stream-json. Whether agy flushes its NDJSON incrementally or in one
+    // burst at exit was not measured, and streamingFormats drives the idle-timer
+    // semantics. Declaring it streaming on an unmeasured guess would turn the
+    // total-runtime bound into an idle bound for every gemini caller.
     streamingFormats: [],
     outputDiscipline: {
       streaming: "terminal-burst",
@@ -989,6 +1039,12 @@ const PROVIDER_DEFINITIONS = {
       },
     },
     adminSubcommands: [
+      {
+        family: "clone",
+        safety: "mutating-gated",
+        evidence:
+          "grok 1.0.13 (5e9a58528b76) root help advertises `clone`. Auto-declared by `npm run providers:rebaseline`. safety is the conservative default: a read-only misclassification would remove a control, a gated one only adds an approval, so generated families are never `read-only`. UNVERIFIED pending maintainer review.",
+      },
       {
         family: "du",
         safety: "mutating-gated",
@@ -1260,6 +1316,30 @@ const PROVIDER_DEFINITIONS = {
       },
     },
     adminSubcommands: [
+      {
+        family: "desktop",
+        safety: "mutating-gated",
+        evidence:
+          "devin 3000.6.12 (fc947ca5) root help advertises `desktop`. Auto-declared by `npm run providers:rebaseline`. safety is the conservative default: a read-only misclassification would remove a control, a gated one only adds an approval, so generated families are never `read-only`. UNVERIFIED pending maintainer review.",
+      },
+      {
+        family: "doctor",
+        safety: "mutating-gated",
+        evidence:
+          "devin 3000.6.12 (fc947ca5) root help advertises `doctor`. Auto-declared by `npm run providers:rebaseline`. safety is the conservative default: a read-only misclassification would remove a control, a gated one only adds an approval, so generated families are never `read-only`. UNVERIFIED pending maintainer review.",
+      },
+      {
+        family: "rm",
+        safety: "mutating-gated",
+        evidence:
+          "devin 3000.6.12 (fc947ca5) root help advertises `rm`. Auto-declared by `npm run providers:rebaseline`. safety is the conservative default: a read-only misclassification would remove a control, a gated one only adds an approval, so generated families are never `read-only`. UNVERIFIED pending maintainer review.",
+      },
+      {
+        family: "ssh",
+        safety: "mutating-gated",
+        evidence:
+          "devin 3000.6.12 (fc947ca5) root help advertises `ssh`. Auto-declared by `npm run providers:rebaseline`. safety is the conservative default: a read-only misclassification would remove a control, a gated one only adds an approval, so generated families are never `read-only`. UNVERIFIED pending maintainer review.",
+      },
       { family: "auth", safety: "mutating-gated", evidence: "devin auth login/logout/status" },
       {
         family: "mcp",
@@ -1382,6 +1462,12 @@ const PROVIDER_DEFINITIONS = {
       },
     },
     adminSubcommands: [
+      {
+        family: "persist",
+        safety: "mutating-gated",
+        evidence:
+          "2026.09.02-c22c1a3 root help advertises `persist`. Auto-declared by `npm run providers:rebaseline`. safety is the conservative default: a read-only misclassification would remove a control, a gated one only adds an approval, so generated families are never `read-only`. UNVERIFIED pending maintainer review.",
+      },
       {
         family: "bedrock",
         safety: "mutating-gated",

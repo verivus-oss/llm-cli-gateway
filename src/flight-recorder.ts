@@ -269,11 +269,17 @@ async function ensureCacheControlBlocksColumn(conn: StorageConnection): Promise<
  */
 async function ensureMetadataCompletionRankColumn(conn: StorageConnection): Promise<void> {
   const names = await columnNames(conn, "gateway_metadata");
-  if (names.has("completion_rank")) return;
+  if (!names.has("completion_rank")) {
+    await conn.execute(
+      "ALTER TABLE gateway_metadata ADD COLUMN completion_rank INTEGER NOT NULL DEFAULT 0"
+    );
+  }
+  // Keep the repair independent of the ALTER. If another process wins the
+  // column race and stops before this backfill, the retry must still restore
+  // the rank invariant rather than treating column presence as completion.
   await conn.execute(
-    "ALTER TABLE gateway_metadata ADD COLUMN completion_rank INTEGER NOT NULL DEFAULT 0"
+    "UPDATE gateway_metadata SET completion_rank = 2 WHERE status <> 'started' AND completion_rank = 0"
   );
-  await conn.execute("UPDATE gateway_metadata SET completion_rank = 2 WHERE status <> 'started'");
 }
 
 /**

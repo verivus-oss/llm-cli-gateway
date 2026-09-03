@@ -290,6 +290,62 @@ function grokSignal(event: Record<string, unknown>): ProgressSignal | null {
   return null;
 }
 
+function geminiSignal(event: Record<string, unknown>): ProgressSignal | null {
+  const type = typeof event.type === "string" ? event.type : event.event;
+  if (type === "init") {
+    return { phase: "starting", kind: "lifecycle", message: "Provider session initialized" };
+  }
+  if (type === "step_update") {
+    const update = nestedRecord(event, "step_update");
+    if (update?.step_type === "tool") {
+      return { phase: "tool", kind: "tool_start", message: "Using a provider tool" };
+    }
+    return { phase: "thinking", kind: "reasoning", message: "Provider reasoning activity" };
+  }
+  if (type === "message") {
+    return event.role === "assistant"
+      ? { phase: "writing", kind: "output", message: "Provider is writing output" }
+      : null;
+  }
+  if (type === "result") {
+    return { phase: "writing", kind: "output", message: "Provider produced a result" };
+  }
+  return null;
+}
+
+function mistralSignal(event: Record<string, unknown>): ProgressSignal | null {
+  const type = typeof event.type === "string" ? event.type : "";
+  if (type === "reasoning") {
+    return { phase: "thinking", kind: "reasoning", message: "Provider reasoning activity" };
+  }
+  if (type === "effect") {
+    return { phase: "tool", kind: "tool_start", message: "Using a provider tool" };
+  }
+  if (type === "message" && event.role === "assistant") {
+    return { phase: "writing", kind: "output", message: "Provider is writing output" };
+  }
+  return null;
+}
+
+function cursorSignal(event: Record<string, unknown>): ProgressSignal | null {
+  const type = typeof event.type === "string" ? event.type : "";
+  if (type === "system" && event.subtype === "init") {
+    return { phase: "starting", kind: "lifecycle", message: "Provider session initialized" };
+  }
+  if (type === "thinking") {
+    return { phase: "thinking", kind: "reasoning", message: "Provider reasoning activity" };
+  }
+  if (type === "tool_call") {
+    return event.subtype === "completed"
+      ? null
+      : { phase: "tool", kind: "tool_start", message: "Using a provider tool" };
+  }
+  if (type === "assistant" || type === "result") {
+    return { phase: "writing", kind: "output", message: "Provider is writing output" };
+  }
+  return null;
+}
+
 function structuredSignal(provider: string, line: string): ProgressSignal | null {
   let value: unknown;
   try {
@@ -301,7 +357,10 @@ function structuredSignal(provider: string, line: string): ProgressSignal | null
   if (!record) return null;
   if (provider === "claude") return claudeSignal(record);
   if (provider === "codex") return codexSignal(record);
+  if (provider === "gemini") return geminiSignal(record);
   if (provider === "grok") return grokSignal(record);
+  if (provider === "mistral") return mistralSignal(record);
+  if (provider === "cursor") return cursorSignal(record);
   return null;
 }
 
@@ -309,7 +368,10 @@ function structuredCapability(provider: string, outputFormat?: string): boolean 
   return (
     (provider === "claude" && outputFormat === "stream-json") ||
     (provider === "codex" && outputFormat === "json") ||
-    (provider === "grok" && outputFormat === "streaming-json")
+    (provider === "gemini" && outputFormat === "stream-json") ||
+    (provider === "grok" && outputFormat === "streaming-json") ||
+    (provider === "mistral" && outputFormat === "streaming") ||
+    (provider === "cursor" && outputFormat === "stream-json")
   );
 }
 

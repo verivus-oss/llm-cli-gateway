@@ -1702,6 +1702,34 @@ export async function collectStorageHealth(
         `deleting rows frees pages but not bytes, so run 'llm-cli-gateway storage compact' after.`
     );
   }
+
+  // #296: the two windows are inverted relative to information content. The
+  // `requests` row keeps the prompt and the final text; the `jobs` row keeps the
+  // launched argv and the raw provider stream, and it is the only one of the two
+  // a dispatched run can be replayed from. Bounding the complete record and not
+  // the partial one is a defensible choice, but a silent one is not: on an
+  // unchanged installation it is what happens by default.
+  //
+  // Gated on the OLDEST request rather than on the configuration, because the
+  // configuration alone is true on every host and a warning that always fires is
+  // read as background. This fires once a request actually outlives the job
+  // window, which is the moment the loss became real on THIS host.
+  const jobBoundDays = block.retention.policy?.jobs ?? null;
+  const oldest = block.flight_recorder.oldest_request;
+  if (
+    jobBoundDays !== null &&
+    block.retention.unbounded.includes("requests") &&
+    oldest !== null &&
+    Date.parse(oldest) < Date.now() - jobBoundDays * 86_400_000
+  ) {
+    block.warnings.push(
+      `Retention is inverted: 'requests' is unbounded and 'jobs' is bounded at ${jobBoundDays} day(s), ` +
+        `and the oldest request (${oldest}) is already past that window. The job row holds the launched argv ` +
+        `and the raw provider output; the request row holds the prompt and the final text only. ` +
+        `Requests older than the job bound can no longer be replayed. Set [persistence.retention].jobs ` +
+        `to widen the complete record, or [persistence.retention].requests to stop keeping the partial one forever.`
+    );
+  }
   for (const row of block.co_resident) {
     if (!row.live && row.rows > 0) {
       block.warnings.push(

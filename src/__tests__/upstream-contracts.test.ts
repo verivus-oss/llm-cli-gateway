@@ -115,17 +115,12 @@ describe("upstream CLI contracts", () => {
   });
 
   it("accepts only documented Antigravity execution modes", () => {
-    expect(
-      validateUpstreamCliArgs("gemini", ["--print", "hello", "--mode", "accept-edits"]).ok
-    ).toBe(true);
-    expect(validateUpstreamCliArgs("gemini", ["--print", "hello", "--mode", "plan"]).ok).toBe(true);
+    expect(validateUpstreamCliArgs("gemini", ["--print=hello", "--mode", "accept-edits"]).ok).toBe(
+      true
+    );
+    expect(validateUpstreamCliArgs("gemini", ["--print=hello", "--mode", "plan"]).ok).toBe(true);
 
-    const invalid = validateUpstreamCliArgs("gemini", [
-      "--print",
-      "hello",
-      "--mode",
-      "unrestricted",
-    ]);
+    const invalid = validateUpstreamCliArgs("gemini", ["--print=hello", "--mode", "unrestricted"]);
     expect(invalid.ok).toBe(false);
     expect(invalid.violations[0]?.message).toMatch(/does not accept value "unrestricted"/);
   });
@@ -372,7 +367,7 @@ describe("upstream CLI contracts", () => {
       >;
     };
     const reportJson = JSON.stringify(report);
-    expect(reportJson.length).toBeLessThan(70 * 1024);
+    expect(reportJson.length).toBeLessThan(76 * 1024);
     expect(report.contracts.grok.subcommandCount).toBeGreaterThan(20);
     expect(report.contracts.grok.subcommands).toBeUndefined();
     expect(report.contracts.grok.subcommandsCatalog.columns).toContain("resourceUri");
@@ -813,7 +808,7 @@ Options:
       expect((ACP_ENTRYPOINT_CONTRACTS.claude.adapterCandidates ?? []).length).toBeGreaterThan(0);
     });
 
-    it("keeps agy on the watchlist with no ACP surface at agy 1.1.17", () => {
+    it("keeps agy on the watchlist with no ACP surface at agy 1.1.25", () => {
       const agy = ACP_ENTRYPOINT_CONTRACTS.gemini;
       expect(agy.status).toBe("absent_watchlist");
       expect(agy.executable).toBe("agy");
@@ -821,12 +816,12 @@ Options:
       // the target must fail here so the ACP claim is re-probed rather than
       // restamped. This tripwire fired on the 1.1.7 -> 1.1.8 rebaseline and did
       // its job. It fired again on 1.1.8 -> 1.1.12 (2026-08-13) and on
-      // 1.1.12 -> 1.1.17 (2026-08-14).
-      // Re-probed at agy 1.1.17: still absent_watchlist, still no native
+      // 1.1.12 -> 1.1.17 (2026-08-14), 1.1.17 -> 1.1.24, and 1.1.24 -> 1.1.25
+      // (2026-09-03). Re-probed at agy 1.1.25: still absent_watchlist, still no native
       // entrypoint. `agy --help` contains zero occurrences of "acp", and
       // `agy acp --help` prints output byte-identical to `agy --help` rather
       // than subcommand help, which is how an unrecognised subcommand presents.
-      expect(agy.targetVersion).toContain("1.1.17");
+      expect(agy.targetVersion).toContain("1.1.25");
       expect(agy.entrypointArgs).toEqual([]);
       expect(agy.probeArgs).toEqual([]);
     });

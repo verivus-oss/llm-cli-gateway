@@ -1,0 +1,92 @@
+# Every request through the gateway records everything the provider did.
+# Supersedes the scope of job-record-replayability.dag.toml, which it contains.
+
+[meta]
+surface = "what is launched, what is captured, what is projected back, and what retention keeps"
+status = "done 2026-09-03 at d64ba20; c1 evidence remains in docs/evidence/c1-capture-ceiling-2026-09-02.md"
+issue = "https://github.com/verivusai-labs/llm-cli-gateway/issues/296"
+
+# THE REQUIREMENT
+#
+# Every request to every agent tool records what went in, the exact argv, the
+# reasoning, and the tool-use transcript. The c1 evidence records the original
+# gap; commit d64ba20 closes it for all seven provider paths.
+
+[facts]
+measured_at = "implemented and source-verified at d64ba20; the original provider probes remain recorded against their installed binaries in the c1 evidence"
+capture_is_independent = "each provider launches in its richest supported capture wire; the caller output format is a projection and no longer controls the durable record"
+capture_formats = "claude stream-json, codex json, gemini stream-json, grok streaming-json, mistral streaming, devin ATIF-v1.7 export, cursor stream-json"
+devin_export_is_bounded = "the gateway mints an exact correlation-keyed path, refuses links and non-regular files, validates a complete ATIF object, persists it within the shared job ceiling, then removes only that exact source path"
+capture_is_honest = "capture_status distinguishes captured_whole, captured_to_limit and not_captured; dropped byte counts and stable errors explain incomplete capture"
+retention_keeps_it = "jobs and requests are both unbounded by default, with independent opt-in operator bounds"
+
+[non_goals]
+no_caller_contract_change = "the richer launch wire is internal. The caller's requested format remains an explicit projection of the capture and is pinned against the preceding provider presentation."
+no_claimed_reasoning = "a provider that emits no reasoning must record that it emitted none. Storing an empty field that reads like a complete record is worse than storing nothing."
+no_unaccounted_write = "capture uses the configured job-output ceiling. Operators may choose a very large ceiling, but the record still states whether bytes were dropped."
+no_new_disclosure_by_default = "a full transcript contains file contents the agent read. Whatever a remote HTTP caller could read before, it reads no more of after."
+
+[[node]]
+id = "c1.measure-the-ceiling"
+critical = true
+depends_on = []
+role = "Every later node assumes a provider can emit a transcript. Five of seven are unmeasured, and the contract advertising a flag is not evidence the flag carries tool calls."
+action = "DONE 2026-09-02. Table in docs/evidence/c1-capture-ceiling-2026-09-02.md, dispatched through the stdio gtwy and read back with llm_job_result rawOutput."
+constraint = "This is a LIVE probe against installed binaries and belongs with upstream:drift, not with npm run check, which never touches a provider binary. Record the version probed beside every row."
+constraint_2 = "Two further findings the node did not anticipate. The session id is ON THE WIRE for mistral and cursor and is not extracted, which is #296 defect 2 and the cause of the parseVibeMetaJson dead end. And job-progress.ts reports activity_only for cursor, mistral and devin while they emit a structured stream, so the richer wire buys nothing there until it knows the format."
+affects = ["c2.capture-is-not-the-caller-projection", "c3.native-store-harvest"]
+
+[[node]]
+id = "c2.capture-is-not-the-caller-projection"
+critical = true
+depends_on = ["c1.measure-the-ceiling"]
+role = "The single structural change. What is recorded and what is returned are the same string today, so a caller asking for text destroys the record."
+action = "DONE at d64ba20. ProviderCapturePlan selects the rich wire before launch and ProviderDisplayInput projects text or JSON after capture. Durable args_json and capture_format name the actual launch and grammar."
+constraint = "Every provider needs a rich-to-text and rich-to-json projection, and each one is a place a caller's output silently changes. Pin the projections against the current text output per provider before switching the launch wire."
+constraint_2 = "Record the wire that was captured on the job row. Reading a stream without knowing which grammar it is in is not reading it."
+affects = ["c4.bounded-and-honest", "c5.retention-follows-information", "c6.reachable-and-scoped"]
+
+[[node]]
+id = "c3.native-store-harvest"
+depends_on = ["c1.measure-the-ceiling"]
+role = "For a provider whose stdout will never carry the transcript, the transcript still exists: on disk, in the provider's own session store."
+action = "DONE at d64ba20. Rich stdout covers six providers. Devin alone needs native harvest, so the gateway securely copies its exact ATIF export into native_transcript and accounts for its bytes and truncation before deleting the gateway-owned temporary artifact."
+constraint = "The harvested Devin artifact is keyed by an exact gateway-minted correlation path. Other providers use rich stdout; the Gemini cwd and start-time native-history join remains non-unique and is not used as a capture key."
+constraint_2 = "Harvesting reads a file the provider wrote. Treat it as untrusted input on the way in, exactly as review-prompt.ts fences repository evidence."
+affects = ["c4.bounded-and-honest", "c6.reachable-and-scoped"]
+
+[[node]]
+id = "c4.bounded-and-honest"
+critical = true
+depends_on = ["c2.capture-is-not-the-caller-projection", "c3.native-store-harvest"]
+role = "Complete capture multiplies durable volume by the size of a transcript. A ceiling that is hit silently converts a complete record into a plausible partial one."
+action = "DONE at d64ba20. The stdout and stderr stream plus any native transcript share max_job_output_bytes. The row stores capture_status, output_dropped_bytes, native_transcript_bytes, native_transcript_truncated, native_transcript_dropped_bytes and capture_error."
+constraint = "Distinguish three states and never merge them: captured whole, captured to a stated ceiling, and not captured because this provider cannot emit it. The third is c1's finding made durable."
+affects = ["c5.retention-follows-information"]
+
+[[node]]
+id = "c5.retention-follows-information"
+depends_on = ["c4.bounded-and-honest"]
+role = "Keeping everything while deleting it in 30 days was the previous default, and it was the opposite of the requirement."
+action = "DONE at d64ba20. Both destructive defaults are off. Jobs and requests remain unbounded until an operator sets the corresponding persistence retention bound, and the health surfaces report the resolved policy."
+constraint = "The explicit decision at d64ba20 makes both defaults unbounded, so an upgrade deletes nothing. Operators retain independent opt-in bounds."
+affects = []
+
+[[node]]
+id = "c6.reachable-and-scoped"
+critical = true
+depends_on = ["c2.capture-is-not-the-caller-projection", "c3.native-store-harvest"]
+role = "A complete record nothing can read is a complete record nobody has. A complete record everyone can read is a disclosure."
+action = "DONE at d64ba20. Owning local stdio callers can read raw job capture and can opt into the linked jobRecord on llm_request_result. includeJobRecord defaults false. Remote callers receive neither raw transcript nor host replay paths, and a remote raw-result request is refused."
+constraint = "A transcript carries file contents, absolute paths and possibly secrets the provider echoed. It is local-only data, not a redacted remote projection. Remote retrieval is refused and pinned by ownership-boundary tests."
+affects = []
+
+[[node]]
+id = "c2a.the-record-must-not-cost-dedup"
+depends_on = []
+status = "done"
+role = "Capturing more per request added a request-local path to argv. Argv is the dedup identity, so the capture silently turned every devin request into a unique one."
+action = "DONE. CliRequestPrep carries dedupArgs, computed where the path is minted, and the four sites that build devin argv consume it. A derived-set test fails when a fifth site does not."
+constraint = "Found by cross-LLM review at adfaf88: the canonicalisation existed and was called at one of four sites. The helper itself had no test, and replacing its body with an identity function survived 4842."
+constraint_2 = "A CALLER-supplied export path stays in the identity. Two requests writing to different destinations differ in an effect the caller can observe, so they are not the same request."
+affects = ["c3.native-store-harvest", "c4.bounded-and-honest"]
