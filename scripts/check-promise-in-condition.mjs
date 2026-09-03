@@ -55,7 +55,8 @@
  *                     never matches, which is a dead branch and not a dead guard.
  */
 import ts from "typescript";
-import { relative, resolve, sep } from "node:path";
+import { resolve } from "node:path";
+import { gatedRelativePath } from "./lib/gated-path.mjs";
 
 const args = process.argv.slice(2);
 if (args.length !== 0 && (args.length !== 2 || args[0] !== "--root" || !args[1])) {
@@ -155,10 +156,8 @@ const TRUTHINESS_PREDICATES = new Set([
 const violations = [];
 for (const sf of program.getSourceFiles()) {
   if (sf.isDeclarationFile) continue;
-  // Separator-safe: the predicate is written against POSIX form so a Windows
-  // checkout (src\\probe.ts) is gated exactly like a POSIX one (src/probe.ts).
-  const rel = relative(ROOT, sf.fileName).split(sep).join("/");
-  if (!rel.startsWith("src/")) continue;
+  const rel = gatedRelativePath(ROOT, sf.fileName);
+  if (rel === null) continue;
 
   /**
    * See through a coercion call so the boolean positions below examine the

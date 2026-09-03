@@ -9,30 +9,39 @@
  */
 import { execFileSync } from "node:child_process";
 import {
+  existsSync,
   closeSync,
   mkdirSync,
   mkdtempSync,
   openSync,
   readFileSync,
+  readdirSync,
   rmSync,
+  symlinkSync,
   writeFileSync,
 } from "node:fs";
-import { dirname, join, resolve } from "node:path";
+import nodePath, { dirname, join, resolve } from "node:path";
+import { gatedRelativePath } from "./lib/gated-path.mjs";
+import { scratchRoot } from "./lib/scratch-root.mjs";
 import { fileURLToPath } from "node:url";
 import { afterEach, describe, expect, it } from "vitest";
 
 const REPO_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const CHECKER = join(REPO_ROOT, "scripts", "check-promise-in-condition.mjs");
-const SCRATCH_ROOT = join(REPO_ROOT, ".scratch");
 let fixtureRoot;
+
+// Every fixture writer goes through this so a symlinked `.scratch` is refused
+// before the first byte is written, not discovered by porcelain afterwards.
+function scratchDir() {
+  return scratchRoot(REPO_ROOT);
+}
 
 function runGate(root = fixtureRoot) {
   const args = [CHECKER];
   if (root) args.push("--root", root);
-  mkdirSync(SCRATCH_ROOT, { recursive: true });
   // A disk-backed descriptor preserves checker diagnostics in restricted runners
   // that empty nested Node stdout/stderr pipes.
-  const captureRoot = mkdtempSync(join(SCRATCH_ROOT, "promise-output-"));
+  const captureRoot = mkdtempSync(join(scratchDir(), "promise-output-"));
   const outputPath = join(captureRoot, "checker-output.txt");
   const outputFd = openSync(outputPath, "w");
   let exitCode = 0;
@@ -47,13 +56,14 @@ function runGate(root = fixtureRoot) {
     return { exitCode, output: readFileSync(outputPath, "utf8") };
   } finally {
     rmSync(captureRoot, { recursive: true, force: true });
+    // The capture directory is per call; a surviving one is a leak, not a cache.
+    expect(existsSync(captureRoot)).toBe(false);
   }
 }
 
 function inject(snippet) {
   expect(fixtureRoot).toBeUndefined();
-  mkdirSync(SCRATCH_ROOT, { recursive: true });
-  fixtureRoot = mkdtempSync(join(SCRATCH_ROOT, "promise-condition-"));
+  fixtureRoot = mkdtempSync(join(scratchDir(), "promise-condition-"));
   const sourceDir = join(fixtureRoot, "src");
   const target = join(sourceDir, "probe.ts");
   mkdirSync(sourceDir);
@@ -66,7 +76,10 @@ function inject(snippet) {
 }
 
 afterEach(() => {
-  if (fixtureRoot) rmSync(fixtureRoot, { recursive: true, force: true });
+  if (fixtureRoot) {
+    rmSync(fixtureRoot, { recursive: true, force: true });
+    expect(existsSync(fixtureRoot)).toBe(false);
+  }
   fixtureRoot = undefined;
 });
 
@@ -299,5 +312,75 @@ describe("promise-in-condition gate", () => {
     return xs.filter(Boolean) as number[];
   }`);
     expect(runGate().exitCode).toBe(0);
+  });
+  it("fails closed with exit 2 when --root has no tsconfig.json, instead of scanning the cwd", () => {
+    fixtureRoot = mkdtempSync(join(scratchDir(), "promise-condition-"));
+    const r = runGate(fixtureRoot);
+    expect(r.exitCode).toBe(2);
+    expect(r.output).toContain("Cannot read file");
+    expect(r.output).not.toContain("promise-in-condition: 0 in production");
+  });
+
+  it("fails closed with exit 2 when the root tsconfig.json is malformed", () => {
+    fixtureRoot = mkdtempSync(join(scratchDir(), "promise-condition-"));
+    writeFileSync(join(fixtureRoot, "tsconfig.json"), "{ not json");
+    const r = runGate(fixtureRoot);
+    expect(r.exitCode).toBe(2);
+    expect(r.output).not.toContain("promise-in-condition: 0 in production");
+  });
+
+  it("fails closed with exit 2 on malformed arguments", () => {
+    for (const argv of [
+      ["--root"],
+      ["--root", ""],
+      ["--roots", REPO_ROOT],
+      ["--root", REPO_ROOT, "extra"],
+    ]) {
+      let exitCode = 0;
+      try {
+        execFileSync("node", [CHECKER, ...argv], { cwd: REPO_ROOT, stdio: "ignore" });
+      } catch (err) {
+        exitCode = err.status ?? 1;
+      }
+      expect(exitCode, `argv ${JSON.stringify(argv)}`).toBe(2);
+    }
+  });
+
+  it("gates a Windows-separated path exactly like a POSIX one", () => {
+    expect(gatedRelativePath("/repo", "/repo/src/probe.ts", nodePath.posix)).toBe("src/probe.ts");
+    expect(gatedRelativePath("C:\\repo", "C:\\repo\\src\\probe.ts", nodePath.win32)).toBe(
+      "src/probe.ts"
+    );
+    expect(gatedRelativePath("/repo", "/repo/scripts/x.ts", nodePath.posix)).toBeNull();
+    expect(gatedRelativePath("/repo", "/repo/src-other/x.ts", nodePath.posix)).toBeNull();
+    expect(gatedRelativePath("C:\\repo", "C:\\repo\\srcs\\x.ts", nodePath.win32)).toBeNull();
+    expect(gatedRelativePath("/repo", "/repo/src", nodePath.posix)).toBeNull();
+  });
+
+  it("refuses to write fixtures through a symlinked .scratch", () => {
+    // The round-2 board measured this: `.scratch -> src` sent every fixture
+    // into tracked src/ while the case ran. The guard is exercised on a
+    // throwaway repo root, because replacing the real .scratch mid-suite is
+    // the kind of tree edit this file exists to stop.
+    fixtureRoot = mkdtempSync(join(scratchDir(), "promise-guard-"));
+    const fakeSrc = join(fixtureRoot, "src");
+    mkdirSync(fakeSrc);
+    symlinkSync("src", join(fixtureRoot, ".scratch"), "dir");
+    expect(() => scratchRoot(fixtureRoot)).toThrow(/symbolic link/);
+    // Nothing may have been written through the link before the refusal.
+    expect(readdirSync(fakeSrc)).toEqual([]);
+  });
+
+  it("refuses a .scratch that exists as a regular file", () => {
+    fixtureRoot = mkdtempSync(join(scratchDir(), "promise-guard-"));
+    writeFileSync(join(fixtureRoot, ".scratch"), "");
+    expect(() => scratchRoot(fixtureRoot)).toThrow(/not a directory/);
+  });
+
+  it("creates a missing .scratch as a real directory", () => {
+    fixtureRoot = mkdtempSync(join(scratchDir(), "promise-guard-"));
+    const dir = scratchRoot(fixtureRoot);
+    expect(dir).toBe(join(fixtureRoot, ".scratch"));
+    expect(existsSync(dir)).toBe(true);
   });
 });
