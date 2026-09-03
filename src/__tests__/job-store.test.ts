@@ -102,9 +102,7 @@ describe("JobStore", () => {
       expect((await row!).exitCode).toBe(0);
       expect((await row!).stdout).toBe("result");
       expect((await row!).finishedAt).toBe(finishedAt);
-      // expiresAt = finishedAt + retentionMs
-      const expectedExpiry = Date.parse(finishedAt) + resolveJobRetentionMs();
-      expect(Date.parse((await row!).expiresAt)).toBeCloseTo(expectedExpiry, -3);
+      expect((await row!).expiresAt).toBe("9999-12-31T23:59:59.999Z");
     });
   });
 
@@ -551,8 +549,11 @@ describe("JobStore", () => {
 
   describe("evictExpired", () => {
     it("deletes rows whose expires_at is in the past", async () => {
+      const bounded = new SqliteJobStore(join(tempDir, "bounded.db"), undefined, {
+        retentionMs: 1,
+      });
       const t = new Date().toISOString();
-      await store.recordStart({
+      await bounded.recordStart({
         id: "expired",
         correlationId: "ce",
         requestKey: "k",
@@ -561,7 +562,7 @@ describe("JobStore", () => {
         startedAt: t,
         pid: 1,
       });
-      await store.recordComplete({
+      await bounded.recordComplete({
         id: "expired",
         status: "completed",
         exitCode: 0,
@@ -569,13 +570,13 @@ describe("JobStore", () => {
         stderr: "",
         outputTruncated: false,
         error: null,
-        // finishedAt in the far past so retention has elapsed.
-        finishedAt: new Date(Date.now() - resolveJobRetentionMs() - 60_000).toISOString(),
+        finishedAt: new Date(Date.now() - 60_000).toISOString(),
       });
 
-      const removed = store.evictExpired();
+      const removed = bounded.evictExpired();
       expect(await removed).toBe(1);
-      expect(await store.getById("expired")).toBeNull();
+      expect(await bounded.getById("expired")).toBeNull();
+      await bounded.close();
     });
 
     it("keeps non-terminal jobs (far-future expiry) untouched", async () => {
@@ -617,11 +618,11 @@ describe("JobStore", () => {
       }
     });
 
-    it("retention defaults to 30 days", () => {
+    it("retention defaults to unbounded", () => {
       const prev = process.env.LLM_GATEWAY_JOB_RETENTION_DAYS;
       delete process.env.LLM_GATEWAY_JOB_RETENTION_DAYS;
       try {
-        expect(resolveJobRetentionMs()).toBe(30 * 24 * 60 * 60 * 1000);
+        expect(resolveJobRetentionMs()).toBeNull();
       } finally {
         if (prev !== undefined) process.env.LLM_GATEWAY_JOB_RETENTION_DAYS = prev;
       }
@@ -676,6 +677,92 @@ describe("JobStore", () => {
       ["sqlite", new SqliteJobStore(join(tempDir, `parity-${Math.random()}`.replace(".", "")))],
       ["memory", new MemoryJobStore()],
     ];
+
+    it("round-trips replay context and terminal capture accounting", async () => {
+      for (const [name, backend] of backends()) {
+        const t = new Date().toISOString();
+        await backend.recordStart({
+          id: "capture-parity",
+          correlationId: "capture-corr",
+          requestKey: "capture-key",
+          cli: "devin",
+          args: ["--export", "/tmp/gateway-owned.json"],
+          outputFormat: "text",
+          startedAt: t,
+          pid: 7,
+          ownerInstance: "capture-owner",
+          cwd: { scope: "workspace", path: "/workspace/repo", workspaceAlias: "repo" },
+          replayContext: {
+            version: 1,
+            repositoryHead: "a".repeat(40),
+            instructionFiles: [
+              {
+                path: "/workspace/repo/AGENTS.md",
+                sha256: "b".repeat(64),
+                sourceBytes: 18,
+                effectiveBytes: 18,
+                effectiveLimitBytes: null,
+                truncated: false,
+                status: "captured",
+              },
+            ],
+          },
+          captureFormat: "atif-v1.7",
+        });
+        expect(
+          await backend.recordComplete({
+            id: "capture-parity",
+            status: "completed",
+            exitCode: 0,
+            stdout: "done",
+            stderr: "",
+            outputTruncated: false,
+            error: null,
+            finishedAt: t,
+          }),
+          name
+        ).toBe(true);
+        expect(
+          await backend.recordCapture({
+            id: "capture-parity",
+            ownerInstance: "other-owner",
+            captureStatus: "captured_whole",
+            outputDroppedBytes: 0,
+            nativeTranscript: "must-not-land",
+            nativeTranscriptBytes: 13,
+            nativeTranscriptTruncated: false,
+            nativeTranscriptDroppedBytes: 0,
+            captureError: null,
+          }),
+          name
+        ).toBe(false);
+        expect(
+          await backend.recordCapture({
+            id: "capture-parity",
+            ownerInstance: "capture-owner",
+            captureStatus: "captured_to_limit",
+            outputDroppedBytes: 0,
+            nativeTranscript: '{"version":"ATIF-v1.7"}',
+            nativeTranscriptBytes: 23,
+            nativeTranscriptTruncated: true,
+            nativeTranscriptDroppedBytes: 41,
+            captureError: null,
+          }),
+          name
+        ).toBe(true);
+
+        const row = await backend.getById("capture-parity");
+        expect(row?.cwdScope, name).toBe("workspace");
+        expect(row?.workspaceAlias, name).toBe("repo");
+        expect(row?.replayContext?.repositoryHead, name).toBe("a".repeat(40));
+        expect(row?.captureFormat, name).toBe("atif-v1.7");
+        expect(row?.captureStatus, name).toBe("captured_to_limit");
+        expect(row?.nativeTranscript, name).toContain("ATIF-v1.7");
+        expect(row?.nativeTranscriptTruncated, name).toBe(true);
+        expect(row?.nativeTranscriptDroppedBytes, name).toBe(41);
+        await backend.close();
+      }
+    });
 
     it("returns true on an open row and false once the row is terminal", async () => {
       for (const [name, backend] of backends()) {

@@ -46,6 +46,10 @@ export const POSTGRES_IMMUTABLE_MIGRATION_SHA256 = {
   // a development database, which recorded its checksum, so a source edit now
   // breaks `npm run migrate` on that host rather than here.
   "024_async_job_cwd_scope.sql": "414c22f2ada88e4946f47e511e993e7f59bd7778e00df27e09ca5075fe1cbc80",
+  // Complete capture owns durable transcripts. Pin it at authorship so an
+  // applied database can never disagree with a later copy of this release.
+  "025_complete_job_capture.sql":
+    "fd90f44fd55d8e75e7eee0aa815a2c91c0e27ddf981f25fa446168c24222194a",
 } as const;
 
 /**
@@ -105,6 +109,15 @@ export const POSTGRES_JOB_STORE_REQUIRED_COLUMNS = {
     "cwd_scope",
     "cwd_path",
     "workspace_alias",
+    "replay_context_json",
+    "capture_format",
+    "capture_status",
+    "output_dropped_bytes",
+    "native_transcript",
+    "native_transcript_bytes",
+    "native_transcript_truncated",
+    "native_transcript_dropped_bytes",
+    "capture_error",
   ],
   gateway_instances: ["instance_id", "role", "hostname", "pid", "started_at", "last_heartbeat"],
   validation_runs: [

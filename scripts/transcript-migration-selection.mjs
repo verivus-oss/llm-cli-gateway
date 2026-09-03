@@ -21,8 +21,8 @@ import { join } from "node:path";
 /**
  * The tables the flight recorder owns. This is the list, not a sample: a
  * migration naming anything outside it is another subsystem's, and a new
- * recorder-owned table (transcript-cutover.design.md reserves one under
- * migration 025) has to join here before its migration reaches the mirror.
+ * recorder-owned table has to join here before its migration reaches the
+ * mirror.
  */
 export const RECORDER_TABLES = ["requests", "gateway_metadata"];
 
@@ -34,14 +34,26 @@ const LEDGER_TABLE = "schema_migrations";
 
 const TRANSCRIPT_ERA = 22;
 
-const TABLE_TARGET =
-  /\b(?:CREATE\s+TABLE(?:\s+IF\s+NOT\s+EXISTS)?|ALTER\s+TABLE|CREATE\s+(?:UNIQUE\s+)?INDEX(?:\s+CONCURRENTLY)?(?:\s+IF\s+NOT\s+EXISTS)?\s+\w+\s+ON)\s+([a-zA-Z_][\w]*)/gi;
+const SQL_IDENTIFIER = String.raw`(?:"(?:[^"]|"")*"|[a-zA-Z_][\w$]*)`;
+const TABLE_TARGET = new RegExp(
+  String.raw`\b(?:` +
+    String.raw`(?:CREATE\s+TABLE(?:\s+IF\s+NOT\s+EXISTS)?|ALTER\s+TABLE(?:\s+IF\s+EXISTS)?)\s+(${SQL_IDENTIFIER})` +
+    String.raw`|CREATE\s+(?:UNIQUE\s+)?INDEX(?:\s+CONCURRENTLY)?(?:\s+IF\s+NOT\s+EXISTS)?\s+${SQL_IDENTIFIER}\s+ON\s+(${SQL_IDENTIFIER})` +
+    String.raw`)`,
+  "gi"
+);
+
+function identifierText(identifier) {
+  return identifier.startsWith('"')
+    ? identifier.slice(1, -1).replaceAll('""', '"')
+    : identifier.toLowerCase();
+}
 
 /** Every table a migration creates, alters or indexes, ledger receipt aside. */
 export function tableTargets(sql) {
   const targets = new Set();
   for (const match of sql.matchAll(TABLE_TARGET)) {
-    const table = match[1].toLowerCase();
+    const table = identifierText(match[1] ?? match[2]);
     if (table !== LEDGER_TABLE) targets.add(table);
   }
   return targets;

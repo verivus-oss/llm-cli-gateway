@@ -2,6 +2,7 @@ import { ChildProcess } from "child_process";
 import { randomUUID } from "crypto";
 import os from "os";
 import { hrtime } from "process";
+import { closeSync, lstatSync, openSync, readSync, unlinkSync } from "node:fs";
 import {
   createProcessGroupTerminationFence,
   envWithExtendedPath,
@@ -48,6 +49,9 @@ import {
 } from "./claude-mcp-config.js";
 import { assertMcpArtifactAdmissionInvariant } from "./mcp-artifact-admission.js";
 import { describeJobCwd, type JobCwdResolution } from "./job-cwd-scope.js";
+import { captureJobReplayContext, type JobReplayContext } from "./job-replay-context.js";
+import { captureFormatCarriesTranscript, planProviderCapture } from "./provider-capture.js";
+import { devinTranscriptPath } from "./devin-transcript.js";
 import {
   createPersonalKitTerminalMetadata,
   createVibeKitTerminalMetadata,
@@ -220,7 +224,10 @@ function resolveJobProgressCapability(
     return options.includes("--json") ? "structured" : "activity_only";
   }
   if (cli === "claude" && outputFormat === "stream-json") return "structured";
+  if (cli === "gemini" && outputFormat === "stream-json") return "structured";
   if (cli === "grok" && outputFormat === "streaming-json") return "structured";
+  if (cli === "mistral" && outputFormat === "streaming") return "structured";
+  if (cli === "cursor" && outputFormat === "stream-json") return "structured";
   return "activity_only";
 }
 
@@ -725,6 +732,7 @@ interface AsyncJobRecord {
   stdout: string;
   stderr: string;
   outputTruncated: boolean;
+  outputDroppedBytes: number;
   canceled: boolean;
   error: string | null;
   errorCategory: AsyncJobErrorCategory | null;
@@ -766,6 +774,19 @@ interface AsyncJobRecord {
   stdinDeliveryFailed?: boolean;
   metricsRecorded: boolean;
   outputFormat?: string;
+  /** Actual durable stdout grammar, distinct from caller presentation. */
+  captureFormat?: string | null;
+  transcriptCapable: boolean;
+  replayContext: JobReplayContext | null;
+  cwdRecord: ReturnType<typeof describeJobCwd> | null;
+  captureStatus: "captured_whole" | "captured_to_limit" | "not_captured" | null;
+  nativeTranscript: string | null;
+  nativeTranscriptBytes: number;
+  nativeTranscriptTruncated: boolean;
+  nativeTranscriptDroppedBytes: number;
+  captureError: string | null;
+  /** Exact gateway-owned Devin export path, never reconstructed from arbitrary argv. */
+  nativeTranscriptPath?: string;
   /**
    * Native compressor PR-1 (spec 5.2): effective enqueue-time compression
    * decision. Persisted alongside output_format; NULL/undefined on legacy
@@ -943,6 +964,7 @@ export interface AsyncJobSnapshot {
   exitCode: number | null;
   correlationId: string;
   outputTruncated: boolean;
+  outputDroppedBytes: number;
   stdoutBytes: number;
   stderrBytes: number;
   error: string | null;
@@ -952,6 +974,19 @@ export interface AsyncJobSnapshot {
   retryable?: boolean;
   exited: boolean;
   progress: JobProgressSnapshot;
+  executionContext?: {
+    cwd: ReturnType<typeof describeJobCwd> | null;
+    replay: JobReplayContext | null;
+    capture: {
+      format: string | null;
+      status: "captured_whole" | "captured_to_limit" | "not_captured" | null;
+      outputDroppedBytes: number;
+      nativeTranscriptBytes: number;
+      nativeTranscriptTruncated: boolean;
+      nativeTranscriptDroppedBytes: number;
+      error: string | null;
+    };
+  };
 }
 
 /**
@@ -973,6 +1008,12 @@ export type AsyncJobSnapshotLookup =
 export interface AsyncJobResult extends AsyncJobSnapshot {
   stdout: string;
   stderr: string;
+  /** Local raw readback of a bounded provider-native transcript. */
+  nativeTranscript?: string;
+  nativeTranscriptOffsetChars?: number;
+  nativeTranscriptTotalChars?: number;
+  nativeTranscriptNextOffsetChars?: number | null;
+  nativeTranscriptPageTruncated?: boolean;
   stdoutTruncated: boolean;
   stderrTruncated: boolean;
   /** Character offset of this stdout page in the captured stream. */
@@ -2837,6 +2878,7 @@ export class AsyncJobManager {
       stdout: "",
       stderr: "",
       outputTruncated: false,
+      outputDroppedBytes: 0,
       canceled: false,
       error: null,
       errorCategory: null,
@@ -2848,6 +2890,17 @@ export class AsyncJobManager {
       payloadJson,
       exited: false,
       metricsRecorded: false,
+      outputFormat: undefined,
+      captureFormat: "api-response",
+      transcriptCapable: false,
+      replayContext: null,
+      cwdRecord: null,
+      captureStatus: null,
+      nativeTranscript: null,
+      nativeTranscriptBytes: 0,
+      nativeTranscriptTruncated: false,
+      nativeTranscriptDroppedBytes: 0,
+      captureError: null,
       ownerPrincipal,
       mcpArtifactPath: null,
       mcpArtifactScope: null,
@@ -2955,6 +3008,7 @@ export class AsyncJobManager {
       ownerHostname: this.hostname,
       transport: "http",
       payloadJson,
+      captureFormat: "api-response",
       kitExecution: stableKitExecution,
       kitSessionId: stableKitSessionId,
       validationAdmission,
@@ -3621,6 +3675,111 @@ export class AsyncJobManager {
     return write;
   }
 
+  private prepareNativeTranscript(job: AsyncJobRecord): void {
+    if (job.cli !== "devin" || !job.closeObserved || job.nativeTranscript !== null) return;
+    const transcriptPath = job.nativeTranscriptPath;
+    if (!transcriptPath) {
+      job.captureError = "Provider native transcript export was not enabled";
+      return;
+    }
+    try {
+      // The path is gateway-minted and correlation-keyed. Refuse links so a
+      // replaced export cannot make the gateway copy an unrelated host file.
+      const info = lstatSync(transcriptPath);
+      if (!info.isFile() || info.isSymbolicLink()) {
+        job.captureError = "Provider native transcript was not a regular file";
+        return;
+      }
+      const streamBytes = Buffer.byteLength(job.stdout) + Buffer.byteLength(job.stderr);
+      const availableBytes = Math.max(0, this.maxJobOutputBytes - streamBytes);
+      const bytesToRead = Math.min(info.size, availableBytes);
+      const bytes = Buffer.alloc(bytesToRead);
+      const fd = openSync(transcriptPath, "r");
+      let offset = 0;
+      try {
+        while (offset < bytes.length) {
+          const count = readSync(fd, bytes, offset, bytes.length - offset, offset);
+          if (count === 0) break;
+          offset += count;
+        }
+      } finally {
+        closeSync(fd);
+      }
+      const transcript = bytes.subarray(0, offset).toString("utf8");
+      const truncated = offset < info.size;
+      if (!truncated) {
+        const parsed: unknown = JSON.parse(transcript);
+        if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
+          job.captureError = "Provider native transcript did not contain an ATIF object";
+          return;
+        }
+      }
+      job.nativeTranscript = transcript;
+      job.nativeTranscriptBytes = Buffer.byteLength(transcript);
+      job.nativeTranscriptTruncated = truncated;
+      job.nativeTranscriptDroppedBytes = Math.max(0, info.size - offset);
+      job.captureError = null;
+    } catch {
+      job.captureError = "Provider native transcript could not be read";
+    }
+  }
+
+  private captureOutcome(job: AsyncJobRecord): void {
+    if (job.kitExecution) return;
+    this.prepareNativeTranscript(job);
+    if (job.cli === "devin") {
+      if (!job.closeObserved) return;
+      if (job.nativeTranscript !== null) {
+        job.captureStatus = job.nativeTranscriptTruncated ? "captured_to_limit" : "captured_whole";
+      } else {
+        job.captureStatus = "not_captured";
+      }
+      return;
+    }
+    if (!job.transcriptCapable) {
+      job.captureStatus = "not_captured";
+      job.captureError ??= "Provider wire did not emit a complete transcript";
+      return;
+    }
+    job.captureStatus = job.outputTruncated ? "captured_to_limit" : "captured_whole";
+    job.captureError = null;
+  }
+
+  private async persistCapture(job: AsyncJobRecord): Promise<boolean> {
+    if (!this.store || job.kitExecution || !job.terminalRowOwned) return false;
+    this.captureOutcome(job);
+    if (job.captureStatus === null) return false;
+    try {
+      const applied = await this.store.recordCapture({
+        id: job.id,
+        ownerInstance: this.instanceId,
+        captureStatus: job.captureStatus,
+        outputDroppedBytes: job.outputDroppedBytes,
+        nativeTranscript: job.nativeTranscript,
+        nativeTranscriptBytes: job.nativeTranscriptBytes,
+        nativeTranscriptTruncated: job.nativeTranscriptTruncated,
+        nativeTranscriptDroppedBytes: job.nativeTranscriptDroppedBytes,
+        captureError: job.captureError,
+      });
+      if (applied && job.nativeTranscriptPath) {
+        const expected = devinTranscriptPath(job.correlationId);
+        if (job.nativeTranscriptPath === expected) {
+          try {
+            unlinkSync(expected);
+          } catch {
+            // The durable copy already succeeded. A later host cleanup may
+            // remove the exact gateway-owned source file.
+          }
+          job.nativeTranscriptPath = undefined;
+        }
+      }
+      return applied;
+    } catch (error) {
+      this.logger.error(`JobStore.recordCapture failed for ${job.id}`, error);
+      return false;
+    }
+  }
+
   private async persistCompleteBody(job: AsyncJobRecord): Promise<boolean> {
     if (!this.store) return !job.kitExecution;
     // Never persist a non-terminal job as complete. "queued" (issue #130) is
@@ -3647,6 +3806,7 @@ export class AsyncJobManager {
     if (job.terminalPersisted) {
       if (this.mayWriteOutputFor(job)) await this.persistLateOutput(job);
       else job.outputDirty = false;
+      await this.persistCapture(job);
       return true;
     }
     // Make sure the latest output is captured in the same row update.
@@ -3689,6 +3849,7 @@ export class AsyncJobManager {
           { correlationId: job.correlationId }
         );
       }
+      if (applied) await this.persistCapture(job);
       return true;
     } catch (err) {
       this.logger.error(`JobStore.recordComplete failed for ${job.id}`, err);
@@ -3854,6 +4015,7 @@ export class AsyncJobManager {
       stdout: row.stdout,
       stderr: row.stderr,
       outputTruncated: row.outputTruncated,
+      outputDroppedBytes: row.outputDroppedBytes,
       canceled: row.status === "canceled",
       error: row.error,
       errorCategory:
@@ -3877,6 +4039,23 @@ export class AsyncJobManager {
       exited: row.status !== "running" && row.status !== "queued",
       metricsRecorded: true,
       outputFormat: row.outputFormat ?? undefined,
+      captureFormat: row.captureFormat,
+      transcriptCapable: captureFormatCarriesTranscript(row.cli, row.captureFormat),
+      replayContext: row.replayContext,
+      cwdRecord:
+        row.cwdScope === null
+          ? null
+          : {
+              scope: row.cwdScope,
+              path: row.cwdPath,
+              workspaceAlias: row.workspaceAlias,
+            },
+      captureStatus: row.captureStatus,
+      nativeTranscript: row.nativeTranscript,
+      nativeTranscriptBytes: row.nativeTranscriptBytes,
+      nativeTranscriptTruncated: row.nativeTranscriptTruncated,
+      nativeTranscriptDroppedBytes: row.nativeTranscriptDroppedBytes,
+      captureError: row.captureError,
       compressResponse: row.compressResponse ?? null,
       ownerPrincipal: row.ownerPrincipal,
       mcpArtifactPath: row.mcpArtifactPath,
@@ -3891,10 +4070,15 @@ export class AsyncJobManager {
       terminalPersistenceAcknowledged: row.status !== "queued" && row.status !== "running",
       progress: new JobProgressTracker(
         row.cli,
-        row.outputFormat ?? undefined,
+        row.captureFormat ?? row.outputFormat ?? undefined,
         parseStoredJobProgress(row.progressJson),
         row.startedAt,
-        resolveJobProgressCapability(row.cli, args, row.outputFormat ?? undefined, row.transport)
+        resolveJobProgressCapability(
+          row.cli,
+          args,
+          row.captureFormat ?? row.outputFormat ?? undefined,
+          row.transport
+        )
       ),
       progressDirty: false,
       lastProgressFlushAt: Date.now(),
@@ -4118,7 +4302,14 @@ export class AsyncJobManager {
     } = opts;
     const stableKitExecution = kitExecution ? cloneKitExecutionRef(kitExecution) : null;
     const stableKitSessionId = normalizeKitSessionId(stableKitExecution, kitSessionId);
-    const invalidArgv = containsInvalidCliArg(args);
+    const capturePlan = stableKitExecution
+      ? { args: [...args], captureFormat: null, transcriptCapable: false }
+      : planProviderCapture(cli, args, outputFormat);
+    const launchArgs = capturePlan.args;
+    const persistedCaptureArgs = stableKitExecution
+      ? [...(persistedArgs ?? args)]
+      : planProviderCapture(cli, persistedArgs ?? args, outputFormat).args;
+    const invalidArgv = containsInvalidCliArg(launchArgs);
     const durableFlightRecorderEntry = redactInvalidArgvFlightRecorderEntry(
       redactPersonalKitFlightRecorderEntry(flightRecorderEntry, stableKitExecution),
       invalidArgv
@@ -4134,7 +4325,7 @@ export class AsyncJobManager {
     });
     const durableMcpArtifactPath = resolvePersistedClaudeMcpArtifactPath(
       cli,
-      args,
+      launchArgs,
       requestedMcpArtifactPath
     );
     const durableMcpArtifactScope = resolvePersistedClaudeMcpArtifactScope(
@@ -4200,6 +4391,8 @@ export class AsyncJobManager {
       throw new Error(`Job id ${id} is already in use`);
     }
     const startedAt = new Date().toISOString();
+    const cwdRecord = describeJobCwd(cwd, cwdResolution);
+    const replayContext = captureJobReplayContext(cli, cwdRecord, stableKitExecution !== null);
 
     // F3: ownership principal from the request context ambient at job creation
     // (synchronous with the tool handler). stdio / boot-time paths → "local".
@@ -4212,7 +4405,7 @@ export class AsyncJobManager {
       // Retain the exact vector only in the launch closure. A queued job needs
       // it until admission runs, but the long-lived job record must not keep a
       // rejected NUL-bearing vector through its completed-memory TTL.
-      args: invalidArgv ? persistableJobArgs(args, stableKitExecution) : [...args],
+      args: invalidArgv ? persistableJobArgs(launchArgs, stableKitExecution) : [...launchArgs],
       requestKey,
       correlationId,
       // Issue #130: created "queued"; flipped to "running" by launch() the
@@ -4225,6 +4418,7 @@ export class AsyncJobManager {
       stdout: "",
       stderr: "",
       outputTruncated: false,
+      outputDroppedBytes: 0,
       canceled: false,
       error: null,
       errorCategory: null,
@@ -4236,6 +4430,20 @@ export class AsyncJobManager {
       exited: false,
       metricsRecorded: false,
       outputFormat,
+      captureFormat: capturePlan.captureFormat,
+      transcriptCapable: capturePlan.transcriptCapable,
+      replayContext,
+      cwdRecord: stableKitExecution ? null : cwdRecord,
+      captureStatus: null,
+      nativeTranscript: null,
+      nativeTranscriptBytes: 0,
+      nativeTranscriptTruncated: false,
+      nativeTranscriptDroppedBytes: 0,
+      captureError: null,
+      nativeTranscriptPath:
+        cli === "devin" && launchArgs.includes(devinTranscriptPath(correlationId))
+          ? devinTranscriptPath(correlationId)
+          : undefined,
       compressResponse: compressResponse ?? null,
       mcpArtifactPath: durableMcpArtifactPath,
       mcpArtifactScope: durableMcpArtifactScope,
@@ -4247,10 +4455,15 @@ export class AsyncJobManager {
       terminalPersistenceAcknowledged: stableKitExecution === null,
       progress: new JobProgressTracker(
         cli,
-        outputFormat,
+        capturePlan.captureFormat ?? outputFormat,
         null,
         startedAt,
-        resolveJobProgressCapability(cli, args, outputFormat, "process")
+        resolveJobProgressCapability(
+          cli,
+          launchArgs,
+          capturePlan.captureFormat ?? outputFormat,
+          "process"
+        )
       ),
       progressDirty: true,
       lastProgressFlushAt: Date.now(),
@@ -4301,7 +4514,14 @@ export class AsyncJobManager {
         // queued -> running transition. Unawaited, a rejection skipped this
         // catch, so the job was never terminalised as failed and its limiter
         // permit was never released.
-        await this.launchProcessJob(job, { cli, args, cwd, stdin, extraEnv, idleTimeoutMs });
+        await this.launchProcessJob(job, {
+          cli,
+          args: launchArgs,
+          cwd,
+          stdin,
+          extraEnv,
+          idleTimeoutMs,
+        });
       } catch (err) {
         const launchError = describeProcessLaunchError(cli, err as Error);
         job.status = "failed";
@@ -4357,8 +4577,8 @@ export class AsyncJobManager {
       requestKey,
       cli,
       args: invalidArgv
-        ? persistableJobArgs(args, stableKitExecution)
-        : persistableJobArgs(persistedArgs ?? args, stableKitExecution),
+        ? persistableJobArgs(launchArgs, stableKitExecution)
+        : persistableJobArgs(persistedCaptureArgs, stableKitExecution),
       outputFormat,
       compressResponse,
       startedAt,
@@ -4375,7 +4595,9 @@ export class AsyncJobManager {
       kitExecution: stableKitExecution,
       kitSessionId: stableKitSessionId,
       validationAdmission,
-      cwd: describeJobCwd(cwd, cwdResolution),
+      cwd: job.cwdRecord,
+      replayContext: job.replayContext,
+      captureFormat: capturePlan.captureFormat,
     });
     await this.maybeFlushProgress(job, true);
     // Slice 1.5: only opt-in callers (pure async handlers) write logStart
@@ -4867,6 +5089,7 @@ export class AsyncJobManager {
     options: {
       stdoutOffsetChars?: number;
       stderrOffsetChars?: number;
+      nativeTranscriptOffsetChars?: number;
       redactProviderSessionIds?: boolean;
     } = {}
   ): Promise<AsyncJobResult | null> {
@@ -4880,6 +5103,10 @@ export class AsyncJobManager {
       if (!job) return null;
     }
 
+    if (!job.hydratedFromStore && job.status !== "queued" && job.status !== "running") {
+      await this.persistCapture(job);
+    }
+
     const durableKitResult = Boolean(job.kitExecution) && job.kitOutputAvailableInMemory === false;
     const fullStdout = durableKitResult ? PERSONAL_KIT_OUTPUT_WITHHELD : job.stdout;
     const fullStderr = durableKitResult ? "" : job.stderr;
@@ -4887,13 +5114,18 @@ export class AsyncJobManager {
     // can cover an identifier that happens to straddle a page boundary.
     const providerMeta =
       !job.kitExecution && job.transport === "process"
-        ? extractProviderOutputMetadata(job.cli, job.stdout, job.outputFormat)
+        ? extractProviderOutputMetadata(job.cli, job.stdout, job.captureFormat ?? job.outputFormat)
         : undefined;
     // A native session id is resumable only after a successful completion, but
     // remote redaction must use the parsed value for every captured outcome.
     const resumableProviderMeta = job.status === "completed" ? providerMeta : undefined;
     const stdout = pageText(fullStdout, maxChars, options.stdoutOffsetChars ?? 0);
     const stderr = pageText(fullStderr, maxChars, options.stderrOffsetChars ?? 0);
+    const nativeTranscriptValue = job.nativeTranscript ?? null;
+    const nativeTranscript =
+      nativeTranscriptValue === null
+        ? null
+        : pageText(nativeTranscriptValue, maxChars, options.nativeTranscriptOffsetChars ?? 0);
     const sessionId = options.redactProviderSessionIds ? providerMeta?.sessionId : undefined;
     // `snapshot.error` is caller-visible too. It is not paged, so scrub it in
     // full before returning the object rather than relying on the stdout/stderr
@@ -4921,6 +5153,15 @@ export class AsyncJobManager {
       stderrOffsetChars: stderr.offsetChars,
       stderrTotalChars: stderr.totalChars,
       stderrNextOffsetChars: stderr.nextOffsetChars,
+      ...(nativeTranscript
+        ? {
+            nativeTranscript: nativeTranscript.text,
+            nativeTranscriptOffsetChars: nativeTranscript.offsetChars,
+            nativeTranscriptTotalChars: nativeTranscript.totalChars,
+            nativeTranscriptNextOffsetChars: nativeTranscript.nextOffsetChars,
+            nativeTranscriptPageTruncated: nativeTranscript.truncated,
+          }
+        : {}),
       ...(resumableProviderMeta?.sessionId
         ? { providerSessionId: resumableProviderMeta.sessionId }
         : {}),
@@ -5130,6 +5371,10 @@ export class AsyncJobManager {
     return this.jobs.get(jobId)?.outputFormat;
   }
 
+  getJobCaptureFormat(jobId: string): string | null | undefined {
+    return this.jobs.get(jobId)?.captureFormat;
+  }
+
   /**
    * Native compressor PR-1 (spec 5.2): the job's persisted effective
    * compression decision. NULL/undefined (legacy or pre-compressor rows)
@@ -5180,10 +5425,15 @@ export class AsyncJobManager {
     if (!job.progress) {
       job.progress = new JobProgressTracker(
         job.cli,
-        job.outputFormat,
+        job.captureFormat ?? job.outputFormat,
         null,
         job.startedAt,
-        resolveJobProgressCapability(job.cli, job.args, job.outputFormat, job.transport)
+        resolveJobProgressCapability(
+          job.cli,
+          job.args,
+          job.captureFormat ?? job.outputFormat,
+          job.transport
+        )
       );
       job.progressDirty = true;
       job.lastProgressFlushAt = Date.now();
@@ -5205,6 +5455,7 @@ export class AsyncJobManager {
       exitCode: job.exitCode,
       correlationId: job.correlationId,
       outputTruncated: job.outputTruncated,
+      outputDroppedBytes: job.outputDroppedBytes,
       stdoutBytes: Buffer.byteLength(job.stdout),
       stderrBytes: Buffer.byteLength(job.stderr),
       error: job.kitExecution && job.error ? PERSONAL_KIT_FAILURE_WITHHELD : job.error,
@@ -5212,6 +5463,30 @@ export class AsyncJobManager {
       ...(job.retryable !== null ? { retryable: job.retryable } : {}),
       exited: job.exited,
       progress: this.progressTracker(job).snapshot(afterProgressSeq, progressLimit),
+      ...(!job.kitExecution
+        ? {
+            executionContext: {
+              cwd: job.cwdRecord ? { ...job.cwdRecord } : null,
+              replay: job.replayContext
+                ? {
+                    ...job.replayContext,
+                    instructionFiles: job.replayContext.instructionFiles.map(entry => ({
+                      ...entry,
+                    })),
+                  }
+                : null,
+              capture: {
+                format: job.captureFormat ?? null,
+                status: job.captureStatus,
+                outputDroppedBytes: job.outputDroppedBytes,
+                nativeTranscriptBytes: job.nativeTranscriptBytes,
+                nativeTranscriptTruncated: job.nativeTranscriptTruncated,
+                nativeTranscriptDroppedBytes: job.nativeTranscriptDroppedBytes,
+                error: job.captureError,
+              },
+            },
+          }
+        : {}),
     };
   }
 
@@ -5223,6 +5498,7 @@ export class AsyncJobManager {
     const totalBytes = Buffer.byteLength(job.stdout) + Buffer.byteLength(job.stderr) + chunk.length;
     if (totalBytes > this.maxJobOutputBytes) {
       job.outputTruncated = true;
+      job.outputDroppedBytes += chunk.length;
       if (job.status === "running") {
         // Issue #130: the cap is configurable via [limits].max_job_output_bytes;
         // the message renders "50MB" at the default cap (asserted by tests).

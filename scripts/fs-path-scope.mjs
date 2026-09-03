@@ -28,6 +28,7 @@ export const CALLER_INFLUENCED_FS_MODULES = [
   "src/devin-transcript.ts",
   "src/executor.ts",
   "src/index.ts",
+  "src/job-replay-context.ts",
   "src/mistral-kit-isolation.ts",
   "src/mistral-meta-json-parser.ts",
   "src/personal-config.ts",
@@ -47,6 +48,7 @@ export const CALLER_INFLUENCED_FS_MODULES = [
  */
 export const GATEWAY_OWNED_FS_MODULES = [
   "src/approval-manager.ts",
+  "src/async-job-manager.ts",
   "src/config.ts",
   "src/doctor.ts",
   "src/entrypoint-url.ts",

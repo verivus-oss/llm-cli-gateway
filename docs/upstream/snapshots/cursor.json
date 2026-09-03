@@ -1,7 +1,7 @@
 {
   "schemaVersion": "upstream-scan-snapshot.v2",
   "cli": "cursor",
-  "fetchedAt": "2026-08-13T12:25:05.087Z",
+  "fetchedAt": "2026-09-03T01:23:09.142Z",
   "sources": [
     {
       "url": "https://cursor.com/cli",
@@ -29,10 +29,10 @@
     }
   ],
   "helpSurface": {
-    "probedAt": "2026-08-13T12:25:04.753Z",
+    "probedAt": "2026-09-03T01:23:08.835Z",
     "available": true,
-    "version": "2026.08.11-e8db854",
-    "targetVersion": "cursor-agent 2026.08.11-e8db854",
+    "version": "2026.09.02-c22c1a3",
+    "targetVersion": "cursor-agent 2026.09.02-c22c1a3",
     "versionMatchesTarget": true,
     "discoveredFlags": [
       "--add-dir",
@@ -61,7 +61,7 @@
       "--worktree-base",
       "--yolo"
     ],
-    "helpHash": "e05e93810c059427e4c84296de0d88a6d7506aa1fd1f0a08b5f1e00446baf81a",
+    "helpHash": "2ca9b4647ac516476618eb79098c736ace5a0c0ec16e82fd9d64889747c61b98",
     "extraVsContract": [],
     "missingFromBinary": [],
     "arityMismatches": [],
@@ -80,6 +80,7 @@
     "ls",
     "mcp",
     "models",
+    "persist",
     "plugin",
     "resume",
     "rule",
@@ -94,7 +95,7 @@
       "commandPath": [
         "about"
       ],
-      "probedAt": "2026-08-13T12:24:58.718Z",
+      "probedAt": "2026-09-03T01:23:02.916Z",
       "available": true,
       "existence": "present",
       "discoveredFlags": [
@@ -114,7 +115,7 @@
       "commandPath": [
         "agent"
       ],
-      "probedAt": "2026-08-13T12:24:59.052Z",
+      "probedAt": "2026-09-03T01:23:03.233Z",
       "available": true,
       "existence": "present",
       "discoveredFlags": [],
@@ -132,7 +133,7 @@
       "commandPath": [
         "bedrock"
       ],
-      "probedAt": "2026-08-13T12:25:00.097Z",
+      "probedAt": "2026-09-03T01:23:04.314Z",
       "available": true,
       "existence": "present",
       "discoveredFlags": [],
@@ -150,7 +151,7 @@
       "commandPath": [
         "create-chat"
       ],
-      "probedAt": "2026-08-13T12:25:00.426Z",
+      "probedAt": "2026-09-03T01:23:04.631Z",
       "available": true,
       "existence": "present",
       "discoveredFlags": [],
@@ -168,7 +169,7 @@
       "commandPath": [
         "generate-rule"
       ],
-      "probedAt": "2026-08-13T12:25:00.759Z",
+      "probedAt": "2026-09-03T01:23:04.946Z",
       "available": true,
       "existence": "present",
       "discoveredFlags": [],
@@ -186,7 +187,7 @@
       "commandPath": [
         "install-shell-integration"
       ],
-      "probedAt": "2026-08-13T12:25:01.095Z",
+      "probedAt": "2026-09-03T01:23:05.316Z",
       "available": true,
       "existence": "present",
       "discoveredFlags": [],
@@ -204,7 +205,7 @@
       "commandPath": [
         "login"
       ],
-      "probedAt": "2026-08-13T12:25:01.425Z",
+      "probedAt": "2026-09-03T01:23:05.631Z",
       "available": true,
       "existence": "present",
       "discoveredFlags": [],
@@ -222,7 +223,7 @@
       "commandPath": [
         "logout"
       ],
-      "probedAt": "2026-08-13T12:25:01.756Z",
+      "probedAt": "2026-09-03T01:23:05.945Z",
       "available": true,
       "existence": "present",
       "discoveredFlags": [],
@@ -240,7 +241,7 @@
       "commandPath": [
         "ls"
       ],
-      "probedAt": "2026-08-13T12:25:02.100Z",
+      "probedAt": "2026-09-03T01:23:06.271Z",
       "available": true,
       "existence": "present",
       "discoveredFlags": [],
@@ -258,7 +259,7 @@
       "commandPath": [
         "mcp"
       ],
-      "probedAt": "2026-08-13T12:25:02.428Z",
+      "probedAt": "2026-09-03T01:23:06.582Z",
       "available": true,
       "existence": "present",
       "discoveredFlags": [],
@@ -276,7 +277,7 @@
       "commandPath": [
         "models"
       ],
-      "probedAt": "2026-08-13T12:25:02.773Z",
+      "probedAt": "2026-09-03T01:23:06.894Z",
       "available": true,
       "existence": "present",
       "discoveredFlags": [],
@@ -290,11 +291,29 @@
       "tier": "inspect",
       "summary": "List Cursor account models."
     },
+    "persist": {
+      "commandPath": [
+        "persist"
+      ],
+      "probedAt": "2026-09-03T01:23:06.946Z",
+      "available": true,
+      "existence": "present",
+      "discoveredFlags": [],
+      "helpHash": "7c936932f4cc1a342dbd7b25ff692c400eb716216fd24eb5733455ba37301855",
+      "extraVsContract": [],
+      "missingFromBinary": [],
+      "arityMismatches": [],
+      "enumMismatches": [],
+      "risk": "writes_local_config",
+      "exposure": "tracked_only",
+      "tier": "catalog",
+      "summary": "Upstream-declared cursor command (auto-catalogued, unverified)."
+    },
     "plugin": {
       "commandPath": [
         "plugin"
       ],
-      "probedAt": "2026-08-13T12:25:03.105Z",
+      "probedAt": "2026-09-03T01:23:07.261Z",
       "available": true,
       "existence": "present",
       "discoveredFlags": [],
@@ -312,7 +331,7 @@
       "commandPath": [
         "resume"
       ],
-      "probedAt": "2026-08-13T12:25:03.435Z",
+      "probedAt": "2026-09-03T01:23:07.573Z",
       "available": true,
       "existence": "present",
       "discoveredFlags": [],
@@ -330,7 +349,7 @@
       "commandPath": [
         "status"
       ],
-      "probedAt": "2026-08-13T12:25:03.769Z",
+      "probedAt": "2026-09-03T01:23:07.889Z",
       "available": true,
       "existence": "present",
       "discoveredFlags": [
@@ -350,7 +369,7 @@
       "commandPath": [
         "uninstall-shell-integration"
       ],
-      "probedAt": "2026-08-13T12:25:04.104Z",
+      "probedAt": "2026-09-03T01:23:08.204Z",
       "available": true,
       "existence": "present",
       "discoveredFlags": [],
@@ -368,7 +387,7 @@
       "commandPath": [
         "update"
       ],
-      "probedAt": "2026-08-13T12:25:04.430Z",
+      "probedAt": "2026-09-03T01:23:08.518Z",
       "available": true,
       "existence": "present",
       "discoveredFlags": [],
@@ -386,14 +405,19 @@
       "commandPath": [
         "worker"
       ],
-      "probedAt": "2026-08-13T12:25:04.753Z",
+      "probedAt": "2026-09-03T01:23:08.835Z",
       "available": true,
       "existence": "present",
       "discoveredFlags": [
+        "--all-pools",
+        "--api-key",
         "--auth-token-file",
+        "--clone-git-repos",
         "--computer-use",
         "--data-dir",
         "--debug",
+        "--display",
+        "--endpoint",
         "--identity-socket",
         "--idle-release-timeout",
         "--label",
@@ -401,14 +425,20 @@
         "--management-addr",
         "--mint-github-token",
         "--name",
+        "--on-session-end",
+        "--on-session-start",
         "--pool",
         "--pool-name",
+        "--repository",
+        "--share-desktop",
         "--single-use",
+        "--spawn",
         "--sync-dashboard-secrets",
         "--wait",
+        "--warm-idle",
         "--worker-dir"
       ],
-      "helpHash": "e0ca5d19bca14e8f43b62efbe12f412a1ed6e066fe7e0898f3922673509ea03f",
+      "helpHash": "a67cf407ec97b6b73b6b9061d6fedb33c2106f1e462fd145ecda1920e8dab6c3",
       "extraVsContract": [],
       "missingFromBinary": [],
       "arityMismatches": [],

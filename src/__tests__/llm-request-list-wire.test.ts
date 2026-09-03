@@ -132,10 +132,8 @@ describe("llm_request_list (wire)", () => {
     expect(res.hint).toContain("validation_run_jobs");
     expect(res.hint).toContain("validation_receipt");
     expect(res.hint).toContain("llm_job_result");
-    // And the opposite gap, which is what makes an OLD correlationId resolve
-    // here and its job not resolve at all.
-    expect(res.hint).toMatch(/request retention is unbounded by default/);
-    expect(res.hint).toMatch(/job retention defaults to 30 days/);
+    expect(res.hint).toMatch(/Jobs and requests are both unbounded by default/);
+    expect(res.hint).toMatch(/configure their bounds independently/);
   });
 
   it("hands back an asyncJobId usable with llm_job_*", async () => {

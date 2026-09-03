@@ -196,8 +196,25 @@ describe("PostgresJobStore", () => {
       cli: "claude",
       args: ["-p", "postgres"],
       outputFormat: "text",
+      captureFormat: "stream-json",
+      replayContext: {
+        version: 1,
+        repositoryHead: "a".repeat(40),
+        instructionFiles: [
+          {
+            path: "/workspace/CLAUDE.md",
+            sha256: "b".repeat(64),
+            sourceBytes: 12,
+            effectiveBytes: 12,
+            effectiveLimitBytes: null,
+            truncated: false,
+            status: "captured",
+          },
+        ],
+      },
       startedAt,
       pid: 123,
+      ownerInstance: "pg-capture-owner",
       ownerPrincipal: "alice@example.com",
     });
     await store.recordOutput("pg-job-1", "partial", "", false, ["queued", "running"]);
@@ -211,6 +228,32 @@ describe("PostgresJobStore", () => {
       error: null,
       finishedAt,
     });
+    expect(
+      await store.recordCapture({
+        id: "pg-job-1",
+        ownerInstance: "pg-capture-owner",
+        captureStatus: "captured_to_limit",
+        outputDroppedBytes: 7,
+        nativeTranscript: '{"atif":true}',
+        nativeTranscriptBytes: 13,
+        nativeTranscriptTruncated: true,
+        nativeTranscriptDroppedBytes: 2,
+        captureError: null,
+      })
+    ).toBe(true);
+    expect(
+      await store.recordCapture({
+        id: "pg-job-1",
+        ownerInstance: "other-instance",
+        captureStatus: "not_captured",
+        outputDroppedBytes: 0,
+        nativeTranscript: null,
+        nativeTranscriptBytes: 0,
+        nativeTranscriptTruncated: false,
+        nativeTranscriptDroppedBytes: 0,
+        captureError: "must not overwrite",
+      })
+    ).toBe(false);
 
     const row = store.getById("pg-job-1");
     expect(await row).toMatchObject({
@@ -220,6 +263,29 @@ describe("PostgresJobStore", () => {
       cli: "claude",
       argsJson: JSON.stringify(["-p", "postgres"]),
       outputFormat: "text",
+      captureFormat: "stream-json",
+      captureStatus: "captured_to_limit",
+      outputDroppedBytes: 7,
+      nativeTranscript: '{"atif":true}',
+      nativeTranscriptBytes: 13,
+      nativeTranscriptTruncated: true,
+      nativeTranscriptDroppedBytes: 2,
+      captureError: null,
+      replayContext: {
+        version: 1,
+        repositoryHead: "a".repeat(40),
+        instructionFiles: [
+          {
+            path: "/workspace/CLAUDE.md",
+            sha256: "b".repeat(64),
+            sourceBytes: 12,
+            effectiveBytes: 12,
+            effectiveLimitBytes: null,
+            truncated: false,
+            status: "captured",
+          },
+        ],
+      },
       status: "completed",
       exitCode: 0,
       stdout: "done",

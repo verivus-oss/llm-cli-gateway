@@ -1,7 +1,7 @@
 {
   "schemaVersion": "upstream-scan-snapshot.v2",
   "cli": "gemini",
-  "fetchedAt": "2026-08-13T12:24:41.249Z",
+  "fetchedAt": "2026-09-03T01:22:40.554Z",
   "sources": [
     {
       "url": "https://antigravity.google/docs/cli-overview",
@@ -33,10 +33,10 @@
     }
   ],
   "helpSurface": {
-    "probedAt": "2026-08-13T12:24:41.249Z",
+    "probedAt": "2026-09-03T01:22:40.553Z",
     "available": true,
-    "version": "1.1.12",
-    "targetVersion": "1.1.12",
+    "version": "1.1.24",
+    "targetVersion": "1.1.24",
     "versionMatchesTarget": true,
     "discoveredFlags": [
       "--add-dir",
@@ -46,6 +46,7 @@
       "--dangerously-skip-permissions",
       "--disable-slash-commands",
       "--effort",
+      "--input-format",
       "--json-schema",
       "--log-file",
       "--mode",
@@ -59,7 +60,7 @@
       "--prompt-interactive",
       "--sandbox"
     ],
-    "helpHash": "1a76a80acd0731942eb5c31db9f57ceaa2634b082d6bdc05c4eb9c6d8a3788e5",
+    "helpHash": "81169a03280ed0aff3036e98c21e9a3883c5bf0f0531bc8eb12fd2a660c46a4a",
     "extraVsContract": [],
     "missingFromBinary": [],
     "arityMismatches": [],
@@ -71,6 +72,8 @@
     "changelog",
     "help",
     "install",
+    "mcp",
+    "mic-serve",
     "models",
     "plugin",
     "plugins",
@@ -81,7 +84,7 @@
       "commandPath": [
         "agent"
       ],
-      "probedAt": "2026-08-13T12:24:40.850Z",
+      "probedAt": "2026-09-03T01:22:39.990Z",
       "available": true,
       "existence": "present",
       "discoveredFlags": [],
@@ -99,7 +102,7 @@
       "commandPath": [
         "changelog"
       ],
-      "probedAt": "2026-08-13T12:24:40.918Z",
+      "probedAt": "2026-09-03T01:22:40.060Z",
       "available": true,
       "existence": "present",
       "discoveredFlags": [],
@@ -117,7 +120,7 @@
       "commandPath": [
         "install"
       ],
-      "probedAt": "2026-08-13T12:24:40.984Z",
+      "probedAt": "2026-09-03T01:22:40.127Z",
       "available": true,
       "existence": "present",
       "discoveredFlags": [
@@ -135,11 +138,49 @@
       "tier": "catalog",
       "summary": "Configure Antigravity CLI environment paths and shell settings."
     },
+    "mcp": {
+      "commandPath": [
+        "mcp"
+      ],
+      "probedAt": "2026-09-03T01:22:40.198Z",
+      "available": true,
+      "existence": "present",
+      "discoveredFlags": [],
+      "helpHash": "07208088e5a99db2293022e3b9adfb548e9606edfba04c9a962787ad8bad8bbd",
+      "extraVsContract": [],
+      "missingFromBinary": [],
+      "arityMismatches": [],
+      "enumMismatches": [],
+      "risk": "writes_local_config",
+      "exposure": "tracked_only",
+      "tier": "catalog",
+      "summary": "Upstream-declared gemini command (auto-catalogued, unverified)."
+    },
+    "mic-serve": {
+      "commandPath": [
+        "mic-serve"
+      ],
+      "probedAt": "2026-09-03T01:22:40.270Z",
+      "available": true,
+      "existence": "present",
+      "discoveredFlags": [
+        "--addr"
+      ],
+      "helpHash": "76120ede9679b72786ef11c90d9b310fc6b917fac5baa3231688583cd94b3f95",
+      "extraVsContract": [],
+      "missingFromBinary": [],
+      "arityMismatches": [],
+      "enumMismatches": [],
+      "risk": "writes_local_config",
+      "exposure": "tracked_only",
+      "tier": "catalog",
+      "summary": "Upstream-declared gemini command (auto-catalogued, unverified)."
+    },
     "models": {
       "commandPath": [
         "models"
       ],
-      "probedAt": "2026-08-13T12:24:41.050Z",
+      "probedAt": "2026-09-03T01:22:40.337Z",
       "available": true,
       "existence": "present",
       "discoveredFlags": [],
@@ -157,7 +198,7 @@
       "commandPath": [
         "plugin"
       ],
-      "probedAt": "2026-08-13T12:24:41.114Z",
+      "probedAt": "2026-09-03T01:22:40.408Z",
       "available": true,
       "existence": "present",
       "discoveredFlags": [],
@@ -175,7 +216,7 @@
       "commandPath": [
         "plugins"
       ],
-      "probedAt": "2026-08-13T12:24:41.181Z",
+      "probedAt": "2026-09-03T01:22:40.477Z",
       "available": true,
       "existence": "present",
       "discoveredFlags": [],
@@ -193,7 +234,7 @@
       "commandPath": [
         "update"
       ],
-      "probedAt": "2026-08-13T12:24:41.249Z",
+      "probedAt": "2026-09-03T01:22:40.553Z",
       "available": true,
       "existence": "present",
       "discoveredFlags": [],

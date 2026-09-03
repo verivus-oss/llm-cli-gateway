@@ -21,6 +21,8 @@ import {
 } from "./validation-wedge-sql.js";
 import type { PersonalKitTerminalMetadata } from "./provider-output-metadata.js";
 import { principalCanAccess } from "./request-context.js";
+import { parseJobReplayContext, type JobReplayContext } from "./job-replay-context.js";
+import { persistenceRetentionPolicy } from "./storage/retention.js";
 import {
   nodePostgresPoolFactory,
   PostgresStorageDriver,
@@ -212,6 +214,21 @@ export interface JobRecord {
   cwdPath: string | null;
   /** Registered workspace alias the directory was bound to, when there was one. */
   workspaceAlias: string | null;
+  /** Bounded instruction digests and repository commit captured at admission. */
+  replayContext: JobReplayContext | null;
+  /** Provider wire stored in stdout, or native artifact grammar for file capture. */
+  captureFormat: string | null;
+  /** Null on legacy rows that predate complete-capture accounting. */
+  captureStatus: "captured_whole" | "captured_to_limit" | "not_captured" | null;
+  /** Bytes rejected after the per-job capture ceiling was reached. */
+  outputDroppedBytes: number;
+  /** Bounded provider-native transcript for transports that cannot stream one. */
+  nativeTranscript: string | null;
+  nativeTranscriptBytes: number;
+  nativeTranscriptTruncated: boolean;
+  nativeTranscriptDroppedBytes: number;
+  /** Stable reason capture was unavailable, never raw provider output. */
+  captureError: string | null;
 }
 
 /**
@@ -256,7 +273,6 @@ export function resolveJobStoreDbPath(): string | null {
   return path.join(os.homedir(), ".llm-cli-gateway", "logs.db");
 }
 
-const DEFAULT_RETENTION_DAYS = 30;
 const FAR_FUTURE_ISO = "9999-12-31T23:59:59.999Z";
 
 /**
@@ -268,13 +284,18 @@ const FAR_FUTURE_ISO = "9999-12-31T23:59:59.999Z";
  */
 const SQLITE_NOW_MS = "CAST(ROUND((julianday('now') - 2440587.5) * 86400000.0) AS INTEGER)";
 
-export function resolveJobRetentionMs(): number {
+export function resolveJobRetentionMs(): number | null {
   const raw = process.env.LLM_GATEWAY_JOB_RETENTION_DAYS;
-  const days = raw ? Number(raw) : DEFAULT_RETENTION_DAYS;
-  if (!Number.isFinite(days) || days <= 0) {
-    return DEFAULT_RETENTION_DAYS * 24 * 60 * 60 * 1000;
-  }
+  if (!raw) return null;
+  const days = Number(raw);
+  if (!Number.isFinite(days) || days <= 0) return null;
   return days * 24 * 60 * 60 * 1000;
+}
+
+function retentionExpiryIso(at: string | number, retentionMs: number | null): string {
+  return retentionMs === null
+    ? FAR_FUTURE_ISO
+    : new Date((typeof at === "number" ? at : Date.parse(at)) + retentionMs).toISOString();
 }
 
 const DEFAULT_DEDUP_WINDOW_MS = 60 * 60 * 1000; // 1 hour
@@ -344,6 +365,19 @@ function rowToRecord(row: any): JobRecord {
     cwdScope: parseJobCwdScope(row.cwd_scope),
     cwdPath: typeof row.cwd_path === "string" ? row.cwd_path : null,
     workspaceAlias: typeof row.workspace_alias === "string" ? row.workspace_alias : null,
+    replayContext: parseJobReplayContext(row.replay_context_json),
+    captureFormat: typeof row.capture_format === "string" ? row.capture_format : null,
+    captureStatus: ["captured_whole", "captured_to_limit", "not_captured"].includes(
+      row.capture_status
+    )
+      ? row.capture_status
+      : null,
+    outputDroppedBytes: Number(row.output_dropped_bytes ?? 0),
+    nativeTranscript: typeof row.native_transcript === "string" ? row.native_transcript : null,
+    nativeTranscriptBytes: Number(row.native_transcript_bytes ?? 0),
+    nativeTranscriptTruncated: parseDurableBoolean(row.native_transcript_truncated),
+    nativeTranscriptDroppedBytes: Number(row.native_transcript_dropped_bytes ?? 0),
+    captureError: typeof row.capture_error === "string" ? row.capture_error : null,
   };
 }
 
@@ -484,6 +518,47 @@ async function ensureJobsCwdScopeColumns(conn: StorageConnection): Promise<void>
   }
   if (!names.has("workspace_alias")) {
     await conn.execute("ALTER TABLE jobs ADD COLUMN workspace_alias TEXT");
+  }
+}
+
+/** #296: add replay and complete-capture evidence to legacy SQLite job tables. */
+async function ensureJobsCaptureColumns(conn: StorageConnection): Promise<void> {
+  const cols = (await conn.query("PRAGMA table_info(jobs)")) as Array<{ name?: string }>;
+  const names = new Set(cols.map(col => col?.name));
+  if (!names.has("replay_context_json")) {
+    await conn.execute("ALTER TABLE jobs ADD COLUMN replay_context_json TEXT");
+  }
+  if (!names.has("capture_format")) {
+    await conn.execute("ALTER TABLE jobs ADD COLUMN capture_format TEXT");
+  }
+  if (!names.has("capture_status")) {
+    await conn.execute("ALTER TABLE jobs ADD COLUMN capture_status TEXT");
+  }
+  if (!names.has("output_dropped_bytes")) {
+    await conn.execute(
+      "ALTER TABLE jobs ADD COLUMN output_dropped_bytes INTEGER NOT NULL DEFAULT 0"
+    );
+  }
+  if (!names.has("native_transcript")) {
+    await conn.execute("ALTER TABLE jobs ADD COLUMN native_transcript TEXT");
+  }
+  if (!names.has("native_transcript_bytes")) {
+    await conn.execute(
+      "ALTER TABLE jobs ADD COLUMN native_transcript_bytes INTEGER NOT NULL DEFAULT 0"
+    );
+  }
+  if (!names.has("native_transcript_truncated")) {
+    await conn.execute(
+      "ALTER TABLE jobs ADD COLUMN native_transcript_truncated INTEGER NOT NULL DEFAULT 0"
+    );
+  }
+  if (!names.has("native_transcript_dropped_bytes")) {
+    await conn.execute(
+      "ALTER TABLE jobs ADD COLUMN native_transcript_dropped_bytes INTEGER NOT NULL DEFAULT 0"
+    );
+  }
+  if (!names.has("capture_error")) {
+    await conn.execute("ALTER TABLE jobs ADD COLUMN capture_error TEXT");
   }
 }
 
@@ -763,6 +838,8 @@ export interface JobStore {
      * redacted for the same privacy reason.
      */
     cwd?: JobCwdRecord | null;
+    replayContext?: JobReplayContext | null;
+    captureFormat?: string | null;
   }): Promise<void>;
   /**
    * Permanently reserve an unadmitted Kit attempt id. This is an atomic
@@ -868,6 +945,18 @@ export interface JobStore {
     status: JobStoreStatus,
     progressJson: string
   ): Promise<boolean>;
+  /** Persist terminal capture accounting and any bounded native transcript. */
+  recordCapture(input: {
+    id: string;
+    ownerInstance: string;
+    captureStatus: "captured_whole" | "captured_to_limit" | "not_captured";
+    outputDroppedBytes: number;
+    nativeTranscript: string | null;
+    nativeTranscriptBytes: number;
+    nativeTranscriptTruncated: boolean;
+    nativeTranscriptDroppedBytes: number;
+    captureError: string | null;
+  }): Promise<boolean>;
   /**
    * Write the terminal row. Returns true when the row was actually written,
    * false when the completion guard rejected it because the row was already
@@ -1137,7 +1226,10 @@ const SQL_INSERT = `
                         mcp_artifact_path, mcp_artifact_scope, mcp_artifact_cleanup_pending, lease_deadline,
                         kit_execution_json, kit_session_id, kit_terminal_finalized,
                         kit_terminal_finalized_at, kit_terminal_metadata_json,
-                        cwd_scope, cwd_path, workspace_alias)
+                        cwd_scope, cwd_path, workspace_alias,
+                        replay_context_json, capture_format, capture_status,
+                        output_dropped_bytes, native_transcript, native_transcript_bytes,
+                        native_transcript_truncated, native_transcript_dropped_bytes, capture_error)
       VALUES (@id, @correlation_id, @request_key, @cli, @args_json, @output_format,
               @compress_response,
               'queued', @exit_code, @stdout, @stderr, @output_truncated, @error,
@@ -1145,7 +1237,9 @@ const SQL_INSERT = `
               @transport, @http_status, @payload_json, @owner_instance, @owner_hostname,
               @mcp_artifact_path, @mcp_artifact_scope, @mcp_artifact_cleanup_pending,
               ${SQLITE_NOW_MS} + @lease_ttl_ms, @kit_execution_json, @kit_session_id,
-              0, NULL, NULL, @cwd_scope, @cwd_path, @workspace_alias)
+              0, NULL, NULL, @cwd_scope, @cwd_path, @workspace_alias,
+              @replay_context_json, @capture_format, NULL,
+              0, NULL, 0, 0, 0, NULL)
     `;
 
 const SQL_INSERT_KIT_ATTEMPT_FENCE = `
@@ -1177,6 +1271,20 @@ const SQL_UPDATE_PROGRESS = `
 const SQL_UPDATE_PROGRESS_IF_STATUS = `
       UPDATE jobs SET progress_json = @progress_json
       WHERE id = @id AND status = @status
+    `;
+
+const SQL_UPDATE_CAPTURE = `
+      UPDATE jobs
+      SET capture_status = @capture_status,
+          output_dropped_bytes = @output_dropped_bytes,
+          native_transcript = CASE WHEN kit_execution_json IS NULL THEN @native_transcript ELSE NULL END,
+          native_transcript_bytes = CASE WHEN kit_execution_json IS NULL THEN @native_transcript_bytes ELSE 0 END,
+          native_transcript_truncated = CASE WHEN kit_execution_json IS NULL THEN @native_transcript_truncated ELSE 0 END,
+          native_transcript_dropped_bytes = CASE WHEN kit_execution_json IS NULL THEN @native_transcript_dropped_bytes ELSE 0 END,
+          capture_error = @capture_error
+      WHERE id = @id
+        AND owner_instance = @owner_instance
+        AND status IN ('completed', 'failed', 'canceled', 'orphaned')
     `;
 
 const SQL_UPDATE_COMPLETE = `
@@ -1355,7 +1463,7 @@ export class SqliteJobStore implements JobStore, ValidationRunStore {
   private readonly dbPath: string;
   private bootstrapPromise: Promise<void> | null = null;
   private closed = false;
-  private retentionMs: number;
+  private retentionMs: number | null;
   private dedupWindowMs: number;
   /** #139: initial lease TTL used by recordStart/markRunning/heartbeat (ms). */
   private leaseTtlMs: number;
@@ -1363,7 +1471,7 @@ export class SqliteJobStore implements JobStore, ValidationRunStore {
   constructor(
     dbPath: string,
     private logger: Logger = noopLogger,
-    options: { retentionMs?: number; dedupWindowMs?: number; leaseTtlMs?: number } = {}
+    options: { retentionMs?: number | null; dedupWindowMs?: number; leaseTtlMs?: number } = {}
   ) {
     // openDatabase owns parent-directory creation (mkdirSync recursive), so the
     // job store no longer does its own mkdir. Any open/DDL failure throws to
@@ -1373,7 +1481,8 @@ export class SqliteJobStore implements JobStore, ValidationRunStore {
     // driver would put two independent writers on one file.
     this.driver = new SqliteStorageDriver(dbPath);
     this.dbPath = dbPath;
-    this.retentionMs = options.retentionMs ?? resolveJobRetentionMs();
+    this.retentionMs =
+      options.retentionMs === undefined ? resolveJobRetentionMs() : options.retentionMs;
     this.dedupWindowMs = options.dedupWindowMs ?? resolveDedupWindowMs();
     this.leaseTtlMs = options.leaseTtlMs ?? DEFAULT_INSTANCE_LEASE_TTL_MS;
 
@@ -1469,7 +1578,16 @@ export class SqliteJobStore implements JobStore, ValidationRunStore {
         progress_json TEXT,
         cwd_scope TEXT,
         cwd_path TEXT,
-        workspace_alias TEXT
+        workspace_alias TEXT,
+        replay_context_json TEXT,
+        capture_format TEXT,
+        capture_status TEXT,
+        output_dropped_bytes INTEGER NOT NULL DEFAULT 0,
+        native_transcript TEXT,
+        native_transcript_bytes INTEGER NOT NULL DEFAULT 0,
+        native_transcript_truncated INTEGER NOT NULL DEFAULT 0,
+        native_transcript_dropped_bytes INTEGER NOT NULL DEFAULT 0,
+        capture_error TEXT
       );
       CREATE INDEX IF NOT EXISTS idx_jobs_request_key ON jobs(request_key);
       CREATE INDEX IF NOT EXISTS idx_jobs_status ON jobs(status);
@@ -1558,6 +1676,7 @@ export class SqliteJobStore implements JobStore, ValidationRunStore {
       await ensureJobsErrorClassificationColumns(conn);
       // #296: must also run before the prepared INSERT below binds its columns.
       await ensureJobsCwdScopeColumns(conn);
+      await ensureJobsCaptureColumns(conn);
       // #139: idempotent migration for durable ownership and lease columns.
       // Same must-run-before-prepare ordering.
       await ensureJobsLeaseColumns(conn);
@@ -1692,6 +1811,8 @@ export class SqliteJobStore implements JobStore, ValidationRunStore {
     kitSessionId?: string | null;
     validationAdmission?: ValidationJobAdmission;
     cwd?: JobCwdRecord | null;
+    replayContext?: JobReplayContext | null;
+    captureFormat?: string | null;
   }): Promise<void> {
     assertMcpArtifactAdmissionInvariant(input);
     const insertJob = async (conn?: StorageConnection): Promise<void> => {
@@ -1740,6 +1861,11 @@ export class SqliteJobStore implements JobStore, ValidationRunStore {
             cwd_scope: input.kitExecution ? null : (input.cwd?.scope ?? null),
             cwd_path: input.kitExecution ? null : (input.cwd?.path ?? null),
             workspace_alias: input.kitExecution ? null : (input.cwd?.workspaceAlias ?? null),
+            replay_context_json:
+              input.kitExecution || !input.replayContext
+                ? null
+                : JSON.stringify(input.replayContext),
+            capture_format: input.kitExecution ? null : (input.captureFormat ?? null),
           },
         ],
         conn
@@ -2071,7 +2197,7 @@ export class SqliteJobStore implements JobStore, ValidationRunStore {
           );
         }
         const nowIso = new Date().toISOString();
-        const expiresAt = new Date(Date.now() + this.retentionMs).toISOString();
+        const expiresAt = retentionExpiryIso(Date.now(), this.retentionMs);
         const rows = (await this.allSql(
           SQL_ORPHAN_EXPIRED,
           [
@@ -2155,6 +2281,33 @@ export class SqliteJobStore implements JobStore, ValidationRunStore {
     return Number(result.changes) === 1;
   }
 
+  async recordCapture(input: {
+    id: string;
+    ownerInstance: string;
+    captureStatus: "captured_whole" | "captured_to_limit" | "not_captured";
+    outputDroppedBytes: number;
+    nativeTranscript: string | null;
+    nativeTranscriptBytes: number;
+    nativeTranscriptTruncated: boolean;
+    nativeTranscriptDroppedBytes: number;
+    captureError: string | null;
+  }): Promise<boolean> {
+    const result = await this.execSql(SQL_UPDATE_CAPTURE, [
+      {
+        id: input.id,
+        owner_instance: input.ownerInstance,
+        capture_status: input.captureStatus,
+        output_dropped_bytes: input.outputDroppedBytes,
+        native_transcript: input.nativeTranscript,
+        native_transcript_bytes: input.nativeTranscriptBytes,
+        native_transcript_truncated: input.nativeTranscriptTruncated ? 1 : 0,
+        native_transcript_dropped_bytes: input.nativeTranscriptDroppedBytes,
+        capture_error: input.captureError,
+      },
+    ]);
+    return Number(result.changes) === 1;
+  }
+
   /**
    * Mark a job as completed/failed/canceled. Sets expires_at = now + retention.
    */
@@ -2173,7 +2326,7 @@ export class SqliteJobStore implements JobStore, ValidationRunStore {
     progressJson?: string | null;
     kitTerminalMetadata?: PersonalKitTerminalMetadata | null;
   }): Promise<boolean> {
-    const expiresAt = new Date(Date.parse(input.finishedAt) + this.retentionMs).toISOString();
+    const expiresAt = retentionExpiryIso(input.finishedAt, this.retentionMs);
     const result = await this.execSql(SQL_UPDATE_COMPLETE, [
       {
         id: input.id,
@@ -2731,12 +2884,15 @@ export class MemoryJobStore implements JobStore {
     string,
     KitAttemptFenceInput & { state: "admitted" | "recovered" }
   >();
-  private retentionMs: number;
+  private retentionMs: number | null;
   private dedupWindowMs: number;
   private leaseTtlMs: number;
 
-  constructor(options: { retentionMs?: number; dedupWindowMs?: number; leaseTtlMs?: number } = {}) {
-    this.retentionMs = options.retentionMs ?? resolveJobRetentionMs();
+  constructor(
+    options: { retentionMs?: number | null; dedupWindowMs?: number; leaseTtlMs?: number } = {}
+  ) {
+    this.retentionMs =
+      options.retentionMs === undefined ? resolveJobRetentionMs() : options.retentionMs;
     this.dedupWindowMs = options.dedupWindowMs ?? resolveDedupWindowMs();
     this.leaseTtlMs = options.leaseTtlMs ?? DEFAULT_INSTANCE_LEASE_TTL_MS;
   }
@@ -2762,6 +2918,8 @@ export class MemoryJobStore implements JobStore {
     kitSessionId?: string | null;
     validationAdmission?: ValidationJobAdmission;
     cwd?: JobCwdRecord | null;
+    replayContext?: JobReplayContext | null;
+    captureFormat?: string | null;
   }): Promise<void> {
     assertMcpArtifactAdmissionInvariant(input);
     if (input.kitExecution) {
@@ -2828,6 +2986,15 @@ export class MemoryJobStore implements JobStore {
       kitTerminalFinalized: false,
       kitTerminalFinalizedAt: null,
       progressJson: null,
+      replayContext: input.kitExecution ? null : (input.replayContext ?? null),
+      captureFormat: input.kitExecution ? null : (input.captureFormat ?? null),
+      captureStatus: null,
+      outputDroppedBytes: 0,
+      nativeTranscript: null,
+      nativeTranscriptBytes: 0,
+      nativeTranscriptTruncated: false,
+      nativeTranscriptDroppedBytes: 0,
+      captureError: null,
     });
   }
 
@@ -2997,6 +3164,37 @@ export class MemoryJobStore implements JobStore {
     return true;
   }
 
+  async recordCapture(input: {
+    id: string;
+    ownerInstance: string;
+    captureStatus: "captured_whole" | "captured_to_limit" | "not_captured";
+    outputDroppedBytes: number;
+    nativeTranscript: string | null;
+    nativeTranscriptBytes: number;
+    nativeTranscriptTruncated: boolean;
+    nativeTranscriptDroppedBytes: number;
+    captureError: string | null;
+  }): Promise<boolean> {
+    const row = this.rows.get(input.id);
+    if (
+      !row ||
+      row.ownerInstance !== input.ownerInstance ||
+      row.status === "queued" ||
+      row.status === "running" ||
+      row.kitExecution !== null
+    ) {
+      return false;
+    }
+    row.captureStatus = input.captureStatus;
+    row.outputDroppedBytes = input.outputDroppedBytes;
+    row.nativeTranscript = input.nativeTranscript;
+    row.nativeTranscriptBytes = input.nativeTranscriptBytes;
+    row.nativeTranscriptTruncated = input.nativeTranscriptTruncated;
+    row.nativeTranscriptDroppedBytes = input.nativeTranscriptDroppedBytes;
+    row.captureError = input.captureError;
+    return true;
+  }
+
   async recordComplete(input: {
     id: string;
     status: Exclude<JobStoreStatus, "running" | "queued">;
@@ -3033,7 +3231,7 @@ export class MemoryJobStore implements JobStore {
     row.errorCategory = input.errorCategory ?? null;
     row.retryable = input.retryable ?? null;
     row.finishedAt = input.finishedAt;
-    row.expiresAt = new Date(Date.parse(input.finishedAt) + this.retentionMs).toISOString();
+    row.expiresAt = retentionExpiryIso(input.finishedAt, this.retentionMs);
     row.leaseDeadline = null;
     if (input.httpStatus !== undefined) row.httpStatus = input.httpStatus;
     // Keep the compatibility input out of the in-memory representation too:
@@ -3173,7 +3371,7 @@ export class PostgresJobStore implements JobStore, ValidationRunStore {
     dsn: string,
     private logger: Logger = noopLogger,
     options: {
-      retentionMs?: number;
+      retentionMs?: number | null;
       dedupWindowMs?: number;
       leaseTtlMs?: number;
       roleDsns?: PostgresRoleDsns;
@@ -3188,7 +3386,8 @@ export class PostgresJobStore implements JobStore, ValidationRunStore {
     // `[persistence.roles]`.
     this.roleDsns = { ...options.roleDsns, app: dsn };
     this.config = {
-      retentionMs: options.retentionMs ?? resolveJobRetentionMs(),
+      retentionMs:
+        options.retentionMs === undefined ? resolveJobRetentionMs() : options.retentionMs,
       dedupWindowMs: options.dedupWindowMs ?? resolveDedupWindowMs(),
       leaseTtlMs: options.leaseTtlMs ?? DEFAULT_INSTANCE_LEASE_TTL_MS,
       farFutureIso: FAR_FUTURE_ISO,
@@ -3324,6 +3523,8 @@ export class PostgresJobStore implements JobStore, ValidationRunStore {
     kitSessionId?: string | null;
     validationAdmission?: ValidationJobAdmission;
     cwd?: JobCwdRecord | null;
+    replayContext?: JobReplayContext | null;
+    captureFormat?: string | null;
   }): Promise<void> {
     assertMcpArtifactAdmissionInvariant(input);
     await this.call("recordStart", input);
@@ -3428,6 +3629,20 @@ export class PostgresJobStore implements JobStore, ValidationRunStore {
     progressJson: string
   ): Promise<boolean> {
     return this.call("recordProgressIfStatus", id, status, progressJson);
+  }
+
+  async recordCapture(input: {
+    id: string;
+    ownerInstance: string;
+    captureStatus: "captured_whole" | "captured_to_limit" | "not_captured";
+    outputDroppedBytes: number;
+    nativeTranscript: string | null;
+    nativeTranscriptBytes: number;
+    nativeTranscriptTruncated: boolean;
+    nativeTranscriptDroppedBytes: number;
+    captureError: string | null;
+  }): Promise<boolean> {
+    return this.call("recordCapture", input);
   }
 
   async recordComplete(input: {
@@ -3630,8 +3845,9 @@ export function createJobStore(
   config: PersistenceConfig,
   logger: Logger = noopLogger
 ): JobStore | null {
+  const jobRetentionDays = persistenceRetentionPolicy(config).days.jobs;
   const opts = {
-    retentionMs: config.retentionDays * 24 * 60 * 60 * 1000,
+    retentionMs: jobRetentionDays === null ? null : jobRetentionDays * 24 * 60 * 60 * 1000,
     dedupWindowMs: config.dedupWindowMs,
     // #139: initial lease TTL used by recordStart/markRunning/heartbeat.
     leaseTtlMs: config.instanceLeaseTtlMs,

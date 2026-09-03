@@ -553,6 +553,60 @@ export const UPSTREAM_CLI_CONTRACTS: Record<CliType, CliContract> = {
       // this command. Catalogued only (exposure defaults to tracked_only, so it
       // is not reachable by callers); risk is a conservative default pending
       // maintainer verification.
+      attach: subcommand(
+        ["attach"],
+        "Upstream-declared claude command (auto-catalogued, unverified).",
+        "writes_local_config"
+      ),
+      // Auto-declared by `npm run providers:rebaseline`: upstream advertises
+      // this command. Catalogued only (exposure defaults to tracked_only, so it
+      // is not reachable by callers); risk is a conservative default pending
+      // maintainer verification.
+      kill: subcommand(
+        ["kill"],
+        "Upstream-declared claude command (auto-catalogued, unverified).",
+        "writes_local_config"
+      ),
+      // Auto-declared by `npm run providers:rebaseline`: upstream advertises
+      // this command. Catalogued only (exposure defaults to tracked_only, so it
+      // is not reachable by callers); risk is a conservative default pending
+      // maintainer verification.
+      logs: subcommand(
+        ["logs"],
+        "Upstream-declared claude command (auto-catalogued, unverified).",
+        "writes_local_config"
+      ),
+      // Auto-declared by `npm run providers:rebaseline`: upstream advertises
+      // this command. Catalogued only (exposure defaults to tracked_only, so it
+      // is not reachable by callers); risk is a conservative default pending
+      // maintainer verification.
+      respawn: subcommand(
+        ["respawn"],
+        "Upstream-declared claude command (auto-catalogued, unverified).",
+        "writes_local_config"
+      ),
+      // Auto-declared by `npm run providers:rebaseline`: upstream advertises
+      // this command. Catalogued only (exposure defaults to tracked_only, so it
+      // is not reachable by callers); risk is a conservative default pending
+      // maintainer verification.
+      rm: subcommand(
+        ["rm"],
+        "Upstream-declared claude command (auto-catalogued, unverified).",
+        "writes_local_config"
+      ),
+      // Auto-declared by `npm run providers:rebaseline`: upstream advertises
+      // this command. Catalogued only (exposure defaults to tracked_only, so it
+      // is not reachable by callers); risk is a conservative default pending
+      // maintainer verification.
+      stop: subcommand(
+        ["stop"],
+        "Upstream-declared claude command (auto-catalogued, unverified).",
+        "writes_local_config"
+      ),
+      // Auto-declared by `npm run providers:rebaseline`: upstream advertises
+      // this command. Catalogued only (exposure defaults to tracked_only, so it
+      // is not reachable by callers); risk is a conservative default pending
+      // maintainer verification.
       import: subcommand(
         ["import"],
         "Upstream-declared claude command (auto-catalogued, unverified).",
@@ -609,7 +663,11 @@ export const UPSTREAM_CLI_CONTRACTS: Record<CliType, CliContract> = {
           "--settings",
           "--strict-mcp-config",
         ],
-        { tier: "inspect", flagArities: { "--json": "none", "--strict-mcp-config": "none" } }
+        {
+          acknowledgedUpstreamFlags: ["--restricted"],
+          tier: "inspect",
+          flagArities: { "--json": "none", "--strict-mcp-config": "none" },
+        }
       ),
       auth: subcommand(["auth"], "Manage Claude authentication state.", "auth", [], {
         exposure: "not_exposed",
@@ -897,11 +955,15 @@ export const UPSTREAM_CLI_CONTRACTS: Record<CliType, CliContract> = {
       "--ide",
       "--no-chrome",
       "--print", // long form of declared -p
+      "--permission-prompt-tool",
+      "--permission-prompts",
       "--prompt-suggestions",
+      "--restricted",
       "--remote-control",
       "--remote-control-session-name-prefix",
       "--teleport",
       "--tmux",
+      "--system-prompt-snapshot",
       "--version",
       "--worktree",
     ],
@@ -1073,7 +1135,7 @@ export const UPSTREAM_CLI_CONTRACTS: Record<CliType, CliContract> = {
     ],
   },
   codex: {
-    acknowledgedUpstreamFlags: ["--approve-for-me"],
+    acknowledgedUpstreamFlags: ["--approve-for-me", "--thread-source"],
     cli: "codex",
     executable: "codex",
     upstream: "OpenAI Codex CLI",
@@ -1207,7 +1269,7 @@ export const UPSTREAM_CLI_CONTRACTS: Record<CliType, CliContract> = {
           "--version",
         ],
         {
-          acknowledgedUpstreamFlags: ["--approve-for-me"],
+          acknowledgedUpstreamFlags: ["--approve-for-me", "--thread-source"],
           children: {
             resume: subcommand(
               ["exec", "resume"],
@@ -1231,7 +1293,8 @@ export const UPSTREAM_CLI_CONTRACTS: Record<CliType, CliContract> = {
                 "--output-schema",
                 "--skip-git-repo-check",
                 "--strict-config",
-              ]
+              ],
+              { acknowledgedUpstreamFlags: ["--thread-source"] }
             ),
             review: subcommand(
               ["exec", "review"],
@@ -1256,7 +1319,8 @@ export const UPSTREAM_CLI_CONTRACTS: Record<CliType, CliContract> = {
                 "--strict-config",
                 "--title",
                 "--uncommitted",
-              ]
+              ],
+              { acknowledgedUpstreamFlags: ["--thread-source"] }
             ),
           },
         }
@@ -1878,6 +1942,17 @@ export const UPSTREAM_CLI_CONTRACTS: Record<CliType, CliContract> = {
       // this command. Catalogued only (exposure defaults to tracked_only, so it
       // is not reachable by callers); risk is a conservative default pending
       // maintainer verification.
+      "mic-serve": subcommand(
+        ["mic-serve"],
+        "Upstream-declared gemini command (auto-catalogued, unverified).",
+        "writes_local_config",
+        [],
+        { acknowledgedUpstreamFlags: ["--addr"] }
+      ),
+      // Auto-declared by `npm run providers:rebaseline`: upstream advertises
+      // this command. Catalogued only (exposure defaults to tracked_only, so it
+      // is not reachable by callers); risk is a conservative default pending
+      // maintainer verification.
       mcp: subcommand(
         ["mcp"],
         "Upstream-declared gemini command (auto-catalogued, unverified).",
@@ -1996,6 +2071,12 @@ export const UPSTREAM_CLI_CONTRACTS: Record<CliType, CliContract> = {
         values: ["text", "json", "stream-json"],
         description: "Output format for print mode",
       },
+      "--input-format": {
+        arity: "one",
+        values: ["text", "stream-json"],
+        description:
+          "Input format for print mode. stream-json reads NDJSON turns from stdin and requires stream-json output.",
+      },
       "--print-timeout": {
         arity: "one",
         description: "Print-mode wait timeout as a Go duration string (e.g. 5m0s)",
@@ -2060,6 +2141,12 @@ export const UPSTREAM_CLI_CONTRACTS: Record<CliType, CliContract> = {
         id: "gemini-output-format-stream-json",
         description: "Antigravity print mode accepts --output-format stream-json",
         args: ["--print", "hello", "--output-format", "stream-json"],
+        expect: "pass",
+      },
+      {
+        id: "gemini-input-format-stream-json",
+        description: "Antigravity stream-json stdin and output modes are accepted together",
+        args: ["--print", "--input-format", "stream-json", "--output-format", "stream-json"],
         expect: "pass",
       },
       {
@@ -2159,6 +2246,19 @@ export const UPSTREAM_CLI_CONTRACTS: Record<CliType, CliContract> = {
     helpArgs: [["--help"]],
     subcommands: acknowledgeSubcommandFlags(
       {
+        // Auto-declared by `npm run providers:rebaseline`: upstream advertises
+        // this command. Catalogued only (exposure defaults to tracked_only, so it
+        // is not reachable by callers); risk is a conservative default pending
+        // maintainer verification.
+        clone: subcommand(
+          ["clone"],
+          "Upstream-declared grok command (auto-catalogued, unverified).",
+          "writes_local_config",
+          [],
+          {
+            acknowledgedUpstreamFlags: ["--branch", "--cone", "--full-history", "--leader-socket"],
+          }
+        ),
         // Auto-declared by `npm run providers:rebaseline`: upstream advertises
         // this command. Catalogued only (exposure defaults to tracked_only, so it
         // is not reachable by callers); risk is a conservative default pending
@@ -3273,6 +3373,48 @@ export const UPSTREAM_CLI_CONTRACTS: Record<CliType, CliContract> = {
     },
     helpArgs: [["--help"]],
     subcommands: {
+      // Auto-declared by `npm run providers:rebaseline`: upstream advertises
+      // this command. Catalogued only (exposure defaults to tracked_only, so it
+      // is not reachable by callers); risk is a conservative default pending
+      // maintainer verification.
+      desktop: subcommand(
+        ["desktop"],
+        "Upstream-declared devin command (auto-catalogued, unverified).",
+        "writes_local_config"
+      ),
+      // Auto-declared by `npm run providers:rebaseline`: upstream advertises
+      // this command. Catalogued only (exposure defaults to tracked_only, so it
+      // is not reachable by callers); risk is a conservative default pending
+      // maintainer verification.
+      doctor: subcommand(
+        ["doctor"],
+        "Upstream-declared devin command (auto-catalogued, unverified).",
+        "writes_local_config",
+        [],
+        { acknowledgedUpstreamFlags: ["--json"] }
+      ),
+      // Auto-declared by `npm run providers:rebaseline`: upstream advertises
+      // this command. Catalogued only (exposure defaults to tracked_only, so it
+      // is not reachable by callers); risk is a conservative default pending
+      // maintainer verification.
+      rm: subcommand(
+        ["rm"],
+        "Upstream-declared devin command (auto-catalogued, unverified).",
+        "writes_local_config",
+        [],
+        { acknowledgedUpstreamFlags: ["--force"] }
+      ),
+      // Auto-declared by `npm run providers:rebaseline`: upstream advertises
+      // this command. Catalogued only (exposure defaults to tracked_only, so it
+      // is not reachable by callers); risk is a conservative default pending
+      // maintainer verification.
+      ssh: subcommand(
+        ["ssh"],
+        "Upstream-declared devin command (auto-catalogued, unverified).",
+        "writes_local_config",
+        [],
+        { acknowledgedUpstreamFlags: ["--gateway"] }
+      ),
       acp: subcommand(
         ["acp"],
         "Run the Devin Agent Client Protocol server over stdio.",
@@ -3592,6 +3734,15 @@ export const UPSTREAM_CLI_CONTRACTS: Record<CliType, CliContract> = {
       // this command. Catalogued only (exposure defaults to tracked_only, so it
       // is not reachable by callers); risk is a conservative default pending
       // maintainer verification.
+      persist: subcommand(
+        ["persist"],
+        "Upstream-declared cursor command (auto-catalogued, unverified).",
+        "writes_local_config"
+      ),
+      // Auto-declared by `npm run providers:rebaseline`: upstream advertises
+      // this command. Catalogued only (exposure defaults to tracked_only, so it
+      // is not reachable by callers); risk is a conservative default pending
+      // maintainer verification.
       bedrock: subcommand(
         ["bedrock"],
         "Upstream-declared cursor command (auto-catalogued, unverified).",
@@ -3710,11 +3861,22 @@ export const UPSTREAM_CLI_CONTRACTS: Record<CliType, CliContract> = {
         ],
         {
           acknowledgedUpstreamFlags: [
+            "--all-pools",
+            "--api-key",
+            "--clone-git-repos",
             "--computer-use",
+            "--display",
+            "--endpoint",
             "--identity-socket",
             "--mint-github-token",
+            "--on-session-end",
+            "--on-session-start",
+            "--repository",
+            "--share-desktop",
+            "--spawn",
             "--sync-dashboard-secrets",
             "--wait",
+            "--warm-idle",
           ],
           exposure: "not_exposed",
           flagArities: { "--debug": "none", "--single-use": "none" },

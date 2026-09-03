@@ -97,14 +97,14 @@ describe("doctor reports the policy rather than deciding one", () => {
   it("carries the resolved bounds and the unbounded set out to the report", async () => {
     const storage = await collectStorageHealth(recorder);
     expect(storage.retention.policy).toEqual({
-      jobs: 30,
+      jobs: null,
       requests: null,
       wedgedValidationRuns: null,
     });
     // DERIVED from the policy. It was a hard-coded ["requests"], which is a
     // second place a retention decision was being taken.
-    expect(storage.retention.unbounded).toEqual(["requests", "wedgedValidationRuns"]);
-    expect(storage.retention.days).toBe(30);
+    expect(storage.retention.unbounded).toEqual(["jobs", "requests", "wedgedValidationRuns"]);
+    expect(storage.retention.days).toBeNull();
   });
 
   it("measures reclaimable bytes rather than reporting a bare file size", async () => {
@@ -134,11 +134,9 @@ describe("doctor reports the policy rather than deciding one", () => {
     expect(warning).not.toMatch(/no retention policy covers/);
   });
 
-  it("counts what a bound would take, without one being set", async () => {
-    // With no transcript bound the count falls back to the job window, which is
-    // the only transcript-shaped number an operator had before this node.
+  it("does not invent a horizon when no bound is set", async () => {
     const storage = await collectStorageHealth(recorder);
-    expect(storage.retention.requests_beyond_retention).toBe(0);
+    expect(storage.retention.requests_beyond_retention).toBeNull();
     expect(storage.flight_recorder.request_rows).toBe(1);
   });
 
@@ -161,6 +159,10 @@ describe("doctor reports the policy rather than deciding one", () => {
     it("warns once a request has outlived the job bound", async () => {
       // The request row survives and its job row does not, so the launched argv
       // and the raw provider stream for that correlation id are already gone.
+      writeFileSync(
+        join(dir, "config.toml"),
+        `[persistence]\nbackend = "sqlite"\nretentionDays = 30\n`
+      );
       backdateSeededRequest(45);
       const storage = await collectStorageHealth(recorder);
       const warning = inversionWarning(storage.warnings);
@@ -170,9 +172,7 @@ describe("doctor reports the policy rather than deciding one", () => {
     });
 
     it("stays silent while every request is still inside the job window", async () => {
-      // NEGATIVE CONTROL. The default configuration is inverted on every host,
-      // so a warning keyed on the configuration alone would fire always and be
-      // read as background. It must key on the loss having happened here.
+      // With every bound off there is no inversion to report.
       const storage = await collectStorageHealth(recorder);
       expect(inversionWarning(storage.warnings)).toBeUndefined();
     });
@@ -182,7 +182,7 @@ describe("doctor reports the policy rather than deciding one", () => {
       // numbers are.
       writeFileSync(
         join(dir, "config.toml"),
-        `[persistence]\nbackend = "sqlite"\n[persistence.retention]\nrequests = 90\n`
+        `[persistence]\nbackend = "sqlite"\nretentionDays = 30\n[persistence.retention]\nrequests = 90\n`
       );
       backdateSeededRequest(45);
       const storage = await collectStorageHealth(recorder);
@@ -275,7 +275,7 @@ describe("`storage compact` is an operator action, never a timer", () => {
     const before = statSync(dbPath).size;
     await runStorageCommand(["status"]);
     const text = out.join("");
-    expect(text).toMatch(/unbounded:\s+requests, wedgedValidationRuns/);
+    expect(text).toMatch(/unbounded:\s+jobs, requests, wedgedValidationRuns/);
     expect(text).toMatch(/transcript file/);
     expect(statSync(dbPath).size).toBe(before);
   });

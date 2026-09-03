@@ -4201,10 +4201,16 @@
             "default": 0,
             "description": "Captured stderr character offset for resumable retrieval. Non-zero offsets require rawOutput:true."
           },
+          "nativeTranscriptOffsetChars": {
+            "type": "integer",
+            "minimum": 0,
+            "default": 0,
+            "description": "Provider-native transcript character offset for resumable retrieval. Non-zero offsets require rawOutput:true."
+          },
           "rawOutput": {
             "type": "boolean",
             "default": false,
-            "description": "Return captured provider streams without display parsing or compression. Local stdio pages concatenate to the captured streams; remote pages redact provider session IDs. Required for resumable offsets."
+            "description": "Return captured provider streams without display parsing or compression. Available only to local stdio callers. Required for resumable offsets."
           }
         },
         "required": [
@@ -4324,7 +4330,7 @@
     },
     {
       "name": "llm_request_result",
-      "description": "Read back any persisted request (sync or async) from the flight recorder by correlationId, including prompt and response.",
+      "description": "Read back any persisted request (sync or async) from the flight recorder by correlationId, including prompt and response. Local callers can also include the linked complete job record.",
       "inputSchema": {
         "type": "object",
         "properties": {
@@ -4344,6 +4350,11 @@
             "type": "boolean",
             "default": false,
             "description": "Include the full persisted prompt text in the result"
+          },
+          "includeJobRecord": {
+            "type": "boolean",
+            "default": false,
+            "description": "Include the linked raw provider capture and replay context when called over local stdio. Remote callers receive no transcript or host paths."
           }
         },
         "required": [

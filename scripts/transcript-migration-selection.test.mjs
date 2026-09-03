@@ -77,6 +77,17 @@ describe("which migrations construct the flight recorder", () => {
     ]);
   });
 
+  it("reads quoted table identifiers without treating another subsystem as recorder-owned", () => {
+    expect([...tableTargets('ALTER TABLE "jobs" ADD COLUMN x TEXT;')]).toEqual(["jobs"]);
+    expect([...tableTargets('ALTER TABLE "requests" ADD COLUMN x TEXT;')]).toEqual(["requests"]);
+  });
+
+  it("reads the table after ALTER TABLE IF EXISTS rather than the IF keyword", () => {
+    expect([...tableTargets("ALTER TABLE IF EXISTS requests ADD COLUMN x TEXT;")]).toEqual([
+      "requests",
+    ]);
+  });
+
   it("refuses to return an empty selection instead of an empty schema", () => {
     const dir = fixture({ "022_none.sql": LEDGER(22) });
     try {

@@ -33,10 +33,11 @@ export interface CursorStreamParseResult {
 function cursorUsage(value: unknown): CursorStreamUsage | null {
   if (!value || typeof value !== "object") return null;
   const u = value as Record<string, unknown>;
-  const input = typeof u.inputTokens === "number" ? u.inputTokens : undefined;
-  const output = typeof u.outputTokens === "number" ? u.outputTokens : undefined;
-  if (input === undefined && output === undefined) return null;
-  const usage: CursorStreamUsage = { input_tokens: input ?? 0, output_tokens: output ?? 0 };
+  if (typeof u.inputTokens !== "number" || typeof u.outputTokens !== "number") return null;
+  const usage: CursorStreamUsage = {
+    input_tokens: u.inputTokens,
+    output_tokens: u.outputTokens,
+  };
   if (typeof u.cacheReadTokens === "number") usage.cache_read_tokens = u.cacheReadTokens;
   return usage;
 }

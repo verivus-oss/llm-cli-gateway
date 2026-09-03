@@ -129,6 +129,14 @@ describe("REGRESSIONS Eβ — prepareGeminiRequest emits agy output modes, never
     const prep = prepareGeminiRequest({ ...baseParams, outputFormat: "text" });
     if (!("args" in prep)) throw new Error("expected args");
     expect(prep.args).not.toContain("-o");
+    expect(prep.args).not.toContain("--output-format");
+  });
+
+  it("keeps explicit text dedup-equivalent to an omitted output format", () => {
+    const omitted = prepareGeminiRequest(baseParams);
+    const explicit = prepareGeminiRequest({ ...baseParams, outputFormat: "text" });
+    if (!("args" in omitted) || !("args" in explicit)) throw new Error("expected args");
+    expect(explicit.args).toEqual(omitted.args);
   });
 
   it("argv from prepareGeminiRequest({outputFormat:'text'}) passes validateUpstreamCliArgs", () => {
@@ -181,23 +189,18 @@ describe("REGRESSIONS Eδ — extractUsageAndCost routes outputFormat correctly"
     expect(result.outputTokens).toBe(2);
   });
 
-  // Routes are wired to the correct parser: feeding NDJSON to the `json`
-  // branch (single-object parser) should produce no usage, because
-  // `parseGeminiJson` JSON.parses the whole stdout — multi-line NDJSON
-  // is not a valid single JSON document.
-  it("returns empty usage when NDJSON is mis-fed to the json branch (parser swap guard)", () => {
+  // Capture grammar is independent of caller presentation. A text or JSON
+  // projection cannot make the durable NDJSON telemetry disappear.
+  it("reads captured NDJSON independently of the caller projection", () => {
     const result = extractUsageAndCost("gemini", ndjson, "json");
-    expect(result.inputTokens).toBeUndefined();
-    expect(result.outputTokens).toBeUndefined();
+    expect(result.inputTokens).toBe(33);
+    expect(result.outputTokens).toBe(7);
   });
 
-  // And feeding the single-object payload to the stream-json branch
-  // should also produce no usage, because the single object lacks the
-  // `type: "result"` event entirely.
-  it("returns empty usage when single-object JSON is mis-fed to the stream-json branch", () => {
+  it("reads captured single-object JSON independently of the caller projection", () => {
     const result = extractUsageAndCost("gemini", singleObj, "stream-json");
-    expect(result.inputTokens).toBeUndefined();
-    expect(result.outputTokens).toBeUndefined();
+    expect(result.inputTokens).toBe(11);
+    expect(result.outputTokens).toBe(2);
   });
 
   // #44: codex now always runs with `--json`, so its usage must be extracted

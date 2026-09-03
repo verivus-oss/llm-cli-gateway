@@ -193,6 +193,106 @@ describe("F3b-2 job / request ownership isolation", () => {
     expect(alice.request.correlationId).toBe("req-alice");
   });
 
+  it("llm_request_result exposes the linked complete job record only to local stdio", async () => {
+    const now = new Date().toISOString();
+    await store.recordStart({
+      id: "job-local-record",
+      correlationId: "req-local-record",
+      requestKey: "complete-record",
+      cli: "claude",
+      args: ["--output-format", "stream-json"],
+      outputFormat: "text",
+      startedAt: now,
+      pid: null,
+      ownerPrincipal: "local",
+      cwd: { scope: "caller", path: "/private/workspace", workspaceAlias: null },
+      replayContext: {
+        version: 1,
+        repositoryHead: "a".repeat(40),
+        instructionFiles: [
+          {
+            path: "/private/workspace/CLAUDE.md",
+            sha256: "b".repeat(64),
+            sourceBytes: 12,
+            effectiveBytes: 12,
+            effectiveLimitBytes: null,
+            truncated: false,
+            status: "captured",
+          },
+        ],
+      },
+      captureFormat: "stream-json",
+    });
+    await store.recordComplete({
+      id: "job-local-record",
+      status: "completed",
+      exitCode: 0,
+      stdout: '{"type":"assistant","message":{"content":[]}}',
+      stderr: "",
+      outputTruncated: false,
+      error: null,
+      finishedAt: now,
+    });
+    await flight.logStart({
+      correlationId: "req-local-record",
+      cli: "claude",
+      model: "sonnet",
+      prompt: "prompt",
+      asyncJobId: "job-local-record",
+      ownerPrincipal: "local",
+    });
+    await flight.logComplete("req-local-record", {
+      response: "response",
+      durationMs: 1,
+      retryCount: 0,
+      circuitBreakerState: "closed",
+      optimizationApplied: false,
+      exitCode: 0,
+      status: "completed",
+    });
+
+    const local = await call("llm_request_result", {
+      correlationId: "req-local-record",
+      maxChars: 200000,
+      includeJobRecord: true,
+    });
+    expect(local.jobRecord.stdout).toContain('"type":"assistant"');
+    expect(local.jobRecord.executionContext.cwd.path).toBe("/private/workspace");
+    expect(local.jobRecord.executionContext.replay.repositoryHead).toBe("a".repeat(40));
+
+    await runWithRequestContext(ctx("alice"), () =>
+      flight.logStart({
+        correlationId: "req-remote-record",
+        cli: "claude",
+        model: "sonnet",
+        prompt: "prompt",
+        asyncJobId: "job-local-record",
+      })
+    );
+    await flight.logComplete("req-remote-record", {
+      response: "response",
+      durationMs: 1,
+      retryCount: 0,
+      circuitBreakerState: "closed",
+      optimizationApplied: false,
+      exitCode: 0,
+      status: "completed",
+    });
+
+    const remote = await call(
+      "llm_request_result",
+      {
+        correlationId: "req-remote-record",
+        maxChars: 200000,
+        includeJobRecord: true,
+      },
+      "alice"
+    );
+    expect(remote.jobRecord).toBeNull();
+    expect(remote.jobRecordWithheld).toMatch(/local stdio/);
+    expect(JSON.stringify(remote)).not.toContain("/private/workspace");
+  });
+
   it("llm_request_result redacts native provider ids for the remote owner before slicing", async () => {
     const response = `${"x".repeat(995)}${PROVIDER_SESSION_ID} trailing response`;
     await runWithRequestContext(ctx("alice"), () =>

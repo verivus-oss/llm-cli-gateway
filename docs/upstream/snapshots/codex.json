@@ -1,7 +1,7 @@
 {
   "schemaVersion": "upstream-scan-snapshot.v2",
   "cli": "codex",
-  "fetchedAt": "2026-08-13T12:24:40.582Z",
+  "fetchedAt": "2026-09-03T01:22:39.703Z",
   "sources": [
     {
       "url": "https://api.github.com/repos/openai/codex/releases/latest",
@@ -185,10 +185,10 @@
     }
   ],
   "helpSurface": {
-    "probedAt": "2026-08-13T12:24:40.582Z",
+    "probedAt": "2026-09-03T01:22:39.703Z",
     "available": true,
-    "version": "codex-cli 0.147.0",
-    "targetVersion": "codex-cli 0.147.0",
+    "version": "codex-cli 0.152.1",
+    "targetVersion": "codex-cli 0.152.1",
     "versionMatchesTarget": true,
     "discoveredFlags": [
       "--add-dir",
@@ -216,15 +216,17 @@
       "--sandbox",
       "--skip-git-repo-check",
       "--strict-config",
+      "--thread-source",
       "--version"
     ],
-    "helpHash": "c9b6137920b3e9e17b88e5b30a6426aac25027cd79c8142a99d72eba372b8a91",
+    "helpHash": "02d238c6a20a8907994d4c04eae08dd6503b993cbb9a37b985e870e2d4f22e00",
     "extraVsContract": [],
     "missingFromBinary": [],
     "arityMismatches": [],
     "enumMismatches": []
   },
   "rootCommands": [
+    "agents",
     "app-server",
     "apply",
     "archive",
@@ -242,7 +244,9 @@
     "logout",
     "mcp",
     "mcp-server",
+    "migrate-rollouts",
     "plugin",
+    "queue",
     "remote-control",
     "resume",
     "review",
@@ -251,11 +255,37 @@
     "update"
   ],
   "subcommands": {
+    "agents": {
+      "commandPath": [
+        "agents"
+      ],
+      "probedAt": "2026-09-03T01:22:38.848Z",
+      "available": true,
+      "existence": "present",
+      "discoveredFlags": [
+        "--cd",
+        "--config",
+        "--disable",
+        "--enable",
+        "--no-alt-screen",
+        "--remote",
+        "--remote-auth-token-env"
+      ],
+      "helpHash": "47e67d3337abf66020a9f6d46a328df9a739614c38b5e05ffd1dfecd2734a67b",
+      "extraVsContract": [],
+      "missingFromBinary": [],
+      "arityMismatches": [],
+      "enumMismatches": [],
+      "risk": "writes_local_config",
+      "exposure": "tracked_only",
+      "tier": "catalog",
+      "summary": "Upstream-declared codex command (auto-catalogued, unverified)."
+    },
     "app-server": {
       "commandPath": [
         "app-server"
       ],
-      "probedAt": "2026-08-13T12:24:39.944Z",
+      "probedAt": "2026-09-03T01:22:38.880Z",
       "available": true,
       "existence": "present",
       "discoveredFlags": [
@@ -275,7 +305,7 @@
         "--ws-token-file",
         "--ws-token-sha256"
       ],
-      "helpHash": "388dfba2561238c522a808784ba52f2a5da03194515ea858765bf2aeb7bcd99a",
+      "helpHash": "58b407dc99725bc0b2ce32edf7e01312e042aa110b4488f3d48f9ecb02955217",
       "extraVsContract": [],
       "missingFromBinary": [],
       "arityMismatches": [],
@@ -289,7 +319,7 @@
       "commandPath": [
         "apply"
       ],
-      "probedAt": "2026-08-13T12:24:39.968Z",
+      "probedAt": "2026-09-03T01:22:38.912Z",
       "available": true,
       "existence": "present",
       "discoveredFlags": [
@@ -311,7 +341,7 @@
       "commandPath": [
         "archive"
       ],
-      "probedAt": "2026-08-13T12:24:39.993Z",
+      "probedAt": "2026-09-03T01:22:38.942Z",
       "available": true,
       "existence": "present",
       "discoveredFlags": [
@@ -333,7 +363,7 @@
         "--sandbox",
         "--strict-config"
       ],
-      "helpHash": "1c3f3052b1a35276014d640add4add58e0ace5d2cd3f8304a8d0dbf928c6b6b1",
+      "helpHash": "adf221d76887bbc5271eeb3591a67219bf06fa24c3be7276966cbc6197970842",
       "extraVsContract": [],
       "missingFromBinary": [],
       "arityMismatches": [],
@@ -347,7 +377,7 @@
       "commandPath": [
         "cloud"
       ],
-      "probedAt": "2026-08-13T12:24:40.019Z",
+      "probedAt": "2026-09-03T01:22:38.971Z",
       "available": true,
       "existence": "present",
       "discoveredFlags": [
@@ -370,7 +400,7 @@
       "commandPath": [
         "completion"
       ],
-      "probedAt": "2026-08-13T12:24:40.045Z",
+      "probedAt": "2026-09-03T01:22:39.000Z",
       "available": true,
       "existence": "present",
       "discoveredFlags": [
@@ -392,7 +422,7 @@
       "commandPath": [
         "debug"
       ],
-      "probedAt": "2026-08-13T12:24:40.071Z",
+      "probedAt": "2026-09-03T01:22:39.031Z",
       "available": true,
       "existence": "present",
       "discoveredFlags": [
@@ -414,7 +444,7 @@
       "commandPath": [
         "delete"
       ],
-      "probedAt": "2026-08-13T12:24:40.096Z",
+      "probedAt": "2026-09-03T01:22:39.061Z",
       "available": true,
       "existence": "present",
       "discoveredFlags": [
@@ -437,7 +467,7 @@
         "--sandbox",
         "--strict-config"
       ],
-      "helpHash": "4bafe71c759fd67680ed128dcdb0152ca8c5bac9530607eaec109fb77b434616",
+      "helpHash": "4420c3d6113abdc043cc6698755523871a4c15ed56dc7eb78064c709d7753d5e",
       "extraVsContract": [],
       "missingFromBinary": [],
       "arityMismatches": [],
@@ -451,7 +481,7 @@
       "commandPath": [
         "doctor"
       ],
-      "probedAt": "2026-08-13T12:24:40.121Z",
+      "probedAt": "2026-09-03T01:22:39.090Z",
       "available": true,
       "existence": "present",
       "discoveredFlags": [
@@ -464,7 +494,7 @@
         "--no-color",
         "--summary"
       ],
-      "helpHash": "8e7c6c7d711d9d100f0367b834b227ae1ab0f7a47302828be52695aa1fdc1fde",
+      "helpHash": "384fcb00a67d2708139a9d1a8c9afce0c6c46d6568f26502b478823ce29d5ba4",
       "extraVsContract": [],
       "missingFromBinary": [],
       "arityMismatches": [],
@@ -478,7 +508,7 @@
       "commandPath": [
         "exec"
       ],
-      "probedAt": "2026-08-13T12:24:40.146Z",
+      "probedAt": "2026-09-03T01:22:39.120Z",
       "available": true,
       "existence": "present",
       "discoveredFlags": [
@@ -505,9 +535,10 @@
         "--sandbox",
         "--skip-git-repo-check",
         "--strict-config",
+        "--thread-source",
         "--version"
       ],
-      "helpHash": "0b3f5ef7104d38d706ce1c94c47b605bf29b4b3cbcc30ad22fda1edc4bc53919",
+      "helpHash": "dcea2abef5e33f41aa334ad3e1c6d2d39723a9649a213645d728dc91d84d2799",
       "extraVsContract": [],
       "missingFromBinary": [],
       "arityMismatches": [],
@@ -522,7 +553,7 @@
         "exec",
         "resume"
       ],
-      "probedAt": "2026-08-13T12:24:40.197Z",
+      "probedAt": "2026-09-03T01:22:39.184Z",
       "available": true,
       "existence": "present",
       "discoveredFlags": [
@@ -542,9 +573,10 @@
         "--output-last-message",
         "--output-schema",
         "--skip-git-repo-check",
-        "--strict-config"
+        "--strict-config",
+        "--thread-source"
       ],
-      "helpHash": "f0c94fc4de73f773244c1b3d0dee617d2498e019273a8050401d96ff61db2e6c",
+      "helpHash": "a4be08ef2f297d84ce0bcaefca60a2f6d4f93c430245379c6bc5be1a04493d42",
       "extraVsContract": [],
       "missingFromBinary": [],
       "arityMismatches": [],
@@ -559,7 +591,7 @@
         "exec",
         "review"
       ],
-      "probedAt": "2026-08-13T12:24:40.223Z",
+      "probedAt": "2026-09-03T01:22:39.216Z",
       "available": true,
       "existence": "present",
       "discoveredFlags": [
@@ -579,10 +611,11 @@
         "--output-schema",
         "--skip-git-repo-check",
         "--strict-config",
+        "--thread-source",
         "--title",
         "--uncommitted"
       ],
-      "helpHash": "02b804f1cb719460dbff7a948a441ee828797659c4080edff98fc7547f871974",
+      "helpHash": "683b2f0b1be540350660edc327fb30dd79bf63dbd4d1f13e173e10b376cdbcc8",
       "extraVsContract": [],
       "missingFromBinary": [],
       "arityMismatches": [],
@@ -596,7 +629,7 @@
       "commandPath": [
         "exec-server"
       ],
-      "probedAt": "2026-08-13T12:24:40.248Z",
+      "probedAt": "2026-09-03T01:22:39.245Z",
       "available": true,
       "existence": "present",
       "discoveredFlags": [
@@ -612,7 +645,7 @@
         "--strict-config",
         "--use-agent-identity-auth"
       ],
-      "helpHash": "aafee4809c91917afb9cd546cbacff7b33dc9423c4a0cf7a2e4657e3af0d6ce9",
+      "helpHash": "cf7d915dfc951366449867ee86f0918653d267494c74c6a79acb5d61bc8b5c76",
       "extraVsContract": [],
       "missingFromBinary": [],
       "arityMismatches": [],
@@ -626,7 +659,7 @@
       "commandPath": [
         "features"
       ],
-      "probedAt": "2026-08-13T12:24:40.274Z",
+      "probedAt": "2026-09-03T01:22:39.274Z",
       "available": true,
       "existence": "present",
       "discoveredFlags": [
@@ -648,7 +681,7 @@
       "commandPath": [
         "fork"
       ],
-      "probedAt": "2026-08-13T12:24:40.300Z",
+      "probedAt": "2026-09-03T01:22:39.307Z",
       "available": true,
       "existence": "present",
       "discoveredFlags": [
@@ -676,7 +709,7 @@
         "--strict-config",
         "--version"
       ],
-      "helpHash": "53d92e4760abbe5854ab0b8c937383a04c1de7be4c904e557061a3b200f7861f",
+      "helpHash": "e6068671d621077f045a8b96bd1d1397e8af283cda68db721ecdea3e0702d3e2",
       "extraVsContract": [],
       "missingFromBinary": [],
       "arityMismatches": [],
@@ -690,7 +723,7 @@
       "commandPath": [
         "login"
       ],
-      "probedAt": "2026-08-13T12:24:40.325Z",
+      "probedAt": "2026-09-03T01:22:39.338Z",
       "available": true,
       "existence": "present",
       "discoveredFlags": [
@@ -701,7 +734,7 @@
         "--with-access-token",
         "--with-api-key"
       ],
-      "helpHash": "e612161ccbeac23341f8b70c569a777251c102b776fe93a1ce2d59233cba9ef6",
+      "helpHash": "92b59bdace262549c63f4225f89c659fc48beffafd60226983d50e7ee3dd600c",
       "extraVsContract": [],
       "missingFromBinary": [],
       "arityMismatches": [],
@@ -715,7 +748,7 @@
       "commandPath": [
         "logout"
       ],
-      "probedAt": "2026-08-13T12:24:40.350Z",
+      "probedAt": "2026-09-03T01:22:39.368Z",
       "available": true,
       "existence": "present",
       "discoveredFlags": [
@@ -737,7 +770,7 @@
       "commandPath": [
         "mcp"
       ],
-      "probedAt": "2026-08-13T12:24:40.375Z",
+      "probedAt": "2026-09-03T01:22:39.398Z",
       "available": true,
       "existence": "present",
       "discoveredFlags": [
@@ -759,7 +792,7 @@
       "commandPath": [
         "mcp-server"
       ],
-      "probedAt": "2026-08-13T12:24:40.400Z",
+      "probedAt": "2026-09-03T01:22:39.432Z",
       "available": true,
       "existence": "present",
       "discoveredFlags": [
@@ -768,7 +801,7 @@
         "--enable",
         "--strict-config"
       ],
-      "helpHash": "b5fcb7275d06ee1d9fc348bf02892e695c54962b3b9a6eb31e5ebb271fc65f4b",
+      "helpHash": "2fd3e8fec2e4dbf1c4731e59733968f522d6228d14fac87d8eb4e35f5133cc11",
       "extraVsContract": [],
       "missingFromBinary": [],
       "arityMismatches": [],
@@ -778,11 +811,38 @@
       "tier": "catalog",
       "summary": "Start Codex MCP server mode."
     },
+    "migrate-rollouts": {
+      "commandPath": [
+        "migrate-rollouts"
+      ],
+      "probedAt": "2026-09-03T01:22:39.462Z",
+      "available": true,
+      "existence": "present",
+      "discoveredFlags": [
+        "--apply",
+        "--config",
+        "--disable",
+        "--enable",
+        "--json",
+        "--max-mib-per-second",
+        "--thread",
+        "--verbose"
+      ],
+      "helpHash": "6793c3214b73f58230006e979c14da689160d9f100e1c616040cc1e632234690",
+      "extraVsContract": [],
+      "missingFromBinary": [],
+      "arityMismatches": [],
+      "enumMismatches": [],
+      "risk": "writes_local_config",
+      "exposure": "tracked_only",
+      "tier": "catalog",
+      "summary": "Upstream-declared codex command (auto-catalogued, unverified)."
+    },
     "plugin": {
       "commandPath": [
         "plugin"
       ],
-      "probedAt": "2026-08-13T12:24:40.425Z",
+      "probedAt": "2026-09-03T01:22:39.490Z",
       "available": true,
       "existence": "present",
       "discoveredFlags": [
@@ -800,11 +860,49 @@
       "tier": "catalog",
       "summary": "Manage Codex plugins."
     },
+    "queue": {
+      "commandPath": [
+        "queue"
+      ],
+      "probedAt": "2026-09-03T01:22:39.524Z",
+      "available": true,
+      "existence": "present",
+      "discoveredFlags": [
+        "--add-dir",
+        "--approve-for-me",
+        "--cd",
+        "--config",
+        "--dangerously-bypass-approvals-and-sandbox",
+        "--dangerously-bypass-hook-trust",
+        "--disable",
+        "--enable",
+        "--image",
+        "--local-provider",
+        "--message",
+        "--model",
+        "--oss",
+        "--profile",
+        "--remote",
+        "--remote-auth-token-env",
+        "--sandbox",
+        "--strict-config",
+        "--thread"
+      ],
+      "helpHash": "ce4ef222e8a8c2a90c665f1bc112f02480077e5643f6acb5406177a6780e0df7",
+      "extraVsContract": [],
+      "missingFromBinary": [],
+      "arityMismatches": [],
+      "enumMismatches": [],
+      "risk": "writes_local_config",
+      "exposure": "tracked_only",
+      "tier": "catalog",
+      "summary": "Upstream-declared codex command (auto-catalogued, unverified)."
+    },
     "remote-control": {
       "commandPath": [
         "remote-control"
       ],
-      "probedAt": "2026-08-13T12:24:40.451Z",
+      "probedAt": "2026-09-03T01:22:39.553Z",
       "available": true,
       "existence": "present",
       "discoveredFlags": [
@@ -813,7 +911,7 @@
         "--enable",
         "--json"
       ],
-      "helpHash": "460b10cde9660393af54cdc16ac9ae64770f9f114945d7b9dd59f1ee799d7172",
+      "helpHash": "141aad68297586f1130cc2258b40d6c12306384193077641983443fc8f081419",
       "extraVsContract": [],
       "missingFromBinary": [],
       "arityMismatches": [],
@@ -827,7 +925,7 @@
       "commandPath": [
         "resume"
       ],
-      "probedAt": "2026-08-13T12:24:40.478Z",
+      "probedAt": "2026-09-03T01:22:39.581Z",
       "available": true,
       "existence": "present",
       "discoveredFlags": [
@@ -856,7 +954,7 @@
         "--strict-config",
         "--version"
       ],
-      "helpHash": "e375a60b7b4e5c1477e20d0997d23caa452e4531319e3034d31c0463c5cb36f7",
+      "helpHash": "841cbe1592e2f455301ed8323b9fd0ab74335ceff01d0541835e59c7ed22f938",
       "extraVsContract": [],
       "missingFromBinary": [],
       "arityMismatches": [],
@@ -870,7 +968,7 @@
       "commandPath": [
         "review"
       ],
-      "probedAt": "2026-08-13T12:24:40.502Z",
+      "probedAt": "2026-09-03T01:22:39.609Z",
       "available": true,
       "existence": "present",
       "discoveredFlags": [
@@ -883,7 +981,7 @@
         "--title",
         "--uncommitted"
       ],
-      "helpHash": "069724fdf8db365e51023d30337bedda187aa6b8f737e86ef30f73be05f46f02",
+      "helpHash": "fc02e73477306269139f9e013ba626932e936e3c151d2031a3bca742f5c400fd",
       "extraVsContract": [],
       "missingFromBinary": [],
       "arityMismatches": [],
@@ -897,7 +995,7 @@
       "commandPath": [
         "sandbox"
       ],
-      "probedAt": "2026-08-13T12:24:40.529Z",
+      "probedAt": "2026-09-03T01:22:39.642Z",
       "available": true,
       "existence": "present",
       "discoveredFlags": [
@@ -912,7 +1010,7 @@
         "--sandbox-state-json",
         "--sandbox-state-readable-root"
       ],
-      "helpHash": "2fed76c2d76b4c88653c269c15ba2cd67fb99c6fa5e1afc4b93819429bf9b1d8",
+      "helpHash": "97178d90ade3864159cfa8ac1e94a49144c5f61eb9277713f17273d0c255e295",
       "extraVsContract": [],
       "missingFromBinary": [],
       "arityMismatches": [],
@@ -926,7 +1024,7 @@
       "commandPath": [
         "unarchive"
       ],
-      "probedAt": "2026-08-13T12:24:40.556Z",
+      "probedAt": "2026-09-03T01:22:39.673Z",
       "available": true,
       "existence": "present",
       "discoveredFlags": [
@@ -948,7 +1046,7 @@
         "--sandbox",
         "--strict-config"
       ],
-      "helpHash": "3104190a370bdd0db4b12edc4a9a7e1a273ba2db75924a52348ee4e72aa162e9",
+      "helpHash": "7305427102e50a7c12ae55475635361bf1bbe97fc1279e1d99811c3c6e196bb5",
       "extraVsContract": [],
       "missingFromBinary": [],
       "arityMismatches": [],
@@ -962,7 +1060,7 @@
       "commandPath": [
         "update"
       ],
-      "probedAt": "2026-08-13T12:24:40.582Z",
+      "probedAt": "2026-09-03T01:22:39.703Z",
       "available": true,
       "existence": "present",
       "discoveredFlags": [

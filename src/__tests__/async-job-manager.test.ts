@@ -1,5 +1,10 @@
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { homedir, tmpdir } from "node:os";
+import { join } from "node:path";
 import { describe, it, expect, vi } from "vitest";
 import { AsyncJobManager, type LlmCli } from "../async-job-manager.js";
+import { MemoryJobStore } from "../job-store.js";
+import { devinTranscriptPath } from "../devin-transcript.js";
 
 /** Poll until predicate returns true, or reject after timeoutMs. */
 function waitFor(
@@ -73,6 +78,66 @@ describe("AsyncJobManager", () => {
       const manager = new AsyncJobManager();
       expect(await manager.getJobSnapshot("nonexistent")).toBeNull();
       expect(await manager.getJobResult("nonexistent")).toBeNull();
+    });
+
+    it("harvests, persists, and removes the exact gateway-owned Devin transcript", async () => {
+      const temp = mkdtempSync(join(tmpdir(), "devin-capture-"));
+      const fakeDevin = join(temp, "devin");
+      const correlationId = `capture-${process.pid}-${Date.now()}`;
+      const transcriptPath = devinTranscriptPath(correlationId);
+      const store = new MemoryJobStore();
+      const manager = new AsyncJobManager(undefined, undefined, store);
+      mkdirSync(join(homedir(), ".llm-cli-gateway", "devin-transcripts"), {
+        recursive: true,
+        mode: 0o700,
+      });
+      writeFileSync(
+        fakeDevin,
+        `#!/bin/sh
+out=""
+while [ "$#" -gt 0 ]; do
+  if [ "$1" = "--export" ]; then
+    out="$2"
+    shift 2
+  else
+    shift
+  fi
+done
+printf '%s' '{"version":"ATIF-v1.7","messages":[{"role":"assistant","content":"whole"}]}' > "$out"
+printf '%s\n' 'done'
+`
+      );
+      chmodSync(fakeDevin, 0o755);
+
+      try {
+        const job = await manager.startJob(
+          "devin",
+          ["--export", transcriptPath, "-p", "capture"],
+          correlationId,
+          undefined,
+          undefined,
+          "text",
+          true,
+          { PATH: `${temp}:${process.env.PATH ?? ""}` }
+        );
+        await waitFor(async () => {
+          const current = await manager.getJobSnapshot(job.id);
+          return Boolean(current && !["queued", "running"].includes(current.status));
+        }, 5000);
+
+        const result = await manager.getJobResult(job.id);
+        const durable = await store.getById(job.id);
+        expect(result?.nativeTranscript).toContain('"version":"ATIF-v1.7"');
+        expect(result?.executionContext?.capture.status).toBe("captured_whole");
+        expect(durable?.nativeTranscript).toContain('"content":"whole"');
+        expect(durable?.captureStatus).toBe("captured_whole");
+        expect(durable?.captureError).toBeNull();
+        expect(existsSync(transcriptPath)).toBe(false);
+      } finally {
+        await manager.dispose();
+        rmSync(transcriptPath, { force: true });
+        rmSync(temp, { recursive: true, force: true });
+      }
     });
 
     it("should truncate job results from the beginning of each stream", async () => {

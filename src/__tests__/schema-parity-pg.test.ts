@@ -141,14 +141,23 @@ describe("bootstrap SQL and migrations/ agree", () => {
     // gap column appeared in POSTGRES_JOB_STORE_REQUIRED_COLUMNS, which is the
     // full runtime schema rather than a list of what init() repairs. That is a
     // one-way tie: a new required column missing from BOTH bootstrap and init
-    // would widen the gap and still pass. These three are what
+    // would widen the gap and still pass. These are what
     // PostgresJobStore.init() actually adds via ALTER TABLE, so changing this
     // list has to be a deliberate edit here.
     expect(gap).toEqual([
+      "jobs.capture_error",
+      "jobs.capture_format",
+      "jobs.capture_status",
       "jobs.cwd_path",
       "jobs.cwd_scope",
       "jobs.error_category",
+      "jobs.native_transcript",
+      "jobs.native_transcript_bytes",
+      "jobs.native_transcript_dropped_bytes",
+      "jobs.native_transcript_truncated",
+      "jobs.output_dropped_bytes",
       "jobs.progress_json",
+      "jobs.replay_context_json",
       "jobs.retryable",
       "jobs.workspace_alias",
     ]);

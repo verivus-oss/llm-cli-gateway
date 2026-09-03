@@ -21,14 +21,15 @@ import { FLIGHT_RECORDER_OPERATION_CLASSES } from "../storage/operations.js";
 const noopLogger = { info: (): void => {}, error: (): void => {}, debug: (): void => {} };
 
 describe("the policy is one declaration, and its destructive bounds are OFF", () => {
-  it("bounds jobs exactly as today and bounds nothing else by default", () => {
-    const policy = resolveRetentionPolicy({ jobRetentionDays: 30 });
-    expect(policy.days.jobs).toBe(30);
+  it("bounds nothing by default", () => {
+    const policy = resolveRetentionPolicy({ jobRetentionDays: null });
+    expect(policy.days.jobs).toBeNull();
     // The load-bearing assertion of this whole node. A number here would delete
     // a year of transcripts from every installed host on upgrade.
     expect(policy.days.requests).toBeNull();
     expect(policy.days.wedgedValidationRuns).toBeNull();
     expect(unboundedRetentionSubsystems(policy).sort()).toEqual([
+      "jobs",
       "requests",
       "wedgedValidationRuns",
     ]);
@@ -37,7 +38,7 @@ describe("the policy is one declaration, and its destructive bounds are OFF", ()
 
   it("carries [persistence].retentionDays through rather than restating 30", () => {
     expect(resolveRetentionPolicy({ jobRetentionDays: 7 }).days.jobs).toBe(7);
-    expect(RETENTION_SUBSYSTEMS.jobs.defaultDays).toBe(30);
+    expect(RETENTION_SUBSYSTEMS.jobs.defaultDays).toBeNull();
     expect(RETENTION_SUBSYSTEMS.requests.defaultDays).toBeNull();
   });
 

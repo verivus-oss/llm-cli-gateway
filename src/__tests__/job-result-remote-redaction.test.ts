@@ -163,13 +163,7 @@ describe("Phase 7 B3: llm_job_result remote redaction of providerSessionId", () 
     expect(local.result.providerSessionId).toBe(PROVIDER_SESSION_ID);
   });
 
-  it("grok streaming-json readback preserves raw NDJSON (locked display asymmetry)", async () => {
-    // Design 5.4: the llm_job_result readback routes through the shared
-    // applyProviderDisplayText helper with applyGrokDisplay=false, so a grok
-    // streaming-json job's stdout stays RAW NDJSON on readback (the inline
-    // buildCliResponse path would reconstruct it). Flipping the readback flag to
-    // true (an intentional asymmetry fix) makes stdout the reconstructed reply
-    // and flips this red on purpose.
+  it("grok streaming-json readback matches the inline display projection", async () => {
     await seedGrokJob("job-grok-display", "local");
     const res = await call(
       "llm_job_result",
@@ -177,9 +171,8 @@ describe("Phase 7 B3: llm_job_result remote redaction of providerSessionId", () 
       undefined
     );
     expect(res.success).toBe(true);
-    expect(res.result.stdout).toBe(GROK_STDOUT);
-    // Not the grokDisplayText-reconstructed reply that the inline path produces.
-    expect(res.result.stdout).not.toBe(grokDisplayText("streaming-json", GROK_STDOUT));
+    expect(res.result.stdout).toBe(grokDisplayText("streaming-json", GROK_STDOUT));
+    expect(res.result.stdout).not.toBe(GROK_STDOUT);
   });
 
   it("llm_job_status never carries a provider session id (remote or local)", async () => {
@@ -221,7 +214,7 @@ describe("Phase 7 B3: llm_job_result remote redaction of providerSessionId", () 
     });
   });
 
-  it("redacts a provider session id that crosses remote raw-output page boundaries", async () => {
+  it("rejects remote raw-output retrieval before any captured bytes are returned", async () => {
     const endEvent = JSON.stringify({
       type: "end",
       stopReason: "EndTurn",
@@ -243,24 +236,11 @@ describe("Phase 7 B3: llm_job_result remote redaction of providerSessionId", () 
       { jobId: "job-split", maxChars: 1000, rawOutput: true },
       "alice"
     );
-    const second = await call(
-      "llm_job_result",
-      {
-        jobId: "job-split",
-        maxChars: 1000,
-        rawOutput: true,
-        stdoutOffsetChars: first.result.stdoutNextOffsetChars,
-      },
-      "alice"
-    );
-
-    expect(first.success).toBe(true);
-    expect(second.success).toBe(true);
-    expect(first.result).not.toHaveProperty("providerSessionId");
-    expect(second.result).not.toHaveProperty("providerSessionId");
-    expect(first.result.stdout).not.toContain(PROVIDER_SESSION_ID.slice(0, 8));
-    expect(second.result.stdout).not.toContain(PROVIDER_SESSION_ID.slice(-8));
-    expect(first.result.stdout + second.result.stdout).not.toContain(PROVIDER_SESSION_ID);
+    expect(first).toMatchObject({
+      success: false,
+      error: "Raw provider transcripts are available only on the local stdio surface",
+    });
+    expect(JSON.stringify(first)).not.toContain(PROVIDER_SESSION_ID);
   });
 
   it("redacts terminal failure output without exposing non-resumable metadata", async () => {
@@ -268,11 +248,7 @@ describe("Phase 7 B3: llm_job_result remote redaction of providerSessionId", () 
       const jobId = `job-${status}`;
       await seedGrokJob(jobId, "alice", GROK_STDOUT, status);
 
-      const remote = await call(
-        "llm_job_result",
-        { jobId, maxChars: 200000, rawOutput: true },
-        "alice"
-      );
+      const remote = await call("llm_job_result", { jobId, maxChars: 200000 }, "alice");
       expect(remote.success).toBe(true);
       expect(remote.result.stdout).not.toContain(PROVIDER_SESSION_ID);
       expect(remote.result).not.toHaveProperty("providerSessionId");
@@ -290,7 +266,7 @@ describe("Phase 7 B3: llm_job_result remote redaction of providerSessionId", () 
 
     const remote = await call(
       "llm_job_result",
-      { jobId: "job-error-remote", maxChars: 200000, rawOutput: true },
+      { jobId: "job-error-remote", maxChars: 200000 },
       "alice"
     );
     expect(remote.success).toBe(true);

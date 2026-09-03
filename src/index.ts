@@ -38,6 +38,8 @@ import {
 } from "./provider-output-metadata.js";
 import { parseGeminiJson, parseGeminiStreamJson } from "./gemini-json-parser.js";
 import { parseVibeMetaJson } from "./mistral-meta-json-parser.js";
+import { parseVibeStream } from "./vibe-stream-parser.js";
+import { parseCursorStreamJson } from "./cursor-stream-parser.js";
 import {
   createMistralKitIsolationPlan,
   mistralKitSpawnEnvFragment,
@@ -4148,7 +4150,7 @@ export function extractUsageAndCost(
   // a single JSON object in `--output-format json` and the last NDJSON line in
   // `stream-json`. parseStreamJson handles both (it scans lines for the result
   // event), so json-mode requests no longer silently lose all telemetry.
-  if (cli === "claude" && (outputFormat === "stream-json" || outputFormat === "json")) {
+  if (cli === "claude") {
     const parsed = parseStreamJson(output);
     if (!parsed.usage) {
       return { costUsd: parsed.costUsd ?? undefined };
@@ -4179,9 +4181,16 @@ export function extractUsageAndCost(
       costUsd: parsed.usage.cost_usd,
     };
   }
-  if (cli === "gemini" && (outputFormat === "json" || outputFormat === "stream-json")) {
+  if (cli === "gemini") {
+    const streamed = parseGeminiStreamJson(output);
     const parsed =
-      outputFormat === "stream-json" ? parseGeminiStreamJson(output) : parseGeminiJson(output);
+      streamed &&
+      (streamed.response !== undefined ||
+        streamed.sessionId !== undefined ||
+        streamed.stopReason !== undefined ||
+        streamed.usage !== undefined)
+        ? streamed
+        : parseGeminiJson(output);
     if (!parsed || !parsed.usage) {
       return {};
     }
@@ -4197,7 +4206,18 @@ export function extractUsageAndCost(
   // missing/malformed, the parser returns `{}` and the FR row simply lacks
   // usage data — matching pre-slice behaviour. No stdout fallback exists.
   if (cli === "mistral") {
-    return parseVibeMetaJson(ctx?.home ?? homedir(), ctx?.sessionId);
+    const nativeSessionId = parseVibeStream(output)?.sessionId ?? ctx?.sessionId;
+    return parseVibeMetaJson(ctx?.home ?? homedir(), nativeSessionId);
+  }
+  if (cli === "cursor") {
+    const usage = parseCursorStreamJson(output)?.usage;
+    return usage
+      ? {
+          inputTokens: usage.input_tokens,
+          outputTokens: usage.output_tokens,
+          cacheReadTokens: usage.cache_read_tokens,
+        }
+      : {};
   }
   // Grok CLI (`grok_request`): no grok branch by design. The gateway invokes
   // grok via its HEADLESS `-p` surface (`prepareGrokRequest` builds
@@ -7046,7 +7066,9 @@ export function prepareGeminiRequest(
   // Emitted only when the caller asked for one: an explicit `--output-format
   // text` would be a new argv element on every default request, which changes
   // the dedup key for every existing gemini caller.
-  if (geminiOutputFormat) args.push("--output-format", geminiOutputFormat);
+  if (geminiOutputFormat && geminiOutputFormat !== "text") {
+    args.push("--output-format", geminiOutputFormat);
+  }
   if (resolvedModel) args.push("--model", resolvedModel);
   if (params.includeDirs && params.includeDirs.length > 0) {
     sanitizeCliArgValues(params.includeDirs, "includeDirs");
@@ -22114,6 +22136,10 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
           };
         }
 
+        // Complete replay context contains host paths. Remote callers keep the
+        // pre-capture status surface and receive no new host disclosure.
+        if (callerIsRemote()) delete job.executionContext;
+
         return {
           content: [
             {
@@ -22205,6 +22231,8 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
           };
         }
 
+        if (callerIsRemote()) delete job.executionContext;
+
         const progressToken = extra._meta?.progressToken;
         if (progressToken !== undefined) {
           for (const event of job.progress.events) {
@@ -22259,11 +22287,19 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
           .describe(
             "Captured stderr character offset for resumable retrieval. Non-zero offsets require rawOutput:true."
           ),
+        nativeTranscriptOffsetChars: z
+          .number()
+          .int()
+          .min(0)
+          .default(0)
+          .describe(
+            "Provider-native transcript character offset for resumable retrieval. Non-zero offsets require rawOutput:true."
+          ),
         rawOutput: z
           .boolean()
           .default(false)
           .describe(
-            "Return captured provider streams without display parsing or compression. Local stdio pages concatenate to the captured streams; remote pages redact provider session IDs. Required for resumable offsets."
+            "Return captured provider streams without display parsing or compression. Available only to local stdio callers. Required for resumable offsets."
           ),
       },
       {
@@ -22273,11 +22309,19 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
         idempotentHint: true,
         openWorldHint: false,
       },
-      async ({ jobId, maxChars, stdoutOffsetChars, stderrOffsetChars, rawOutput }) => {
+      async ({
+        jobId,
+        maxChars,
+        stdoutOffsetChars,
+        stderrOffsetChars,
+        nativeTranscriptOffsetChars,
+        rawOutput,
+      }) => {
         const remoteCaller = callerIsRemote();
         const result = await asyncJobManager.getJobResult(jobId, maxChars, {
           stdoutOffsetChars,
           stderrOffsetChars,
+          nativeTranscriptOffsetChars,
           redactProviderSessionIds: remoteCaller,
         });
         // F3b: own-or-not-found (no cross-principal readback of job output).
@@ -22302,7 +22346,39 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
           };
         }
 
-        if (!rawOutput && (stdoutOffsetChars > 0 || stderrOffsetChars > 0)) {
+        if (remoteCaller && rawOutput) {
+          return {
+            content: [
+              {
+                type: "text",
+                text: JSON.stringify(
+                  {
+                    success: false,
+                    error: "Raw provider transcripts are available only on the local stdio surface",
+                    jobId,
+                  },
+                  null,
+                  2
+                ),
+              },
+            ],
+            isError: true,
+          };
+        }
+
+        if (remoteCaller) delete result.executionContext;
+        if (!rawOutput || remoteCaller) {
+          delete result.nativeTranscript;
+          delete result.nativeTranscriptOffsetChars;
+          delete result.nativeTranscriptTotalChars;
+          delete result.nativeTranscriptNextOffsetChars;
+          delete result.nativeTranscriptPageTruncated;
+        }
+
+        if (
+          !rawOutput &&
+          (stdoutOffsetChars > 0 || stderrOffsetChars > 0 || nativeTranscriptOffsetChars > 0)
+        ) {
           return {
             content: [
               {
@@ -22325,8 +22401,10 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
 
         // Parse stream-json output for Claude async jobs
         const outputFormat = asyncJobManager.getJobOutputFormat(jobId);
+        const captureFormat = asyncJobManager.getJobCaptureFormat(jobId) ?? outputFormat;
+        const jobCli = asyncJobManager.getJobCli(jobId) ?? "unknown";
         let parsed: ReturnType<typeof parseStreamJson> | undefined;
-        if (!rawOutput && outputFormat === "stream-json" && result.stdout) {
+        if (!rawOutput && jobCli === "claude" && captureFormat === "stream-json" && result.stdout) {
           parsed = parseStreamJson(result.stdout);
         }
 
@@ -22342,14 +22420,15 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
         // mode returns the raw JSONL.
         if (!rawOutput && result.stdout) {
           // Same shared display helper the sync path uses (design 5.4), but with
-          // applyGrokDisplay: false so the readback keeps its current behavior
-          // (codex reconstructs; grok stays raw). A codex job swaps; grok/claude
-          // are unchanged, byte-identical to the former codex-only branch.
+          // Apply the same provider presentation projection used by the inline
+          // path. The durable raw stream remains available to local callers
+          // through rawOutput.
           result.stdout = applyProviderDisplayText({
-            cli: asyncJobManager.getJobCli(jobId) ?? "unknown",
+            cli: jobCli,
             outputFormat,
+            captureFormat,
             stdout: result.stdout,
-            applyGrokDisplay: false,
+            applyGrokDisplay: true,
           });
         }
 
@@ -22379,7 +22458,7 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
         // coercion callees too.
         const personalKitJob = Boolean(await asyncJobManager.getJobKitExecution(jobId));
         if (compressJob && result.stdout) {
-          if (outputFormat === "stream-json" && parsed) {
+          if (captureFormat === "stream-json" && parsed) {
             result.stdout = parsed.text;
           }
           const compressed = compressDisplayText(result.stdout, {
@@ -22548,7 +22627,7 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
   // query yields no rows and this returns the "not found" shape.
   server.tool(
     "llm_request_result",
-    "Read back any persisted request (sync or async) from the flight recorder by correlationId, including prompt and response.",
+    "Read back any persisted request (sync or async) from the flight recorder by correlationId, including prompt and response. Local callers can also include the linked complete job record.",
     {
       correlationId: z
         .string()
@@ -22567,6 +22646,12 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
         .boolean()
         .default(false)
         .describe("Include the full persisted prompt text in the result"),
+      includeJobRecord: z
+        .boolean()
+        .default(false)
+        .describe(
+          "Include the linked raw provider capture and replay context when called over local stdio. Remote callers receive no transcript or host paths."
+        ),
     },
     {
       title: "Persisted request lookup",
@@ -22575,7 +22660,7 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
       idempotentHint: true,
       openWorldHint: false,
     },
-    async ({ correlationId, maxChars, includePrompt }) => {
+    async ({ correlationId, maxChars, includePrompt, includeJobRecord }) => {
       const remoteCaller = callerIsRemote();
       const record = await readPersistedRequest(flightRecorder, correlationId, {
         maxChars,
@@ -22609,11 +22694,35 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
         };
       }
 
+      let jobRecord: Awaited<ReturnType<AsyncJobManager["getJobResult"]>> = null;
+      if (includeJobRecord && !remoteCaller && record.asyncJobId) {
+        const jobOwner = await asyncJobManager.getJobOwner(record.asyncJobId);
+        if (principalCanAccess(jobOwner, caller)) {
+          jobRecord = await asyncJobManager.getJobResult(record.asyncJobId, maxChars);
+        }
+      }
+
       return {
         content: [
           {
             type: "text",
-            text: JSON.stringify({ success: true, request: record }, null, 2),
+            text: JSON.stringify(
+              {
+                success: true,
+                request: record,
+                ...(includeJobRecord
+                  ? remoteCaller
+                    ? {
+                        jobRecord: null,
+                        jobRecordWithheld:
+                          "Complete provider transcripts and host replay context are available only on the local stdio surface",
+                      }
+                    : { jobRecord }
+                  : {}),
+              },
+              null,
+              2
+            ),
           },
         ],
       };
@@ -22680,7 +22789,7 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
                 success: true,
                 count: requests.length,
                 requests,
-                hint: "Pass correlationId to llm_request_result for prompt/response, or asyncJobId to llm_job_status. An empty list is not proof nothing ran, and it does not mean the work left no record: cross-LLM validation seats write no row HERE, but they write validation_runs and validation_run_jobs, and each of those links a job row holding the launched argv and the provider output (read it with validation_receipt, then llm_job_result). Flight recording can also be disabled (LLM_GATEWAY_LOGS_DB=none). The reverse gap is real too: a listed request can outlive its job, because request retention is unbounded by default and job retention defaults to 30 days.",
+                hint: "Pass correlationId to llm_request_result for prompt/response, or asyncJobId to llm_job_status. An empty list is not proof nothing ran, and it does not mean the work left no record: cross-LLM validation seats write no row HERE, but they write validation_runs and validation_run_jobs, and each of those links a job row holding the launched argv and the provider output (read it with validation_receipt, then llm_job_result). Flight recording can also be disabled (LLM_GATEWAY_LOGS_DB=none). Jobs and requests are both unbounded by default; an operator can configure their bounds independently.",
                 // obs: the hint above lists ONE reason a list can be empty and
                 // there are five. This says which one is true right now, so an
                 // empty result from an unreadable database stops looking the

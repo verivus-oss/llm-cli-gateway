@@ -1,7 +1,7 @@
 {
   "schemaVersion": "upstream-scan-snapshot.v2",
   "cli": "devin",
-  "fetchedAt": "2026-08-13T12:24:57.361Z",
+  "fetchedAt": "2026-09-03T01:23:01.693Z",
   "sources": [
     {
       "url": "https://cli.devin.ai/docs/reference/commands",
@@ -29,10 +29,10 @@
     }
   ],
   "helpSurface": {
-    "probedAt": "2026-08-13T12:24:57.358Z",
+    "probedAt": "2026-09-03T01:23:01.690Z",
     "available": true,
-    "version": "devin 3000.4.16 (355c3c9e)",
-    "targetVersion": "devin 3000.4.16 (355c3c9e)",
+    "version": "devin 3000.6.12 (fc947ca5)",
+    "targetVersion": "devin 3000.6.12 (fc947ca5)",
     "versionMatchesTarget": true,
     "discoveredFlags": [
       "--config",
@@ -47,9 +47,11 @@
       "--sandbox",
       "--version"
     ],
-    "helpHash": "99f38bbc7e6f9fc7ae05179e22051776596a90d521177f28c16f30bfbd7d9fc9",
+    "helpHash": "6871538a2884563074546afdebca1fb6afb123e2948e9c96961e6544a13ea8a0",
     "extraVsContract": [],
-    "missingFromBinary": [],
+    "missingFromBinary": [
+      "--agent-config"
+    ],
     "arityMismatches": [],
     "enumMismatches": []
   },
@@ -57,16 +59,20 @@
     "acp",
     "auth",
     "cloud",
+    "desktop",
+    "doctor",
     "help",
     "list",
     "mcp",
     "migrate",
     "models",
     "plugins",
+    "rm",
     "rules",
     "sandbox",
     "setup",
     "skills",
+    "ssh",
     "uninstall",
     "update",
     "version"
@@ -76,7 +82,7 @@
       "commandPath": [
         "acp"
       ],
-      "probedAt": "2026-08-13T12:24:57.310Z",
+      "probedAt": "2026-09-03T01:23:01.635Z",
       "available": true,
       "existence": "present",
       "discoveredFlags": [
@@ -97,7 +103,7 @@
       "commandPath": [
         "auth"
       ],
-      "probedAt": "2026-08-13T12:24:57.313Z",
+      "probedAt": "2026-09-03T01:23:01.638Z",
       "available": true,
       "existence": "present",
       "discoveredFlags": [],
@@ -115,7 +121,7 @@
       "commandPath": [
         "cloud"
       ],
-      "probedAt": "2026-08-13T12:24:57.317Z",
+      "probedAt": "2026-09-03T01:23:01.641Z",
       "available": true,
       "existence": "present",
       "discoveredFlags": [],
@@ -129,11 +135,49 @@
       "tier": "catalog",
       "summary": "Manage Devin Cloud environments, sandboxes, and builds."
     },
+    "desktop": {
+      "commandPath": [
+        "desktop"
+      ],
+      "probedAt": "2026-09-03T01:23:01.644Z",
+      "available": true,
+      "existence": "present",
+      "discoveredFlags": [],
+      "helpHash": "57c03e18c8abc0dc141aa1c22765d0eed575977c9ccef6deb9877eaf2f8e1ee1",
+      "extraVsContract": [],
+      "missingFromBinary": [],
+      "arityMismatches": [],
+      "enumMismatches": [],
+      "risk": "writes_local_config",
+      "exposure": "tracked_only",
+      "tier": "catalog",
+      "summary": "Upstream-declared devin command (auto-catalogued, unverified)."
+    },
+    "doctor": {
+      "commandPath": [
+        "doctor"
+      ],
+      "probedAt": "2026-09-03T01:23:01.647Z",
+      "available": true,
+      "existence": "present",
+      "discoveredFlags": [
+        "--json"
+      ],
+      "helpHash": "0b3432164c1b2e0ed514ba6adcf662184dc0d1cff0d6a5a4a6e2c71245c4c932",
+      "extraVsContract": [],
+      "missingFromBinary": [],
+      "arityMismatches": [],
+      "enumMismatches": [],
+      "risk": "writes_local_config",
+      "exposure": "tracked_only",
+      "tier": "catalog",
+      "summary": "Upstream-declared devin command (auto-catalogued, unverified)."
+    },
     "list": {
       "commandPath": [
         "list"
       ],
-      "probedAt": "2026-08-13T12:24:57.321Z",
+      "probedAt": "2026-09-03T01:23:01.650Z",
       "available": true,
       "existence": "present",
       "discoveredFlags": [
@@ -153,7 +197,7 @@
       "commandPath": [
         "mcp"
       ],
-      "probedAt": "2026-08-13T12:24:57.324Z",
+      "probedAt": "2026-09-03T01:23:01.653Z",
       "available": true,
       "existence": "present",
       "discoveredFlags": [],
@@ -171,7 +215,7 @@
       "commandPath": [
         "migrate"
       ],
-      "probedAt": "2026-08-13T12:24:57.328Z",
+      "probedAt": "2026-09-03T01:23:01.656Z",
       "available": true,
       "existence": "present",
       "discoveredFlags": [],
@@ -189,7 +233,7 @@
       "commandPath": [
         "models"
       ],
-      "probedAt": "2026-08-13T12:24:57.331Z",
+      "probedAt": "2026-09-03T01:23:01.660Z",
       "available": true,
       "existence": "present",
       "discoveredFlags": [],
@@ -207,7 +251,7 @@
       "commandPath": [
         "plugins"
       ],
-      "probedAt": "2026-08-13T12:24:57.335Z",
+      "probedAt": "2026-09-03T01:23:01.663Z",
       "available": true,
       "existence": "present",
       "discoveredFlags": [],
@@ -221,11 +265,31 @@
       "tier": "catalog",
       "summary": "Manage Devin plugins."
     },
+    "rm": {
+      "commandPath": [
+        "rm"
+      ],
+      "probedAt": "2026-09-03T01:23:01.666Z",
+      "available": true,
+      "existence": "present",
+      "discoveredFlags": [
+        "--force"
+      ],
+      "helpHash": "d3368a9865cb3be6f6a6fb24f79fa071f9bf3210c8b9ca5f366194219be2f77b",
+      "extraVsContract": [],
+      "missingFromBinary": [],
+      "arityMismatches": [],
+      "enumMismatches": [],
+      "risk": "writes_local_config",
+      "exposure": "tracked_only",
+      "tier": "catalog",
+      "summary": "Upstream-declared devin command (auto-catalogued, unverified)."
+    },
     "rules": {
       "commandPath": [
         "rules"
       ],
-      "probedAt": "2026-08-13T12:24:57.338Z",
+      "probedAt": "2026-09-03T01:23:01.668Z",
       "available": true,
       "existence": "present",
       "discoveredFlags": [],
@@ -243,7 +307,7 @@
       "commandPath": [
         "sandbox"
       ],
-      "probedAt": "2026-08-13T12:24:57.341Z",
+      "probedAt": "2026-09-03T01:23:01.671Z",
       "available": true,
       "existence": "present",
       "discoveredFlags": [],
@@ -261,7 +325,7 @@
       "commandPath": [
         "setup"
       ],
-      "probedAt": "2026-08-13T12:24:57.345Z",
+      "probedAt": "2026-09-03T01:23:01.674Z",
       "available": true,
       "existence": "present",
       "discoveredFlags": [
@@ -281,7 +345,7 @@
       "commandPath": [
         "skills"
       ],
-      "probedAt": "2026-08-13T12:24:57.348Z",
+      "probedAt": "2026-09-03T01:23:01.677Z",
       "available": true,
       "existence": "present",
       "discoveredFlags": [],
@@ -295,11 +359,31 @@
       "tier": "catalog",
       "summary": "Manage Devin skills."
     },
+    "ssh": {
+      "commandPath": [
+        "ssh"
+      ],
+      "probedAt": "2026-09-03T01:23:01.680Z",
+      "available": true,
+      "existence": "present",
+      "discoveredFlags": [
+        "--gateway"
+      ],
+      "helpHash": "556fad2854b9390dbf141bbc5a638395d39f2f8128de8b63df3b0e40ccba3973",
+      "extraVsContract": [],
+      "missingFromBinary": [],
+      "arityMismatches": [],
+      "enumMismatches": [],
+      "risk": "writes_local_config",
+      "exposure": "tracked_only",
+      "tier": "catalog",
+      "summary": "Upstream-declared devin command (auto-catalogued, unverified)."
+    },
     "uninstall": {
       "commandPath": [
         "uninstall"
       ],
-      "probedAt": "2026-08-13T12:24:57.351Z",
+      "probedAt": "2026-09-03T01:23:01.684Z",
       "available": true,
       "existence": "present",
       "discoveredFlags": [
@@ -320,7 +404,7 @@
       "commandPath": [
         "update"
       ],
-      "probedAt": "2026-08-13T12:24:57.354Z",
+      "probedAt": "2026-09-03T01:23:01.687Z",
       "available": true,
       "existence": "present",
       "discoveredFlags": [
@@ -340,7 +424,7 @@
       "commandPath": [
         "version"
       ],
-      "probedAt": "2026-08-13T12:24:57.357Z",
+      "probedAt": "2026-09-03T01:23:01.690Z",
       "available": true,
       "existence": "present",
       "discoveredFlags": [],

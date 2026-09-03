@@ -172,9 +172,14 @@ export function extractProviderOutputMetadata(
     }
     case "gemini": {
       // Session id is only in the stream-json init event; -o json emits none.
+      const streamed = parseGeminiStreamJson(stdout);
       const parsed =
-        outputFormat === "stream-json"
-          ? parseGeminiStreamJson(stdout)
+        streamed &&
+        (streamed.response !== undefined ||
+          streamed.sessionId !== undefined ||
+          streamed.stopReason !== undefined ||
+          streamed.usage !== undefined)
+          ? streamed
           : outputFormat === "json"
             ? parseGeminiJson(stdout)
             : null;
@@ -187,7 +192,16 @@ export function extractProviderOutputMetadata(
     }
     case "grok": {
       // Grok `-p` json/streaming-json carry stopReason + sessionId but NO usage.
-      const parsed = parseGrokOutput(outputFormat, stdout);
+      const streamed = parseGrokOutput("streaming-json", stdout);
+      const parsed =
+        streamed &&
+        (streamed.text !== undefined ||
+          streamed.sessionId !== undefined ||
+          streamed.stopReason !== undefined ||
+          streamed.thought !== undefined ||
+          streamed.error !== undefined)
+          ? streamed
+          : parseGrokOutput(outputFormat, stdout);
       const out: ProviderOutputMetadata = { absentFields: ["usage"] };
       if (parsed?.sessionId) out.sessionId = parsed.sessionId;
       if (parsed?.stopReason) out.stopReason = parsed.stopReason;
@@ -201,10 +215,7 @@ export function extractProviderOutputMetadata(
       // neither is emitted, which is what the old unconditional absence recorded
       // and what made ~/.vibe/logs/session/<id>/meta.json unreachable: without
       // this id, parseVibeMetaJson only ever saw a gw-* id and returned nothing.
-      const parsed =
-        outputFormat === "streaming" || outputFormat === "stream-json"
-          ? parseVibeStream(stdout)
-          : null;
+      const parsed = parseVibeStream(stdout);
       const out: ProviderOutputMetadata = { absentFields: ["usage"] };
       if (parsed?.sessionId) out.sessionId = parsed.sessionId;
       if (parsed?.stopReason) out.stopReason = parsed.stopReason;
@@ -215,7 +226,7 @@ export function extractProviderOutputMetadata(
     case "cursor": {
       // stream-json carries session_id on every event and a terminal result
       // event with subtype and usage. text and json carry none of it.
-      const parsed = outputFormat === "stream-json" ? parseCursorStreamJson(stdout) : null;
+      const parsed = parseCursorStreamJson(stdout);
       const out: ProviderOutputMetadata = { absentFields: [] };
       if (parsed?.sessionId) out.sessionId = parsed.sessionId;
       if (parsed?.stopReason) out.stopReason = parsed.stopReason;

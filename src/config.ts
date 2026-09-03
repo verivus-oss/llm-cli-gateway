@@ -293,7 +293,7 @@ export function resetSessionDatabaseUrlWarning(): void {
 export const PERSISTENCE_BACKENDS = ["sqlite", "postgres", "memory", "none"] as const;
 export type PersistenceBackend = (typeof PERSISTENCE_BACKENDS)[number];
 
-export const DEFAULT_JOB_RETENTION_DAYS = 30;
+export const DEFAULT_JOB_RETENTION_DAYS: number | null = null;
 export const DEFAULT_DEDUP_WINDOW_MS = 60 * 60 * 1000; // 1 hour
 
 // Issue #139 (durable instance-lease orphan recovery): the lease/heartbeat/sweep
@@ -347,10 +347,8 @@ const REFUSED_ROLE_KEYS: Readonly<Record<string, string>> = {
  * under a permissive schema is silently no bound at all, and the operator has
  * no way to tell that from a bound that ran and found nothing.
  *
- * `jobs` is an override for `[persistence].retentionDays`, which keeps meaning
- * the job store and keeps its 30-day default. `requests` and
- * `wedgedValidationRuns` have NO default: leaving them out deletes nothing,
- * which is what an upgrade must do to a host that never asked for either.
+ * `jobs` is an override for the deprecated `[persistence].retentionDays` key.
+ * Every transcript bound defaults to OFF: leaving them out deletes nothing.
  */
 const PersistenceRetentionSchema = z
   .object({
@@ -367,7 +365,7 @@ const PersistenceSchema = z
     roles: PersistenceRolesSchema.optional(),
     path: z.string().optional(),
     dsn: DatabaseUrlSchema.optional(),
-    retentionDays: z.number().positive().default(DEFAULT_JOB_RETENTION_DAYS),
+    retentionDays: z.number().positive().nullable().default(DEFAULT_JOB_RETENTION_DAYS),
     retention: PersistenceRetentionSchema.default({}),
     dedupWindowMs: z.number().int().nonnegative().default(DEFAULT_DEDUP_WINDOW_MS),
     acknowledgeEphemeral: z.boolean().default(false),
@@ -434,10 +432,9 @@ export interface PersistenceConfig {
    */
   roleDsns: StorageRoleDsns;
   /**
-   * The job store's bound. Unchanged in meaning and default; `retention.days.jobs`
-   * is the same number reached through the one policy.
+   * Deprecated job-store bound. Null means unbounded; use retention.days.jobs.
    */
-  retentionDays: number;
+  retentionDays: number | null;
   /**
    * Every bound, resolved once. `doctor` and `llm_process_health` report this
    * rather than each deciding for itself which subsystems are unbounded.

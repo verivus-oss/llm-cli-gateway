@@ -11,11 +11,9 @@
  * A bare `--export` was measured to produce no file this gateway could find, so
  * the path is supplied rather than left to the CLI's default.
  *
- * TWO THINGS THIS DOES NOT DO, both tracked as nodes in
- * docs/plans/complete-flight-record.dag.toml:
- *   c3  nothing harvests these files into the durable record yet. They are
- *       findable only through this module's correlation-id mapping.
- *   c4/c5  nothing evicts them. One file per devin request, unbounded.
+ * The async job manager harvests the exact correlation-keyed file after close,
+ * copies it into the bounded durable record, and removes the source only after
+ * the owner-fenced store write succeeds.
  */
 import { createHash } from "node:crypto";
 import { mkdirSync } from "node:fs";

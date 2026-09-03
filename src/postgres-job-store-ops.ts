@@ -36,7 +36,7 @@ import type { StorageConnection } from "./storage/store.js";
 
 /** What the worker used to receive as `workerData`. */
 export interface PostgresJobStoreOpsConfig {
-  retentionMs: number;
+  retentionMs: number | null;
   dedupWindowMs: number;
   leaseTtlMs: number;
   farFutureIso: string;
@@ -401,7 +401,16 @@ export function createPostgresJobStoreOps(
       progress_json TEXT,
       cwd_scope TEXT,
       cwd_path TEXT,
-      workspace_alias TEXT
+      workspace_alias TEXT,
+      replay_context_json TEXT,
+      capture_format TEXT,
+      capture_status TEXT,
+      output_dropped_bytes BIGINT NOT NULL DEFAULT 0,
+      native_transcript TEXT,
+      native_transcript_bytes BIGINT NOT NULL DEFAULT 0,
+      native_transcript_truncated BOOLEAN NOT NULL DEFAULT FALSE,
+      native_transcript_dropped_bytes BIGINT NOT NULL DEFAULT 0,
+      capture_error TEXT
     );
     CREATE INDEX IF NOT EXISTS idx_jobs_request_key ON jobs(request_key);
     CREATE INDEX IF NOT EXISTS idx_jobs_status ON jobs(status);
@@ -506,6 +515,30 @@ export function createPostgresJobStoreOps(
         await affected(client, "ALTER TABLE jobs ADD COLUMN IF NOT EXISTS cwd_scope TEXT");
         await affected(client, "ALTER TABLE jobs ADD COLUMN IF NOT EXISTS cwd_path TEXT");
         await affected(client, "ALTER TABLE jobs ADD COLUMN IF NOT EXISTS workspace_alias TEXT");
+        await affected(
+          client,
+          "ALTER TABLE jobs ADD COLUMN IF NOT EXISTS replay_context_json TEXT"
+        );
+        await affected(client, "ALTER TABLE jobs ADD COLUMN IF NOT EXISTS capture_format TEXT");
+        await affected(client, "ALTER TABLE jobs ADD COLUMN IF NOT EXISTS capture_status TEXT");
+        await affected(
+          client,
+          "ALTER TABLE jobs ADD COLUMN IF NOT EXISTS output_dropped_bytes BIGINT NOT NULL DEFAULT 0"
+        );
+        await affected(client, "ALTER TABLE jobs ADD COLUMN IF NOT EXISTS native_transcript TEXT");
+        await affected(
+          client,
+          "ALTER TABLE jobs ADD COLUMN IF NOT EXISTS native_transcript_bytes BIGINT NOT NULL DEFAULT 0"
+        );
+        await affected(
+          client,
+          "ALTER TABLE jobs ADD COLUMN IF NOT EXISTS native_transcript_truncated BOOLEAN NOT NULL DEFAULT FALSE"
+        );
+        await affected(
+          client,
+          "ALTER TABLE jobs ADD COLUMN IF NOT EXISTS native_transcript_dropped_bytes BIGINT NOT NULL DEFAULT 0"
+        );
+        await affected(client, "ALTER TABLE jobs ADD COLUMN IF NOT EXISTS capture_error TEXT");
         // The owner/status index references owner_instance, so it can only be created
         // AFTER the ALTER adds that column to a pre-existing (migration-created) table.
         await affected(
@@ -619,11 +652,15 @@ export function createPostgresJobStoreOps(
                            mcp_artifact_path, mcp_artifact_scope, mcp_artifact_cleanup_pending, lease_deadline,
                            kit_execution_json, kit_session_id, kit_terminal_finalized,
                            kit_terminal_finalized_at, kit_terminal_metadata_json,
-                           cwd_scope, cwd_path, workspace_alias)
+                           cwd_scope, cwd_path, workspace_alias,
+                           replay_context_json, capture_format, capture_status,
+                           output_dropped_bytes, native_transcript, native_transcript_bytes,
+                           native_transcript_truncated, native_transcript_dropped_bytes, capture_error)
          VALUES ($1, $2, $3, $4, $5, $6, $7, 'queued', NULL, '', '', FALSE, NULL,
                  $8, NULL, $9, $10, $11, $12, NULL, $13, $14, $15, $16, $17, $18,
                  ${PG_NOW_MS} + $19, $20, $21,
-                 FALSE, NULL, NULL, $22, $23, $24)`;
+                 FALSE, NULL, NULL, $22, $23, $24,
+                 $25, $26, NULL, 0, NULL, 0, FALSE, 0, NULL)`;
         const insertArgs = [
           input.id,
           input.correlationId,
@@ -649,6 +686,8 @@ export function createPostgresJobStoreOps(
           input.cwd?.scope ?? null,
           input.cwd?.path ?? null,
           input.cwd?.workspaceAlias ?? null,
+          input.replayContext ? JSON.stringify(input.replayContext) : null,
+          input.captureFormat ?? null,
         ];
         if (!input.validationAdmission) {
           await poolAffected(insertSql, insertArgs);
@@ -950,7 +989,9 @@ export function createPostgresJobStoreOps(
             [
               httpJobGraceMs,
               new Date().toISOString(),
-              new Date(Date.now() + config.retentionMs).toISOString(),
+              config.retentionMs === null
+                ? config.farFutureIso
+                : new Date(Date.now() + config.retentionMs).toISOString(),
               excludeIds,
             ]
           );
@@ -988,9 +1029,40 @@ export function createPostgresJobStoreOps(
         );
         return (result.rowCount ?? 0) === 1;
       }
+      case "recordCapture": {
+        const input = args[0];
+        const result = await poolAffected(
+          `UPDATE jobs
+           SET capture_status = $2,
+               output_dropped_bytes = $3,
+               native_transcript = CASE WHEN kit_execution_json IS NULL THEN $4 ELSE NULL END,
+               native_transcript_bytes = CASE WHEN kit_execution_json IS NULL THEN $5 ELSE 0 END,
+               native_transcript_truncated = CASE WHEN kit_execution_json IS NULL THEN $6 ELSE FALSE END,
+               native_transcript_dropped_bytes = CASE WHEN kit_execution_json IS NULL THEN $7 ELSE 0 END,
+               capture_error = $8
+           WHERE id = $1
+             AND owner_instance = $9
+             AND status IN ('completed', 'failed', 'canceled', 'orphaned')`,
+          [
+            input.id,
+            input.captureStatus,
+            input.outputDroppedBytes,
+            input.nativeTranscript,
+            input.nativeTranscriptBytes,
+            input.nativeTranscriptTruncated,
+            input.nativeTranscriptDroppedBytes,
+            input.captureError,
+            input.ownerInstance,
+          ]
+        );
+        return (result.rowCount ?? 0) === 1;
+      }
       case "recordComplete": {
         const input = args[0];
-        const expiresAt = new Date(Date.parse(input.finishedAt) + config.retentionMs).toISOString();
+        const expiresAt =
+          config.retentionMs === null
+            ? config.farFutureIso
+            : new Date(Date.parse(input.finishedAt) + config.retentionMs).toISOString();
         // #139: guarded completion. A terminal result may only land on a still-open
         // (queued/running) row or a mistakenly-orphaned one; a no-op on an
         // already-terminal row (last committed terminal state wins).

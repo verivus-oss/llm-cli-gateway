@@ -12,20 +12,24 @@
  * helpers preserves the intentional inline order display -> optimize -> compress
  * -> integrity (index.ts buildCliResponse), which a fused helper would reorder.
  *
- * Both response surfaces call this: the inline `buildCliResponse` path passes
- * `applyGrokDisplay: true`; the `llm_job_result` readback path passes `false`.
- * The grok swap is behind that explicit flag so the readback path keeps its
- * current behavior (it never applied `grokDisplayText`); a separate change flips
- * the flag to true once the grok-readback asymmetry is intentionally fixed.
+ * Both response surfaces call this. The explicit `applyGrokDisplay` input keeps
+ * low-level callers able to request raw Grok events, while normal inline and
+ * job-result display paths both enable the projection.
  */
 import { codexDisplayText } from "./codex-json-parser.js";
-import { grokDisplayText } from "./grok-json-parser.js";
+import { grokDisplayText, parseGrokOutput } from "./grok-json-parser.js";
+import { parseGeminiStreamJson } from "./gemini-json-parser.js";
+import { parseVibeStream } from "./vibe-stream-parser.js";
+import { parseCursorStreamJson } from "./cursor-stream-parser.js";
+import { parseStreamJson } from "./stream-json-parser.js";
 
 export interface ProviderDisplayInput {
   /** Provider that produced `stdout` (e.g. "codex", "grok", "claude"). */
   readonly cli: string;
   /** Caller-facing output format; "json" is returned verbatim (raw object). */
   readonly outputFormat: string | undefined;
+  /** Actual stored provider grammar. Defaults to outputFormat for legacy rows. */
+  readonly captureFormat?: string | null;
   /** Raw captured provider stdout. */
   readonly stdout: string;
   /**
@@ -35,6 +39,98 @@ export interface ProviderDisplayInput {
   readonly applyGrokDisplay: boolean;
 }
 
+function inferCaptureFormat(
+  cli: string,
+  outputFormat: string | undefined,
+  stdout: string
+): string | null {
+  if (["json", "stream-json", "streaming", "streaming-json"].includes(outputFormat ?? "")) {
+    return outputFormat ?? null;
+  }
+  if (cli === "gemini" && parseGeminiStreamJson(stdout)) return "stream-json";
+  if (cli === "grok") {
+    const parsed = parseGrokOutput("streaming-json", stdout);
+    if (
+      parsed &&
+      (parsed.text !== undefined ||
+        parsed.sessionId !== undefined ||
+        parsed.stopReason !== undefined ||
+        parsed.thought !== undefined ||
+        parsed.error !== undefined)
+    ) {
+      return "streaming-json";
+    }
+  }
+  if (cli === "mistral" && parseVibeStream(stdout)) return "streaming";
+  if (cli === "cursor" && parseCursorStreamJson(stdout)) return "stream-json";
+  if (cli === "claude" && stdout.trimStart().startsWith("{")) return "stream-json";
+  if (cli === "codex" && stdout.trimStart().startsWith("{")) return "json";
+  return outputFormat ?? null;
+}
+
+function lastJsonLine(
+  stdout: string,
+  matches: (value: Record<string, unknown>) => boolean
+): Record<string, unknown> | null {
+  let selected: Record<string, unknown> | null = null;
+  for (const line of stdout.split(/\r?\n/)) {
+    const trimmed = line.trim();
+    if (!trimmed) continue;
+    try {
+      const parsed: unknown = JSON.parse(trimmed);
+      if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) continue;
+      const value = parsed as Record<string, unknown>;
+      if (matches(value)) selected = value;
+    } catch {
+      // Provider banners and partial final lines are not JSON events.
+    }
+  }
+  return selected;
+}
+
+function projectCapturedJson(cli: string, captureFormat: string | null, stdout: string): string {
+  if (cli === "claude" && captureFormat === "stream-json") {
+    const result = lastJsonLine(stdout, value => value.type === "result");
+    return result ? JSON.stringify(result) : stdout;
+  }
+  if (cli === "gemini" && captureFormat === "stream-json") {
+    const result = lastJsonLine(
+      stdout,
+      value => value.type === "result" || value.event === "result"
+    );
+    const body = result?.event === "result" ? result.result : result;
+    return body && typeof body === "object" ? JSON.stringify(body) : stdout;
+  }
+  if (cli === "grok" && captureFormat === "streaming-json") {
+    const parsed = parseGrokOutput("streaming-json", stdout);
+    if (!parsed) return stdout;
+    const projected: Record<string, unknown> = {};
+    for (const key of [
+      "text",
+      "stopReason",
+      "sessionId",
+      "requestId",
+      "thought",
+      "error",
+    ] as const) {
+      if (parsed[key] !== undefined) projected[key] = parsed[key];
+    }
+    return JSON.stringify(projected);
+  }
+  if (cli === "mistral" && captureFormat === "streaming") {
+    const result = lastJsonLine(
+      stdout,
+      value => value.type === "message" && value.role === "assistant"
+    );
+    return result ? JSON.stringify(result) : stdout;
+  }
+  if (cli === "cursor" && captureFormat === "stream-json") {
+    const result = lastJsonLine(stdout, value => value.type === "result");
+    return result ? JSON.stringify(result) : stdout;
+  }
+  return stdout;
+}
+
 /**
  * Reconstruct the human-facing reply text for a provider, or return `stdout`
  * unchanged when no swap applies. At most one provider branch fires because
@@ -42,6 +138,13 @@ export interface ProviderDisplayInput {
  */
 export function applyProviderDisplayText(input: ProviderDisplayInput): string {
   const { cli, outputFormat, stdout, applyGrokDisplay } = input;
+  const captureFormat = input.captureFormat ?? inferCaptureFormat(cli, outputFormat, stdout);
+  const callerWantsStructured = ["json", "stream-json", "streaming", "streaming-json"].includes(
+    outputFormat ?? ""
+  );
+  if (outputFormat === "json" && captureFormat !== "json") {
+    return projectCapturedJson(cli, captureFormat, stdout);
+  }
   // codex always runs with --json; in non-json output the caller wants the
   // reconstructed final agent_message, not the raw JSONL event stream.
   if (cli === "codex" && outputFormat !== "json") {
@@ -51,7 +154,19 @@ export function applyProviderDisplayText(input: ProviderDisplayInput): string {
   // concatenates the text deltas into the final reply (no-op outside
   // streaming-json). Behind the flag so readback can keep omitting it.
   if (cli === "grok" && applyGrokDisplay) {
-    return grokDisplayText(outputFormat, stdout);
+    return grokDisplayText(captureFormat ?? undefined, stdout);
+  }
+  if (!callerWantsStructured && cli === "claude" && captureFormat === "stream-json") {
+    return parseStreamJson(stdout).text;
+  }
+  if (!callerWantsStructured && cli === "gemini" && captureFormat === "stream-json") {
+    return parseGeminiStreamJson(stdout)?.response ?? "";
+  }
+  if (!callerWantsStructured && cli === "mistral" && captureFormat === "streaming") {
+    return parseVibeStream(stdout)?.response ?? "";
+  }
+  if (!callerWantsStructured && cli === "cursor" && captureFormat === "stream-json") {
+    return parseCursorStreamJson(stdout)?.response ?? "";
   }
   return stdout;
 }

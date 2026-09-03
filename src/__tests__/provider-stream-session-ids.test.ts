@@ -37,12 +37,10 @@ describe("mistral: the Vibe session id was on the wire all along", () => {
     );
   });
 
-  it("still records an ABSENCE on the text wire, because text emits none", () => {
-    // The old behaviour was unconditional absence. It was right for `text` and
-    // wrong for `streaming`; keeping it right for text is half the fix.
-    const meta = extractProviderOutputMetadata("mistral", "MARKER\n", "text");
-    expect(meta.sessionId).toBeUndefined();
-    expect(meta.absentFields).toContain("sessionId");
+  it("uses the captured streaming grammar for a text projection", () => {
+    const meta = extractProviderOutputMetadata("mistral", VIBE, "text");
+    expect(meta.sessionId).toBe("32c3e0db-e7df-0ade-d836-a0e6b4c50259");
+    expect(meta.absentFields).not.toContain("sessionId");
   });
 
   it("takes the stop reason from the LAST entry, not the first", () => {
@@ -85,10 +83,12 @@ describe("cursor: session id, stop reason and usage from stream-json", () => {
     expect(meta.absentFields).toEqual([]);
   });
 
-  it("records an absence on text, where none of it is emitted", () => {
-    const meta = extractProviderOutputMetadata("cursor", "MARKER\n", "text");
-    expect(meta.absentFields).toContain("sessionId");
-    expect(meta.absentFields).toContain("stopReason");
+  it("uses captured stream-json metadata for a text projection", () => {
+    const meta = extractProviderOutputMetadata("cursor", CURSOR, "text");
+    expect(meta.sessionId).toBe("a8951d8d-9de2-4258-ab7a-761a99a84a16");
+    expect(meta.stopReason).toBe("success");
+    expect(meta.absentFields).not.toContain("sessionId");
+    expect(meta.absentFields).not.toContain("stopReason");
   });
 
   it("names a failure even when subtype is missing", () => {
@@ -98,6 +98,19 @@ describe("cursor: session id, stop reason and usage from stream-json", () => {
 
   it("returns null on output that is not this wire", () => {
     expect(parseCursorStreamJson("MARKER\n")).toBeNull();
+  });
+
+  it("records malformed token fields as absent instead of fabricating zero", () => {
+    const line = JSON.stringify({
+      type: "result",
+      subtype: "success",
+      session_id: "s1",
+      usage: { inputTokens: "3532", outputTokens: 214 },
+    });
+    expect(parseCursorStreamJson(`${line}\n`)?.usage).toBeUndefined();
+    expect(
+      extractProviderOutputMetadata("cursor", `${line}\n`, "stream-json").absentFields
+    ).toContain("usage");
   });
 });
 

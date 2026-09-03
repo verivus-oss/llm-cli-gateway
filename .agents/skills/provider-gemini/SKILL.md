@@ -63,9 +63,10 @@ metadata is authoritative; the TOML is scanner input only.
    controls. `workspace` and `worktree` are gateway routing selections, not
    Antigravity-native flags. `includeDirs` is an additional read path and does
    not select cwd. Use `workingDir` to select the process cwd, or a verified
-   registered `workspace` for remote HTTP/OAuth callers. An unscoped child uses a fresh neutral temporary cwd, not the gateway
-   repository. JSON or stream-json output, attachments, policy files, admin
-   policy files, and `skipTrust` are unsupported or rejected in the current
+   registered `workspace` for remote HTTP/OAuth callers. An unscoped child uses
+   a fresh neutral temporary cwd, not the gateway repository. JSON and
+   stream-json output are supported. Attachments, policy files, admin policy
+   files, and `skipTrust` remain unsupported or rejected in the current
    Antigravity path.
 7. For continuity, use a verified caller-owned Antigravity conversation ID or
    `resumeLatest:true`. Gateway-generated `gw-*` IDs are bookkeeping IDs and
@@ -116,12 +117,12 @@ is set.
 
 ## Antigravity-specific notes (see the contract for exact rules)
 
-- Tested against agy 1.1.13. Antigravity (`agy`) has no native ACP entrypoint; legacy Gemini CLI ACP evidence does not transfer, so `provider-acp://gemini` reports `native:false` (no methods, no adapter-as-native masquerade) and `gemini_request` exposes no `transport:"acp"` selector.
+- Tested against agy 1.1.24. Antigravity (`agy`) has no native ACP entrypoint; legacy Gemini CLI ACP evidence does not transfer, so `provider-acp://gemini` reports `native:false` (no methods, no adapter-as-native masquerade) and `gemini_request` exposes no `transport:"acp"` selector.
 - The public MCP tool names stay `gemini_request` / `gemini_request_async`, but
   the spawned executable is `agy`.
 - Antigravity print mode uses `--print <prompt-as-positional>`, not Gemini's
   old `-p <prompt>` shape.
-- agy 1.1.13 retains root `--agent` plus `agent` and `agents` commands. Track and
+- agy 1.1.24 retains root `--agent` plus `agent` and `agents` commands. Track and
   acknowledge those upstream-only controls before exposing them through a
   request schema; custom agent selection can change tool and permission posture.
 - `approvalMode:"auto_edit"` maps to `--mode accept-edits`,
