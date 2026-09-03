@@ -48,6 +48,49 @@ describe("AsyncJobManager", () => {
       expect(result.stdout.trim()).toBe("hello");
     });
 
+    it("forwards a resolved cwd scope through the backwards-compatible startJob wrapper", async () => {
+      const cwd = mkdtempSync(join(tmpdir(), "async-cwd-scope-"));
+      const store = new MemoryJobStore();
+      const manager = new AsyncJobManager(undefined, undefined, store);
+      const parameters: Parameters<AsyncJobManager["startJob"]> = [
+        "pwd" as LlmCli,
+        [],
+        "corr-cwd-scope",
+        cwd,
+        undefined,
+        undefined,
+        true,
+        undefined,
+        undefined,
+        undefined,
+        undefined,
+        undefined,
+        undefined,
+        undefined,
+        undefined,
+        undefined,
+        undefined,
+        undefined,
+        undefined,
+        undefined,
+        undefined,
+        { effectiveWorkingDir: cwd },
+      ];
+
+      try {
+        const job = await manager.startJob(...parameters);
+        await waitForJobDone(manager, job.id);
+        expect((await manager.getJobResult(job.id))?.executionContext?.cwd).toEqual({
+          scope: "caller",
+          path: cwd,
+          workspaceAlias: null,
+        });
+      } finally {
+        await manager.dispose();
+        rmSync(cwd, { recursive: true, force: true });
+      }
+    });
+
     it("should track a failed job", async () => {
       const manager = new AsyncJobManager();
       const job = await manager.startJob("sh" as LlmCli, ["-c", "exit 42"], "corr-2");

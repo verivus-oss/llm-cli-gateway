@@ -3,7 +3,7 @@ import { planProviderCapture } from "../provider-capture.js";
 
 describe("provider capture planning", () => {
   it.each([
-    ["gemini", ["--print", "hello"], "--output-format", "stream-json"],
+    ["gemini", ["--print=hello"], "--output-format", "stream-json"],
     ["grok", ["-p=hello"], "--output-format", "streaming-json"],
     ["mistral", ["-p=hello", "--agent", "accept-edits"], "--output", "streaming"],
   ] as const)("selects the rich %s wire for text callers", (provider, input, flag, value) => {
@@ -23,7 +23,7 @@ describe("provider capture planning", () => {
 
   it.each([
     ["claude", ["-p", "--output-format", "json", "--", "hello"], "--output-format", "stream-json"],
-    ["gemini", ["--print", "hello", "--output-format", "json"], "--output-format", "stream-json"],
+    ["gemini", ["--print=hello", "--output-format", "json"], "--output-format", "stream-json"],
     ["grok", ["-p=hello", "--output-format", "json"], "--output-format", "streaming-json"],
     ["mistral", ["-p=hello", "--output", "json"], "--output", "streaming"],
     [

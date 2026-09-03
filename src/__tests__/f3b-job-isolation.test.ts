@@ -102,6 +102,59 @@ describe("F3b-2 job / request ownership isolation", () => {
     });
   }
 
+  async function seedJobWithHostEvidence(id: string, ownerPrincipal: string): Promise<void> {
+    const now = new Date().toISOString();
+    await store.recordStart({
+      id,
+      correlationId: `corr-${id}`,
+      requestKey: `host-evidence-${id}`,
+      cli: "devin",
+      args: [],
+      startedAt: now,
+      pid: null,
+      ownerPrincipal,
+      ownerInstance: "test-instance",
+      cwd: { scope: "caller", path: "/private/alice/workspace", workspaceAlias: null },
+      replayContext: {
+        version: 1,
+        repositoryHead: "a".repeat(40),
+        instructionFiles: [
+          {
+            path: "/private/alice/workspace/AGENTS.md",
+            sha256: "b".repeat(64),
+            sourceBytes: 18,
+            effectiveBytes: 18,
+            effectiveLimitBytes: null,
+            truncated: false,
+            status: "captured",
+          },
+        ],
+      },
+      captureFormat: "atif-v1.7",
+    });
+    await store.recordComplete({
+      id,
+      status: "completed",
+      exitCode: 0,
+      stdout: "alice result",
+      stderr: "",
+      outputTruncated: false,
+      error: null,
+      finishedAt: now,
+    });
+    await store.recordCapture({
+      id,
+      ownerInstance: "test-instance",
+      captureStatus: "captured_whole",
+      outputDroppedBytes: 0,
+      nativeTranscript: "private ATIF transcript",
+      nativeTranscriptBytes: 23,
+      nativeTranscriptTruncated: false,
+      nativeTranscriptDroppedBytes: 0,
+      captureError: null,
+    });
+  }
+
   it("llm_job_status is own-or-not-found across principals", async () => {
     await seedAliceJob();
 
@@ -148,6 +201,36 @@ describe("F3b-2 job / request ownership isolation", () => {
     const alice = await call("job_result", { jobId: "job-alice", maxChars: 200000 }, "alice");
     expect(alice.success).toBe(true);
     expect(alice.result.stdout).toContain("alice private output");
+  });
+
+  it("withholds host replay evidence on every remote job read surface", async () => {
+    await seedJobWithHostEvidence("job-alice-host-evidence", "alice");
+    const jobId = "job-alice-host-evidence";
+
+    const responses = [
+      await call("llm_job_status", { jobId }, "alice"),
+      await call("llm_job_watch", { jobId, waitMs: 0 }, "alice"),
+      await call("llm_job_result", { jobId, maxChars: 200000 }, "alice"),
+      await call("job_status", { jobId }, "alice"),
+      await call("job_result", { jobId, maxChars: 200000 }, "alice"),
+    ];
+
+    for (const response of responses) {
+      const encoded = JSON.stringify(response);
+      expect(response.success).toBe(true);
+      expect(encoded).not.toContain("/private/alice/workspace");
+      expect(encoded).not.toContain("private ATIF transcript");
+      expect(encoded).not.toContain("executionContext");
+      expect(encoded).not.toContain("nativeTranscript");
+    }
+
+    await seedJobWithHostEvidence("job-local-host-evidence", "local");
+    const local = await call("job_result", {
+      jobId: "job-local-host-evidence",
+      maxChars: 200000,
+    });
+    expect(local.result.executionContext.cwd.path).toBe("/private/alice/workspace");
+    expect(local.result.nativeTranscript).toBe("private ATIF transcript");
   });
 
   it("llm_job_cancel reports another principal's job as not found", async () => {

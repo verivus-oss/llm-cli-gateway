@@ -51,7 +51,7 @@ import { assertMcpArtifactAdmissionInvariant } from "./mcp-artifact-admission.js
 import { describeJobCwd, type JobCwdResolution } from "./job-cwd-scope.js";
 import { captureJobReplayContext, type JobReplayContext } from "./job-replay-context.js";
 import { captureFormatCarriesTranscript, planProviderCapture } from "./provider-capture.js";
-import { devinTranscriptPath } from "./devin-transcript.js";
+import { devinTranscriptPath, pruneStaleDevinTranscripts } from "./devin-transcript.js";
 import {
   createPersonalKitTerminalMetadata,
   createVibeKitTerminalMetadata,
@@ -1473,6 +1473,11 @@ export class AsyncJobManager {
       logger
     );
 
+    const transcriptPrune = pruneStaleDevinTranscripts();
+    if (transcriptPrune.removed > 0 || transcriptPrune.failed > 0) {
+      this.logger.info("Devin transcript orphan sweep completed", transcriptPrune);
+    }
+
     // #139: register this instance BEFORE any request can be admitted (the
     // register-before-admit invariant: a job row can only be written after the
     // ctor returns, so it always follows a live instance row). A failed initial
@@ -1494,6 +1499,10 @@ export class AsyncJobManager {
     this.evictionTimer = setInterval(() => {
       if (this.evictionTickInFlight) return;
       this.evictionTickInFlight = true;
+      const transcriptPrune = pruneStaleDevinTranscripts();
+      if (transcriptPrune.removed > 0 || transcriptPrune.failed > 0) {
+        this.logger.info("Devin transcript orphan sweep completed", transcriptPrune);
+      }
       void this.evictCompletedJobs().finally(() => {
         this.evictionTickInFlight = false;
       });
@@ -4226,7 +4235,8 @@ export class AsyncJobManager {
     jobId?: string,
     dedupArgs?: string[],
     mcpArtifactPath?: string,
-    mcpArtifactScope?: string
+    mcpArtifactScope?: string,
+    cwdResolution?: JobCwdResolution
   ): Promise<AsyncJobSnapshot> {
     return (
       await this.startJobWithDedup(cli, args, correlationId, {
@@ -4248,6 +4258,7 @@ export class AsyncJobManager {
         dedupArgs,
         mcpArtifactPath,
         mcpArtifactScope,
+        cwdResolution,
       })
     ).snapshot;
   }

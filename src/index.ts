@@ -220,7 +220,12 @@ import {
 } from "./async-job-manager.js";
 import { createJobStore, isValidationRunStore, type JobStore } from "./job-store.js";
 import type { JobCwdResolution } from "./job-cwd-scope.js";
-import { devinTranscriptDedupArgs, ensureDevinTranscriptPath } from "./devin-transcript.js";
+import { projectJobReadback } from "./job-readback-projection.js";
+import {
+  devinTranscriptDedupArgs,
+  ensureDevinTranscriptPath,
+  removeInlineDevinTranscript,
+} from "./devin-transcript.js";
 import {
   MCP_ARTIFACT_RECOVERY_ACKNOWLEDGEMENT,
   recoverMcpArtifactCleanupPin,
@@ -1909,6 +1914,7 @@ async function awaitJobOrDefer(
       // Release the run slot and per-request resources (outputSchema temp
       // files) as soon as the inline execution settles.
       slot.release();
+      if (cli === "devin") removeInlineDevinTranscript(corrId, args);
       consumeOnComplete();
     }
   }
@@ -7015,7 +7021,7 @@ export function prepareGeminiRequest(
   }
   // Antigravity (agy) owns its own MCP configuration, so the gateway never
   // emits an MCP allowlist to argv. This legacy metadata is returned unchanged.
-  // agy 1.1.24 accepts text|json|stream-json in print mode. This used to refuse
+  // agy 1.1.25 accepts text|json|stream-json in print mode. This used to refuse
   // everything but text on the claim that the headless path emits text only,
   // which was false at this version: stream-json is the only gemini wire that
   // carries the working directory, the tool list and per-tool parameters.
@@ -7035,9 +7041,9 @@ export function prepareGeminiRequest(
     return unsupported("skipTrust", "agy has no --skip-trust flag");
   }
 
-  // agy does not honor an end-of-options marker or --print=<prompt>. Its
-  // verified print mode requires a separate positional prompt, so reject the
-  // one form that would be parsed as another option.
+  // agy 1.1.25 parses the token after a bare --print as that flag's prompt.
+  // Keep the prompt attached so a following gateway flag cannot be consumed as
+  // prompt text. The CLI's own diagnostic explicitly requires this form.
   try {
     sanitizeCliArgValue(effectivePrompt, "prompt");
     assertCliArgUtf8Size(effectivePrompt, {
@@ -7062,7 +7068,13 @@ export function prepareGeminiRequest(
   } catch (error) {
     return createErrorResponse(params.operation, 1, "", corrId, error as Error);
   }
-  const args = ["--print", effectivePrompt];
+  const printArg = `--print=${effectivePrompt}`;
+  try {
+    assertCliArgUtf8Size(printArg, { provider: "gemini", inputName: "prompt argv element" });
+  } catch (error) {
+    return createErrorResponse(params.operation, 1, "", corrId, error as Error);
+  }
+  const args = [printArg];
   // Emitted only when the caller asked for one: an explicit `--output-format
   // text` would be a new argv element on every default request, which changes
   // the dedup key for every existing gemini caller.
@@ -12595,7 +12607,10 @@ export async function handleGeminiRequestAsync(
         undefined,
         undefined,
         undefined,
-        sessionBoundDedupArgs(args, effectiveSessionId)
+        sessionBoundDedupArgs(args, effectiveSessionId),
+        undefined,
+        undefined,
+        jobCwdResolutionOf(worktreeResolution.cwd, worktreeResolution)
       );
     },
     buildSuccessResponse: ({ job, value: { worktreeResolution } }) => {
@@ -13365,7 +13380,10 @@ export async function handleGrokRequestAsync(
         undefined,
         undefined,
         undefined,
-        sessionBoundDedupArgs(args, effectiveSessionId)
+        sessionBoundDedupArgs(args, effectiveSessionId),
+        undefined,
+        undefined,
+        jobCwdResolutionOf(worktreeResolution.cwd, worktreeResolution)
       );
     },
     buildSuccessResponse: ({ job, value: { worktreeResolution, effectiveSessionId } }) => {
@@ -14098,7 +14116,10 @@ export async function handleDevinRequestAsync(
         undefined,
         undefined,
         undefined,
-        sessionBoundDedupArgs(prep.dedupArgs ?? args, effectiveSessionId)
+        sessionBoundDedupArgs(prep.dedupArgs ?? args, effectiveSessionId),
+        undefined,
+        undefined,
+        jobCwdResolutionOf(worktreeResolution.cwd ?? params.workingDir, worktreeResolution)
       );
     },
     buildSuccessResponse: ({ job, value: { worktreeResolution, effectiveSessionId } }) => {
@@ -14894,7 +14915,10 @@ export async function handleCursorRequestAsync(
         undefined,
         undefined,
         undefined,
-        sessionBoundDedupArgs(args, effectiveSessionId)
+        sessionBoundDedupArgs(args, effectiveSessionId),
+        undefined,
+        undefined,
+        jobCwdResolutionOf(cursorWorkspace.cwd ?? worktreeResolution.cwd, worktreeResolution)
       );
     },
     buildSuccessResponse: ({ job, value: { effectiveSessionId } }) => ({
@@ -15775,7 +15799,10 @@ export async function handleMistralRequestAsync(
       undefined,
       undefined,
       undefined,
-      sessionBoundDedupArgs(args, effectiveSessionId)
+      sessionBoundDedupArgs(args, effectiveSessionId),
+      undefined,
+      undefined,
+      jobCwdResolutionOf(worktreeResolution.cwd, worktreeResolution)
     );
     jobHandedOff = true;
     if (sessionAdmission) worktreeLifecycle.transfer();
@@ -16172,7 +16199,10 @@ export async function handleCodexRequestAsync(
             : undefined,
           kitSession?.gatewaySessionId,
           kitSession?.attemptId,
-          sessionBoundDedupArgs(args, effectiveSessionId)
+          sessionBoundDedupArgs(args, effectiveSessionId),
+          undefined,
+          undefined,
+          jobCwdResolutionOf(kit?.codexIsolation?.cwd ?? worktreeResolution.cwd, worktreeResolution)
         ),
     });
     jobHandedOff = true;
@@ -17077,7 +17107,10 @@ async function dispatchRoutedCliAsync(
       undefined,
       undefined,
       undefined,
-      prep.dedupArgs ? [...prep.dedupArgs] : undefined
+      prep.dedupArgs ? [...prep.dedupArgs] : undefined,
+      undefined,
+      undefined,
+      jobCwdResolutionOf(workspaceResolution.cwd, workspaceResolution)
     );
     cleanupHandedOff = true;
     return {
@@ -20628,7 +20661,11 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
                 kitSession?.attemptId,
                 sessionBoundDedupArgs(buildClaudeMcpDedupArgs(args, mcpConfig), effectiveSessionId),
                 mcpConfig?.cleanup ? mcpConfig.path : undefined,
-                mcpConfig?.cleanup ? mcpConfig.artifactScope : undefined
+                mcpConfig?.cleanup ? mcpConfig.artifactScope : undefined,
+                jobCwdResolutionOf(
+                  kit?.context.scope.cwd ?? worktreeResolution.cwd ?? workingDir,
+                  worktreeResolution
+                )
               ),
           });
           requestCleanupHandedOff = true;
@@ -22109,7 +22146,7 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
         openWorldHint: false,
       },
       async ({ jobId, afterProgressSeq, progressLimit }) => {
-        const job = await asyncJobManager.getJobSnapshot(jobId, {
+        let job = await asyncJobManager.getJobSnapshot(jobId, {
           afterProgressSeq,
           progressLimit,
         });
@@ -22136,9 +22173,7 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
           };
         }
 
-        // Complete replay context contains host paths. Remote callers keep the
-        // pre-capture status surface and receive no new host disclosure.
-        if (callerIsRemote()) delete job.executionContext;
+        job = projectJobReadback(job, { remote: callerIsRemote() });
 
         return {
           content: [
@@ -22231,7 +22266,7 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
           };
         }
 
-        if (callerIsRemote()) delete job.executionContext;
+        job = projectJobReadback(job, { remote: callerIsRemote() });
 
         const progressToken = extra._meta?.progressToken;
         if (progressToken !== undefined) {
@@ -22318,7 +22353,7 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
         rawOutput,
       }) => {
         const remoteCaller = callerIsRemote();
-        const result = await asyncJobManager.getJobResult(jobId, maxChars, {
+        let result = await asyncJobManager.getJobResult(jobId, maxChars, {
           stdoutOffsetChars,
           stderrOffsetChars,
           nativeTranscriptOffsetChars,
@@ -22366,14 +22401,10 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
           };
         }
 
-        if (remoteCaller) delete result.executionContext;
-        if (!rawOutput || remoteCaller) {
-          delete result.nativeTranscript;
-          delete result.nativeTranscriptOffsetChars;
-          delete result.nativeTranscriptTotalChars;
-          delete result.nativeTranscriptNextOffsetChars;
-          delete result.nativeTranscriptPageTruncated;
-        }
+        result = projectJobReadback(result, {
+          remote: remoteCaller,
+          includeNativeTranscript: rawOutput,
+        });
 
         if (
           !rawOutput &&

@@ -321,12 +321,12 @@ describe("REGRESSIONS Eθ — grok `-p` headless output carries no per-request u
 // rejected by the mechanical contract.
 describe("REGRESSIONS Eε — gemini-compatible contract rejects legacy -o output modes", () => {
   it("validateUpstreamCliArgs rejects ['--print','x','-o','stream-json']", () => {
-    const validation = validateUpstreamCliArgs("gemini", ["--print", "x", "-o", "stream-json"]);
+    const validation = validateUpstreamCliArgs("gemini", ["--print=x", "-o", "stream-json"]);
     expect(validation.ok).toBe(false);
   });
 
   it("validateUpstreamCliArgs rejects ['--print','x','-o','json']", () => {
-    const validation = validateUpstreamCliArgs("gemini", ["--print", "x", "-o", "json"]);
+    const validation = validateUpstreamCliArgs("gemini", ["--print=x", "-o", "json"]);
     expect(validation.ok).toBe(false);
   });
 
@@ -341,7 +341,7 @@ describe("REGRESSIONS Eε — gemini-compatible contract rejects legacy -o outpu
     );
     expect(fixture, "gemini-minimal fixture must be registered").toBeDefined();
     expect(fixture?.expect).toBe("pass");
-    expect(fixture?.args).toEqual(["--print", "hello"]);
+    expect(fixture?.args).toEqual(["--print=hello"]);
 
     const validation = validateUpstreamCliArgs("gemini", fixture?.args as readonly string[]);
     expect(validation.ok, JSON.stringify(validation.violations)).toBe(true);

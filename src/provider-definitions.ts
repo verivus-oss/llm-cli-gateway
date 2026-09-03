@@ -934,7 +934,7 @@ const PROVIDER_DEFINITIONS = {
       trust: false,
       flags: ["--sandbox", "--mode", "--dangerously-skip-permissions"],
     },
-    // agy 1.1.24 accepts --output-format text|json|stream-json in print mode.
+    // agy 1.1.25 accepts --output-format text|json|stream-json in print mode.
     // stream-json is the only wire that carries the working directory, the tool
     // list, per-tool parameters and usage; measured in
     // docs/evidence/c1-capture-ceiling-2026-09-02.md.

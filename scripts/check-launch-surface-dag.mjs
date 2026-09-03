@@ -1,9 +1,9 @@
 #!/usr/bin/env node
 // Verify docs/plans/validation-launch-surface.dag.toml against the actual code.
 //
-// A map with wrong coordinates is worse than no map: it is a control that
-// cannot fail, in documentation form. The checker therefore rejects incomplete
-// declarations and reduced coverage as well as ordinary coordinate drift.
+// A map with stale declarations is worse than no map: it is a control that
+// cannot fail, in documentation form. The checker resolves named symbols and
+// quoted source evidence rather than persisting layout coordinates.
 //
 // Exit 0 clean, 1 on drift. Run: node scripts/check-launch-surface-dag.mjs
 
@@ -90,10 +90,7 @@ function analyzeProtectedSymbol(sourceText, fileName, symbol) {
         if (call) {
           callers.push(enclosingFunctionName(call));
         } else {
-          const location = sourceFile.getLineAndCharacterOfPosition(node.getStart(sourceFile));
           unexpectedReferences.push({
-            line: location.line + 1,
-            column: location.character + 1,
             syntax: node.parent.getText(sourceFile).replaceAll(/\s+/g, " ").slice(0, 100),
           });
         }
@@ -103,6 +100,49 @@ function analyzeProtectedSymbol(sourceText, fileName, symbol) {
   };
   visit(sourceFile);
   return { callers, declarations, unexpectedReferences };
+}
+
+function countNamedNodeDeclarations(sourceText, fileName, kind, symbol) {
+  const sourceFile = ts.createSourceFile(fileName, sourceText, ts.ScriptTarget.Latest, true);
+  let count = 0;
+  const visit = node => {
+    if (kind === "mcp_tool" && ts.isCallExpression(node)) {
+      const callee = node.expression;
+      const method = ts.isPropertyAccessExpression(callee) ? callee.name.text : "";
+      const first = node.arguments[0];
+      if (
+        (method === "tool" || method === "registerTool") &&
+        first &&
+        ts.isStringLiteralLike(first) &&
+        first.text === symbol
+      ) {
+        count++;
+      }
+    } else if (
+      kind === "function" &&
+      ts.isFunctionDeclaration(node) &&
+      node.name?.text === symbol
+    ) {
+      count++;
+    } else if (
+      kind === "durable_schema" &&
+      ts.isVariableDeclaration(node) &&
+      ts.isIdentifier(node.name) &&
+      node.name.text === symbol
+    ) {
+      count++;
+    } else if (
+      kind === "durable_field" &&
+      ts.isPropertyAssignment(node) &&
+      ((ts.isIdentifier(node.name) && node.name.text === symbol) ||
+        (ts.isStringLiteralLike(node.name) && node.name.text === symbol))
+    ) {
+      count++;
+    }
+    ts.forEachChild(node, visit);
+  };
+  visit(sourceFile);
+  return count;
 }
 
 function sortedUnique(values) {
@@ -132,7 +172,6 @@ export function checkLaunchSurfaceDag({ rootDir = process.cwd(), dagPath = DAG_P
     }
     return fileCache.get(relative);
   };
-  const linesOf = relative => readSource(relative).split("\n");
 
   let document;
   try {
@@ -181,13 +220,13 @@ export function checkLaunchSurfaceDag({ rootDir = process.cwd(), dagPath = DAG_P
       problems.push(`${label}: must be a table`);
       continue;
     }
-    for (const field of ["id", "kind", "file", "role"]) {
+    for (const field of ["id", "kind", "file", "symbol", "role"]) {
       if (typeof node[field] !== "string" || node[field].length === 0) {
         problems.push(`${label}.${field}: missing non-empty string`);
       }
     }
-    if (!Number.isInteger(node.line) || node.line < 1) {
-      problems.push(`${label}.line: missing positive integer`);
+    if (Object.hasOwn(node, "line")) {
+      problems.push(`${label}: layout coordinates are forbidden; use symbol`);
     }
     if (!nonemptyStrings(node.affects))
       problems.push(`${label}.affects: missing non-empty string list`);
@@ -198,22 +237,21 @@ export function checkLaunchSurfaceDag({ rootDir = process.cwd(), dagPath = DAG_P
     if (
       typeof node.id !== "string" ||
       typeof node.file !== "string" ||
-      !Number.isInteger(node.line)
+      typeof node.symbol !== "string"
     ) {
       continue;
     }
     nodesChecked++;
-    const symbol = node.id.split(".").slice(1).join(".");
-    const lines = linesOf(node.file);
-    if (node.line > lines.length) {
+    const declarationCount = countNamedNodeDeclarations(
+      readSource(node.file),
+      node.file,
+      node.kind,
+      node.symbol
+    );
+    if (declarationCount !== 1) {
       problems.push(
-        `${node.id}: ${node.file}:${node.line} is past end of file (${lines.length} lines)`
+        `${node.id}: ${node.file} must declare named symbol "${node.symbol}" exactly once; found ${declarationCount}`
       );
-    } else {
-      const window = lines.slice(Math.max(0, node.line - 3), node.line + 2).join("\n");
-      if (!window.includes(symbol)) {
-        problems.push(`${node.id}: ${node.file}:${node.line} no longer declares "${symbol}"`);
-      }
     }
 
     if (node.kind === "durable_field") {
@@ -224,29 +262,23 @@ export function checkLaunchSurfaceDag({ rootDir = process.cwd(), dagPath = DAG_P
       for (const [flowIndex, hop] of node.flow.entries()) {
         const hopLabel = `${node.id}.flow[${flowIndex}]`;
         if (!isRecord(hop)) {
-          problems.push(`${hopLabel}: must be a table with file, line, token, and role`);
+          problems.push(`${hopLabel}: must be a table with file, evidence, and role`);
           continue;
         }
-        for (const field of ["file", "token", "role"]) {
+        for (const field of ["file", "evidence", "role"]) {
           if (typeof hop[field] !== "string" || hop[field].length === 0) {
             problems.push(`${hopLabel}.${field}: missing non-empty string`);
           }
         }
-        if (!Number.isInteger(hop.line) || hop.line < 1) {
-          problems.push(`${hopLabel}.line: missing positive integer`);
+        if (Object.hasOwn(hop, "line")) {
+          problems.push(`${hopLabel}: layout coordinates are forbidden; use quoted evidence`);
         }
-        if (
-          typeof hop.file !== "string" ||
-          typeof hop.token !== "string" ||
-          !Number.isInteger(hop.line)
-        ) {
+        if (typeof hop.file !== "string" || typeof hop.evidence !== "string") {
           continue;
         }
         flowsChecked++;
-        const flowLines = linesOf(hop.file);
-        const flowWindow = flowLines.slice(Math.max(0, hop.line - 2), hop.line + 1).join("\n");
-        if (!flowWindow.includes(hop.token)) {
-          problems.push(`${hopLabel}: ${hop.file}:${hop.line} no longer carries "${hop.token}"`);
+        if (!readSource(hop.file).includes(hop.evidence)) {
+          problems.push(`${hopLabel}: ${hop.file} no longer carries "${hop.evidence}"`);
         }
       }
     } else if (Object.hasOwn(node, "flow")) {
@@ -300,7 +332,7 @@ export function checkLaunchSurfaceDag({ rootDir = process.cwd(), dagPath = DAG_P
     }
     for (const reference of analysis.unexpectedReferences) {
       problems.push(
-        `invariant ${invariant.symbol}: unsupported reference at ${orchestratorFile}:${reference.line}:${reference.column} (${reference.syntax})`
+        `invariant ${invariant.symbol}: unsupported reference in ${orchestratorFile} (${reference.syntax})`
       );
     }
     if (actualCallers.length !== invariant.callers) {

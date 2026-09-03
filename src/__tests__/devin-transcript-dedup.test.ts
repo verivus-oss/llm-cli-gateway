@@ -11,7 +11,7 @@
  * gateway-minted path embeds that id and the identity is what decides whether
  * the second request runs at all.
  */
-import { mkdtempSync, rmSync } from "node:fs";
+import { existsSync, mkdtempSync, rmSync, utimesSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
@@ -19,6 +19,9 @@ import {
   devinTranscriptDedupArgs,
   devinTranscriptPath,
   DEVIN_TRANSCRIPT_DIRNAME,
+  DEVIN_TRANSCRIPT_STALE_MS,
+  pruneStaleDevinTranscripts,
+  removeInlineDevinTranscript,
 } from "../devin-transcript.js";
 import { prepareDevinRequest, resolveGatewayServerRuntime } from "../index.js";
 
@@ -128,5 +131,39 @@ describe("the prepared dedup identity", () => {
     const prep = prepFor("corr-one", { exportSession: false });
     expect(prep.args).not.toContain("--export");
     expect(prep.dedupArgs).toEqual(prep.args);
+  });
+});
+
+describe("gateway-owned Devin transcript cleanup", () => {
+  it("removes stale gateway exports while preserving fresh and unrelated files", () => {
+    const now = Date.now();
+    const stale = devinTranscriptPath("stale-export", fakeHome);
+    const fresh = devinTranscriptPath("fresh-export", fakeHome);
+    const unrelated = join(fakeHome, ".llm-cli-gateway", DEVIN_TRANSCRIPT_DIRNAME, "operator.json");
+    writeFileSync(stale, "stale");
+    writeFileSync(fresh, "fresh");
+    writeFileSync(unrelated, "operator");
+    const old = new Date(now - DEVIN_TRANSCRIPT_STALE_MS - 1);
+    utimesSync(stale, old, old);
+
+    const result = pruneStaleDevinTranscripts(now, fakeHome);
+
+    expect(result.removed).toBe(1);
+    expect(existsSync(stale)).toBe(false);
+    expect(existsSync(fresh)).toBe(true);
+    expect(existsSync(unrelated)).toBe(true);
+  });
+
+  it("removes only the exact gateway path present in an inline invocation", () => {
+    const correlationId = "inline-export";
+    const path = devinTranscriptPath(correlationId, fakeHome);
+    writeFileSync(path, "inline");
+
+    expect(removeInlineDevinTranscript(correlationId, ["--export", "/tmp/other"], fakeHome)).toBe(
+      false
+    );
+    expect(existsSync(path)).toBe(true);
+    expect(removeInlineDevinTranscript(correlationId, ["--export", path], fakeHome)).toBe(true);
+    expect(existsSync(path)).toBe(false);
   });
 });

@@ -5,7 +5,13 @@ import type { AsyncJobManager } from "./async-job-manager.js";
 import { CLI_TYPES } from "./session-manager.js";
 import { getAvailableCliInfo } from "./model-registry.js";
 import { apiProviderCatalogEntry } from "./api-request.js";
-import { getRequestContext, principalCanAccess, resolveOwnerPrincipal } from "./request-context.js";
+import {
+  getRequestContext,
+  isRemotePrincipal,
+  principalCanAccess,
+  resolveOwnerPrincipal,
+} from "./request-context.js";
+import { projectJobReadback } from "./job-readback-projection.js";
 import { PerformanceMetrics } from "./metrics.js";
 import { loadLeastCostConfig, type ApiProviderRuntime, type LeastCostConfig } from "./config.js";
 import { buildRouterEnv, resolveRouterPriors, toRouterConfig } from "./lcr-router-env.js";
@@ -1122,11 +1128,13 @@ export function registerValidationTools(server: McpServer, deps: ValidationToolD
       // F3b owner check (cross-LLM validation receipts §5a): own-or-not-found.
       // A job owned by another principal is reported as absent, mirroring the
       // llm_job_status path; previously this surface had no ownership check.
-      const job = await deps.asyncJobManager.getJobSnapshot(jobId);
-      const caller = resolveOwnerPrincipal(getRequestContext());
+      const requestContext = getRequestContext();
+      let job = await deps.asyncJobManager.getJobSnapshot(jobId);
+      const caller = resolveOwnerPrincipal(requestContext);
       if (!job || !principalCanAccess(await deps.asyncJobManager.getJobOwner(jobId), caller)) {
         return textResponse({ success: false, error: "Job not found", jobId });
       }
+      job = projectJobReadback(job, { remote: isRemotePrincipal(requestContext) });
       return textResponse({ success: true, job });
     }
   );
@@ -1158,11 +1166,16 @@ export function registerValidationTools(server: McpServer, deps: ValidationToolD
       // F3b owner check (cross-LLM validation receipts §5a): own-or-not-found.
       // A job owned by another principal is reported as absent, mirroring the
       // llm_job_result path; previously this surface had no ownership check.
-      const result = await deps.asyncJobManager.getJobResult(jobId, maxChars);
-      const caller = resolveOwnerPrincipal(getRequestContext());
+      const requestContext = getRequestContext();
+      const remote = isRemotePrincipal(requestContext);
+      let result = await deps.asyncJobManager.getJobResult(jobId, maxChars, {
+        redactProviderSessionIds: remote,
+      });
+      const caller = resolveOwnerPrincipal(requestContext);
       if (!result || !principalCanAccess(await deps.asyncJobManager.getJobOwner(jobId), caller)) {
         return textResponse({ success: false, error: "Job not found", jobId });
       }
+      result = projectJobReadback(result, { remote });
       // Cross-LLM validation receipts (Phase 1): eager mint. If this job is the
       // one that just made its validation run terminal, mint the receipt now,
       // while the linked job outputs still exist (they are evicted after the

@@ -242,6 +242,12 @@ function redactReviewPromptArgs(
     if (index >= 0) redacted[index] = `-p=${marker}`;
     return redacted;
   }
+  if (provider === "gemini") {
+    const promptArg = `--print=${prompt}`;
+    const index = redacted.indexOf(promptArg);
+    if (index >= 0) redacted[index] = `--print=${marker}`;
+    return redacted;
+  }
   const index = redacted.lastIndexOf(prompt);
   if (index >= 0) redacted[index] = marker;
   return redacted;
@@ -1233,11 +1239,10 @@ function buildProviderInvocation(
     return { args, stdin: planned.stdin };
   }
   if (provider === "gemini") {
-    const promptArg = sanitizeCliArgValue(prompt, "prompt");
+    const promptArg = `--print=${sanitizeCliArgValue(prompt, "prompt")}`;
     return guardedArgvInvocation(provider, promptArg, [
-      "--print",
-      ...(review ? ["--mode", "plan", "--sandbox"] : []),
       promptArg,
+      ...(review ? ["--mode", "plan", "--sandbox"] : []),
     ]);
   }
   throw new Error(`Unsupported CLI validation provider: ${provider}`);

@@ -745,15 +745,14 @@ describe("U21 prepareGeminiRequest agy args ordering (Layer 9)", () => {
     };
   }
 
-  it("emits --print as the first arg, with the prompt immediately after", () => {
+  it("emits the prompt attached to --print as the first arg", () => {
     const prep = prepareGeminiRequest(baseParams());
     // prep is either CliRequestPrep with .args, or an ExtendedToolResponse on
     // approval denial. The legacy path with no MCP-managed approval cannot
     // produce a denial response, so .args must be present.
     expect("args" in prep).toBe(true);
     if (!("args" in prep)) throw new Error("expected args");
-    expect(prep.args[0]).toBe("--print");
-    expect(prep.args[1]).toBe("hello world");
+    expect(prep.args[0]).toBe("--print=hello world");
   });
 
   it("places --print prompt before other supported agy flags", () => {
@@ -765,10 +764,9 @@ describe("U21 prepareGeminiRequest agy args ordering (Layer 9)", () => {
       sandbox: true,
     });
     if (!("args" in prep)) throw new Error("expected args");
-    expect(prep.args[0]).toBe("--print");
-    expect(prep.args[1]).toBe("hello world");
+    expect(prep.args[0]).toBe("--print=hello world");
     // The remainder must include the flags, but none of them must precede --print.
-    const remainder = prep.args.slice(2);
+    const remainder = prep.args.slice(1);
     expect(remainder).toContain("--model");
     expect(remainder).toContain("--add-dir");
     expect(remainder).toContain("--sandbox");
@@ -780,9 +778,9 @@ describe("U21 prepareGeminiRequest agy args ordering (Layer 9)", () => {
   it("never emits the prompt as a positional first argument", () => {
     const prep = prepareGeminiRequest(baseParams());
     if (!("args" in prep)) throw new Error("expected args");
-    // The first arg must be the --print flag, NOT the prompt itself.
+    // The first arg must be the attached --print value, not a positional prompt.
     expect(prep.args[0]).not.toBe("hello world");
-    expect(prep.args[0]).toBe("--print");
+    expect(prep.args[0]).toBe("--print=hello world");
   });
 });
 

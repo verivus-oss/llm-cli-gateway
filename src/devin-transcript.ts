@@ -16,11 +16,14 @@
  * the owner-fenced store write succeeds.
  */
 import { createHash } from "node:crypto";
-import { mkdirSync } from "node:fs";
+import { lstatSync, mkdirSync, readdirSync, unlinkSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
 
 export const DEVIN_TRANSCRIPT_DIRNAME = "devin-transcripts";
+export const DEVIN_TRANSCRIPT_STALE_MS = 2 * 60 * 60 * 1000;
+
+const GATEWAY_TRANSCRIPT_NAME = /^[A-Za-z0-9._-]*-[a-f0-9]{12}\.json$/;
 
 /** The gateway-owned directory devin exports are written into. */
 export function devinTranscriptDirectory(home: string = homedir()): string {
@@ -54,9 +57,69 @@ export function ensureDevinTranscriptPath(
 ): string | null {
   try {
     mkdirSync(devinTranscriptDirectory(home), { recursive: true, mode: 0o700 });
+    pruneStaleDevinTranscripts(Date.now(), home);
     return devinTranscriptPath(correlationId, home);
   } catch {
     return null;
+  }
+}
+
+export interface DevinTranscriptPruneResult {
+  inspected: number;
+  removed: number;
+  failed: number;
+}
+
+/**
+ * Remove stale gateway-minted exports without following links or touching
+ * caller-selected files. Two hours exceeds the provider's one-hour process
+ * ceiling, so a live managed export is not eligible. Running this at startup,
+ * every five minutes, and before each new export bounds leftovers from crashes,
+ * missing close events, and failed capture writes.
+ */
+export function pruneStaleDevinTranscripts(
+  nowMs: number = Date.now(),
+  home: string = homedir()
+): DevinTranscriptPruneResult {
+  const result = { inspected: 0, removed: 0, failed: 0 };
+  const directory = devinTranscriptDirectory(home);
+  let entries;
+  try {
+    entries = readdirSync(directory, { withFileTypes: true });
+  } catch {
+    return result;
+  }
+
+  for (const entry of entries) {
+    if (!entry.isFile() || !GATEWAY_TRANSCRIPT_NAME.test(entry.name)) continue;
+    result.inspected += 1;
+    const path = join(directory, entry.name);
+    try {
+      const info = lstatSync(path);
+      if (!info.isFile() || info.isSymbolicLink()) continue;
+      if (nowMs - info.mtimeMs < DEVIN_TRANSCRIPT_STALE_MS) continue;
+      unlinkSync(path);
+      result.removed += 1;
+    } catch {
+      result.failed += 1;
+    }
+  }
+  return result;
+}
+
+/** Remove only the exact export path the gateway minted for this invocation. */
+export function removeInlineDevinTranscript(
+  correlationId: string,
+  args: readonly string[],
+  home: string = homedir()
+): boolean {
+  const expected = devinTranscriptPath(correlationId, home);
+  if (!args.includes(expected)) return false;
+  try {
+    unlinkSync(expected);
+    return true;
+  } catch {
+    return false;
   }
 }
 

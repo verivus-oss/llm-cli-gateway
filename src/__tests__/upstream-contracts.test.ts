@@ -115,17 +115,12 @@ describe("upstream CLI contracts", () => {
   });
 
   it("accepts only documented Antigravity execution modes", () => {
-    expect(
-      validateUpstreamCliArgs("gemini", ["--print", "hello", "--mode", "accept-edits"]).ok
-    ).toBe(true);
-    expect(validateUpstreamCliArgs("gemini", ["--print", "hello", "--mode", "plan"]).ok).toBe(true);
+    expect(validateUpstreamCliArgs("gemini", ["--print=hello", "--mode", "accept-edits"]).ok).toBe(
+      true
+    );
+    expect(validateUpstreamCliArgs("gemini", ["--print=hello", "--mode", "plan"]).ok).toBe(true);
 
-    const invalid = validateUpstreamCliArgs("gemini", [
-      "--print",
-      "hello",
-      "--mode",
-      "unrestricted",
-    ]);
+    const invalid = validateUpstreamCliArgs("gemini", ["--print=hello", "--mode", "unrestricted"]);
     expect(invalid.ok).toBe(false);
     expect(invalid.violations[0]?.message).toMatch(/does not accept value "unrestricted"/);
   });

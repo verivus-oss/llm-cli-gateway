@@ -120,8 +120,9 @@ is set.
 - Tested against agy 1.1.25. Antigravity (`agy`) has no native ACP entrypoint; legacy Gemini CLI ACP evidence does not transfer, so `provider-acp://gemini` reports `native:false` (no methods, no adapter-as-native masquerade) and `gemini_request` exposes no `transport:"acp"` selector.
 - The public MCP tool names stay `gemini_request` / `gemini_request_async`, but
   the spawned executable is `agy`.
-- Antigravity print mode uses `--print <prompt-as-positional>`, not Gemini's
-  old `-p <prompt>` shape.
+- Antigravity 1.1.25 consumes the token after bare `--print` as its prompt, so
+  gateway requests attach the value as `--print=<prompt>`. This keeps later
+  gateway flags from being mistaken for prompt text.
 - agy 1.1.25 retains root `--agent` plus `agent` and `agents` commands. Track and
   acknowledge those upstream-only controls before exposing them through a
   request schema; custom agent selection can change tool and permission posture.

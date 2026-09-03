@@ -51,8 +51,8 @@ function count(args: string[], flag: string): number {
 }
 
 describe("gemini argv golden (Phase 4 Part B)", () => {
-  it("emits only --print + prompt for a minimal request", () => {
-    expect(argsFor({})).toEqual(["--print", "PROMPT"]);
+  it("attaches the prompt to --print for a minimal request", () => {
+    expect(argsFor({})).toEqual(["--print=PROMPT"]);
   });
 
   it("kitchen sink (project variant): every wired flag emits in order", () => {
@@ -64,7 +64,7 @@ describe("gemini argv golden (Phase 4 Part B)", () => {
       project: "proj-1",
     });
     // Prompt run head.
-    expect(args.slice(0, 2)).toEqual(["--print", "PROMPT"]);
+    expect(args[0]).toBe("--print=PROMPT");
     // --model with a resolved value.
     expect(args.indexOf("--model")).toBeGreaterThan(0);
     expect(valueAfter(args, "--model")).toBeTruthy();

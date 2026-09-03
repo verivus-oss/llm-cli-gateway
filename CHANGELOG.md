@@ -61,6 +61,13 @@ All notable changes to the llm-cli-gateway project.
 - Flight-recorder migration selection is derived from the tables each migration
   targets, keeping bootstrap repair, SQLite, PostgreSQL, and schema-parity checks
   aligned through migration 25.
+- Antigravity 1.1.25 prompts are attached to `--print`, preventing later review
+  and request flags from being consumed as prompt text.
+- Pure async provider jobs now retain the resolved cwd scope, and every remote
+  job read surface shares one projection that withholds host replay paths and
+  native transcripts.
+- Gateway-owned Devin exports are removed after direct inline runs and swept
+  after crashes, missing close events, or failed durable capture writes.
 
 ### Security
 

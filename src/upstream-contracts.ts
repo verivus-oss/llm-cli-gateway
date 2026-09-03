@@ -2037,7 +2037,8 @@ export const UPSTREAM_CLI_CONTRACTS: Record<CliType, CliContract> = {
     flags: {
       "--print": {
         arity: "none",
-        description: "Run a single prompt non-interactively",
+        inlineValue: true,
+        description: "Run a single prompt non-interactively; attach the prompt with =",
       },
       "-p": { arity: "none", description: "Short alias for --print" },
       "--prompt": { arity: "none", description: "Alias for --print" },
@@ -2131,7 +2132,7 @@ export const UPSTREAM_CLI_CONTRACTS: Record<CliType, CliContract> = {
       {
         id: "gemini-minimal",
         description: "Minimal Antigravity print-mode prompt request",
-        args: ["--print", "hello"],
+        args: ["--print=hello"],
         expect: "pass",
       },
       {
@@ -2140,7 +2141,7 @@ export const UPSTREAM_CLI_CONTRACTS: Record<CliType, CliContract> = {
         // agy 1.1.24 in docs/evidence/c1-capture-ceiling-2026-09-02.md.
         id: "gemini-output-format-stream-json",
         description: "Antigravity print mode accepts --output-format stream-json",
-        args: ["--print", "hello", "--output-format", "stream-json"],
+        args: ["--print=hello", "--output-format", "stream-json"],
         expect: "pass",
       },
       {
@@ -2154,81 +2155,81 @@ export const UPSTREAM_CLI_CONTRACTS: Record<CliType, CliContract> = {
         // refused here rather than reaching spawn.
         id: "gemini-output-format-unknown-value",
         description: "An undeclared --output-format value is refused before spawn",
-        args: ["--print", "hello", "--output-format", "ndjson"],
+        args: ["--print=hello", "--output-format", "ndjson"],
         expect: "fail",
       },
       {
         id: "gemini-unsupported-flag",
         description: "Unsupported flag is rejected before spawn",
-        args: ["--print", "hello", "--not-a-gemini-flag"],
+        args: ["--print=hello", "--not-a-gemini-flag"],
         expect: "fail",
       },
       {
         id: "gemini-agent-selection-acknowledged-not-emitted",
         description:
           "Antigravity 1.1.2 advertises --agent, but gateway request argv stays closed until its security model is explicitly wired",
-        args: ["--print", "hello", "--agent", "reviewer"],
+        args: ["--print=hello", "--agent", "reviewer"],
         expect: "fail",
       },
       {
         id: "gemini-effort-acknowledged-not-emitted",
         description:
           "Antigravity 1.1.7 advertises --effort, but the gateway emits no gemini effort flag",
-        args: ["--print", "hello", "--effort", "high"],
+        args: ["--print=hello", "--effort", "high"],
         expect: "fail",
       },
       {
         id: "gemini-antigravity-workspace-flags",
         description: "Antigravity workspace and sandbox flags are accepted",
-        args: ["--print", "hello", "--add-dir", "/tmp", "--sandbox"],
+        args: ["--print=hello", "--add-dir", "/tmp", "--sandbox"],
         expect: "pass",
       },
       {
         id: "gemini-yolo",
         description: "Antigravity permission bypass is accepted",
-        args: ["--print", "hello", "--dangerously-skip-permissions"],
+        args: ["--print=hello", "--dangerously-skip-permissions"],
         expect: "pass",
       },
       {
         id: "gemini-accept-edits-mode",
         description: "Antigravity bounded accept-edits execution mode is accepted",
-        args: ["--print", "hello", "--mode", "accept-edits"],
+        args: ["--print=hello", "--mode", "accept-edits"],
         expect: "pass",
       },
       {
         id: "gemini-plan-mode",
         description: "Antigravity plan execution mode is accepted",
-        args: ["--print", "hello", "--mode", "plan"],
+        args: ["--print=hello", "--mode", "plan"],
         expect: "pass",
       },
       {
         id: "gemini-conversation",
         description: "Antigravity conversation resume is accepted",
-        args: ["--print", "hello", "--conversation", "user-session"],
+        args: ["--print=hello", "--conversation", "user-session"],
         expect: "pass",
       },
       {
         id: "gemini-legacy-output-format-rejected",
         description: "Legacy Gemini JSON output flag is rejected",
-        args: ["--print", "hello", "-o", "json"],
+        args: ["--print=hello", "-o", "json"],
         expect: "fail",
       },
       {
         id: "gemini-project-wired",
         description: "Antigravity 1.0.14: --project <ID> is wired",
-        args: ["--print", "hello", "--project", "proj-123"],
+        args: ["--print=hello", "--project", "proj-123"],
         expect: "pass",
       },
       {
         id: "gemini-new-project-wired",
         description: "Antigravity 1.0.14: --new-project is wired",
-        args: ["--print", "hello", "--new-project"],
+        args: ["--print=hello", "--new-project"],
         expect: "pass",
       },
       {
         id: "gemini-print-timeout-wired",
         description: "Antigravity --print-timeout <DURATION> is wired",
-        args: ["--print", "hello", "--print-timeout", "30s"],
+        args: ["--print=hello", "--print-timeout", "30s"],
         expect: "pass",
       },
     ],
