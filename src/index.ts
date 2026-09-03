@@ -11598,6 +11598,7 @@ export async function handleCodexRequest(
         contextPrefix: kitPrefix!,
         sandboxMode: resolveCodexKitSandboxMode(kit.context.preferences),
         outputFormat: resolveCodexKitOutputFormat(kit.context.preferences),
+        launchContext: { correlationId, provider: "codex" },
       });
       kitSession = await resolvePersonalKitSession(
         runtime,
@@ -15851,6 +15852,7 @@ export async function handleCodexRequestAsync(
         contextPrefix: kitPrefix!,
         sandboxMode: resolveCodexKitSandboxMode(kit.context.preferences),
         outputFormat: resolveCodexKitOutputFormat(kit.context.preferences),
+        launchContext: { correlationId: params.correlationId, provider: "codex" },
       });
       kitSession = await resolvePersonalKitSession(
         runtime,

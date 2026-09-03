@@ -12,6 +12,7 @@ import {
   createCodexKitIsolationProjection,
   inspectCodexKitPromptInput,
   runCodexKitPromptProbeForTest,
+  codexKitProbeSpawnOptions,
 } from "../codex-kit-isolation.js";
 import { prepareCodexRequest } from "../index.js";
 import { validateUpstreamCliArgs } from "../upstream-contracts.js";
@@ -143,6 +144,28 @@ describe("Codex Personal Agent Config isolation", () => {
     expect(projection.args).toContain("skills.config=[]");
     expect(projection.env).toEqual({});
     expect(projection.skillPaths).toEqual([]);
+  });
+
+  it("forwards the launch context to both probe passes and into the spawn options", async () => {
+    testDir = mkdtempSync(join(tmpdir(), "codex-kit-isolation-"));
+    const seen: Array<unknown> = [];
+    const launchContext = { correlationId: "corr-kit-probe", provider: "codex" };
+    await createCodexKitIsolationPlan(testDir, {
+      contextPrefix: "<gateway-personal-config>Kit context</gateway-personal-config>",
+      sandboxMode: "workspace-write",
+      outputFormat: "text",
+      baseEnv: { PATH: process.env.PATH },
+      launchContext,
+      probe: input => {
+        seen.push(input.launchContext);
+        return promptInput("provider-owned developer policy only");
+      },
+    });
+    expect(seen).toEqual([launchContext, launchContext]);
+    const options = codexKitProbeSpawnOptions({ cwd: testDir, env: { A: "1" }, launchContext });
+    expect(options.launchContext).toEqual(launchContext);
+    expect(options.stdio).toEqual(["ignore", "pipe", "pipe"]);
+    expect(codexKitProbeSpawnOptions({ cwd: testDir, env: {} }).launchContext).toBeUndefined();
   });
 
   it("uses a two-pass nonblocking probe and appends every gateway control", async () => {
