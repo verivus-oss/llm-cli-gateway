@@ -21,6 +21,39 @@ import nodePath from "node:path";
 
 export const SCRATCH_DIR_NAME = ".scratch";
 
+// Directories never walked when looking for a tracked directory that the
+// opened `.scratch` might alias. `.scratch` itself is the thing under test.
+const UNWALKED = new Set([".git", "node_modules", SCRATCH_DIR_NAME]);
+
+function sameInode(a, b) {
+  return a.dev === b.dev && a.ino === b.ino;
+}
+
+/**
+ * Round-4 board finding: a bind mount of `src` over `.scratch` (possible for
+ * an unprivileged user inside their own mount namespace) is a real directory
+ * to `open`, so the descriptor check passes and fixtures land in `src/`. The
+ * mount is invisible from outside that namespace, so only the mounter's own
+ * run is affected, but the defence is cheap: the opened directory must not be
+ * the same inode as the repository root or any directory under it. Symlinks
+ * are not followed during the walk.
+ */
+function aliasedTrackedDirectory(repoRoot, opened, fsApi, pathApi) {
+  const pending = [repoRoot];
+  while (pending.length > 0) {
+    const current = pending.pop();
+    if (sameInode(fsApi.lstatSync(current), opened)) {
+      return pathApi.relative(repoRoot, current) || ".";
+    }
+    for (const entry of fsApi.readdirSync(current, { withFileTypes: true })) {
+      if (entry.isDirectory() && !UNWALKED.has(entry.name)) {
+        pending.push(pathApi.join(current, entry.name));
+      }
+    }
+  }
+  return null;
+}
+
 function describeRefusal(dir, fsApi) {
   let st;
   try {
@@ -67,6 +100,13 @@ export function openScratchRoot(repoRoot, fsApi = nodeFs, pathApi = nodePath) {
     } else {
       throw err;
     }
+  }
+  const alias = aliasedTrackedDirectory(repoRoot, fsApi.fstatSync(fd), fsApi, pathApi);
+  if (alias !== null) {
+    fsApi.closeSync(fd);
+    throw new Error(
+      `${dir} is the same directory as ${alias} under ${repoRoot}; refusing to write fixtures there.`
+    );
   }
   return { dir, fd };
 }

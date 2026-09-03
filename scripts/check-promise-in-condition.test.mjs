@@ -490,6 +490,81 @@ describe("promise-in-condition gate", () => {
     expect(readdirSync(fakeSrc)).toEqual([]);
   });
 
+  it("refuses a .scratch that is the same directory as a tracked one, as a bind mount would be", () => {
+    // Codex's round-4 blocker: `mount --bind src .scratch` inside an
+    // unprivileged mount namespace gives open() a real directory whose inode
+    // IS src. The kernel-level shape needs a namespace to reproduce, so the
+    // test injects the one observable it produces: fstat of the descriptor
+    // reporting src's device and inode.
+    fixtureRoot = newScratchDir("promise-guard-");
+    const fakeSrc = join(fixtureRoot, "src");
+    const scratch = join(fixtureRoot, ".scratch");
+    mkdirSync(fakeSrc);
+    mkdirSync(scratch);
+    const fs = {
+      ...nodeFs,
+      constants: nodeFs.constants,
+      fstatSync() {
+        return nodeFs.lstatSync(fakeSrc);
+      },
+    };
+    expect(() => makeScratchDir(fixtureRoot, "promise-condition-", fs)).toThrow(
+      /same directory as src under/
+    );
+    expect(readdirSync(fakeSrc)).toEqual([]);
+    expect(readdirSync(scratch)).toEqual([]);
+  });
+
+  it("refuses a .scratch that is the same directory as the repository root", () => {
+    fixtureRoot = newScratchDir("promise-guard-");
+    mkdirSync(join(fixtureRoot, ".scratch"));
+    const fs = {
+      ...nodeFs,
+      constants: nodeFs.constants,
+      fstatSync() {
+        return nodeFs.lstatSync(fixtureRoot);
+      },
+    };
+    expect(() => makeScratchDir(fixtureRoot, "promise-condition-", fs)).toThrow(
+      /same directory as \. under/
+    );
+    expect(readdirSync(fixtureRoot).sort()).toEqual([".scratch"]);
+  });
+
+  it("does not follow symlinks while looking for an aliased tracked directory", () => {
+    // A link out of the fixture root must not drag the walk into unrelated
+    // trees; a dangling one must not throw.
+    fixtureRoot = newScratchDir("promise-guard-");
+    mkdirSync(join(fixtureRoot, ".scratch"));
+    symlinkSync("/", join(fixtureRoot, "escape"), "dir");
+    symlinkSync("nowhere", join(fixtureRoot, "dangling"), "dir");
+    const made = makeScratchDir(fixtureRoot, "promise-condition-");
+    expect(dirname(made)).toBe(join(fixtureRoot, ".scratch"));
+  });
+
+  it("rethrows a re-open failure that is not ENOENT after creating .scratch", () => {
+    // Grok's round-4 survivor: the re-open after mkdir has its own rethrow
+    // branch, and swallowing it (fd = -1) passed every case. First open
+    // sees ENOENT, mkdir runs, the second open is denied: the same denied
+    // object must surface, and nothing may be created through a bad fd.
+    fixtureRoot = newScratchDir("promise-guard-");
+    const denied = Object.assign(new Error("EACCES: permission denied"), { code: "EACCES" });
+    let opens = 0;
+    const fs = {
+      ...nodeFs,
+      constants: nodeFs.constants,
+      openSync(path, flags) {
+        opens += 1;
+        if (opens === 1) return nodeFs.openSync(path, flags);
+        throw denied;
+      },
+    };
+    expect(() => makeScratchDir(fixtureRoot, "promise-condition-", fs)).toThrow(denied);
+    expect(opens).toBe(2);
+    expect(existsSync(join(fixtureRoot, ".scratch"))).toBe(true);
+    expect(readdirSync(join(fixtureRoot, ".scratch"))).toEqual([]);
+  });
+
   it("rethrows an open failure that is not ENOENT instead of creating over it", () => {
     fixtureRoot = newScratchDir("promise-guard-");
     const denied = Object.assign(new Error("EACCES: permission denied"), { code: "EACCES" });
