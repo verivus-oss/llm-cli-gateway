@@ -2670,6 +2670,7 @@ export class AsyncJobManager {
 
     for (const [id, job] of this.jobs) {
       if (job.status !== "running" && job.status !== "queued" && job.finishedAt) {
+        if (this.isOwnedProcessAwaitingClose(job)) continue;
         const finishedMs = new Date(job.finishedAt).getTime();
         if (now - finishedMs > this.completedJobMemoryTtlMs) {
           this.jobs.delete(id);
@@ -4181,10 +4182,13 @@ export class AsyncJobManager {
   }
 
   /** True while an owned process can still emit output or require close cleanup. */
+  private isOwnedProcessAwaitingClose(job: AsyncJobRecord): boolean {
+    return job.transport === "process" && job.process !== null && !job.closeObserved;
+  }
+
+  /** True while any owned process can still emit output or require close cleanup. */
   private hasOwnedProcessAwaitingClose(): boolean {
-    return [...this.jobs.values()].some(
-      job => job.transport === "process" && job.process !== null && !job.closeObserved
-    );
+    return [...this.jobs.values()].some(job => this.isOwnedProcessAwaitingClose(job));
   }
 
   /**

@@ -413,7 +413,13 @@ describe("AsyncJobManager shutdown fencing", () => {
   it("waits for close after the dead-process sweep infers exit", async () => {
     const testDir = mkdtempSync(join(tmpdir(), "async-shutdown-inherited-pipe-"));
     const store = new SqliteJobStore(join(testDir, "jobs.db"));
-    const manager = new AsyncJobManager(undefined, undefined, store);
+    const manager = new AsyncJobManager(
+      undefined,
+      undefined,
+      store,
+      undefined,
+      limits({ completedJobMemoryTtlMs: 1 })
+    );
     const deregisterInstance = store.deregisterInstance.bind(store);
     let deregistered = false;
     let terminalHookCalls = 0;
@@ -476,6 +482,10 @@ describe("AsyncJobManager shutdown fencing", () => {
       expect(job.closeObserved).toBe(false);
       expect(terminalHookCalls).toBe(0);
       expect(artifactCleanupCalls).toBe(0);
+
+      await new Promise(resolve => setTimeout(resolve, 10));
+      await internals.evictCompletedJobs();
+      expect(internals.jobs.has(started.snapshot.id)).toBe(true);
 
       const startedAt = Date.now();
       await manager.dispose({ timeoutMs: 75 });
