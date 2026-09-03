@@ -2,6 +2,7 @@ import { readdirSync, readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
+import { STEPS as GATE_STEPS } from "./check-steps.mjs";
 
 const repoRoot = join(dirname(fileURLToPath(import.meta.url)), "..");
 
@@ -291,7 +292,9 @@ describe("release to public Pages contract", () => {
     expect(packageJson.scripts["verify:no-internal-mcp:check"]).toBe(
       "node scripts/verify-no-internal-mcp.mjs --allow-unstripped-dist"
     );
-    expect(packageJson.scripts.check).toContain("npm run verify:no-internal-mcp:check");
+    // The gate is a declared step list now, not an && chain, so the assertion
+    // moved from the string to the list. Same claim: this check is IN the gate.
+    expect(GATE_STEPS.map(step => step.script)).toContain("verify:no-internal-mcp:check");
     expect(readRepositoryFile("scripts/verify-no-internal-mcp.mjs")).toContain(
       "PACKED_INTERNAL_MCP_ALIASES"
     );
