@@ -54,7 +54,13 @@ export const STEPS = [
   // gate, not the audit, not CI. 72ms, offline, and it was already passing.
   { name: "supply-chain:baseline:check", script: "supply-chain:baseline:check" },
 
-  { name: "test", script: "test", heavy: true, why: "the full vitest suite" },
+  {
+    name: "test",
+    script: "test",
+    needs: ["build"],
+    heavy: true,
+    why: "the full vitest suite imports generated dist artifacts",
+  },
   {
     name: "security:audit",
     script: "security:audit",

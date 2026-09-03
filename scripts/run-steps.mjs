@@ -117,6 +117,21 @@ export async function runSteps(steps, execute, options = {}) {
   return results;
 }
 
+/** Select named steps plus their transitive prerequisites, preserving gate order. */
+export function selectSteps(steps, names) {
+  if (names.length === 0) return [...steps];
+  const byName = new Map(steps.map(step => [step.name, step]));
+  const selected = new Set();
+  const visit = name => {
+    const step = byName.get(name);
+    if (!step || selected.has(name)) return;
+    for (const dependency of step.needs ?? []) visit(dependency);
+    selected.add(name);
+  };
+  for (const name of names) visit(name);
+  return steps.filter(step => selected.has(step.name));
+}
+
 export function summarise(results) {
   const count = status => results.filter(r => r.status === status).length;
   return {

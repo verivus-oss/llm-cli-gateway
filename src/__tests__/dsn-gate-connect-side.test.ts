@@ -180,5 +180,11 @@ describe("the ssl-file question is asked of PostgreSQL DSNs only", () => {
     // Valueless, and uppercase, are both inert to pg and must stay inert here.
     expect(namesSslFileParameter("postgresql://h.invalid/db?sslcert")).toBe(false);
     expect(namesSslFileParameter("postgresql://h.invalid/db?SSLCERT=/etc/hosts")).toBe(false);
+    expect(namesSslFileParameter("postgresql://h.invalid/db?sslcert=/etc/hosts&sslcert")).toBe(
+      false
+    );
+    expect(namesSslFileParameter("postgresql://h.invalid/db#ignored?sslcert=/etc/hosts")).toBe(
+      false
+    );
   });
 });

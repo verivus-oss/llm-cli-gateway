@@ -160,7 +160,7 @@ import {
 } from "./least-cost-router.js";
 import { loadGatewaySkills, type SkillEntry } from "./skill-loader.js";
 import { runAcpRequest } from "./acp/runtime.js";
-import { isAcpError } from "./acp/errors.js";
+import { isAcpError, redactAcpMessage } from "./acp/errors.js";
 import { redactSecrets } from "./secret-redaction.js";
 import {
   createApiProvider,
@@ -226,6 +226,7 @@ import {
   ensureDevinTranscriptPath,
   removeInlineDevinTranscript,
 } from "./devin-transcript.js";
+import { planProviderCapture } from "./provider-capture.js";
 import {
   MCP_ARTIFACT_RECOVERY_ACKNOWLEDGEMENT,
   recoverMcpArtifactCleanupPin,
@@ -343,7 +344,7 @@ import {
 } from "./storage/retention.js";
 import { redactDiagnosticUrl } from "./endpoint-exposure.js";
 import { PrepPhase, PrepPipeline, type PrepStage } from "./prep-pipeline.js";
-import { applyProviderDisplayText } from "./provider-display.js";
+import { applyProviderDisplayText, projectRemoteProviderOutput } from "./provider-display.js";
 import { buildRemoteConnectorUrls } from "./remote-url.js";
 import {
   gatherConnectorSetupPacket,
@@ -1715,6 +1716,8 @@ interface InlineJobResponse {
   errorCategory?: AsyncJobErrorCategory;
   /** Whether the same unchanged request can succeed when retried. */
   retryable?: boolean;
+  /** Actual provider grammar captured before caller-facing projection. */
+  captureFormat?: string | null;
   /** Present only when AsyncJobManager owned this completed invocation. */
   jobId?: string;
 }
@@ -1903,13 +1906,15 @@ async function awaitJobOrDefer(
       throw err;
     }
     try {
-      return await executeCli(command, args, {
+      const capturePlan = planProviderCapture(cli, args, outputFormat);
+      const executed = await executeCli(command, capturePlan.args, {
         idleTimeout: idleTimeoutMs,
         logger: runtime.logger,
         env: env ? ({ ...process.env, ...env } as NodeJS.ProcessEnv) : undefined,
         stdin,
         cwd,
       });
+      return { ...executed, captureFormat: capturePlan.captureFormat };
     } finally {
       // Release the run slot and per-request resources (outputSchema temp
       // files) as soon as the inline execution settles.
@@ -1996,6 +2001,7 @@ async function awaitJobOrDefer(
         code: result.exitCode ?? 1,
         ...(result.errorCategory ? { errorCategory: result.errorCategory } : {}),
         ...(typeof result.retryable === "boolean" ? { retryable: result.retryable } : {}),
+        captureFormat: runtime.asyncJobManager.getJobCaptureFormat(job.id),
         jobId: job.id,
       };
     }
@@ -2918,6 +2924,7 @@ interface KitTerminalHooks<TFacts = undefined> {
     stdout: string;
     durationMs: number;
     facts: TFacts;
+    result: KitTerminalInlineResult;
   }): Promise<ExtendedToolResponse> | ExtendedToolResponse;
 }
 
@@ -3006,7 +3013,13 @@ async function runKitTerminalEnvelope<TFacts>(
     if (kit && kitSession && !result.jobId) {
       await hooks.finalizeKit({ completed: true, stdout, result });
     }
-    return await hooks.buildSuccessResponse({ worktreeResolution, stdout, durationMs, facts });
+    return await hooks.buildSuccessResponse({
+      worktreeResolution,
+      stdout,
+      durationMs,
+      facts,
+      result,
+    });
   } catch (error) {
     await ledger.rollbackOnException(kitSession, env.exceptionRollbackManager);
     await ledger.cleanupOnException(
@@ -4157,6 +4170,7 @@ export function extractUsageAndCost(
   // `stream-json`. parseStreamJson handles both (it scans lines for the result
   // event), so json-mode requests no longer silently lose all telemetry.
   if (cli === "claude") {
+    if (outputFormat !== "json" && outputFormat !== "stream-json") return {};
     const parsed = parseStreamJson(output);
     if (!parsed.usage) {
       return { costUsd: parsed.costUsd ?? undefined };
@@ -4188,6 +4202,7 @@ export function extractUsageAndCost(
     };
   }
   if (cli === "gemini") {
+    if (outputFormat !== "json" && outputFormat !== "stream-json") return {};
     const streamed = parseGeminiStreamJson(output);
     const parsed =
       streamed &&
@@ -4319,7 +4334,17 @@ function buildAsyncFlightRecorderHandoff(
     // reports counts but no dollar cost gets its cost DERIVED and stamped
     // derived-from-tokens on completion, for BOTH routed and direct async jobs.
     extractUsage: (stdout: string) => {
-      const usage = extractUsageAndCost(cli, stdout, fmt, { sessionId: sid, home });
+      const captureFormat =
+        cli === "claude" || cli === "gemini"
+          ? "stream-json"
+          : cli === "grok"
+            ? "streaming-json"
+            : cli === "mistral"
+              ? "streaming"
+              : cli === "cursor"
+                ? "stream-json"
+                : fmt;
+      const usage = extractUsageAndCost(cli, stdout, captureFormat, { sessionId: sid, home });
       const { costUsd, costBasis } = deriveCostBasis(cli, model, usage);
       return { ...usage, costUsd, costBasis };
     },
@@ -7796,7 +7821,8 @@ export function buildCliResponse(
   // (request param ?? config, AND outputFormat/output-schema guards already
   // folded in by resolveEffectiveCompression). Default false: off-path
   // behavior is byte-identical to pre-compressor builds.
-  compressResponse = false
+  compressResponse = false,
+  captureFormat?: string | null
 ): ExtendedToolResponse {
   const trackingOnlySession = isGatewayTrackingOnlySession(cli, sessionId);
   // Provider display swap (design 5.4): codex reconstructs the final
@@ -7806,7 +7832,13 @@ export function buildCliResponse(
   // before optimize / compress / review-integrity so they operate on the human
   // reply. The inline path applies grok display (applyGrokDisplay: true); the
   // llm_job_result readback passes false, keeping its current asymmetry.
-  let finalStdout = applyProviderDisplayText({ cli, outputFormat, stdout, applyGrokDisplay: true });
+  let finalStdout = applyProviderDisplayText({
+    cli,
+    outputFormat,
+    captureFormat,
+    stdout,
+    applyGrokDisplay: true,
+  });
   // Skip response optimization for JSON output to prevent corrupting structured data
   if (optimizeResponse && outputFormat !== "json") {
     const optimized = optimizeResponseText(finalStdout);
@@ -7944,7 +7976,10 @@ export function buildCliResponse(
       // Phase 4 slice β: thread sessionId + home so the Mistral branch of
       // extractUsageAndCost can read `~/.vibe/logs/session/<dir>/meta.json`.
       // Other CLIs ignore the ctx (their usage source is stdout).
-      ...extractUsageAndCost(cli, stdout, outputFormat, { sessionId, home: homedir() }),
+      ...extractUsageAndCost(cli, stdout, captureFormat ?? outputFormat, {
+        sessionId,
+        home: homedir(),
+      }),
       exitCode: 0,
       retryCount: 0,
     },
@@ -11376,7 +11411,7 @@ export async function handleClaudeRequest(
       }
       return errResp;
     },
-    buildSuccessResponse: async ({ worktreeResolution, stdout, durationMs }) => {
+    buildSuccessResponse: async ({ worktreeResolution, stdout, durationMs, result }) => {
       // Parse stream-json NDJSON output to extract result text
       if (outputFormat === "stream-json") {
         const parsed = parseStreamJson(stdout);
@@ -11428,7 +11463,8 @@ export async function handleClaudeRequest(
           undefined,
           outputFormat ?? "stream-json",
           warnings,
-          effectiveCompress
+          effectiveCompress,
+          result.captureFormat
         );
         await safeRecordCompression(corrId, streamResponse.compression, runtime, kit !== null);
         if (worktreeResolution.worktreePath) {
@@ -11443,7 +11479,13 @@ export async function handleClaudeRequest(
       // single json result object; plain text yields no fields (capability fact).
       const claudeMeta = extractProviderOutputMetadata("claude", stdout, outputFormat);
       await flight.completeInline({
-        response: stdout,
+        response: applyProviderDisplayText({
+          cli: "claude",
+          outputFormat,
+          captureFormat: result.captureFormat,
+          stdout,
+          applyGrokDisplay: true,
+        }),
         durationMs,
         retryCount: 0,
         circuitBreakerState: "closed",
@@ -11464,7 +11506,8 @@ export async function handleClaudeRequest(
         undefined,
         outputFormat,
         warnings,
-        effectiveCompress
+        effectiveCompress,
+        result.captureFormat
       );
       await safeRecordCompression(corrId, nonStreamResponse.compression, runtime, kit !== null);
       if (worktreeResolution.worktreePath) {
@@ -12039,7 +12082,7 @@ export async function handleCodexRequest(
         result
       );
     },
-    buildSuccessResponse: async ({ worktreeResolution, stdout, durationMs, facts }) => {
+    buildSuccessResponse: async ({ worktreeResolution, stdout, durationMs, facts, result }) => {
       // #44: usage is parsed from the raw JSONL `stdout`, but the FR response
       // column stores the reconstructed reply (== text-mode stdout) so
       // read-back surfaces (llm_request_result, cache-stats) get plain text,
@@ -12075,7 +12118,8 @@ export async function handleCodexRequest(
         undefined,
         effectiveOutputFormat,
         undefined,
-        effectiveCompress
+        effectiveCompress,
+        result.captureFormat
       );
       await safeRecordCompression(corrId, codexResponse.compression, runtime, kit !== null);
       if (worktreeResolution.worktreePath) {
@@ -12337,14 +12381,22 @@ export async function handleGeminiRequest(
         jobCwdResolutionOf(worktreeResolution.cwd, worktreeResolution)
       );
     },
-    computeSuccessFacts: stdout => {
-      const geminiUsage = extractUsageAndCost("gemini", stdout, params.outputFormat);
+    computeSuccessFacts: (stdout, result) => {
+      const geminiUsage = extractUsageAndCost(
+        "gemini",
+        stdout,
+        result.captureFormat ?? params.outputFormat
+      );
       // LCR: label cost_basis (gemini is T2, so a counts-only completion is
       // derived-from-tokens); parity with the async/deferred handoff.
       const cost = deriveCostBasis("gemini", prep.resolvedModel || "default", geminiUsage);
       // Phase 7: Gemini stream-json carries a session id (init event) + result
       // status; persist them so a deferred/fresh session stays resumable.
-      const geminiMeta = extractProviderOutputMetadata("gemini", stdout, params.outputFormat);
+      const geminiMeta = extractProviderOutputMetadata(
+        "gemini",
+        stdout,
+        result.captureFormat ?? params.outputFormat
+      );
       return { geminiUsage, cost, geminiMeta };
     },
     finalizeKit: async () => {},
@@ -12361,7 +12413,7 @@ export async function handleGeminiRequest(
         },
         result
       ),
-    buildSuccessResponse: async ({ worktreeResolution, stdout, durationMs, facts }) => {
+    buildSuccessResponse: async ({ worktreeResolution, stdout, durationMs, facts, result }) => {
       const response = buildCliResponse(
         "gemini",
         stdout,
@@ -12373,7 +12425,8 @@ export async function handleGeminiRequest(
         userProvidedSession,
         params.outputFormat,
         undefined,
-        effectiveCompress
+        effectiveCompress,
+        result.captureFormat
       );
       await safeRecordCompression(corrId, response.compression, runtime);
       if (worktreeResolution.worktreePath) {
@@ -12383,7 +12436,13 @@ export async function handleGeminiRequest(
         }
       }
       await flight.completeInline({
-        response: stdout,
+        response: applyProviderDisplayText({
+          cli: "gemini",
+          outputFormat: params.outputFormat,
+          captureFormat: result.captureFormat,
+          stdout,
+          applyGrokDisplay: true,
+        }),
         durationMs,
         retryCount: 0,
         circuitBreakerState: "closed",
@@ -13101,7 +13160,7 @@ export async function handleGrokRequest(
         },
         result
       ),
-    buildSuccessResponse: async ({ worktreeResolution, stdout, durationMs, facts }) => {
+    buildSuccessResponse: async ({ worktreeResolution, stdout, durationMs, facts, result }) => {
       const response = buildCliResponse(
         "grok",
         stdout,
@@ -13113,7 +13172,8 @@ export async function handleGrokRequest(
         sessionResult.userProvidedSession,
         params.outputFormat,
         undefined,
-        effectiveCompress
+        effectiveCompress,
+        result.captureFormat
       );
       await safeRecordCompression(corrId, response.compression, runtime);
       if (worktreeResolution.worktreePath) {
@@ -13123,7 +13183,13 @@ export async function handleGrokRequest(
         }
       }
       await flight.completeInline({
-        response: stdout,
+        response: applyProviderDisplayText({
+          cli: "grok",
+          outputFormat: params.outputFormat,
+          captureFormat: result.captureFormat,
+          stdout,
+          applyGrokDisplay: true,
+        }),
         durationMs,
         retryCount: 0,
         circuitBreakerState: "closed",
@@ -13891,7 +13957,7 @@ export async function handleDevinRequest(
         },
         result
       ),
-    buildSuccessResponse: async ({ stdout, durationMs }) => {
+    buildSuccessResponse: async ({ stdout, durationMs, result }) => {
       const response = buildCliResponse(
         "devin",
         stdout,
@@ -13903,11 +13969,18 @@ export async function handleDevinRequest(
         sessionResult.userProvidedSession,
         undefined,
         undefined,
-        effectiveCompress
+        effectiveCompress,
+        result.captureFormat
       );
       await safeRecordCompression(corrId, response.compression, runtime);
       await flight.completeInline({
-        response: stdout,
+        response: applyProviderDisplayText({
+          cli: "devin",
+          outputFormat: undefined,
+          captureFormat: result.captureFormat,
+          stdout,
+          applyGrokDisplay: true,
+        }),
         durationMs,
         retryCount: 0,
         circuitBreakerState: "closed",
@@ -14685,7 +14758,7 @@ export async function handleCursorRequest(
         },
         result
       ),
-    buildSuccessResponse: async ({ stdout, durationMs }) => {
+    buildSuccessResponse: async ({ stdout, durationMs, result }) => {
       const response = buildCliResponse(
         "cursor",
         stdout,
@@ -14697,11 +14770,18 @@ export async function handleCursorRequest(
         sessionResult.userProvidedSession,
         params.outputFormat,
         undefined,
-        effectiveCompress
+        effectiveCompress,
+        result.captureFormat
       );
       await safeRecordCompression(corrId, response.compression, runtime);
       await flight.completeInline({
-        response: stdout,
+        response: applyProviderDisplayText({
+          cli: "cursor",
+          outputFormat: params.outputFormat,
+          captureFormat: result.captureFormat,
+          stdout,
+          applyGrokDisplay: true,
+        }),
         durationMs,
         retryCount: 0,
         circuitBreakerState: "closed",
@@ -15574,7 +15654,7 @@ export async function handleMistralRequest(
         },
         result
       ),
-    buildSuccessResponse: async ({ worktreeResolution, stdout, durationMs }) => {
+    buildSuccessResponse: async ({ worktreeResolution, stdout, durationMs, result }) => {
       const response = buildCliResponse(
         "mistral",
         stdout,
@@ -15586,7 +15666,8 @@ export async function handleMistralRequest(
         sessionResult.userProvidedSession,
         params.outputFormat,
         undefined,
-        effectiveCompress
+        effectiveCompress,
+        result.captureFormat
       );
       await safeRecordCompression(corrId, response.compression, runtime, kit !== null);
       if (worktreeResolution.worktreePath) {
@@ -15596,7 +15677,13 @@ export async function handleMistralRequest(
         }
       }
       await flight.completeInline({
-        response: stdout,
+        response: applyProviderDisplayText({
+          cli: "mistral",
+          outputFormat: params.outputFormat,
+          captureFormat: result.captureFormat,
+          stdout,
+          applyGrokDisplay: true,
+        }),
         durationMs,
         retryCount: 0,
         circuitBreakerState: "closed",
@@ -16517,7 +16604,7 @@ async function dispatchRoutedCli(
 
     // claude stream-json carries usage/cost + text in NDJSON; all other CLIs go
     // through the shared extractUsageAndCost parser and return stdout verbatim.
-    const claudeStream = cli === "claude" && outputFormat === "stream-json";
+    const claudeStream = cli === "claude" && result.captureFormat === "stream-json";
     const parsedClaude = claudeStream ? parseStreamJson(stdout) : null;
     const responseText = parsedClaude ? parsedClaude.text : stdout;
     const usage = parsedClaude
@@ -16528,8 +16615,8 @@ async function dispatchRoutedCli(
           cacheCreationTokens: parsedClaude.usage?.cacheCreationInputTokens || undefined,
           costUsd: parsedClaude.costUsd ?? undefined,
         }
-      : extractUsageAndCost(cli, stdout, outputFormat);
-    const meta = extractProviderOutputMetadata(cli, stdout, outputFormat);
+      : extractUsageAndCost(cli, stdout, result.captureFormat ?? outputFormat);
+    const meta = extractProviderOutputMetadata(cli, stdout, result.captureFormat ?? outputFormat);
     // Label the recorded cost with its basis and, for a T2 provider that
     // reported counts but no dollar cost, backfill the derived cost.
     const { costUsd: recordedCostUsd, costBasis } = deriveCostBasis(
@@ -16540,7 +16627,13 @@ async function dispatchRoutedCli(
     await safeFlightComplete(
       corrId,
       {
-        response: cli === "codex" ? codexFrResponse(outputFormat, stdout) : responseText,
+        response: applyProviderDisplayText({
+          cli,
+          outputFormat,
+          captureFormat: result.captureFormat,
+          stdout,
+          applyGrokDisplay: true,
+        }),
         durationMs,
         retryCount: 0,
         circuitBreakerState: "closed",
@@ -16569,7 +16662,8 @@ async function dispatchRoutedCli(
       undefined,
       outputFormat,
       undefined,
-      effectiveCompress
+      effectiveCompress,
+      result.captureFormat
     );
     await safeRecordCompression(corrId, response.compression, runtime);
     return response;
@@ -22454,13 +22548,19 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
           // Apply the same provider presentation projection used by the inline
           // path. The durable raw stream remains available to local callers
           // through rawOutput.
-          result.stdout = applyProviderDisplayText({
-            cli: jobCli,
-            outputFormat,
-            captureFormat,
-            stdout: result.stdout,
-            applyGrokDisplay: true,
-          });
+          result.stdout = remoteCaller
+            ? projectRemoteProviderOutput(jobCli, result.stdout, captureFormat)
+            : applyProviderDisplayText({
+                cli: jobCli,
+                outputFormat,
+                captureFormat,
+                stdout: result.stdout,
+                applyGrokDisplay: true,
+              });
+        }
+        if (remoteCaller) {
+          result.stderr = redactAcpMessage(result.stderr);
+          if (result.error) result.error = redactAcpMessage(result.error);
         }
 
         // Native compressor (spec 5.2): honor the job's PERSISTED effective
@@ -22489,7 +22589,7 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
         // coercion callees too.
         const personalKitJob = Boolean(await asyncJobManager.getJobKitExecution(jobId));
         if (compressJob && result.stdout) {
-          if (captureFormat === "stream-json" && parsed) {
+          if (!remoteCaller && captureFormat === "stream-json" && parsed) {
             result.stdout = parsed.text;
           }
           const compressed = compressDisplayText(result.stdout, {

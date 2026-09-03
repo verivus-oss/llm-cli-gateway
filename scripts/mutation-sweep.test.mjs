@@ -99,13 +99,15 @@ describe("mutation-sweep enumerate", () => {
   });
 
   it("gives every mutation a distinct id and a replacement that changes the text", () => {
-    const found = enumerate(
-      `const A = new Set(["x", "y"]);\nexport function f(a: string): boolean {\n  return a.includes("=") || a.includes(",");\n}\n`
-    );
+    const source = `const A = new Set(["x", "y"]);\nexport function f(a: string): boolean {\n  return a.includes("=") || a.includes(",");\n}\n`;
+    const found = enumerate(source);
     expect(new Set(found.map(m => m.id)).size).toBe(found.length);
     for (const m of found) {
       expect(m.end, m.label).toBeGreaterThan(m.start);
       expect(m.replacement, m.label).not.toBe(undefined);
+      expect(m.original, m.label).toBe(source.slice(m.start, m.end));
+      expect(m.sourceSha256, m.label).toMatch(/^[0-9a-f]{64}$/);
+      expect(m.measuredCommit, m.label).toMatch(/^[0-9a-f]{40,64}$/);
     }
   });
 });
@@ -133,5 +135,37 @@ describe("mutation-sweep run", () => {
     }
     expect(status).toBe(2);
     expect(output).toContain("--total");
+  });
+
+  it("refuses an impossible shard selection before touching the tree", () => {
+    const dir = mkdtempSync(join(tmpdir(), "mutation-sweep-shard-"));
+    temporaries.push(dir);
+    const mutations = join(dir, "m.json");
+    writeFileSync(mutations, JSON.stringify([{ id: "m001", file: "src/config.ts" }]));
+    let status = 0;
+    let output = "";
+    try {
+      execFileSync(
+        "node",
+        [
+          join(ROOT, "scripts", "mutation-sweep.mjs"),
+          "run",
+          mutations,
+          join(dir, "out.jsonl"),
+          "--total",
+          "1",
+          "--shard",
+          "2",
+          "--shards",
+          "2",
+        ],
+        { cwd: ROOT, encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] }
+      );
+    } catch (error) {
+      status = error.status ?? 1;
+      output = `${error.stdout ?? ""}${error.stderr ?? ""}`;
+    }
+    expect(status).toBe(2);
+    expect(output).toContain("--shard");
   });
 });

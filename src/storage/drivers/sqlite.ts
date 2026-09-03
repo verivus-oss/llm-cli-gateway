@@ -12,6 +12,7 @@
  * reports false. That is accurate rather than a limitation to hide, and it is
  * the honest answer to "is role separation in force here".
  */
+import { resolve } from "node:path";
 import {
   openDatabase,
   openReadOnly,
@@ -37,6 +38,9 @@ import type { StorageConnection, StorageDriver, StorageEngine } from "../store.j
 const DEFAULT_DRAIN_TIMEOUT_MS = 2000;
 
 const CLOSING_MESSAGE = "storage: sqlite driver is closing and is not accepting new work";
+
+/** Schema writers sharing one SQLite file must not race across driver instances. */
+const bootstrapQueues = new Map<string, Promise<void>>();
 
 /**
  * Prepared statements, cached per database handle.
@@ -246,8 +250,22 @@ export class SqliteStorageDriver implements StorageDriver {
       if (this.closed) throw new Error("storage: sqlite driver is closed");
       return runInTransaction(this, () => fn(this.connectionFor("write", true)));
     };
-    const started = this.queue.then(run, run);
+    const key = resolve(this.dbPath);
+    const predecessor = bootstrapQueues.get(key) ?? Promise.resolve();
+    // Reserve this driver's queue immediately. If the reservation waited until
+    // the global predecessor settled, a transaction submitted in the meantime
+    // could overtake the bootstrap and prepare statements against a schema that
+    // does not exist yet.
+    const started = Promise.all([this.queue, predecessor]).then(run);
     this.queue = started.catch(() => undefined);
+    const tail = started.then(
+      () => undefined,
+      () => undefined
+    );
+    bootstrapQueues.set(key, tail);
+    void tail.then(() => {
+      if (bootstrapQueues.get(key) === tail) bootstrapQueues.delete(key);
+    });
     return started;
   }
 

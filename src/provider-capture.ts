@@ -18,6 +18,59 @@ export function captureFormatCarriesTranscript(provider: string, format: string 
   );
 }
 
+function hasJsonEvent(
+  stdout: string,
+  predicate: (event: Record<string, unknown>) => boolean
+): boolean {
+  for (const line of stdout.split(/\r?\n/)) {
+    if (!line.trim()) continue;
+    try {
+      const value: unknown = JSON.parse(line);
+      if (value && typeof value === "object" && !Array.isArray(value)) {
+        if (predicate(value as Record<string, unknown>)) return true;
+      }
+    } catch {
+      // Provider banners and partial trailing lines are not terminal events.
+    }
+  }
+  return false;
+}
+
+/** True only when a rich provider wire contains its terminal event. */
+export function providerCaptureStreamIsComplete(
+  provider: string,
+  format: string | null,
+  stdout: string
+): boolean {
+  if (format === "api-response") return true;
+  if (!captureFormatCarriesTranscript(provider, format)) return false;
+  switch (provider) {
+    case "claude":
+      return hasJsonEvent(stdout, event => event.type === "result");
+    case "codex":
+      return hasJsonEvent(
+        stdout,
+        event => event.type === "turn.completed" || event.type === "turn.failed"
+      );
+    case "gemini":
+      return hasJsonEvent(stdout, event => event.type === "result" || event.event === "result");
+    case "grok":
+      return hasJsonEvent(stdout, event => event.type === "end" || event.type === "error");
+    case "mistral":
+      return hasJsonEvent(
+        stdout,
+        event =>
+          typeof event.generationStatus === "string" &&
+          event.generationStatus !== "running" &&
+          event.generationStatus !== "pending"
+      );
+    case "cursor":
+      return hasJsonEvent(stdout, event => event.type === "result");
+    default:
+      return false;
+  }
+}
+
 function replaceOrInsertValueFlag(args: string[], flag: string, value: string): void {
   const optionEnd = args.indexOf("--");
   const searchEnd = optionEnd >= 0 ? optionEnd : args.length;

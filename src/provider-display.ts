@@ -22,6 +22,11 @@ import { parseGeminiStreamJson } from "./gemini-json-parser.js";
 import { parseVibeStream } from "./vibe-stream-parser.js";
 import { parseCursorStreamJson } from "./cursor-stream-parser.js";
 import { parseStreamJson } from "./stream-json-parser.js";
+import {
+  captureFormatCarriesTranscript,
+  providerCaptureStreamIsComplete,
+} from "./provider-capture.js";
+import { redactAcpMessage } from "./acp/errors.js";
 
 export interface ProviderDisplayInput {
   /** Provider that produced `stdout` (e.g. "codex", "grok", "claude"). */
@@ -148,25 +153,62 @@ export function applyProviderDisplayText(input: ProviderDisplayInput): string {
   // codex always runs with --json; in non-json output the caller wants the
   // reconstructed final agent_message, not the raw JSONL event stream.
   if (cli === "codex" && outputFormat !== "json") {
-    return codexDisplayText(stdout);
+    const response = codexDisplayText(stdout);
+    return response === "" && stdout !== "" ? stdout : response;
   }
   // grok --output-format streaming-json emits raw NDJSON deltas; grokDisplayText
   // concatenates the text deltas into the final reply (no-op outside
   // streaming-json). Behind the flag so readback can keep omitting it.
   if (cli === "grok" && applyGrokDisplay) {
-    return grokDisplayText(captureFormat ?? undefined, stdout);
+    const response = grokDisplayText(captureFormat ?? undefined, stdout);
+    return response === "" && stdout !== "" ? stdout : response;
   }
   if (!callerWantsStructured && cli === "claude" && captureFormat === "stream-json") {
-    return parseStreamJson(stdout).text;
+    return lastJsonLine(stdout, value => value.type === "result")
+      ? parseStreamJson(stdout).text
+      : stdout;
   }
   if (!callerWantsStructured && cli === "gemini" && captureFormat === "stream-json") {
-    return parseGeminiStreamJson(stdout)?.response ?? "";
+    const response = parseGeminiStreamJson(stdout)?.response;
+    return response === undefined ? stdout : response;
   }
   if (!callerWantsStructured && cli === "mistral" && captureFormat === "streaming") {
-    return parseVibeStream(stdout)?.response ?? "";
+    const response = parseVibeStream(stdout)?.response;
+    return response === undefined ? stdout : response;
   }
   if (!callerWantsStructured && cli === "cursor" && captureFormat === "stream-json") {
-    return parseCursorStreamJson(stdout)?.response ?? "";
+    const response = parseCursorStreamJson(stdout)?.response;
+    return response === undefined ? stdout : response;
   }
   return stdout;
+}
+
+/**
+ * Reduce a provider capture to response text safe for a remote caller. Rich
+ * event streams never fail open: an incomplete or unrecognized capture is
+ * withheld instead of returning reasoning, tool arguments, or tool results.
+ */
+export function projectRemoteProviderOutput(
+  cli: string,
+  stdout: string,
+  captureFormat?: string | null
+): string {
+  const resolvedFormat = captureFormat ?? inferCaptureFormat(cli, undefined, stdout);
+  if (
+    captureFormatCarriesTranscript(cli, resolvedFormat) &&
+    !providerCaptureStreamIsComplete(cli, resolvedFormat, stdout)
+  ) {
+    return "[provider transcript withheld: terminal response unavailable]";
+  }
+  const display = applyProviderDisplayText({
+    cli,
+    outputFormat: "text",
+    captureFormat: resolvedFormat,
+    stdout,
+    applyGrokDisplay: true,
+  });
+  if (captureFormatCarriesTranscript(cli, resolvedFormat) && display === stdout) {
+    return "[provider transcript withheld: response projection unavailable]";
+  }
+  return redactAcpMessage(display);
 }

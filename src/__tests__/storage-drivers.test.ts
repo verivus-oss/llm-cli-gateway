@@ -255,6 +255,44 @@ describe("SqliteStorageDriver", () => {
     expect(order).toEqual(["A:start", "A:end", "B:start", "B:end"]);
   });
 
+  it("serialises schema bootstraps across drivers sharing one database", async () => {
+    const other = new SqliteStorageDriver(join(dir, "t.db"));
+    const order: string[] = [];
+    let releaseFirst = () => {};
+    const holdFirst = new Promise<void>(resolveFirst => {
+      releaseFirst = resolveFirst;
+    });
+    try {
+      const first = driver.bootstrap(async () => {
+        order.push("first:start");
+        await holdFirst;
+        order.push("first:end");
+      });
+      const second = other.bootstrap(async () => {
+        order.push("second:start");
+        order.push("second:end");
+      });
+      const writeAfterSecond = other.transaction("write", async () => {
+        order.push("second:write");
+      });
+      await Promise.resolve();
+      await Promise.resolve();
+      expect(order).toEqual(["first:start"]);
+      releaseFirst();
+      await Promise.all([first, second, writeAfterSecond]);
+      expect(order).toEqual([
+        "first:start",
+        "first:end",
+        "second:start",
+        "second:end",
+        "second:write",
+      ]);
+    } finally {
+      releaseFirst();
+      await other.close();
+    }
+  });
+
   it("refuses to open a transaction on a read class", async () => {
     // Rejects rather than throws: an async surface that sometimes throws
     // synchronously cannot be handled with .catch() by any caller.

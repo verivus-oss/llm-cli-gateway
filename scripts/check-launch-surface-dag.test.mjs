@@ -132,6 +132,19 @@ describe("launch-surface DAG checker", () => {
     );
   });
 
+  it("does not accept flow evidence copied into a comment", () => {
+    mutate("src/validation-orchestrator.ts", source =>
+      source.replace(
+        "...(args.reviewAuthorization ? { reviewAuthorization: args.reviewAuthorization } : {}),",
+        "...{}, // reviewAuthorization: args.reviewAuthorization"
+      )
+    );
+
+    expect(problemText()).toContain(
+      'field.trustCursorWorkspace.flow[4]: src/validation-orchestrator.ts no longer carries "reviewAuthorization: args.reviewAuthorization"'
+    );
+  });
+
   it("rejects a node with its named symbol removed", () => {
     mutate(DAG_PATH, source =>
       source.replace(

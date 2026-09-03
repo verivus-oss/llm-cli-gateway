@@ -20,6 +20,8 @@ import type { FlightRecorderQuery } from "./flight-recorder.js";
 import { estimateCacheSavingsUsd } from "./pricing.js";
 import { redactKnownProviderSessionId } from "./provider-output-metadata.js";
 import { principalCanAccess } from "./request-context.js";
+import { projectRemoteProviderOutput } from "./provider-display.js";
+import { redactAcpMessage } from "./acp/errors.js";
 
 export type CacheStatsCli = "claude" | "codex" | "gemini" | "grok" | "mistral";
 
@@ -540,15 +542,25 @@ export async function readPersistedRequest(
   // its prefix through a pre-redaction response slice. Error and thinking text
   // are not sliced, but must be scrubbed before this object is serialized.
   const redactProviderSessionId = opts.redactProviderSessionId ? row.provider_session_id : null;
-  const fullResponse =
+  const sessionRedactedResponse =
     row.response === null
       ? null
       : redactKnownProviderSessionId(row.response, redactProviderSessionId);
+  const fullResponse =
+    sessionRedactedResponse === null
+      ? null
+      : opts.redactProviderSessionId
+        ? projectRemoteProviderOutput(row.cli, sessionRedactedResponse)
+        : sessionRedactedResponse;
   const fullPrompt = redactKnownProviderSessionId(row.prompt ?? "", redactProviderSessionId);
-  const errorMessage =
+  const sessionRedactedError =
     row.error_message === null
       ? null
       : redactKnownProviderSessionId(row.error_message, redactProviderSessionId);
+  const errorMessage =
+    sessionRedactedError !== null && opts.redactProviderSessionId
+      ? redactAcpMessage(sessionRedactedError)
+      : sessionRedactedError;
   const sessionId =
     row.session_id === null
       ? null
@@ -579,7 +591,10 @@ export async function readPersistedRequest(
     responseChars,
     responseTruncated,
     response,
-    thinkingBlocks: parseThinkingBlocks(row.thinking_blocks, redactProviderSessionId),
+    thinkingBlocks:
+      parseThinkingBlocks(row.thinking_blocks, redactProviderSessionId)?.map(block =>
+        opts.redactProviderSessionId ? redactAcpMessage(block) : block
+      ) ?? null,
     ownerPrincipal: row.owner_principal,
   };
 

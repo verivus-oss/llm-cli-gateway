@@ -12,6 +12,8 @@ import {
   resolveOwnerPrincipal,
 } from "./request-context.js";
 import { projectJobReadback } from "./job-readback-projection.js";
+import { projectRemoteProviderOutput } from "./provider-display.js";
+import { redactAcpMessage } from "./acp/errors.js";
 import { PerformanceMetrics } from "./metrics.js";
 import { loadLeastCostConfig, type ApiProviderRuntime, type LeastCostConfig } from "./config.js";
 import { buildRouterEnv, resolveRouterPriors, toRouterConfig } from "./lcr-router-env.js";
@@ -36,7 +38,6 @@ import {
   resolveValidationReceipt,
 } from "./validation-receipt.js";
 import {
-  collectValidationJobResult,
   ReviewRunAuthorizationError,
   startJudgeSynthesis,
   startReviewRun,
@@ -1129,11 +1130,12 @@ export function registerValidationTools(server: McpServer, deps: ValidationToolD
       // A job owned by another principal is reported as absent, mirroring the
       // llm_job_status path; previously this surface had no ownership check.
       const requestContext = getRequestContext();
-      let job = await deps.asyncJobManager.getJobSnapshot(jobId);
       const caller = resolveOwnerPrincipal(requestContext);
-      if (!job || !principalCanAccess(await deps.asyncJobManager.getJobOwner(jobId), caller)) {
+      if (!principalCanAccess(await deps.asyncJobManager.getJobOwner(jobId), caller)) {
         return textResponse({ success: false, error: "Job not found", jobId });
       }
+      let job = await deps.asyncJobManager.getJobSnapshot(jobId);
+      if (!job) return textResponse({ success: false, error: "Job not found", jobId });
       job = projectJobReadback(job, { remote: isRemotePrincipal(requestContext) });
       return textResponse({ success: true, job });
     }
@@ -1168,14 +1170,25 @@ export function registerValidationTools(server: McpServer, deps: ValidationToolD
       // llm_job_result path; previously this surface had no ownership check.
       const requestContext = getRequestContext();
       const remote = isRemotePrincipal(requestContext);
+      const caller = resolveOwnerPrincipal(requestContext);
+      if (!principalCanAccess(await deps.asyncJobManager.getJobOwner(jobId), caller)) {
+        return textResponse({ success: false, error: "Job not found", jobId });
+      }
       let result = await deps.asyncJobManager.getJobResult(jobId, maxChars, {
         redactProviderSessionIds: remote,
       });
-      const caller = resolveOwnerPrincipal(requestContext);
-      if (!result || !principalCanAccess(await deps.asyncJobManager.getJobOwner(jobId), caller)) {
-        return textResponse({ success: false, error: "Job not found", jobId });
+      if (!result) return textResponse({ success: false, error: "Job not found", jobId });
+      if (remote) {
+        const cli = deps.asyncJobManager.getJobCli(jobId) ?? provider ?? "unknown";
+        result.stdout = projectRemoteProviderOutput(
+          cli,
+          result.stdout,
+          deps.asyncJobManager.getJobCaptureFormat(jobId)
+        );
+        result.stderr = redactAcpMessage(result.stderr);
+        if (result.error) result.error = redactAcpMessage(result.error);
       }
-      result = projectJobReadback(result, { remote });
+      result = projectJobReadback(result, { remote, includeNativeTranscript: false });
       // Cross-LLM validation receipts (Phase 1): eager mint. If this job is the
       // one that just made its validation run terminal, mint the receipt now,
       // while the linked job outputs still exist (they are evicted after the
@@ -1184,10 +1197,7 @@ export function registerValidationTools(server: McpServer, deps: ValidationToolD
       return textResponse({
         success: true,
         result,
-        normalized:
-          provider !== undefined
-            ? await collectValidationJobResult(deps, provider, jobId, null, maxChars)
-            : null,
+        normalized: provider !== undefined ? normalizeJobResult(provider, null, result) : null,
       });
     }
   );

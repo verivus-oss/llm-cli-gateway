@@ -34,6 +34,8 @@ const PROVIDER_SESSION_ID = "019ec070-26ab-7fa3-b66b-72fc6964f250";
 // provider-minted sessionId that a resume needs (extractProviderOutputMetadata
 // lifts it into the job result as providerSessionId).
 const GROK_STDOUT =
+  JSON.stringify({ type: "thought", data: "read /home/alice/private/plan.md" }) +
+  "\n" +
   JSON.stringify({ type: "text", data: "hello world" }) +
   "\n" +
   JSON.stringify({
@@ -151,11 +153,10 @@ describe("Phase 7 B3: llm_job_result remote redaction of providerSessionId", () 
     const remote = await call("llm_job_result", { jobId: "job-remote", maxChars: 200000 }, "alice");
     expect(remote.success).toBe(true);
     expect(remote.result).not.toHaveProperty("providerSessionId");
-    // The provider session id must not leak via any STRUCTURED field. The raw
-    // `stdout` is the caller's own job output (it may echo the id in the end
-    // event); that is legitimately theirs, so it is excluded from this guard.
-    const { stdout: _omitStdout, ...structured } = remote.result;
-    expect(JSON.stringify(structured)).not.toContain(PROVIDER_SESSION_ID);
+    // Remote readback is a reply projection, never the rich provider wire.
+    expect(remote.result.stdout).toBe("hello world");
+    expect(JSON.stringify(remote.result)).not.toContain(PROVIDER_SESSION_ID);
+    expect(JSON.stringify(remote.result)).not.toContain("/home/alice/private");
 
     // Local stdio caller: providerSessionId is present (needed for local resume).
     const local = await call("llm_job_result", { jobId: "job-local", maxChars: 200000 }, undefined);

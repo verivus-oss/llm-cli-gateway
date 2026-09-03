@@ -1,10 +1,10 @@
 import { chmodSync, existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
-import { homedir, tmpdir } from "node:os";
+import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, it, expect, vi } from "vitest";
 import { AsyncJobManager, type LlmCli } from "../async-job-manager.js";
 import { MemoryJobStore } from "../job-store.js";
-import { devinTranscriptPath } from "../devin-transcript.js";
+import { ensureDevinTranscriptPath } from "../devin-transcript.js";
 
 /** Poll until predicate returns true, or reject after timeoutMs. */
 function waitFor(
@@ -127,13 +127,12 @@ describe("AsyncJobManager", () => {
       const temp = mkdtempSync(join(tmpdir(), "devin-capture-"));
       const fakeDevin = join(temp, "devin");
       const correlationId = `capture-${process.pid}-${Date.now()}`;
-      const transcriptPath = devinTranscriptPath(correlationId);
+      const originalHome = process.env.HOME;
+      process.env.HOME = temp;
+      const transcriptPath = ensureDevinTranscriptPath(correlationId, temp);
+      if (!transcriptPath) throw new Error("failed to mint Devin transcript path");
       const store = new MemoryJobStore();
       const manager = new AsyncJobManager(undefined, undefined, store);
-      mkdirSync(join(homedir(), ".llm-cli-gateway", "devin-transcripts"), {
-        recursive: true,
-        mode: 0o700,
-      });
       writeFileSync(
         fakeDevin,
         `#!/bin/sh
@@ -180,6 +179,8 @@ printf '%s\n' 'done'
         await manager.dispose();
         rmSync(transcriptPath, { force: true });
         rmSync(temp, { recursive: true, force: true });
+        if (originalHome === undefined) delete process.env.HOME;
+        else process.env.HOME = originalHome;
       }
     });
 

@@ -304,17 +304,18 @@ describe("JobStore", () => {
           "[]",
           "completed",
           new Date().toISOString(),
-          "9999-12-31T23:59:59.999Z"
+          "2000-01-01T00:00:00.000Z"
         );
       seed.close();
 
-      const migrated = new SqliteJobStore(legacyPath);
+      const migrated = new SqliteJobStore(legacyPath, undefined, { retentionMs: null });
       try {
         // Legacy row survives migration; owner is NULL (legacy-unowned).
         expect((await migrated.getById("legacy-1"))?.ownerPrincipal).toBeNull();
         expect(await migrated.getById("legacy-1")).toMatchObject({
           errorCategory: null,
           retryable: null,
+          expiresAt: "9999-12-31T23:59:59.999Z",
         });
         // New inserts after migration can carry an owner.
         await migrated.recordStart({
@@ -710,19 +711,6 @@ describe("JobStore", () => {
           captureFormat: "atif-v1.7",
         });
         expect(
-          await backend.recordComplete({
-            id: "capture-parity",
-            status: "completed",
-            exitCode: 0,
-            stdout: "done",
-            stderr: "",
-            outputTruncated: false,
-            error: null,
-            finishedAt: t,
-          }),
-          name
-        ).toBe(true);
-        expect(
           await backend.recordCapture({
             id: "capture-parity",
             ownerInstance: "other-owner",
@@ -750,6 +738,33 @@ describe("JobStore", () => {
           }),
           name
         ).toBe(true);
+        expect(
+          await backend.recordComplete({
+            id: "capture-parity",
+            status: "completed",
+            exitCode: 0,
+            stdout: "done",
+            stderr: "",
+            outputTruncated: false,
+            error: null,
+            finishedAt: t,
+          }),
+          name
+        ).toBe(true);
+        expect(
+          await backend.recordCapture({
+            id: "capture-parity",
+            ownerInstance: "capture-owner",
+            captureStatus: "not_captured",
+            outputDroppedBytes: 0,
+            nativeTranscript: null,
+            nativeTranscriptBytes: 0,
+            nativeTranscriptTruncated: false,
+            nativeTranscriptDroppedBytes: 0,
+            captureError: "must not downgrade",
+          }),
+          name
+        ).toBe(false);
 
         const row = await backend.getById("capture-parity");
         expect(row?.cwdScope, name).toBe("workspace");

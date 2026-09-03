@@ -88,6 +88,23 @@ describe("which migrations construct the flight recorder", () => {
     ]);
   });
 
+  it("classifies DML, foreign keys, triggers, comments, and qualified targets", () => {
+    const sql = `
+      UPDATE public.requests SET status = 'done';
+      INSERT INTO "audit"."jobs" (id) VALUES ('x');
+      DELETE FROM gateway_metadata WHERE request_id = 'x';
+      CREATE TABLE child (request_id TEXT REFERENCES public.requests(id));
+      CREATE TRIGGER touch_jobs AFTER UPDATE ON public.jobs EXECUTE FUNCTION touch();
+      COMMENT ON TABLE public.gateway_metadata IS 'metadata';
+    `;
+    expect([...tableTargets(sql)].sort()).toEqual([
+      "child",
+      "gateway_metadata",
+      "jobs",
+      "requests",
+    ]);
+  });
+
   it("refuses to return an empty selection instead of an empty schema", () => {
     const dir = fixture({ "022_none.sql": LEDGER(22) });
     try {

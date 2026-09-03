@@ -15,15 +15,16 @@
  * copies it into the bounded durable record, and removes the source only after
  * the owner-fenced store write succeeds.
  */
-import { createHash } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { lstatSync, mkdirSync, readdirSync, unlinkSync } from "node:fs";
 import { homedir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 
 export const DEVIN_TRANSCRIPT_DIRNAME = "devin-transcripts";
 export const DEVIN_TRANSCRIPT_STALE_MS = 2 * 60 * 60 * 1000;
 
 const GATEWAY_TRANSCRIPT_NAME = /^[A-Za-z0-9._-]*-[a-f0-9]{12}\.json$/;
+const activeGatewayTranscripts = new Set<string>();
 
 /** The gateway-owned directory devin exports are written into. */
 export function devinTranscriptDirectory(home: string = homedir()): string {
@@ -58,16 +59,62 @@ export function ensureDevinTranscriptPath(
   try {
     mkdirSync(devinTranscriptDirectory(home), { recursive: true, mode: 0o700 });
     pruneStaleDevinTranscripts(Date.now(), home);
-    return devinTranscriptPath(correlationId, home);
+    const path = devinTranscriptPath(`${correlationId}-${randomUUID()}`, home);
+    activeGatewayTranscripts.add(path);
+    return path;
   } catch {
     return null;
   }
+}
+
+/**
+ * Return the exact gateway-minted export carried by `--export`, if this process
+ * minted it. The registry prevents a caller-selected lookalike filename from
+ * gaining gateway cleanup or harvest ownership.
+ */
+export function gatewayDevinTranscriptPathFromArgs(
+  args: readonly string[],
+  home: string = homedir()
+): string | null {
+  const optionEnd = args.indexOf("--");
+  const searchEnd = optionEnd >= 0 ? optionEnd : args.length;
+  for (let index = 0; index < searchEnd; index += 1) {
+    if (args[index] !== "--export" || index + 1 >= searchEnd) continue;
+    const candidate = args[index + 1];
+    if (
+      activeGatewayTranscripts.has(candidate) &&
+      dirname(candidate) === devinTranscriptDirectory(home)
+    ) {
+      return candidate;
+    }
+  }
+  return null;
+}
+
+/** Stop treating a completed invocation's export as active. */
+export function releaseGatewayDevinTranscriptPath(path: string | undefined): void {
+  if (path) activeGatewayTranscripts.delete(path);
 }
 
 export interface DevinTranscriptPruneResult {
   inspected: number;
   removed: number;
   failed: number;
+}
+
+/** Minimum structural proof required before an export is called complete. */
+export function isCompleteAtifDocument(value: unknown): boolean {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return false;
+  const document = value as Record<string, unknown>;
+  if (document.version !== "ATIF-v1.7" || !Array.isArray(document.messages)) return false;
+  return document.messages.every(
+    message =>
+      Boolean(message) &&
+      typeof message === "object" &&
+      !Array.isArray(message) &&
+      typeof (message as Record<string, unknown>).role === "string" &&
+      Object.prototype.hasOwnProperty.call(message, "content")
+  );
 }
 
 /**
@@ -94,6 +141,7 @@ export function pruneStaleDevinTranscripts(
     if (!entry.isFile() || !GATEWAY_TRANSCRIPT_NAME.test(entry.name)) continue;
     result.inspected += 1;
     const path = join(directory, entry.name);
+    if (activeGatewayTranscripts.has(path)) continue;
     try {
       const info = lstatSync(path);
       if (!info.isFile() || info.isSymbolicLink()) continue;
@@ -109,16 +157,18 @@ export function pruneStaleDevinTranscripts(
 
 /** Remove only the exact export path the gateway minted for this invocation. */
 export function removeInlineDevinTranscript(
-  correlationId: string,
+  _correlationId: string,
   args: readonly string[],
   home: string = homedir()
 ): boolean {
-  const expected = devinTranscriptPath(correlationId, home);
-  if (!args.includes(expected)) return false;
+  const expected = gatewayDevinTranscriptPathFromArgs(args, home);
+  if (!expected) return false;
   try {
     unlinkSync(expected);
+    activeGatewayTranscripts.delete(expected);
     return true;
   } catch {
+    activeGatewayTranscripts.delete(expected);
     return false;
   }
 }

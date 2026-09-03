@@ -9,7 +9,7 @@
  * the explicit Grok projection switch used by low-level callers.
  */
 import { describe, expect, it } from "vitest";
-import { applyProviderDisplayText } from "../provider-display.js";
+import { applyProviderDisplayText, projectRemoteProviderOutput } from "../provider-display.js";
 import { codexDisplayText } from "../codex-json-parser.js";
 import { grokDisplayText } from "../grok-json-parser.js";
 
@@ -171,5 +171,45 @@ describe("applyProviderDisplayText", () => {
         })
       ).toBe(text);
     }
+  });
+
+  it("preserves an incomplete local rich stream when no reply can be projected", () => {
+    const incomplete = JSON.stringify({
+      type: "item.started",
+      item: { type: "command_execution", command: "/usr/bin/private-tool" },
+    });
+    expect(
+      applyProviderDisplayText({
+        cli: "codex",
+        outputFormat: "text",
+        captureFormat: "json",
+        stdout: incomplete,
+        applyGrokDisplay: true,
+      })
+    ).toBe(incomplete);
+  });
+
+  it("projects only the terminal reply for a remote rich capture", () => {
+    const capture = [
+      JSON.stringify({ type: "system", subtype: "init", cwd: "/home/alice/private" }),
+      JSON.stringify({
+        type: "assistant",
+        message: {
+          content: [{ type: "tool_use", name: "Read", input: { file: "/etc/shadow" } }],
+        },
+      }),
+      JSON.stringify({ type: "result", result: "safe answer" }),
+    ].join("\n");
+    expect(projectRemoteProviderOutput("claude", capture, "stream-json")).toBe("safe answer");
+  });
+
+  it("withholds an incomplete rich capture from a remote caller", () => {
+    const capture = JSON.stringify({
+      type: "assistant",
+      message: { content: [{ type: "thinking", thinking: "private reasoning" }] },
+    });
+    expect(projectRemoteProviderOutput("claude", capture, "stream-json")).toBe(
+      "[provider transcript withheld: terminal response unavailable]"
+    );
   });
 });

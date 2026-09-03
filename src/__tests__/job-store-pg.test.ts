@@ -95,6 +95,39 @@ describe("PostgresJobStore", () => {
     expect(await store.recordComplete({ ...terminal, id: "pg-no-such-row" })).toBe(false);
   });
 
+  it("rebases older finite expiries when the resolved policy is unbounded", async () => {
+    const startedAt = new Date().toISOString();
+    await store.recordStart({
+      id: "pg-old-finite-expiry",
+      correlationId: "pg-old-finite-expiry-corr",
+      requestKey: "pg-old-finite-expiry-key",
+      cli: "claude",
+      args: ["-p", "history"],
+      startedAt,
+      pid: null,
+    });
+    await store.recordComplete({
+      id: "pg-old-finite-expiry",
+      status: "completed",
+      exitCode: 0,
+      stdout: "history",
+      stderr: "",
+      outputTruncated: false,
+      error: null,
+      finishedAt: startedAt,
+    });
+    await pool.query("UPDATE jobs SET expires_at = $1 WHERE id = $2", [
+      "2000-01-01T00:00:00.000Z",
+      "pg-old-finite-expiry",
+    ]);
+    await store.close();
+
+    store = new PostgresJobStore(TEST_DATABASE_URL, undefined, { retentionMs: null });
+    expect(await store.getById("pg-old-finite-expiry")).toMatchObject({
+      expiresAt: "9999-12-31T23:59:59.999Z",
+    });
+  });
+
   it("fences an output write on the status the caller claims", async () => {
     // Postgres is the engine where this matters most: a shared store means the
     // other writer is another gateway instance. Unfenced, a flush decided
@@ -218,16 +251,6 @@ describe("PostgresJobStore", () => {
       ownerPrincipal: "alice@example.com",
     });
     await store.recordOutput("pg-job-1", "partial", "", false, ["queued", "running"]);
-    await store.recordComplete({
-      id: "pg-job-1",
-      status: "completed",
-      exitCode: 0,
-      stdout: "done",
-      stderr: "",
-      outputTruncated: false,
-      error: null,
-      finishedAt,
-    });
     expect(
       await store.recordCapture({
         id: "pg-job-1",
@@ -241,6 +264,16 @@ describe("PostgresJobStore", () => {
         captureError: null,
       })
     ).toBe(true);
+    await store.recordComplete({
+      id: "pg-job-1",
+      status: "completed",
+      exitCode: 0,
+      stdout: "done",
+      stderr: "",
+      outputTruncated: false,
+      error: null,
+      finishedAt,
+    });
     expect(
       await store.recordCapture({
         id: "pg-job-1",
@@ -252,6 +285,19 @@ describe("PostgresJobStore", () => {
         nativeTranscriptTruncated: false,
         nativeTranscriptDroppedBytes: 0,
         captureError: "must not overwrite",
+      })
+    ).toBe(false);
+    expect(
+      await store.recordCapture({
+        id: "pg-job-1",
+        ownerInstance: "pg-capture-owner",
+        captureStatus: "not_captured",
+        outputDroppedBytes: 0,
+        nativeTranscript: null,
+        nativeTranscriptBytes: 0,
+        nativeTranscriptTruncated: false,
+        nativeTranscriptDroppedBytes: 0,
+        captureError: "must not downgrade",
       })
     ).toBe(false);
 

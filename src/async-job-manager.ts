@@ -2,7 +2,15 @@ import { ChildProcess } from "child_process";
 import { randomUUID } from "crypto";
 import os from "os";
 import { hrtime } from "process";
-import { closeSync, lstatSync, openSync, readSync, unlinkSync } from "node:fs";
+import {
+  closeSync,
+  constants,
+  fstatSync,
+  lstatSync,
+  openSync,
+  readSync,
+  unlinkSync,
+} from "node:fs";
 import {
   createProcessGroupTerminationFence,
   envWithExtendedPath,
@@ -42,6 +50,7 @@ import {
   type FlightRecorderLike,
 } from "./flight-recorder.js";
 import { codexFrResponse } from "./codex-json-parser.js";
+import { applyProviderDisplayText } from "./provider-display.js";
 import {
   getClaudeMcpArtifactScopeForPath,
   isClaudeMcpArtifactPath,
@@ -50,8 +59,17 @@ import {
 import { assertMcpArtifactAdmissionInvariant } from "./mcp-artifact-admission.js";
 import { describeJobCwd, type JobCwdResolution } from "./job-cwd-scope.js";
 import { captureJobReplayContext, type JobReplayContext } from "./job-replay-context.js";
-import { captureFormatCarriesTranscript, planProviderCapture } from "./provider-capture.js";
-import { devinTranscriptPath, pruneStaleDevinTranscripts } from "./devin-transcript.js";
+import {
+  captureFormatCarriesTranscript,
+  planProviderCapture,
+  providerCaptureStreamIsComplete,
+} from "./provider-capture.js";
+import {
+  gatewayDevinTranscriptPathFromArgs,
+  isCompleteAtifDocument,
+  pruneStaleDevinTranscripts,
+  releaseGatewayDevinTranscriptPath,
+} from "./devin-transcript.js";
 import {
   createPersonalKitTerminalMetadata,
   createVibeKitTerminalMetadata,
@@ -785,6 +803,8 @@ interface AsyncJobRecord {
   nativeTranscriptTruncated: boolean;
   nativeTranscriptDroppedBytes: number;
   captureError: string | null;
+  /** True after the owner-fenced store accepted the capture exactly once. */
+  capturePersisted: boolean;
   /** Exact gateway-owned Devin export path, never reconstructed from arbitrary argv. */
   nativeTranscriptPath?: string;
   /**
@@ -2910,6 +2930,7 @@ export class AsyncJobManager {
       nativeTranscriptTruncated: false,
       nativeTranscriptDroppedBytes: 0,
       captureError: null,
+      capturePersisted: false,
       ownerPrincipal,
       mcpArtifactPath: null,
       mcpArtifactScope: null,
@@ -3336,6 +3357,15 @@ export class AsyncJobManager {
     } else if (job.transport === "process" && job.cli === "codex") {
       const codexText = codexFrResponse(job.outputFormat, job.stdout);
       response = isFailure ? job.stderr || codexText : codexText;
+    } else if (job.transport === "process") {
+      const display = applyProviderDisplayText({
+        cli: job.cli,
+        outputFormat: job.outputFormat,
+        captureFormat: job.captureFormat,
+        stdout: job.stdout,
+        applyGrokDisplay: true,
+      });
+      response = isFailure ? job.stderr || display : display;
     } else {
       response = isFailure ? job.stderr || job.stdout : job.stdout;
     }
@@ -3353,7 +3383,7 @@ export class AsyncJobManager {
     // continuation handle in apiResponseId instead.
     const providerMeta =
       !isKit && job.transport === "process"
-        ? extractProviderOutputMetadata(job.cli, job.stdout, job.outputFormat)
+        ? extractProviderOutputMetadata(job.cli, job.stdout, job.captureFormat ?? job.outputFormat)
         : undefined;
 
     try {
@@ -3692,18 +3722,33 @@ export class AsyncJobManager {
       return;
     }
     try {
-      // The path is gateway-minted and correlation-keyed. Refuse links so a
-      // replaced export cannot make the gateway copy an unrelated host file.
-      const info = lstatSync(transcriptPath);
-      if (!info.isFile() || info.isSymbolicLink()) {
-        job.captureError = "Provider native transcript was not a regular file";
+      // Bind the read to the checked inode. O_NOFOLLOW closes the last-component
+      // link swap on platforms that expose it; the descriptor identity check
+      // also catches replacement between lstat and open.
+      const pathInfo = lstatSync(transcriptPath);
+      const noFollow = typeof constants.O_NOFOLLOW === "number" ? constants.O_NOFOLLOW : 0;
+      const fd = openSync(transcriptPath, constants.O_RDONLY | noFollow);
+      const info = fstatSync(fd);
+      if (
+        !pathInfo.isFile() ||
+        pathInfo.isSymbolicLink() ||
+        !info.isFile() ||
+        pathInfo.dev !== info.dev ||
+        pathInfo.ino !== info.ino
+      ) {
+        closeSync(fd);
+        job.captureError = "Provider native transcript was not a stable regular file";
         return;
       }
       const streamBytes = Buffer.byteLength(job.stdout) + Buffer.byteLength(job.stderr);
       const availableBytes = Math.max(0, this.maxJobOutputBytes - streamBytes);
       const bytesToRead = Math.min(info.size, availableBytes);
+      if (bytesToRead === 0) {
+        closeSync(fd);
+        job.captureError = "Provider native transcript exceeded the remaining capture budget";
+        return;
+      }
       const bytes = Buffer.alloc(bytesToRead);
-      const fd = openSync(transcriptPath, "r");
       let offset = 0;
       try {
         while (offset < bytes.length) {
@@ -3718,8 +3763,8 @@ export class AsyncJobManager {
       const truncated = offset < info.size;
       if (!truncated) {
         const parsed: unknown = JSON.parse(transcript);
-        if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
-          job.captureError = "Provider native transcript did not contain an ATIF object";
+        if (!isCompleteAtifDocument(parsed)) {
+          job.captureError = "Provider native transcript was not a complete ATIF-v1.7 document";
           return;
         }
       }
@@ -3746,16 +3791,30 @@ export class AsyncJobManager {
       return;
     }
     if (!job.transcriptCapable) {
-      job.captureStatus = "not_captured";
-      job.captureError ??= "Provider wire did not emit a complete transcript";
+      if (job.captureFormat === "api-response") {
+        job.captureStatus = job.outputTruncated ? "captured_to_limit" : "captured_whole";
+        job.captureError = null;
+      } else {
+        job.captureStatus = "not_captured";
+        job.captureError ??= "Provider wire did not emit a complete transcript";
+      }
       return;
     }
-    job.captureStatus = job.outputTruncated ? "captured_to_limit" : "captured_whole";
-    job.captureError = null;
+    if (job.outputTruncated) {
+      job.captureStatus = "captured_to_limit";
+      job.captureError = null;
+    } else if (providerCaptureStreamIsComplete(job.cli, job.captureFormat ?? null, job.stdout)) {
+      job.captureStatus = "captured_whole";
+      job.captureError = null;
+    } else {
+      job.captureStatus = "not_captured";
+      job.captureError = "Provider wire did not include its terminal event";
+    }
   }
 
   private async persistCapture(job: AsyncJobRecord): Promise<boolean> {
-    if (!this.store || job.kitExecution || !job.terminalRowOwned) return false;
+    if (job.capturePersisted) return true;
+    if (!this.store || job.kitExecution) return false;
     this.captureOutcome(job);
     if (job.captureStatus === null) return false;
     try {
@@ -3770,17 +3829,27 @@ export class AsyncJobManager {
         nativeTranscriptDroppedBytes: job.nativeTranscriptDroppedBytes,
         captureError: job.captureError,
       });
-      if (applied && job.nativeTranscriptPath) {
-        const expected = devinTranscriptPath(job.correlationId);
-        if (job.nativeTranscriptPath === expected) {
+      if (applied) job.capturePersisted = true;
+      if (
+        applied &&
+        job.captureStatus === "captured_whole" &&
+        job.nativeTranscript !== null &&
+        job.nativeTranscriptPath
+      ) {
+        const expected = job.nativeTranscriptPath;
+        if (gatewayDevinTranscriptPathFromArgs(job.args) === expected) {
           try {
             unlinkSync(expected);
           } catch {
             // The durable copy already succeeded. A later host cleanup may
             // remove the exact gateway-owned source file.
           }
+          releaseGatewayDevinTranscriptPath(expected);
           job.nativeTranscriptPath = undefined;
         }
+      }
+      if (applied && job.captureStatus !== "captured_whole") {
+        releaseGatewayDevinTranscriptPath(job.nativeTranscriptPath);
       }
       return applied;
     } catch (error) {
@@ -3815,13 +3884,26 @@ export class AsyncJobManager {
     if (job.terminalPersisted) {
       if (this.mayWriteOutputFor(job)) await this.persistLateOutput(job);
       else job.outputDirty = false;
-      await this.persistCapture(job);
+      const captureApplied = await this.persistCapture(job);
+      if (!job.kitExecution && job.closeObserved && !captureApplied) {
+        job.terminalPersistenceAcknowledged = false;
+        this.scheduleTerminalPersistenceRetry(job);
+        return false;
+      }
+      job.terminalPersistenceAcknowledged = true;
       return true;
     }
     // Make sure the latest output is captured in the same row update.
     job.outputDirty = false;
     const isKit = Boolean(job.kitExecution);
     try {
+      // A normal close has the complete provider wire available now. Commit its
+      // capture accounting first, while the durable row is still open, so a
+      // crash cannot expose a terminal row with an unrecorded capture. Early
+      // signal paths have no close proof yet and persist capture on close.
+      if (!isKit && job.closeObserved && !(await this.persistCapture(job))) {
+        throw new Error("capture persistence was not acknowledged");
+      }
       const applied = await this.store.recordComplete({
         id: job.id,
         status: job.status,
@@ -3858,11 +3940,10 @@ export class AsyncJobManager {
           { correlationId: job.correlationId }
         );
       }
-      if (applied) await this.persistCapture(job);
       return true;
     } catch (err) {
       this.logger.error(`JobStore.recordComplete failed for ${job.id}`, err);
-      if (job.kitExecution) this.scheduleTerminalPersistenceRetry(job);
+      this.scheduleTerminalPersistenceRetry(job);
       return false;
     }
   }
@@ -3916,9 +3997,9 @@ export class AsyncJobManager {
    * an unrecoverable running row.
    */
   private scheduleTerminalPersistenceRetry(job: AsyncJobRecord): void {
+    const capturePending = !job.kitExecution && job.closeObserved && !job.capturePersisted;
     if (
-      !job.kitExecution ||
-      job.terminalPersistenceAcknowledged ||
+      (job.terminalPersistenceAcknowledged && !capturePending) ||
       job.terminalPersistenceRetryTimer ||
       !job.finishedAt
     ) {
@@ -3953,10 +4034,10 @@ export class AsyncJobManager {
   private hasPendingTerminalPersistence(): boolean {
     return [...this.jobs.values()].some(
       job =>
-        Boolean(job.kitExecution) &&
-        !job.terminalPersistenceAcknowledged &&
         job.finishedAt !== null &&
-        !isAsyncJobInProgress(job.status)
+        !isAsyncJobInProgress(job.status) &&
+        (!job.terminalPersistenceAcknowledged ||
+          (!job.kitExecution && job.closeObserved && !job.capturePersisted))
     );
   }
 
@@ -3966,9 +4047,9 @@ export class AsyncJobManager {
    * ordinary bounded backoff resumes if the store remains unavailable.
    */
   private async retryTerminalPersistenceNow(job: AsyncJobRecord): Promise<void> {
+    const capturePending = !job.kitExecution && job.closeObserved && !job.capturePersisted;
     if (
-      !job.kitExecution ||
-      job.terminalPersistenceAcknowledged ||
+      (job.terminalPersistenceAcknowledged && !capturePending) ||
       job.finishedAt === null ||
       isAsyncJobInProgress(job.status)
     ) {
@@ -4065,6 +4146,7 @@ export class AsyncJobManager {
       nativeTranscriptTruncated: row.nativeTranscriptTruncated,
       nativeTranscriptDroppedBytes: row.nativeTranscriptDroppedBytes,
       captureError: row.captureError,
+      capturePersisted: row.captureStatus !== null,
       compressResponse: row.compressResponse ?? null,
       ownerPrincipal: row.ownerPrincipal,
       mcpArtifactPath: row.mcpArtifactPath,
@@ -4451,10 +4533,9 @@ export class AsyncJobManager {
       nativeTranscriptTruncated: false,
       nativeTranscriptDroppedBytes: 0,
       captureError: null,
+      capturePersisted: false,
       nativeTranscriptPath:
-        cli === "devin" && launchArgs.includes(devinTranscriptPath(correlationId))
-          ? devinTranscriptPath(correlationId)
-          : undefined,
+        cli === "devin" ? (gatewayDevinTranscriptPathFromArgs(launchArgs) ?? undefined) : undefined,
       compressResponse: compressResponse ?? null,
       mcpArtifactPath: durableMcpArtifactPath,
       mcpArtifactScope: durableMcpArtifactScope,

@@ -111,6 +111,14 @@ describe("the pg parser contract the DSN gate depends on", () => {
       unknown
     >;
     expect(uppercase.sslcert).toBeUndefined();
+    expect(
+      (parse("postgresql://h.invalid/db?sslcert=/etc/hosts&sslcert") as Record<string, unknown>)
+        .sslcert
+    ).toBe("");
+    expect(
+      (parse("postgresql://h.invalid/db#ignored?sslcert=/etc/hosts") as Record<string, unknown>)
+        .sslcert
+    ).toBeUndefined();
   });
 
   it("resolves an empty authority to localhost rather than pg's internal dummy host", () => {

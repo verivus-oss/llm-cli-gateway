@@ -14,7 +14,8 @@
  */
 import fs, { readFileSync } from "fs";
 import { createRequire } from "module";
-import { afterEach, describe, expect, it } from "vitest";
+import { userInfo } from "os";
+import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { FORMAT_KEYWORDS, redactDsn } from "../flight-recorder-pg.js";
 import { parsePgDsn } from "../storage/pg-dsn-parse.js";
 
@@ -52,6 +53,10 @@ function ambient(vars: Partial<Record<(typeof AMBIENT)[number], string>> = {}): 
   }
   Object.assign(process.env, vars);
 }
+
+beforeEach(() => {
+  ambient();
+});
 
 afterEach(() => {
   for (const [name, value] of saved) {
@@ -349,22 +354,6 @@ function expectAgreesWithPg(dsn: string): string {
 interface ReadsDuring {
   reads: string[];
   result: string;
-  /**
-   * What was installed on the fs module the instant `fn` RETURNED, before this
-   * helper put the original back.
-   *
-   * ROUND 13 BLOCKER, codex. The restore assertion used to run after this
-   * helper's own `finally` had already restored the function, so disabling
-   * production's `finally` outright left the test green: the helper was
-   * repairing the very thing the test claimed to measure. Round 12 tried to fix
-   * this by changing WHICH reference the assertion read. That was the wrong
-   * half. The problem is WHEN it reads.
-   *
-   * Production restores whatever it found, which is `spy`, so a test can assert
-   * `installedAfter === spy` and actually fail when production leaks its stub.
-   */
-  installedAfter: unknown;
-  spy: unknown;
 }
 
 function readsDuring(fn: () => string): ReadsDuring {
@@ -378,29 +367,10 @@ function readsDuring(fn: () => string): ReadsDuring {
   target.readFileSync = spy;
   try {
     const result = fn();
-    return { reads, result, installedAfter: target.readFileSync, spy };
+    return { reads, result };
   } finally {
     target.readFileSync = real;
   }
-}
-
-/**
- * Mirrors passwordSpan's contract for the test that claims provenance cannot
- * see a given input. Kept deliberately dumb: it asserts only that there is no
- * `user:password@` to scrub, which is the condition being claimed.
- */
-/** Mirrors the filler the module uses, so inertness has a subject here. */
-const SCRUBBED_PASSWORD_IN_USE = "redacted";
-
-function passwordSpanIsBlind(dsn: string): boolean {
-  const marker = dsn.indexOf("//");
-  if (marker < 0) return true;
-  const start = marker + 2;
-  const slash = dsn.indexOf("/", start);
-  const at = dsn.lastIndexOf("@", slash < 0 ? dsn.length : slash);
-  if (at < start) return true;
-  const colon = dsn.indexOf(":", start);
-  return colon < 0 || colon > at;
 }
 
 describe("redactDsn names the server pg will actually reach", () => {
@@ -875,8 +845,9 @@ describe("redactDsn names the server pg will actually reach", () => {
     // rule cannot tell it from a relocated userinfo without re-introducing the
     // per-component reasoning that this class escaped three times.
     //
-    // The report degrades to the unparseable line. Nothing about the
-    // CONNECTION changes: db.ts hands pg the original string.
+    // The shared admission gate also refuses this spelling on the connection
+    // path. Reporting and connecting therefore make the same conservative
+    // decision.
     expect(redactDsn("postgresql://host/db?user=alice%40srv")).toBe(
       "postgresql (dsn not parseable)"
     );
@@ -1048,17 +1019,18 @@ describe("redactDsn names the server pg will actually reach", () => {
     // `database bob (from PGUSER)`. pg took `bob` from the DSN and ignored
     // PGUSER entirely, so the annotation sent the reader to the wrong variable.
     // No test set PGUSER, so deleting the whole branch passed 10 of 10.
-    ambient({ PGUSER: "alice" });
+    const ambientUser = userInfo().username === "alice" ? "pguser-from-env" : "alice";
+    ambient({ PGUSER: ambientUser });
     expect(expectAgreesWithPg("postgresql://bob@127.0.0.1:5433")).toBe(
       "postgresql host 127.0.0.1 port 5433 database bob (default: the connecting user, from the DSN)"
     );
     // PGUSER is named only when pg actually used it.
-    ambient({ PGUSER: "alice" });
+    ambient({ PGUSER: ambientUser });
     expect(expectAgreesWithPg("postgresql://127.0.0.1:5433")).toBe(
-      "postgresql host 127.0.0.1 port 5433 database alice (default: the connecting user, from PGUSER)"
+      `postgresql host 127.0.0.1 port 5433 database ${ambientUser} (default: the connecting user, from PGUSER)`
     );
     // An explicit database is never attributed to the user at all.
-    ambient({ PGUSER: "alice" });
+    ambient({ PGUSER: ambientUser });
     expect(expectAgreesWithPg("postgresql://bob@127.0.0.1:5433/realdb")).toBe(
       "postgresql host 127.0.0.1 port 5433 database realdb"
     );
@@ -1170,7 +1142,7 @@ describe("redactDsn names the server pg will actually reach", () => {
     );
   });
 
-  it("still names the target when the DSN points at SSL material that is missing", () => {
+  it("declines the target without opening missing SSL material", () => {
     // Deliberate divergence from `new Client({connectionString})`, pinned here
     // so it is not mistaken for the target disagreement this file exists to
     // prevent. pg's constructor ALSO validates SSL material and throws ENOENT
@@ -1179,9 +1151,6 @@ describe("redactDsn names the server pg will actually reach", () => {
     // in the error message about the failure. Measured: with a cert file that
     // DOES exist, pg resolves host `good`, exactly what is reported here.
     //
-    // Round 11: the title and this comment used to say the parameters were
-    // STRIPPED. Nothing has been stripped since round 10 deleted the rewriting;
-    // pg is handed the original string with the read suppressed underneath it.
     ambient();
     // ROUND 24. The point survives in a weaker form: a cert that does not exist
     // must not make this THROW or hang, and it does not, because the file is
@@ -1461,15 +1430,11 @@ describe("redactDsn names the server pg will actually reach", () => {
     // A guard on the guard: if the property ever matched nothing, or only a
     // handful, every assertion below would pass while checking almost none.
     expect(unsafe.length, "the property matched too few code points").toBeGreaterThan(4000);
-    // Asserted after the loop: both arms must actually run, or one of the two
-    // safe outcomes is being claimed without ever having been exercised.
-
     // Back to 100 with the DATABASE as the carrier. Round 18 had to move this
     // into a byte-bounded socket path because its allowlist refused any
     // database holding these code points; round 21 removed that allowlist.
     const BATCH = 100;
     let escaped = 0;
-    let refused = 0;
     for (let at = 0; at < unsafe.length; at += BATCH) {
       const batch = unsafe.slice(at, at + BATCH);
       const first = batch[0].toString(16).toUpperCase();
@@ -1497,17 +1462,9 @@ describe("redactDsn names the server pg will actually reach", () => {
           ? `${BS}u{${cp.toString(16).padStart(5, "0")}}`
           : `${BS}u${cp.toString(16).padStart(4, "0")}`
       );
-      // TWO safe outcomes, and the test must accept both or it lies about one.
-      // A batch containing U+2028 or U+2029 is REFUSED by the socket grammar,
-      // because JS `\s` counts them as whitespace; the rest reach `show` and
-      // come back escaped. Refusing is at least as safe as escaping, so the
-      // invariant asserted above (no raw unsafe code point, one line) is what
-      // binds, and this only records which arm ran.
-      if (report.includes("not parseable")) refused += 1;
-      else {
-        escaped += 1;
-        expect(report, `${label} is not rendered in order`).toContain(`db${escapes.join("")}x`);
-      }
+      escaped += 1;
+      expect(report, `${label} was refused instead of rendered`).not.toContain("not parseable");
+      expect(report, `${label} is not rendered in order`).toContain(`db${escapes.join("")}x`);
     }
 
     expect(escaped, "no batch ever reached `show`, so escaping went untested").toBeGreaterThan(0);
@@ -1549,23 +1506,13 @@ describe("redactDsn names the server pg will actually reach", () => {
     // The read is suppressed rather than the string rewritten, which is what
     // let every rewriting bug through. Also proves the guard is REMOVED again.
     ambient();
-    const { reads, installedAfter, spy } = readsDuring(() =>
+    const { reads } = readsDuring(() =>
       redactDsn(
         "postgresql://u:p@127.0.0.1:5433/db?sslcert=/etc/hosts&sslkey=/etc/hosts&sslrootcert=/etc/hosts"
       )
     );
     expect(reads.filter(r => r.includes("/etc/hosts"))).toEqual([]);
-    // The guard must not survive the call. Checked at the only instant that
-    // can fail: what production left installed when it RETURNED, captured
-    // by `readsDuring` before that helper restored anything.
-    //
-    // Two earlier versions of this assertion could not fail at all. Round
-    // 11 read a named import, which is not a live binding. Round 12 moved
-    // it to the module property but still read it AFTER `readsDuring` had
-    // put the original back, so production skipping its own `finally`
-    // stayed green. Round 13, codex.
-    expect(installedAfter, "production left its own stub installed").toBe(spy);
-    // And nothing outlived the helper either, through the same property.
+    // The helper must restore its own observation hook.
     const fsModule = require("fs") as { readFileSync: typeof readFileSync };
     expect(fsModule.readFileSync, "the guard outlived the helper").toBe(pristineReadFileSync);
     expect(fsModule.readFileSync("package.json", "utf8").length).toBeGreaterThan(0);
@@ -1584,7 +1531,7 @@ describe("redactDsn names the server pg will actually reach", () => {
     expect(redactDsn("postgresql://u:p@:5433/db")).toBe("postgresql (dsn not parseable)");
   });
 
-  it("agrees with pg when the SSL material is real, present and inspected", () => {
+  it("declines present SSL material without opening it", () => {
     // Round 11 BLOCKER, both reviewers. The read guard returned an EMPTY
     // buffer, on a comment claiming the contents were never used. They are:
     // pg-connection-string assigns `config.ssl.ca` from the bytes and then

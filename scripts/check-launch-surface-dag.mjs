@@ -153,6 +153,37 @@ function sameStrings(left, right) {
   return left.length === right.length && left.every((value, index) => value === right[index]);
 }
 
+/** Preserve source layout while making comment text unavailable as evidence. */
+function withoutComments(sourceText) {
+  const chars = sourceText.split("");
+  const sourceFile = ts.createSourceFile(
+    "flow-evidence.ts",
+    sourceText,
+    ts.ScriptTarget.Latest,
+    true
+  );
+  const ranges = new Map();
+  const collect = range => {
+    if (range) ranges.set(`${range.pos}:${range.end}`, range);
+  };
+  const visit = node => {
+    for (const range of ts.getLeadingCommentRanges(sourceText, node.getFullStart()) ?? []) {
+      collect(range);
+    }
+    for (const range of ts.getTrailingCommentRanges(sourceText, node.getEnd()) ?? []) {
+      collect(range);
+    }
+    for (const child of node.getChildren(sourceFile)) visit(child);
+  };
+  visit(sourceFile);
+  for (const range of ranges.values()) {
+    for (let index = range.pos; index < range.end; index += 1) {
+      if (chars[index] !== "\n" && chars[index] !== "\r") chars[index] = " ";
+    }
+  }
+  return chars.join("");
+}
+
 /**
  * Check the launch-surface map and return every problem instead of exiting.
  * Tests inject a temporary root so fail-open mutations exercise this exact code.
@@ -277,7 +308,7 @@ export function checkLaunchSurfaceDag({ rootDir = process.cwd(), dagPath = DAG_P
           continue;
         }
         flowsChecked++;
-        if (!readSource(hop.file).includes(hop.evidence)) {
+        if (!withoutComments(readSource(hop.file)).includes(hop.evidence)) {
           problems.push(`${hopLabel}: ${hop.file} no longer carries "${hop.evidence}"`);
         }
       }

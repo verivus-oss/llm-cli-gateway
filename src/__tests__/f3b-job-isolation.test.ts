@@ -225,9 +225,10 @@ describe("F3b-2 job / request ownership isolation", () => {
     }
 
     await seedJobWithHostEvidence("job-local-host-evidence", "local");
-    const local = await call("job_result", {
+    const local = await call("llm_job_result", {
       jobId: "job-local-host-evidence",
       maxChars: 200000,
+      rawOutput: true,
     });
     expect(local.result.executionContext.cwd.path).toBe("/private/alice/workspace");
     expect(local.result.nativeTranscript).toBe("private ATIF transcript");

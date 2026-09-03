@@ -35,26 +35,36 @@ const LEDGER_TABLE = "schema_migrations";
 const TRANSCRIPT_ERA = 22;
 
 const SQL_IDENTIFIER = String.raw`(?:"(?:[^"]|"")*"|[a-zA-Z_][\w$]*)`;
-const TABLE_TARGET = new RegExp(
-  String.raw`\b(?:` +
-    String.raw`(?:CREATE\s+TABLE(?:\s+IF\s+NOT\s+EXISTS)?|ALTER\s+TABLE(?:\s+IF\s+EXISTS)?)\s+(${SQL_IDENTIFIER})` +
-    String.raw`|CREATE\s+(?:UNIQUE\s+)?INDEX(?:\s+CONCURRENTLY)?(?:\s+IF\s+NOT\s+EXISTS)?\s+${SQL_IDENTIFIER}\s+ON\s+(${SQL_IDENTIFIER})` +
-    String.raw`)`,
-  "gi"
-);
+const QUALIFIED_IDENTIFIER = String.raw`${SQL_IDENTIFIER}(?:\s*\.\s*${SQL_IDENTIFIER})?`;
+const TABLE_TARGETS = [
+  new RegExp(
+    String.raw`\b(?:CREATE\s+TABLE(?:\s+IF\s+NOT\s+EXISTS)?|ALTER\s+TABLE(?:\s+IF\s+EXISTS)?|DROP\s+TABLE(?:\s+IF\s+EXISTS)?|TRUNCATE(?:\s+TABLE)?|INSERT\s+INTO|UPDATE(?!\s+(?:ON|OF)\b)|DELETE\s+FROM|REFERENCES)\s+(${QUALIFIED_IDENTIFIER})`,
+    "gi"
+  ),
+  new RegExp(
+    String.raw`\bCREATE\s+(?:UNIQUE\s+)?INDEX(?:\s+CONCURRENTLY)?(?:\s+IF\s+NOT\s+EXISTS)?\s+${SQL_IDENTIFIER}\s+ON\s+(${QUALIFIED_IDENTIFIER})`,
+    "gi"
+  ),
+  new RegExp(
+    String.raw`\bCREATE\s+(?:CONSTRAINT\s+)?TRIGGER\s+${SQL_IDENTIFIER}[\s\S]*?\bON\s+(${QUALIFIED_IDENTIFIER})`,
+    "gi"
+  ),
+  new RegExp(String.raw`\bCOMMENT\s+ON\s+TABLE\s+(${QUALIFIED_IDENTIFIER})`, "gi"),
+];
 
 function identifierText(identifier) {
-  return identifier.startsWith('"')
-    ? identifier.slice(1, -1).replaceAll('""', '"')
-    : identifier.toLowerCase();
+  const table = identifier.split(".").at(-1).trim();
+  return table.startsWith('"') ? table.slice(1, -1).replaceAll('""', '"') : table.toLowerCase();
 }
 
 /** Every table a migration creates, alters or indexes, ledger receipt aside. */
 export function tableTargets(sql) {
   const targets = new Set();
-  for (const match of sql.matchAll(TABLE_TARGET)) {
-    const table = identifierText(match[1] ?? match[2]);
-    if (table !== LEDGER_TABLE) targets.add(table);
+  for (const pattern of TABLE_TARGETS) {
+    for (const match of sql.matchAll(pattern)) {
+      const table = identifierText(match[1]);
+      if (table !== LEDGER_TABLE) targets.add(table);
+    }
   }
   return targets;
 }

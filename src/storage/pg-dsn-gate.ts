@@ -97,9 +97,8 @@ export function namesSslFileParameter(dsn: string): boolean {
   const lower = dsn.toLowerCase();
   const prefix = POSTGRES_DSN_PREFIXES.find(candidate => lower.startsWith(candidate));
   if (prefix === undefined) return false;
-  return queryPairs(dsn.slice(prefix.length)).some(
-    ([key, value]) => SSL_FILE_KEYS.has(key) && value.length > 0
-  );
+  const resolved = new Map(queryPairs(dsn.slice(prefix.length)));
+  return [...SSL_FILE_KEYS].some(key => (resolved.get(key)?.length ?? 0) > 0);
 }
 
 /** First `/`, `?` or `#`. All three end the authority, and computing that in
@@ -123,6 +122,8 @@ function decodeKey(raw: string): string {
 function queryPairs(rest: string): Array<[string, string]> {
   const at = rest.indexOf("?");
   if (at < 0) return [];
+  const firstHash = rest.indexOf("#");
+  if (firstHash >= 0 && firstHash < at) return [];
   const hash = rest.indexOf("#", at);
   const query = hash < 0 ? rest.slice(at + 1) : rest.slice(at + 1, hash);
   if (query.length === 0) return [];

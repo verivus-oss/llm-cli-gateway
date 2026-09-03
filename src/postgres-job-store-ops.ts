@@ -345,6 +345,13 @@ export function createPostgresJobStoreOps(
   const withClient = <T>(fn: (client: StorageConnection) => Promise<T>): Promise<T> =>
     driver.transaction("write", fn);
 
+  async function rebaseExistingJobExpiryForUnboundedRetention(): Promise<void> {
+    if (config.retentionMs !== null) return;
+    await poolAffected("UPDATE jobs SET expires_at = $1 WHERE expires_at <> $1", [
+      config.farFutureIso,
+    ]);
+  }
+
   async function init(): Promise<void> {
     // The pool, its timeouts and its "error" listener moved to the driver's pool
     // factory, where they are carried as stated parity rather than rebuilt here.
@@ -353,6 +360,7 @@ export function createPostgresJobStoreOps(
     if (await isJobStoreSchemaReady()) {
       await backfillLegacyOwnerHostnames();
       await scrubLegacyPersonalKitJobMaterial();
+      await rebaseExistingJobExpiryForUnboundedRetention();
       return;
     }
     try {
@@ -573,6 +581,7 @@ export function createPostgresJobStoreOps(
     }
     await backfillLegacyOwnerHostnames();
     await scrubLegacyPersonalKitJobMaterial();
+    await rebaseExistingJobExpiryForUnboundedRetention();
   }
 
   async function op(method: string, args: any[]): Promise<unknown> {
@@ -1042,7 +1051,7 @@ export function createPostgresJobStoreOps(
                capture_error = $8
            WHERE id = $1
              AND owner_instance = $9
-             AND status IN ('completed', 'failed', 'canceled', 'orphaned')`,
+             AND capture_status IS NULL`,
           [
             input.id,
             input.captureStatus,

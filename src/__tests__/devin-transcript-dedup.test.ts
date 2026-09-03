@@ -13,14 +13,17 @@
  */
 import { existsSync, mkdtempSync, rmSync, utimesSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import {
   devinTranscriptDedupArgs,
+  devinTranscriptDirectory,
   devinTranscriptPath,
   DEVIN_TRANSCRIPT_DIRNAME,
   DEVIN_TRANSCRIPT_STALE_MS,
+  ensureDevinTranscriptPath,
   pruneStaleDevinTranscripts,
+  releaseGatewayDevinTranscriptPath,
   removeInlineDevinTranscript,
 } from "../devin-transcript.js";
 import { prepareDevinRequest, resolveGatewayServerRuntime } from "../index.js";
@@ -113,9 +116,18 @@ describe("the prepared dedup identity", () => {
 
   it("carries the minted path in the launched argv, and only there", () => {
     const prep = prepFor("corr-one");
-    expect(prep.args).toContain(devinTranscriptPath("corr-one", fakeHome));
-    expect(prep.dedupArgs).not.toContain(devinTranscriptPath("corr-one", fakeHome));
+    const at = prep.args.indexOf("--export");
+    const minted = prep.args[at + 1];
+    expect(dirname(minted)).toBe(devinTranscriptDirectory(fakeHome));
+    expect(prep.dedupArgs).not.toContain(minted);
     expect(prep.args.join(" ")).toContain(DEVIN_TRANSCRIPT_DIRNAME);
+  });
+
+  it("mints a distinct path for concurrent uses of one correlation id", () => {
+    const a = prepFor("shared-correlation");
+    const b = prepFor("shared-correlation");
+    expect(a.args[a.args.indexOf("--export") + 1]).not.toBe(b.args[b.args.indexOf("--export") + 1]);
+    expect(a.dedupArgs).toEqual(b.dedupArgs);
   });
 
   it("keeps a CALLER-supplied export path in the identity", () => {
@@ -156,7 +168,8 @@ describe("gateway-owned Devin transcript cleanup", () => {
 
   it("removes only the exact gateway path present in an inline invocation", () => {
     const correlationId = "inline-export";
-    const path = devinTranscriptPath(correlationId, fakeHome);
+    const path = ensureDevinTranscriptPath(correlationId, fakeHome);
+    if (!path) throw new Error("failed to mint transcript path");
     writeFileSync(path, "inline");
 
     expect(removeInlineDevinTranscript(correlationId, ["--export", "/tmp/other"], fakeHome)).toBe(
@@ -165,5 +178,27 @@ describe("gateway-owned Devin transcript cleanup", () => {
     expect(existsSync(path)).toBe(true);
     expect(removeInlineDevinTranscript(correlationId, ["--export", path], fakeHome)).toBe(true);
     expect(existsSync(path)).toBe(false);
+  });
+
+  it("does not remove a caller-selected lookalike path", () => {
+    const path = devinTranscriptPath("caller-lookalike", fakeHome);
+    writeFileSync(path, "caller");
+    expect(removeInlineDevinTranscript("caller-lookalike", ["--export", path], fakeHome)).toBe(
+      false
+    );
+    expect(existsSync(path)).toBe(true);
+  });
+
+  it("does not prune an active gateway export", () => {
+    const now = Date.now();
+    const path = ensureDevinTranscriptPath("active-export", fakeHome);
+    if (!path) throw new Error("failed to mint transcript path");
+    writeFileSync(path, "active");
+    const old = new Date(now - DEVIN_TRANSCRIPT_STALE_MS - 1);
+    utimesSync(path, old, old);
+    expect(pruneStaleDevinTranscripts(now, fakeHome).removed).toBe(0);
+    expect(existsSync(path)).toBe(true);
+    releaseGatewayDevinTranscriptPath(path);
+    expect(pruneStaleDevinTranscripts(now, fakeHome).removed).toBe(1);
   });
 });

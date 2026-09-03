@@ -10,7 +10,7 @@ import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 import { STEPS, NOT_IN_GATE } from "./check-steps.mjs";
-import { runSteps, summarise } from "./run-steps.mjs";
+import { runSteps, selectSteps, summarise } from "./run-steps.mjs";
 
 const ROOT = join(import.meta.dirname, "..");
 const pkg = JSON.parse(readFileSync(join(ROOT, "package.json"), "utf8"));
@@ -54,6 +54,20 @@ describe("a failing step cannot hide an independent one", () => {
 });
 
 describe("a step that did not run is not a pass", () => {
+  it("includes transitive prerequisites in an only selection", () => {
+    const steps = [
+      { name: "build", script: "build" },
+      { name: "generate", script: "generate", needs: ["build"] },
+      { name: "publish", script: "publish", needs: ["generate"] },
+      { name: "unrelated", script: "unrelated" },
+    ];
+    expect(selectSteps(steps, ["publish"]).map(step => step.name)).toEqual([
+      "build",
+      "generate",
+      "publish",
+    ]);
+  });
+
   it("marks a dependant SKIPPED when its dependency fails, and names the blocker", async () => {
     const steps = [
       { name: "build", script: "build" },
@@ -169,22 +183,33 @@ describe("the declared gate covers the tree", () => {
 
   it("drops nothing the && chain ran", () => {
     // A refactor that quietly loses a step is worse than the chain it replaces.
-    // Pinned against the chain as it stood at bd5aaad, read from git rather
-    // than retyped. ADDING is allowed and DROPPING is not, so this is a subset
-    // test and not an equality one: the ratchet above is what forces additions
-    // to be deliberate.
-    const previous = execFileSync("git", ["show", "bd5aaad:package.json"], {
-      cwd: ROOT,
-      encoding: "utf8",
-    });
-    const before = JSON.parse(previous)
-      .scripts.check.split("&&")
-      .map(s =>
-        s
-          .trim()
-          .replace(/^npm run /, "")
-          .replace(/^npm /, "")
-      );
+    // This fixture is the complete pre-runner chain. Keeping it in the test
+    // makes the gate work in shallow source archives that do not carry the
+    // historical commit where the chain last existed.
+    const before = [
+      "build",
+      "lint",
+      "format:check",
+      "provider:surfaces:check",
+      "storage:port:check",
+      "transcript:schema:parity:check",
+      "promise:conditions:check",
+      "capability:floor:check",
+      "seed:check",
+      "dag:launch-surface:check",
+      "plans:density:check",
+      "plans:citations:check",
+      "upstream:contracts",
+      "site:version:check",
+      "site:generate:check",
+      "site:validate",
+      "interface:floor:check",
+      "surface:invariance:check",
+      "test:collection:check",
+      "test",
+      "security:audit",
+      "verify:no-internal-mcp:check",
+    ];
     const now = new Set(STEPS.map(s => s.script));
     const dropped = before.filter(name => !now.has(name));
     expect(dropped, `the chain ran these and the runner does not: ${dropped.join(", ")}`).toEqual(

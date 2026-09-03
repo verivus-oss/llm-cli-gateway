@@ -22,14 +22,17 @@
  * docs/evidence.
  */
 import ts from "typescript";
+import { createHash } from "node:crypto";
 import { execFileSync, spawnSync } from "node:child_process";
 import { appendFileSync, readFileSync, writeFileSync } from "node:fs";
+import { isAbsolute, resolve } from "node:path";
 
 const [mode, ...rest] = process.argv.slice(2);
 
 /** Mutation shapes. Each is something a reviewer would call "a control". */
 function enumerateFile(file, add) {
   const text = readFileSync(file, "utf8");
+  const sourceSha256 = createHash("sha256").update(text).digest("hex");
   const sf = ts.createSourceFile(file, text, ts.ScriptTarget.ES2022, true);
   const src = node => text.slice(node.getStart(sf), node.getEnd());
   const line = node => sf.getLineAndCharacterOfPosition(node.getStart(sf)).line + 1;
@@ -38,7 +41,17 @@ function enumerateFile(file, add) {
     sf.getLineAndCharacterOfPosition(b).line + 1,
   ];
   const emit = (kind, label, start, end, replacement) =>
-    add({ file, kind, label, start, end, replacement, ...spanOf(span(start, end)) });
+    add({
+      file,
+      kind,
+      label,
+      start,
+      end,
+      original: text.slice(start, end),
+      replacement,
+      sourceSha256,
+      ...spanOf(span(start, end)),
+    });
   const spanOf = ([l1, l2]) => ({ l1, l2 });
 
   const walk = node => {
@@ -265,6 +278,13 @@ if (mode === "enumerate") {
   const [outFile, ...files] = argv;
   const all = [];
   for (const f of files) enumerateFile(f, m => all.push(m));
+  let measuredCommit = null;
+  try {
+    measuredCommit = execFileSync("git", ["rev-parse", "HEAD"], { encoding: "utf8" }).trim();
+  } catch {
+    // An external fixture may not live in a Git work tree.
+  }
+  for (const mutation of all) mutation.measuredCommit = measuredCommit;
 
   // Scope: with `--diff`, a control counts if it lies inside the diff under
   // review. A file the diff does not touch at all is taken WHOLE, and so is one
@@ -324,6 +344,16 @@ if (!Number.isInteger(TOTAL) || TOTAL <= 0) {
   console.error("--total <n> is required: the number of tests the UNMUTATED tree reports.");
   process.exit(2);
 }
+if (
+  !Number.isInteger(SHARDS) ||
+  SHARDS <= 0 ||
+  !Number.isInteger(SHARD) ||
+  SHARD < 0 ||
+  SHARD >= SHARDS
+) {
+  console.error("--shard must be an integer from zero through --shards minus one.");
+  process.exit(2);
+}
 
 const clean = () =>
   execFileSync("git", ["status", "--porcelain"], { cwd: CWD, encoding: "utf8" }).trim();
@@ -347,11 +377,33 @@ function runSuite() {
   return { ran: green || failed, passed: green, line };
 }
 
-function trial(file, start, end, replacement) {
-  const original = readFileSync(`${CWD}/${file}`, "utf8");
-  writeFileSync(`${CWD}/${file}`, original.slice(0, start) + replacement + original.slice(end));
-  const result = runSuite();
-  execFileSync("git", ["checkout", "--", file], { cwd: CWD });
+function mutationPath(file) {
+  return isAbsolute(file) ? file : resolve(CWD, file);
+}
+
+function trial(mutation) {
+  const file = mutationPath(mutation.file);
+  const original = readFileSync(file, "utf8");
+  const sourceSha256 = createHash("sha256").update(original).digest("hex");
+  if (mutation.sourceSha256 && mutation.sourceSha256 !== sourceSha256) {
+    throw new Error(`source hash changed before mutating ${mutation.file}`);
+  }
+  if (
+    mutation.original !== undefined &&
+    original.slice(mutation.start, mutation.end) !== mutation.original
+  ) {
+    throw new Error(`source span changed before mutating ${mutation.file}`);
+  }
+  let result;
+  try {
+    writeFileSync(
+      file,
+      original.slice(0, mutation.start) + mutation.replacement + original.slice(mutation.end)
+    );
+    result = runSuite();
+  } finally {
+    writeFileSync(file, original);
+  }
   if (clean() !== "") throw new Error(`tree dirty after mutating ${file}`);
   return result;
 }
@@ -368,8 +420,16 @@ if (!controlFile) {
   console.error("no mutations to run");
   process.exit(2);
 }
-const controlText = readFileSync(`${CWD}/${controlFile}`, "utf8");
-const noop = trial(controlFile, 0, 0, "\n");
+const controlText = readFileSync(mutationPath(controlFile), "utf8");
+const controlSha256 = createHash("sha256").update(controlText).digest("hex");
+const noop = trial({
+  file: controlFile,
+  start: 0,
+  end: 0,
+  original: "",
+  replacement: "\n",
+  sourceSha256: controlSha256,
+});
 if (!noop.ran) {
   console.error(`shard ${SHARD}: control did not RUN (${noop.line}); the harness is broken.`);
   process.exit(2);
@@ -378,7 +438,14 @@ if (!noop.passed) {
   console.error(`shard ${SHARD}: control was KILLED (${noop.line}); the tree is not green.`);
   process.exit(2);
 }
-const kill = trial(controlFile, 0, controlText.length, "export const broken = 1;\n");
+const kill = trial({
+  file: controlFile,
+  start: 0,
+  end: controlText.length,
+  original: controlText,
+  replacement: "export const broken = 1;\n",
+  sourceSha256: controlSha256,
+});
 if (kill.passed) {
   console.error(
     `shard ${SHARD}: emptying ${controlFile} killed nothing; the harness cannot detect a kill.`
@@ -389,7 +456,7 @@ console.error(`shard ${SHARD}: controls ok (no-op survives, gutted file killed)`
 
 const muts = JSON.parse(readFileSync(mutFile, "utf8")).filter((_, i) => i % SHARDS === SHARD);
 for (const m of muts) {
-  const result = trial(m.file, m.start, m.end, m.replacement);
+  const result = trial(m);
   const verdict = !result.ran ? "invalid" : result.passed ? "SURVIVES" : "killed";
   appendFileSync(outFile, `${JSON.stringify({ ...m, verdict, tests: result.line })}\n`);
   console.error(

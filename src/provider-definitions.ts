@@ -463,7 +463,7 @@ export const PROVIDER_TARGET_VERSIONS: Record<CliType, string> = {
   // (see its comment) and the tool now writes this spelling itself.
   grok: "grok 1.0.13 (5e9a58528b76)",
   mistral: "vibe 2.24.5",
-  devin: "devin 3000.6.12 (fc947ca5)",
+  devin: "devin 3000.6.14 (18033302)",
   cursor: "cursor-agent 2026.09.02-c22c1a3",
 };
 

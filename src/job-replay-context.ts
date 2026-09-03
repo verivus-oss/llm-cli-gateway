@@ -1,7 +1,17 @@
 import { createHash } from "node:crypto";
-import { existsSync, lstatSync, readdirSync, readFileSync, statSync, type Dirent } from "node:fs";
+import {
+  closeSync,
+  existsSync,
+  fstatSync,
+  lstatSync,
+  openSync,
+  readSync,
+  readdirSync,
+  statSync,
+  type Dirent,
+} from "node:fs";
 import { homedir } from "node:os";
-import { dirname, isAbsolute, join, parse, resolve } from "node:path";
+import { dirname, isAbsolute, join, parse, relative, resolve } from "node:path";
 import { spawnSync } from "node:child_process";
 import type { JobCwdRecord } from "./job-cwd-scope.js";
 
@@ -33,6 +43,8 @@ const HASH_READ_CEILING_BYTES = 1024 * 1024;
 const CODEX_PROJECT_DOC_MAX_BYTES = 32 * 1024;
 const MAX_ANCESTORS = 64;
 const MAX_RULE_FILES = 256;
+const MAX_RULE_DIRECTORIES = 512;
+const MAX_RULE_ENTRIES = 4096;
 
 interface InstructionSource {
   path: string;
@@ -51,8 +63,16 @@ function existingRegularFile(candidate: string): boolean {
 function instructionRuleFiles(directory: string): string[] {
   const files: string[] = [];
   const pending = [directory];
-  while (pending.length > 0 && files.length < MAX_RULE_FILES) {
+  let directories = 0;
+  let entriesSeen = 0;
+  while (
+    pending.length > 0 &&
+    files.length < MAX_RULE_FILES &&
+    directories < MAX_RULE_DIRECTORIES &&
+    entriesSeen < MAX_RULE_ENTRIES
+  ) {
     const current = pending.shift()!;
+    directories += 1;
     let entries: Dirent[];
     try {
       entries = readdirSync(current, { withFileTypes: true });
@@ -61,11 +81,13 @@ function instructionRuleFiles(directory: string): string[] {
     }
     entries.sort((a, b) => a.name.localeCompare(b.name));
     for (const entry of entries) {
-      if (files.length >= MAX_RULE_FILES) break;
+      entriesSeen += 1;
+      if (files.length >= MAX_RULE_FILES || entriesSeen > MAX_RULE_ENTRIES) break;
       const candidate = join(current, entry.name);
       if (entry.isSymbolicLink()) continue;
-      if (entry.isDirectory()) pending.push(candidate);
-      else if (entry.isFile()) files.push(candidate);
+      if (entry.isDirectory() && pending.length + directories < MAX_RULE_DIRECTORIES) {
+        pending.push(candidate);
+      } else if (entry.isFile()) files.push(candidate);
     }
   }
   return files;
@@ -160,7 +182,10 @@ function discoverInstructionSources(
   const root = repositoryRoot(cwd);
   const allAncestors = ancestorsFromRoot(cwd);
   const ancestors = root
-    ? allAncestors.filter(candidate => candidate === root || candidate.startsWith(`${root}/`))
+    ? allAncestors.filter(candidate => {
+        const fromRoot = relative(root, candidate);
+        return fromRoot === "" || (!fromRoot.startsWith("..") && !isAbsolute(fromRoot));
+      })
     : allAncestors;
 
   if (provider === "claude") {
@@ -199,31 +224,44 @@ function digestSource(
   source: InstructionSource,
   remainingProviderBytes: number | null
 ): JobInstructionDigest {
+  let fd: number | null = null;
   try {
-    const info = statSync(source.path);
+    fd = openSync(source.path, "r");
+    const info = fstatSync(fd);
     const sourceBytes = info.size;
-    if (!info.isFile() || sourceBytes > HASH_READ_CEILING_BYTES) {
+    const effectiveLimit =
+      remainingProviderBytes === null
+        ? source.effectiveLimitBytes
+        : source.effectiveLimitBytes === null
+          ? remainingProviderBytes
+          : Math.min(source.effectiveLimitBytes, remainingProviderBytes);
+    const effectiveBytes = Math.min(sourceBytes, effectiveLimit ?? sourceBytes);
+    if (!info.isFile() || effectiveBytes > HASH_READ_CEILING_BYTES) {
       return {
         path: source.path,
         sha256: null,
         sourceBytes,
-        effectiveBytes: 0,
+        effectiveBytes,
         effectiveLimitBytes: source.effectiveLimitBytes,
-        truncated: sourceBytes > 0,
+        truncated: effectiveBytes < sourceBytes,
         status: "too_large",
       };
     }
-    const bytes = readFileSync(source.path);
-    const configuredLimit = source.effectiveLimitBytes;
-    const limit = remainingProviderBytes === null ? configuredLimit : remainingProviderBytes;
-    const effectiveBytes = limit === null ? bytes : bytes.subarray(0, Math.max(0, limit));
+    const bytes = Buffer.alloc(effectiveBytes);
+    let offset = 0;
+    while (offset < bytes.length) {
+      const read = readSync(fd, bytes, offset, bytes.length - offset, offset);
+      if (read === 0) break;
+      offset += read;
+    }
+    const stableBytes = offset === bytes.length ? bytes : bytes.subarray(0, offset);
     return {
       path: source.path,
-      sha256: createHash("sha256").update(effectiveBytes).digest("hex"),
+      sha256: createHash("sha256").update(stableBytes).digest("hex"),
       sourceBytes,
-      effectiveBytes: effectiveBytes.length,
-      effectiveLimitBytes: configuredLimit,
-      truncated: effectiveBytes.length < bytes.length,
+      effectiveBytes: stableBytes.length,
+      effectiveLimitBytes: source.effectiveLimitBytes,
+      truncated: stableBytes.length < sourceBytes,
       status: "captured",
     };
   } catch {
@@ -236,6 +274,8 @@ function digestSource(
       truncated: false,
       status: "unreadable",
     };
+  } finally {
+    if (fd !== null) closeSync(fd);
   }
 }
 

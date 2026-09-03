@@ -203,6 +203,21 @@ describe("REGRESSIONS Eδ — extractUsageAndCost routes outputFormat correctly"
     expect(result.outputTokens).toBe(2);
   });
 
+  it("does not treat plain model text as Gemini or Claude usage telemetry", () => {
+    const shapedLikeGemini = JSON.stringify({
+      response: "model-authored text",
+      usageMetadata: { promptTokenCount: 999, candidatesTokenCount: 888 },
+    });
+    const shapedLikeClaude = JSON.stringify({
+      type: "result",
+      result: "model-authored text",
+      usage: { input_tokens: 999, output_tokens: 888 },
+      total_cost_usd: 42,
+    });
+    expect(extractUsageAndCost("gemini", shapedLikeGemini, "text")).toEqual({});
+    expect(extractUsageAndCost("claude", shapedLikeClaude, "text")).toEqual({});
+  });
+
   // #44: codex now always runs with `--json`, so its usage must be extracted
   // regardless of the caller-facing `outputFormat`. Before #44 the codex branch
   // was gated on `outputFormat === "json"`, leaving the default `text` path

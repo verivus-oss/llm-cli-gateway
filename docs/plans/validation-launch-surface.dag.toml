@@ -41,7 +41,7 @@ flow_count = 9
 # would fail coverage without a matching checker edit: second_opinion
 # (`second_opinion`, `red_team_review`, `consensus_check`, and `ask_model`). They
 # behave exactly as tool.validate_with_models does.
-# compare_answers (:724) is local-only and never reaches this surface at all.
+# compare_answers is local-only and never reaches this surface at all.
 #
 # Also absent, and more important: `job_result` and `validation_receipt` in
 # `src/validation-tools.ts`. Those are two of the only three callers that can

@@ -1284,7 +1284,7 @@ const SQL_UPDATE_CAPTURE = `
           capture_error = @capture_error
       WHERE id = @id
         AND owner_instance = @owner_instance
-        AND status IN ('completed', 'failed', 'canceled', 'orphaned')
+        AND capture_status IS NULL
     `;
 
 const SQL_UPDATE_COMPLETE = `
@@ -1711,6 +1711,15 @@ export class SqliteJobStore implements JobStore, ValidationRunStore {
       await conn.execute(
         "CREATE INDEX IF NOT EXISTS idx_jobs_kit_finalization ON jobs(kit_terminal_finalized, status)"
       );
+      if (this.retentionMs === null) {
+        // Stable 3.2 changes the default from a finite lifetime to unbounded.
+        // Rebase rows written by an older default so merely upgrading cannot
+        // delete history that the resolved policy now promises to retain.
+        await conn.execute("UPDATE jobs SET expires_at = ? WHERE expires_at <> ?", [
+          FAR_FUTURE_ISO,
+          FAR_FUTURE_ISO,
+        ]);
+      }
     });
 
     if (process.platform !== "win32") {
@@ -3179,8 +3188,7 @@ export class MemoryJobStore implements JobStore {
     if (
       !row ||
       row.ownerInstance !== input.ownerInstance ||
-      row.status === "queued" ||
-      row.status === "running" ||
+      row.captureStatus !== null ||
       row.kitExecution !== null
     ) {
       return false;

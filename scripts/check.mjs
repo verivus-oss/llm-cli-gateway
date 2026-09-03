@@ -17,7 +17,7 @@ import { spawn } from "node:child_process";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { STEPS } from "./check-steps.mjs";
-import { runSteps, summarise } from "./run-steps.mjs";
+import { runSteps, selectSteps, summarise } from "./run-steps.mjs";
 
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
 const argv = process.argv.slice(2);
@@ -38,12 +38,13 @@ if (flag("list")) {
   process.exit(0);
 }
 
-const selected = only.length > 0 ? STEPS.filter(s => only.includes(s.name)) : STEPS;
-if (only.length > 0 && selected.length !== only.length) {
+const requested = only.length > 0 ? STEPS.filter(s => only.includes(s.name)) : STEPS;
+if (only.length > 0 && requested.length !== only.length) {
   const known = new Set(STEPS.map(s => s.name));
   console.error(`unknown step(s): ${only.filter(n => !known.has(n)).join(", ")}`);
   process.exit(2);
 }
+const selected = selectSteps(STEPS, only);
 
 const execute = step =>
   new Promise(resolve => {

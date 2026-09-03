@@ -93,7 +93,33 @@ describe("job replay context", () => {
     ).toMatchObject({
       status: "too_large",
       sha256: null,
+      effectiveBytes: 1024 * 1024 + 1,
+    });
+  });
+
+  it("charges an oversized Codex source against the aggregate provider budget", () => {
+    const root = tempRoot();
+    const home = join(root, "home");
+    const repo = join(root, "repo");
+    mkdirSync(join(home, ".codex"), { recursive: true });
+    mkdirSync(repo, { recursive: true });
+    writeFileSync(join(home, ".codex", "AGENTS.md"), Buffer.alloc(2 * 1024 * 1024, "g"));
+    writeFileSync(join(repo, "AGENTS.md"), "project\n");
+
+    const captured = captureJobReplayContext(
+      "codex",
+      { scope: "caller", path: repo, workspaceAlias: null },
+      false,
+      { home }
+    );
+    expect(captured?.instructionFiles[0]).toMatchObject({
+      status: "captured",
+      effectiveBytes: 32 * 1024,
+      truncated: true,
+    });
+    expect(captured?.instructionFiles[1]).toMatchObject({
       effectiveBytes: 0,
+      truncated: true,
     });
   });
 });
