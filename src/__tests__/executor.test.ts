@@ -11,6 +11,7 @@ import {
   unregisterProcessGroup,
   launchContextEnv,
 } from "../executor.js";
+import { withLaunchContext } from "../launch-context.js";
 import { spawn } from "child_process";
 import type { ChildProcess } from "child_process";
 import { delimiter, win32 } from "path";
@@ -160,6 +161,28 @@ describe("executeCli", () => {
         }
       );
       expect(result.stdout.trim()).toBe("[unset][unset]:claude");
+    });
+
+    it("does not mutate the inherited environment while stripping its result", () => {
+      // The strip works on a copy: the caller's object must keep its keys, or
+      // a later spawn from the same env would silently lose names it expected
+      // to be able to inspect. A review mutant that dropped the copy survived
+      // until this assertion existed.
+      const input: NodeJS.ProcessEnv = {
+        KEEP_ME: "kept",
+        LLM_GATEWAY_CORRELATION_ID: "forged-correlation",
+        LLM_GATEWAY_JOB_ID: "forged-job",
+        LLM_GATEWAY_SESSION_ID: "forged-session",
+        LLM_GATEWAY_PROVIDER: "forged-provider",
+      };
+      const before = { ...input };
+      const result = withLaunchContext(input, { correlationId: "real", provider: "codex" });
+      expect(input).toEqual(before);
+      expect(result).toEqual({
+        KEEP_ME: "kept",
+        LLM_GATEWAY_CORRELATION_ID: "real",
+        LLM_GATEWAY_PROVIDER: "codex",
+      });
     });
 
     it("exports nothing when no launch context is given, and strips inherited names", async () => {
