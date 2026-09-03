@@ -1,6 +1,7 @@
 #!/usr/bin/env node
 
 import type { PoolClient } from "pg";
+import { admitPgDsn } from "./storage/pg-dsn-gate.js";
 import { createHash } from "crypto";
 import { readFileSync, readdirSync } from "fs";
 import { join, dirname } from "path";
@@ -542,6 +543,19 @@ async function main(): Promise<void> {
   const databaseUrl = process.env.DATABASE_URL;
   if (!databaseUrl) {
     console.error("ERROR: DATABASE_URL environment variable not set");
+    process.exit(1);
+  }
+
+  // THE CORE GATE, and only the core gate. This path had none at all, not even
+  // the prefix test config.ts applies, so it would dial any string DATABASE_URL
+  // held. It must NOT use `parsePgDsn`: that is the reporter's stricter verdict,
+  // which refuses a DSN naming an ssl file, and round 24 measured that wiring
+  // rejecting an ordinary client-certificate TLS DSN before the pool was built.
+  // Reportable is a SUBSET of connectable, so a connector asking the reporter
+  // is asking the wrong question.
+  const admitted = admitPgDsn(databaseUrl);
+  if (!admitted.admitted) {
+    console.error(`ERROR: refusing to migrate with this DATABASE_URL: ${admitted.reason}`);
     process.exit(1);
   }
 

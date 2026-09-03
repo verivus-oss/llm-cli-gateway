@@ -11,8 +11,9 @@
  * `sqlite_master`, and `schema_migrations` where it kept its own `_migrations`.
  *
  * NO DATA MIGRATION. A host that switches backend starts writing here and its
- * existing logs.db rows stay where they are. The configured DSN is passed
- * opaquely to `pg`; health surfaces identify only PostgreSQL.
+ * existing logs.db rows stay where they are. The configured DSN is admitted by
+ * the shared connection gate, while the recorder health report receives only a
+ * bounded projection of the target fields resolved by `pg`.
  */
 import { derivePromptSignals } from "./token-estimator.js";
 import { getRequestContext, principalScopeSql, resolveOwnerPrincipal } from "./request-context.js";
@@ -27,12 +28,11 @@ import {
   type PgPoolFactory,
   type PostgresRoleDsns,
 } from "./storage/drivers/postgres.js";
+import { parsePgDsn, SSL_FILE_REFUSAL, type TargetFieldSource } from "./storage/pg-dsn-parse.js";
+import { showLogField } from "./storage/log-field.js";
 import type { StorageConnection } from "./storage/store.js";
 import { FlightRecorderRuntime, truncateThinkingBlocks } from "./flight-recorder-runtime.js";
-import {
-  POSTGRES_RECORDER_TARGET,
-  postgresFailureMessage,
-} from "./storage/postgres-diagnostics.js";
+import { postgresFailureMessage } from "./storage/postgres-diagnostics.js";
 import type {
   CacheAggregateRow,
   CompressionTelemetry,
@@ -174,6 +174,109 @@ const SQL_BOOTSTRAP = `
     CREATE INDEX IF NOT EXISTS idx_metadata_status ON gateway_metadata(status);
   `;
 
+/**
+ * `pg-connection-string` reads named SSL files while parsing. The reporter
+ * refuses those parameters before invoking it, so producing a health label
+ * cannot open a file or block on a FIFO. Accepted strings are then resolved by
+ * the same parser and client defaults that the connector uses.
+ */
+
+/**
+ * The host is reported EXACTLY as pg resolved it. There is no normalisation.
+ *
+ * There used to be. `normaliseTcpHost` stripped a leading `[` and trailing `]`
+ * and re-added them when the remainder held a colon, because the old URI-shaped
+ * report made `postgresql://::1:5433/db` ambiguous about where the port began.
+ *
+ * The report has not been URI-shaped since round 7. Host and port are separate
+ * LABELLED fields, so nothing is ambiguous, and the normalisation had become a
+ * pure source of disagreement. Round 8 measured four:
+ *
+ *   ?host=[foo]        pg "[foo]"       reported "foo"
+ *   ?host=[]           pg "[]"          reported ""
+ *   ?host=[127.0.0.1]  pg "[127.0.0.1]" reported "127.0.0.1"
+ *   ?host=:            pg ":"           reported "[:]"
+ *
+ * pg keeps brackets it was given and adds none. So does this now. Deleting the
+ * function was the fix; rewriting its bracket rule would have been the fourth
+ * attempt at a rule that exists only to serve a format that is gone.
+ */
+
+/**
+ * Words this format uses as STRUCTURE. A value equal to one of them reads as a
+ * delimiter: round 8 measured `?host=port` printing
+ * `postgresql host port port 5433 database db`, which agrees with pg and is
+ * unreadable. Quoting the collision is enough; the value is still named.
+ */
+export const FORMAT_KEYWORDS = new Set([
+  "host",
+  "socket",
+  "port",
+  "database",
+  "postgresql",
+  // The words an ANNOTATION is written in: `(from PGHOST)`, `(default)`.
+  // Round 9: `?host=from` printed `postgresql host from port 5433`.
+  "from",
+  "default",
+]);
+
+/**
+ * This line's format vocabulary, applied by the shared display control.
+ *
+ * The control itself moved to `storage/log-field.ts` when a second printer of
+ * DSN-derived values was found with none: `evaluateTranscriptAdmission` put a
+ * resolved host straight into a refusal string and three DSN shapes landed a
+ * password there. What stayed here is the part that is genuinely local, namely
+ * which words THIS line uses as delimiters.
+ */
+function show(value: string): string {
+  return showLogField(value, FORMAT_KEYWORDS);
+}
+
+function annotate(source: TargetFieldSource): string {
+  switch (source) {
+    case "dsn":
+      return "";
+    case "PGHOST":
+    case "PGPORT":
+    case "PGDATABASE":
+      return ` (from ${source})`;
+    case "user-from-dsn":
+      return " (default: the connecting user, from the DSN)";
+    case "user-from-PGUSER":
+      return " (default: the connecting user, from PGUSER)";
+    case "user-default":
+      return " (default: the connecting user)";
+    default:
+      return " (default)";
+  }
+}
+
+/**
+ * Names the PostgreSQL server a DSN will reach, for operator logs and doctor.
+ *
+ * There is deliberately no sibling that renders the DSN itself. SQLAlchemy
+ * removed `URL.__str__` for the same reason, accepting a downstream break
+ * rather than leave an unsafe default rendering reachable.
+ */
+export function redactDsn(dsn: string): string {
+  const parsed = parsePgDsn(dsn);
+  if (!parsed.ok) {
+    // The ssl refusal is not a malformed DSN and must not be reported as one:
+    // pg will connect with that string perfectly well, and only this reporter
+    // declines to open the file it names.
+    return parsed.reason === SSL_FILE_REFUSAL
+      ? "postgresql (target not named: the dsn names an ssl file this reporter will not open)"
+      : "postgresql (dsn not parseable)";
+  }
+  const { target } = parsed;
+  const where = target.transport === "unix" ? "socket" : "host";
+  const host = `${show(target.hostOrDirectory)}${annotate(target.sources.host)}`;
+  const port = `${show(target.port)}${annotate(target.sources.port)}`;
+  const database = `${show(target.database)}${annotate(target.sources.database)}`;
+  return `postgresql ${where} ${host} port ${port} database ${database}`;
+}
+
 type RoutedFlightOperation = Exclude<keyof FlightRecorderOperations, "close">;
 
 export interface PostgresFlightRecorderOptions {
@@ -209,7 +312,7 @@ export class PostgresFlightRecorder implements FlightRecorderOperations {
     this.options = options;
     this.redactEnabled = options.redactSecrets ?? isRedactionEnabled();
     this.logger = options.logger ?? null;
-    this.runtime = new FlightRecorderRuntime(POSTGRES_RECORDER_TARGET, postgresFailureMessage);
+    this.runtime = new FlightRecorderRuntime(redactDsn(roleDsns.app), postgresFailureMessage);
 
     // STARTED here, not awaited here, exactly as the SQLite twin does. Without
     // it an idle gateway reports `initialising` for as long as nothing logs a

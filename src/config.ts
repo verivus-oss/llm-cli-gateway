@@ -10,6 +10,7 @@ import { hashSecret, isSecretHash } from "./oauth.js";
 import { isHttpsOrLoopbackUrl, isLoopbackUrl } from "./api-http.js";
 import type { ApiProviderKind } from "./api-provider.js";
 import { CLI_TYPES } from "./provider-types.js";
+import { carriesPostgresDsnScheme } from "./storage/roles.js";
 import type { StorageRoleDsns } from "./storage/roles.js";
 import {
   DEFAULT_RETENTION_SWEEP_INTERVAL_MS,
@@ -19,13 +20,9 @@ import {
 import type { QualityTier } from "./least-cost-types.js";
 
 // Zod schemas for configuration validation
-const DatabaseUrlSchema = z
-  .string()
-  .trim()
-  .min(1)
-  .refine(url => url.startsWith("postgresql://") || url.startsWith("postgres://"), {
-    message: "Database URL must start with postgresql:// or postgres://",
-  });
+const DatabaseUrlSchema = z.string().min(1).refine(carriesPostgresDsnScheme, {
+  message: "Database URL must start with postgresql:// or postgres://",
+});
 
 export interface DatabaseConfig {
   connectionString: string;
@@ -364,6 +361,13 @@ const PersistenceSchema = z
     backend: z.enum(PERSISTENCE_BACKENDS).default("sqlite"),
     roles: PersistenceRolesSchema.optional(),
     path: z.string().optional(),
+    // Round 13 BLOCKER. This was a bare `z.string()`, the ONE connection string
+    // with no scheme check while `reader`, `analytics` and `retention` all had
+    // one. `redactDsn(roleDsns.app)` feeds the startup log line, and pg parses
+    // a string with no authority by putting the input in the PATH, so a
+    // leading space or a missing slash here printed the operator's password.
+    // The gate in `flight-recorder-pg.ts` now refuses the same shapes; this is
+    // the half that stops them reaching a live connection at all.
     dsn: DatabaseUrlSchema.optional(),
     retentionDays: z.number().positive().nullable().default(DEFAULT_JOB_RETENTION_DAYS),
     retention: PersistenceRetentionSchema.default({}),

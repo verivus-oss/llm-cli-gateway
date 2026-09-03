@@ -10,6 +10,7 @@
  * real one is imported dynamically. That also lets routing and translation be
  * tested without a server.
  */
+import { assertAdmissiblePgDsn } from "../pg-dsn-gate.js";
 import {
   READ_ONLY_OPERATION_CLASSES,
   resolveStorageRole,
@@ -562,6 +563,13 @@ export async function nodePostgresPoolFactory(
   const Pool = pg.Pool ?? pg.default?.Pool;
   if (!Pool) throw new Error("storage: the optional peer dependency `pg` is not installed");
   return (role, dsn) => {
+    // THE CONVERGENCE POINT. Every connector reaches pg through this factory:
+    // db.ts, the flight recorder and the job store all build a
+    // PostgresStorageDriver over it. Round 24 gated only db.ts, so a DSN the
+    // reporter refused to name was still dialled by the other two. Gating the
+    // factory is the only placement where "refused for reporting is refused
+    // for connecting" cannot be reintroduced by adding a caller.
+    assertAdmissiblePgDsn(dsn, role);
     const config: PgPoolConfig = {
       connectionString: dsn,
       max: settings.max ?? PG_POOL_MAX,

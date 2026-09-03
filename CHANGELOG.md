@@ -4,6 +4,20 @@ All notable changes to the llm-cli-gateway project.
 
 ## [Unreleased]
 
+### Changed
+
+- **`pg` peer dependency raised from `^8.12.0` to `^8.22.0`** (optional peer;
+  only PostgreSQL-backed installs are affected). The DSN admission gate's
+  correctness is a property of `pg-connection-string`, not of `pg`, and pg
+  selects that package through its own caret range: `pg@8.12` resolves
+  `^2.6.4`, while every behaviour the gate relies on was verified against
+  `2.14.0`. `pg@8.22.0` is the first release that guarantees `^2.14.0`, so the
+  old floor was a range over a parser nobody had measured. Installs on pg 8.12
+  through 8.21 must upgrade pg.
+- `src/__tests__/pg-parser-contract.test.ts` pins the ten parser behaviours the
+  gate depends on. A caret cannot pin a minor, so an upgrade that moves any of
+  them fails this file by name rather than making the gate quietly unsound.
+
 ## [3.2.0-rc.1] - 2026-08-23: provider contracts that maintain themselves, one storage port under all three subsystems
 
 The entries below were verified against the code, not against the candidate

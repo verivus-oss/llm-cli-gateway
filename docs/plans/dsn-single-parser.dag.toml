@@ -1,0 +1,192 @@
+# DSN reporting: one parser, one gate, three consumers
+#
+# Rounds 14 through 23 each closed one spelling of a single class and each was
+# falsified by the next: an unencoded `@`, a fragment, `%40`, a path colon, a
+# one-digit port. The cause is structural: two grammars parse the same DSN, so
+# every disagreement is both a correctness bug and a disclosure. libpq parses
+# once and marks each option's `dispchar`. Four independent reviews converged:
+# this is INPUT VALIDATION, not redaction, and the gate guards both consumers.
+# Before adding a rule, find the node and follow `affects`; a rule that cannot
+# answer `pins` is not a control yet.
+# EVIDENCE  docs/evidence/dsn-single-parser-2026-08-{30,31}.md (not mirrored).
+
+[meta]
+surface = "PostgreSQL DSN parsing, reporting and connection admission"
+branch = "fix/redact-dsn-hardening"
+last_reviewed_head = "925ddcc2"
+generated_from = "round-23 cross-LLM review, verified locally against pg 8.22.0"
+measured_at = "2026-08-30"
+node_count = 18
+invariant_count = 7
+
+[[node]]
+id = "decision.apparent_position"
+kind = "decision"
+status = "settled"
+role = "Whether a reported byte may come from the APPARENT password position, meaning what an operator reads rather than what pg parses. SETTLED 2026-08-30: the requirement is KEPT. The realistic trigger is not an attacker but an operator whose password holds an unencoded `?`, `#` or `@`; that DSN redirects the connection as well as the report, so the gate buys connection integrity, not only redaction."
+affects = ["gate.shared", "parse.single", "report.allowlist"]
+critical = true
+
+[[node]]
+id = "gate.shared"
+kind = "new_module"
+file = "src/storage/pg-dsn-gate.ts"
+status = "planned"
+role = "The single admission decision, consulted before either consumer acts. Refuses a foreign scheme, any ssl file key, an `@` token after the userinfo in either spelling read on raw bytes before the fragment is discarded, a colon outside the host:port separator, and a keyword-shaped authority. Returns a verdict, never a rewritten string."
+pins = "Each rule needs a reason test naming a case no other rule catches, plus a mutation the suite kills. Round 23 found two rules that each passed when disabled alone because they masked each other."
+affects = ["parse.single", "connect.db", "connect.migrate", "channel.redirect"]
+critical = true
+
+[[node]]
+id = "gate.class_not_site"
+kind = "invariant_node"
+status = "planned"
+role = "A gate rule is stated over the CLASS or it is not stated; all five escapes were the class narrowed to one spelling. A rule whose cases all share a literal the rule itself matches on is a site fix, and the corpus must generate the class rather than the case."
+affects = ["gate.shared", "instrument.liveness"]
+
+[[node]]
+id = "gate.keyword_authority"
+kind = "reject_rule"
+status = "planned"
+role = "A schemed keyword-shaped string passes both the prefix gate and `z.string().url()`, and pg puts the whole string including the password into `host`. The existing gate contains the unschemed spelling only."
+affects = ["gate.shared", "connect.migrate"]
+
+[[node]]
+id = "parse.single"
+kind = "replacement"
+file = "src/storage/pg-dsn-parse.ts"
+status = "planned"
+role = "Behind the gate, call pg's parser once and return `{ connect, public }`. `connect` goes to Pool; `public` is host, port and database picked off that same object. Deletes our RFC 3986 reimplementation. Env precedence and ssl resolution measured identical across all three construction routes, so connection behaviour does not change."
+affects = ["report.allowlist", "connect.db", "divergence.retired"]
+critical = true
+
+[[node]]
+id = "report.allowlist"
+kind = "rewrite"
+file = "src/flight-recorder-pg.ts"
+status = "planned"
+role = "`redactDsn` reads only the `public` fields through a fixed allowlist and never echoes a substring of the raw DSN taken by offset. `show()` stays as the CWE-117 quoting and bounding control."
+affects = ["divergence.retired"]
+
+[[node]]
+id = "connect.db"
+kind = "migration"
+file = "src/db.ts"
+status = "planned"
+role = "Builds its pool from `connectionString` today, which is why the reporting parse and the connecting parse are different parsers. Takes `connect` from the single parse instead."
+affects = ["channel.redirect", "channel.startup_packet"]
+
+[[node]]
+id = "connect.migrate"
+kind = "gap"
+file = "src/migrate.ts"
+status = "planned"
+role = "Reads DATABASE_URL and constructs a Pool with no schema gate at all, not even the prefix test config.ts applies. It must consult the same gate."
+affects = ["channel.redirect", "channel.startup_packet"]
+critical = true
+
+[[node]]
+id = "channel.redirect"
+kind = "threat"
+status = "open"
+role = "`?host=` overrides the authority, so an ambiguous DSN silently redirects where the service dials. This ranks above disclosure: refusing the string is the only fix that reaches it."
+
+[[node]]
+id = "channel.startup_packet"
+kind = "threat"
+status = "open"
+role = "A divergence landing the apparent password in `dbname`, `user`, `application_name` or `options` puts it in the StartupMessage to the server, cleartext when ssl is off, and thence into pg_stat_activity and the server log. It never touches DNS, and the earlier two-channel comparison missed it."
+affects = ["gate.shared"]
+
+[[node]]
+id = "instrument.liveness"
+kind = "test_defect"
+file = "src/__tests__/dsn-target-report.test.ts"
+status = "planned"
+role = "The per-marker guard counts acceptances, not marker placements, so marker-free DSNs satisfy it. Verified: refusing every marker-bearing DSN still passes 40 of 40, the exact condition the assertion message claims to detect."
+pins = "Generated entries must carry placement metadata and liveness must be asserted over those subsets."
+affects = ["gate.class_not_site"]
+critical = true
+
+[[node]]
+id = "instrument.unpinned"
+kind = "debt"
+status = "planned"
+role = "Rules whose removal no test catches: the unterminated-IP-literal refusal, the `@` token's case-insensitive flag, the scan-start offset, the duplicate-query refusal, the sun_path budget, and the query user and password handling."
+affects = ["parse.single"]
+
+[[node]]
+id = "contract.pg_version"
+kind = "new_test"
+status = "planned"
+role = "Adopting pg's parser couples us to its version, and a weakening of the sslmode aliases is already announced for the next major. Pin the observed behaviour so the upgrade is a red test, not a silent change."
+
+[[node]]
+id = "divergence.retired"
+kind = "outcome"
+status = "planned"
+role = "Five measured wrong-reports dissolve when one parse serves both, including two where we name a target for a DSN pg refuses outright."
+
+[[node]]
+id = "report.second_printer"
+kind = "defect"
+file = "src/storage/transcript-admission.ts"
+status = "fixed"
+role = "A SECOND printer of DSN-derived values, outside this map and so outside every round that hardened the first. It named its resolved host in a refusal with no control at all; three shapes printed a whole password, measured at 215ded8. The property is POSITION, not secrecy: a credential position is never named, a target position is named only through the control."
+pins = "A corpus planted by position, asserting both halves, plus a case that an ordinary host is still named in full."
+affects = ["display.one_control", "gate.third_consumer"]
+critical = true
+
+[[node]]
+id = "gate.third_consumer"
+kind = "migration"
+file = "src/storage/transcript-admission.ts"
+status = "fixed"
+role = "The deployment-shape gate is the THIRD consumer of `admitPgDsn`, and had its own DSN grammar until now. It decides whether transcript BODIES may enter a deployment, so a target it reads differently from pg admits bodies into a database nothing was proven about."
+affects = ["gate.shared", "parse.single"]
+
+[[node]]
+id = "display.one_control"
+kind = "new_module"
+file = "src/storage/log-field.ts"
+status = "fixed"
+role = "`show()` was private to the reporter while a second caller printed the same class of value with nothing. Bounding, escaping and quoting now live in one module; the FORMAT VOCABULARY stays with each caller, because it describes that caller's line and not a shared fact."
+affects = ["report.allowlist", "report.second_printer"]
+
+[[node]]
+id = "instrument.derived_mutations"
+kind = "test_defect"
+file = "scripts/mutation-sweep.mjs"
+status = "open"
+role = "D7 (a case per arm, a case per member) was asserted and falsified in four consecutive rounds, because which controls have tests was decided by READING. The set is now DERIVED from the tree by AST over five shapes, scoped to the diff. A survivor is a control with no test, though not always a defect: some are equivalent and some unreachable, and each needs the measurement that says which."
+pins = "A must-survive and a must-be-killed control run before any mutation, and a run with no summary line is `invalid`, never a verdict: the first version scored a suite that never started as 48 of 48 killed."
+affects = ["gate.shared", "instrument.liveness"]
+critical = true
+
+[[invariant]]
+id = "one_grammar"
+question = "How many modules in the tree parse a DSN? One, and not ours."
+
+[[invariant]]
+id = "one_verdict"
+question = "Does the gate return the same verdict to the reporter and the connector? A DSN refused for reporting must not be dialled."
+
+[[invariant]]
+id = "rule_is_a_control"
+question = "For each gate rule: which reason test names it, and which mutation does the suite kill? Redundant pairs each need a case the other misses."
+
+[[invariant]]
+id = "no_positional_echo"
+question = "Does any reported byte come from a substring of the raw DSN taken by offset? Every field must come from the parsed projection."
+
+[[invariant]]
+id = "liveness_over_placement"
+question = "Does the corpus assert over where the marker was planted, or only over how many DSNs were accepted?"
+
+[[invariant]]
+id = "one_printer"
+question = "How many places render a DSN-derived value into a line a human reads? One control, whatever the caller's vocabulary."
+
+[[invariant]]
+id = "harness_ran"
+question = "For a mutation reported killed: did the suite RUN? Name the summary line, never the exit code alone."
