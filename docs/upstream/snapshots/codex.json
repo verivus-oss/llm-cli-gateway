@@ -1,25 +1,25 @@
 {
   "schemaVersion": "upstream-scan-snapshot.v2",
   "cli": "codex",
-  "fetchedAt": "2026-09-03T01:22:39.703Z",
+  "fetchedAt": "2026-09-03T03:10:06.196Z",
   "sources": [
     {
       "url": "https://api.github.com/repos/openai/codex/releases/latest",
       "ok": true,
       "status": 200,
-      "bytes": 275818,
-      "sha256": "2d473af7200c3f8006cb7ce30a1be0000b5506d450ccf22ad56245f04324b610",
+      "bytes": 336846,
+      "sha256": "f880b6dc7133abb732c7e86944738f4380e4664b651a3d8b12082fb08649b8fb",
       "semantic": {
         "kind": "github-release.v1",
-        "sha256": "d02e0f9bca9262082e7e94b2c17013d8f65518e524dcfb2bdc305d3e4fc34edf",
+        "sha256": "df84b6bb1293c7d591b2f5d611897fd99f47a26b11c8ad63b6c51bc24b02b5ed",
         "fields": {
-          "tagName": "rust-v0.144.3",
-          "name": "0.144.3",
+          "tagName": "rust-v0.153.0",
+          "name": "0.153.0",
           "draft": false,
           "prerelease": false,
-          "publishedAt": "2026-07-13T06:12:19Z",
+          "publishedAt": "2026-09-03T01:37:38Z",
           "targetCommitish": "main",
-          "bodySha256": "b53d8579362006f3d0862620fa1f13ba85bade8115dc896a75db21233f54b20d"
+          "bodySha256": "db75be3522b08d45fb587f57ddfa56a1018602a6cda72f755154a754575baf35"
         }
       }
     },
@@ -27,17 +27,17 @@
       "url": "https://learn.chatgpt.com/docs/changelog/rss.xml",
       "ok": true,
       "status": 200,
-      "bytes": 104079,
-      "sha256": "aa0b4499bcc13d7f91940f0baed1a4432d32bdb06e7ed331308cb774d2b3f564",
+      "bytes": 1507306,
+      "sha256": "93be134b49b7a2c8dd6beed895f3eb79427ba8fdb6b75694bbcea1c643fb509b",
       "semantic": {
         "kind": "codex-changelog-rss.v1",
-        "sha256": "c93bdb07533a4a99bd1e78dfa096719fd8a593a656b891ccc323a985675514cc",
+        "sha256": "3bad9efa641fe40c72b2e8626171743d4a4823cb503e09aa0998e1f0275ce2ea",
         "fields": {
           "entries": [
             {
               "guid": "https://developers.openai.com/codex/changelog/#codex-2025-06-03",
               "title": "June update",
-              "contentSha256": "9e468caed4d9b3d49072de62e1d67410077a7745a46a5f6b76dd63a52667a5d9"
+              "contentSha256": "ec0880fc207dac29d9f8910dd5ef6d6c3f67685d9a245e43a367161d95d7b2dd"
             },
             {
               "guid": "https://developers.openai.com/codex/changelog/#codex-2025-06-13",
@@ -52,7 +52,7 @@
             {
               "guid": "https://developers.openai.com/codex/changelog/#codex-2025-08-27",
               "title": "Late August update",
-              "contentSha256": "0972f7de276f4f620c9f337dfcda4f29e4327b0b096706c7837af5b0411ff63c"
+              "contentSha256": "2085cb3a5b2628c24682f9b31d4bb7bc47beb9dc2e6f8d96ea8ddbd0bad05817"
             },
             {
               "guid": "https://developers.openai.com/codex/changelog/#codex-2025-09-15",
@@ -162,7 +162,7 @@
             {
               "guid": "https://developers.openai.com/codex/changelog/#codex-2026-05-21",
               "title": "Appshots, goal mode, and more",
-              "contentSha256": "1a2898dc168f20d380356b8ea715c2af73ced5789815082150906be1fa248198"
+              "contentSha256": "5394f45c5446b695404a4a4336d6e7421e7acd4d4e7d8f9c7fa5d9543577d627"
             },
             {
               "guid": "https://developers.openai.com/codex/changelog/#codex-2026-06-02",
@@ -171,13 +171,118 @@
             },
             {
               "guid": "https://developers.openai.com/codex/changelog/#codex-2026-06-11-app",
-              "title": "Codex app",
-              "contentSha256": "6faa0caf253eda10e6aa92fcebb430689ec13d0508e376284cbac1746683a08d"
+              "title": "Usage resets and Browser Developer mode",
+              "contentSha256": "e99f3d1a5cca14d86ec4aff4b227b7d7ee0185c08c5704ee4193497ba36cf7df"
             },
             {
               "guid": "https://developers.openai.com/codex/changelog/#codex-2026-06-25",
               "title": "Codex Remote reaches general availability",
               "contentSha256": "8586332d3037655cc584e90220ffbf320c1058872415b197140836c3a3b7eb6b"
+            },
+            {
+              "guid": "https://developers.openai.com/codex/changelog/#codex-2026-07-29",
+              "title": "Sign in with ChatGPT (beta)",
+              "contentSha256": "650c63155fb86abb444e4ffbecbb155dbaaf2b1f1679687659f7a9150cda2751"
+            },
+            {
+              "guid": "https://developers.openai.com/codex/changelog/#codex-2026-07-31",
+              "title": "GPT-5.4 and GPT-5.4 mini retire from Codex on August 31",
+              "contentSha256": "23d5f4059a249dab26a461c70797bf1a4cdfb2836278d72a07349a63ad5c4f3b"
+            },
+            {
+              "guid": "https://developers.openai.com/codex/changelog/#codex-2026-08-10-daybreak",
+              "title": "Introducing Daybreak Blue and Daybreak Red",
+              "contentSha256": "3640ecaa911b72c27da5366798d2ad6c1275c419f3b5902340bc2b828a15ecd3"
+            },
+            {
+              "guid": "https://developers.openai.com/codex/changelog/#codex-2026-08-11-app",
+              "title": "Linux desktop preview and agent imports",
+              "contentSha256": "8972bd41175dc2f044eb2734a1e8fa814397313903a0150187e20893f63b74da"
+            },
+            {
+              "guid": "https://developers.openai.com/codex/changelog/#codex-2026-08-17-admin-csv",
+              "title": "Public plugin catalog CSV export",
+              "contentSha256": "5c57223c98217c6a8c6b2e8bc9d9d3af12ae7fe1b31d1d8fc6d9b75fdb09e094"
+            },
+            {
+              "guid": "https://developers.openai.com/codex/changelog/#codex-2026-08-19-gitlab",
+              "title": "GitLab support in Codex cloud (Beta)",
+              "contentSha256": "07e32977b60e8bb2e3dce49be519ebadd7ad9013d6bb8f12fea6e20a0822fac0"
+            },
+            {
+              "guid": "https://developers.openai.com/codex/changelog/#codex-2026-08-24",
+              "title": "Codex MCP server command deprecated",
+              "contentSha256": "ce69aed5a2d61630b852e6f4f5d3a74d36fc91306b7aa72a541b6158cfa341bc"
+            },
+            {
+              "guid": "https://developers.openai.com/codex/changelog/#codex-2026-08-25-browser",
+              "title": "Browser extensions, site tools, and cloud sign-in",
+              "contentSha256": "2bb99c98c7ea1b384258f6f98942e3de00d89f8cc8f0467bd9fea81530fb5303"
+            },
+            {
+              "guid": "https://developers.openai.com/codex/changelog/#codex-2026-08-25-event-triggers",
+              "title": "Trigger scheduled tasks from Gmail, Slack, and GitHub events",
+              "contentSha256": "f932f79378d43931bc34efa2e6f9fc1528a3a4d639497f9315658efa3c20bb06"
+            },
+            {
+              "guid": "https://developers.openai.com/codex/changelog/#github-release-361463950",
+              "title": "Codex CLI Release: 0.146.0",
+              "contentSha256": "317181db8068a45f812ac0158d952237c6ded5cd458dade966a5e43ce07ef87e"
+            },
+            {
+              "guid": "https://developers.openai.com/codex/changelog/#github-release-365644216",
+              "title": "Codex CLI Release: 0.146.1",
+              "contentSha256": "914620d8b6e55c920cd9b76866eadd5c8f2edc5de541799ee7e38ab85977a204"
+            },
+            {
+              "guid": "https://developers.openai.com/codex/changelog/#github-release-366471016",
+              "title": "Codex CLI Release: 0.147.0",
+              "contentSha256": "2ea90047f4aed7ba35b549de718247eeb6f457f578fe8c67be4bbd9662659895"
+            },
+            {
+              "guid": "https://developers.openai.com/codex/changelog/#github-release-372686337",
+              "title": "Codex CLI Release: 0.148.0",
+              "contentSha256": "851dc5b7a925d3466414e0263f8c137d21f7a880074aa5752be94b01cf8e9c6e"
+            },
+            {
+              "guid": "https://developers.openai.com/codex/changelog/#github-release-374028976",
+              "title": "Codex CLI Release: 0.149.0",
+              "contentSha256": "1beace5b9c0c7b7c38c05b35ad74cfe0a8781f2a6dc6629dc03113bfa0f15b41"
+            },
+            {
+              "guid": "https://developers.openai.com/codex/changelog/#github-release-375371090",
+              "title": "Codex CLI Release: 0.149.1",
+              "contentSha256": "e20b3fd09224ea4234b30c2f3a9d563c5f7e6da79bc8702ec83df16ddc85862b"
+            },
+            {
+              "guid": "https://developers.openai.com/codex/changelog/#github-release-377374683",
+              "title": "Codex CLI Release: 0.150.0",
+              "contentSha256": "450c6649688642c943560a604f4b6a06be94fe26016df31b3e28b360a4b96053"
+            },
+            {
+              "guid": "https://developers.openai.com/codex/changelog/#github-release-377521340",
+              "title": "Codex CLI Release: 0.150.1",
+              "contentSha256": "f08877e5ef019eceac5c0f67ea1201d4380c7f20e06bca0703cc3471deff2c6f"
+            },
+            {
+              "guid": "https://developers.openai.com/codex/changelog/#github-release-378941035",
+              "title": "Codex CLI Release: 0.151.0",
+              "contentSha256": "e5903314399e43441259a8c1a84c6083668dab84f284366bdc7375ec2222d895"
+            },
+            {
+              "guid": "https://developers.openai.com/codex/changelog/#github-release-380164108",
+              "title": "Codex CLI Release: 0.152.0",
+              "contentSha256": "9e1fed2124facaca26e2761db489bb85511dbd72689121893ec89aaaa5b5335a"
+            },
+            {
+              "guid": "https://developers.openai.com/codex/changelog/#github-release-380862087",
+              "title": "Codex CLI Release: 0.152.1",
+              "contentSha256": "2052fc90d3d8cdd3358afeed34a168ee91c82c14834a05a1af6f44ebcde3e2a4"
+            },
+            {
+              "guid": "https://developers.openai.com/codex/changelog/#github-release-381669913",
+              "title": "Codex CLI Release: 0.153.0",
+              "contentSha256": "b17d8940facce8545f5095f6d0e17b714e756ec0dc0d86f2baefec423ff9fb22"
             }
           ]
         }
@@ -185,10 +290,10 @@
     }
   ],
   "helpSurface": {
-    "probedAt": "2026-09-03T01:22:39.703Z",
+    "probedAt": "2026-09-03T03:10:06.195Z",
     "available": true,
-    "version": "codex-cli 0.152.1",
-    "targetVersion": "codex-cli 0.152.1",
+    "version": "codex-cli 0.153.0",
+    "targetVersion": "codex-cli 0.153.0",
     "versionMatchesTarget": true,
     "discoveredFlags": [
       "--add-dir",
@@ -259,7 +364,7 @@
       "commandPath": [
         "agents"
       ],
-      "probedAt": "2026-09-03T01:22:38.848Z",
+      "probedAt": "2026-09-03T03:10:05.361Z",
       "available": true,
       "existence": "present",
       "discoveredFlags": [
@@ -285,7 +390,7 @@
       "commandPath": [
         "app-server"
       ],
-      "probedAt": "2026-09-03T01:22:38.880Z",
+      "probedAt": "2026-09-03T03:10:05.392Z",
       "available": true,
       "existence": "present",
       "discoveredFlags": [
@@ -319,7 +424,7 @@
       "commandPath": [
         "apply"
       ],
-      "probedAt": "2026-09-03T01:22:38.912Z",
+      "probedAt": "2026-09-03T03:10:05.424Z",
       "available": true,
       "existence": "present",
       "discoveredFlags": [
@@ -341,7 +446,7 @@
       "commandPath": [
         "archive"
       ],
-      "probedAt": "2026-09-03T01:22:38.942Z",
+      "probedAt": "2026-09-03T03:10:05.455Z",
       "available": true,
       "existence": "present",
       "discoveredFlags": [
@@ -377,7 +482,7 @@
       "commandPath": [
         "cloud"
       ],
-      "probedAt": "2026-09-03T01:22:38.971Z",
+      "probedAt": "2026-09-03T03:10:05.487Z",
       "available": true,
       "existence": "present",
       "discoveredFlags": [
@@ -400,7 +505,7 @@
       "commandPath": [
         "completion"
       ],
-      "probedAt": "2026-09-03T01:22:39.000Z",
+      "probedAt": "2026-09-03T03:10:05.517Z",
       "available": true,
       "existence": "present",
       "discoveredFlags": [
@@ -422,7 +527,7 @@
       "commandPath": [
         "debug"
       ],
-      "probedAt": "2026-09-03T01:22:39.031Z",
+      "probedAt": "2026-09-03T03:10:05.548Z",
       "available": true,
       "existence": "present",
       "discoveredFlags": [
@@ -444,7 +549,7 @@
       "commandPath": [
         "delete"
       ],
-      "probedAt": "2026-09-03T01:22:39.061Z",
+      "probedAt": "2026-09-03T03:10:05.577Z",
       "available": true,
       "existence": "present",
       "discoveredFlags": [
@@ -481,7 +586,7 @@
       "commandPath": [
         "doctor"
       ],
-      "probedAt": "2026-09-03T01:22:39.090Z",
+      "probedAt": "2026-09-03T03:10:05.607Z",
       "available": true,
       "existence": "present",
       "discoveredFlags": [
@@ -508,7 +613,7 @@
       "commandPath": [
         "exec"
       ],
-      "probedAt": "2026-09-03T01:22:39.120Z",
+      "probedAt": "2026-09-03T03:10:05.639Z",
       "available": true,
       "existence": "present",
       "discoveredFlags": [
@@ -553,7 +658,7 @@
         "exec",
         "resume"
       ],
-      "probedAt": "2026-09-03T01:22:39.184Z",
+      "probedAt": "2026-09-03T03:10:05.701Z",
       "available": true,
       "existence": "present",
       "discoveredFlags": [
@@ -591,7 +696,7 @@
         "exec",
         "review"
       ],
-      "probedAt": "2026-09-03T01:22:39.216Z",
+      "probedAt": "2026-09-03T03:10:05.732Z",
       "available": true,
       "existence": "present",
       "discoveredFlags": [
@@ -629,7 +734,7 @@
       "commandPath": [
         "exec-server"
       ],
-      "probedAt": "2026-09-03T01:22:39.245Z",
+      "probedAt": "2026-09-03T03:10:05.761Z",
       "available": true,
       "existence": "present",
       "discoveredFlags": [
@@ -659,7 +764,7 @@
       "commandPath": [
         "features"
       ],
-      "probedAt": "2026-09-03T01:22:39.274Z",
+      "probedAt": "2026-09-03T03:10:05.790Z",
       "available": true,
       "existence": "present",
       "discoveredFlags": [
@@ -681,7 +786,7 @@
       "commandPath": [
         "fork"
       ],
-      "probedAt": "2026-09-03T01:22:39.307Z",
+      "probedAt": "2026-09-03T03:10:05.821Z",
       "available": true,
       "existence": "present",
       "discoveredFlags": [
@@ -723,7 +828,7 @@
       "commandPath": [
         "login"
       ],
-      "probedAt": "2026-09-03T01:22:39.338Z",
+      "probedAt": "2026-09-03T03:10:05.850Z",
       "available": true,
       "existence": "present",
       "discoveredFlags": [
@@ -748,7 +853,7 @@
       "commandPath": [
         "logout"
       ],
-      "probedAt": "2026-09-03T01:22:39.368Z",
+      "probedAt": "2026-09-03T03:10:05.883Z",
       "available": true,
       "existence": "present",
       "discoveredFlags": [
@@ -770,7 +875,7 @@
       "commandPath": [
         "mcp"
       ],
-      "probedAt": "2026-09-03T01:22:39.398Z",
+      "probedAt": "2026-09-03T03:10:05.910Z",
       "available": true,
       "existence": "present",
       "discoveredFlags": [
@@ -792,7 +897,7 @@
       "commandPath": [
         "mcp-server"
       ],
-      "probedAt": "2026-09-03T01:22:39.432Z",
+      "probedAt": "2026-09-03T03:10:05.939Z",
       "available": true,
       "existence": "present",
       "discoveredFlags": [
@@ -815,7 +920,7 @@
       "commandPath": [
         "migrate-rollouts"
       ],
-      "probedAt": "2026-09-03T01:22:39.462Z",
+      "probedAt": "2026-09-03T03:10:05.965Z",
       "available": true,
       "existence": "present",
       "discoveredFlags": [
@@ -842,7 +947,7 @@
       "commandPath": [
         "plugin"
       ],
-      "probedAt": "2026-09-03T01:22:39.490Z",
+      "probedAt": "2026-09-03T03:10:05.997Z",
       "available": true,
       "existence": "present",
       "discoveredFlags": [
@@ -850,7 +955,7 @@
         "--disable",
         "--enable"
       ],
-      "helpHash": "4597fbf5d3746597df5499c25c3a0de55d89eb4e36b84a59acc1bdd7857e0e2e",
+      "helpHash": "ff6e388d0c752d60632bacd707298b0ad7a57d7ab0c03254bbd5f745b85f999f",
       "extraVsContract": [],
       "missingFromBinary": [],
       "arityMismatches": [],
@@ -864,7 +969,7 @@
       "commandPath": [
         "queue"
       ],
-      "probedAt": "2026-09-03T01:22:39.524Z",
+      "probedAt": "2026-09-03T03:10:06.026Z",
       "available": true,
       "existence": "present",
       "discoveredFlags": [
@@ -902,7 +1007,7 @@
       "commandPath": [
         "remote-control"
       ],
-      "probedAt": "2026-09-03T01:22:39.553Z",
+      "probedAt": "2026-09-03T03:10:06.053Z",
       "available": true,
       "existence": "present",
       "discoveredFlags": [
@@ -925,7 +1030,7 @@
       "commandPath": [
         "resume"
       ],
-      "probedAt": "2026-09-03T01:22:39.581Z",
+      "probedAt": "2026-09-03T03:10:06.083Z",
       "available": true,
       "existence": "present",
       "discoveredFlags": [
@@ -968,7 +1073,7 @@
       "commandPath": [
         "review"
       ],
-      "probedAt": "2026-09-03T01:22:39.609Z",
+      "probedAt": "2026-09-03T03:10:06.112Z",
       "available": true,
       "existence": "present",
       "discoveredFlags": [
@@ -995,7 +1100,7 @@
       "commandPath": [
         "sandbox"
       ],
-      "probedAt": "2026-09-03T01:22:39.642Z",
+      "probedAt": "2026-09-03T03:10:06.139Z",
       "available": true,
       "existence": "present",
       "discoveredFlags": [
@@ -1024,7 +1129,7 @@
       "commandPath": [
         "unarchive"
       ],
-      "probedAt": "2026-09-03T01:22:39.673Z",
+      "probedAt": "2026-09-03T03:10:06.166Z",
       "available": true,
       "existence": "present",
       "discoveredFlags": [
@@ -1060,7 +1165,7 @@
       "commandPath": [
         "update"
       ],
-      "probedAt": "2026-09-03T01:22:39.703Z",
+      "probedAt": "2026-09-03T03:10:06.195Z",
       "available": true,
       "existence": "present",
       "discoveredFlags": [

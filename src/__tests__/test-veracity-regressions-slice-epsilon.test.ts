@@ -86,7 +86,7 @@ describe("REGRESSIONS Eα — registered tool outputFormat enum (slice ε)", () 
   );
 });
 
-// ─── REGRESSIONS Eβ — Antigravity text-only output guard ───────────────
+// ─── REGRESSIONS Eβ: Antigravity output-mode guard ────────────────────
 //
 // Antigravity CLI has no Gemini-compatible `-o` output flag. It DOES have
 // `--output-format text|json|stream-json`, measured against agy 1.1.24 in
@@ -95,7 +95,7 @@ describe("REGRESSIONS Eα — registered tool outputFormat enum (slice ε)", () 
 // legacy `-o` token is never emitted, and that a caller asking for text gets no
 // output flag at all (an unconditional `--output-format text` would change the
 // dedup key of every existing gemini request).
-describe("REGRESSIONS Eβ — prepareGeminiRequest emits agy output modes, never legacy -o", () => {
+describe("REGRESSIONS Eβ: prepareGeminiRequest emits agy output modes, never legacy -o", () => {
   const baseParams = {
     prompt: "hello",
     approvalStrategy: "legacy" as const,

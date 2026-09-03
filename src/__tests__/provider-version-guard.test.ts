@@ -22,9 +22,9 @@ import { CLI_TYPES } from "../provider-types.js";
  */
 const REAL_INSTALLED: Record<string, string> = {
   claude: "2.1.259 (Claude Code)",
-  codex: "codex-cli 0.152.1",
+  codex: "codex-cli 0.153.0",
   // agy reports a bare version with no product prefix, unlike codex and mistral.
-  gemini: "1.1.24",
+  gemini: "1.1.25",
   // Verbatim from `grok --version` on this host. 1.0.4 appended a
   // release-channel marker AFTER the build hash and 1.0.5 does NOT, so this
   // entry no longer carries the `[stable]` spelling it was pinned for. That
