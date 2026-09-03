@@ -163,6 +163,34 @@ describe("terminal persistence is not re-entrant for the same job", () => {
       await manager.dispose();
     }
   }, 60_000);
+
+  it("releases the settled chain after flight completion", async () => {
+    const manager = new AsyncJobManager(noopLogger, undefined, store);
+    await manager.whenStartupSettled();
+    const internals = manager as unknown as {
+      jobs: Map<string, { terminalWriteChain?: Promise<void> }>;
+    };
+    try {
+      const started = await manager.startJobWithDedup(
+        "node" as LlmCli,
+        ["-e", 'process.stdout.write("DONE")'],
+        "corr-chain-release",
+        { forceRefresh: true }
+      );
+      const jobId = started.snapshot.id;
+      await waitFor(
+        async () => (await manager.getJobSnapshot(jobId))?.status === "completed",
+        25_000
+      );
+
+      // A resolved chain must not make retryTerminalPersistenceNow treat a
+      // write as still in flight during shutdown.
+      await waitFor(() => internals.jobs.get(jobId)?.terminalWriteChain === undefined, 10_000);
+      expect(internals.jobs.get(jobId)?.terminalWriteChain).toBeUndefined();
+    } finally {
+      await manager.dispose();
+    }
+  }, 60_000);
 });
 
 // dispose() lost its bound on NON-Kit terminal persistence.

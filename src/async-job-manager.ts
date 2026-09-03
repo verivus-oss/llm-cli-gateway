@@ -3317,10 +3317,14 @@ export class AsyncJobManager {
     const write = previous
       .catch(() => undefined)
       .then(() => this.writeFlightCompleteBody(job, finalStatus, overrideErrorMessage));
-    job.terminalWriteChain = write.then(
+    const chain = write.then(
       () => undefined,
       () => undefined
     );
+    job.terminalWriteChain = chain;
+    void chain.then(() => {
+      if (job.terminalWriteChain === chain) job.terminalWriteChain = undefined;
+    });
     this.trackPendingWrite(write.catch(() => undefined));
   }
 
