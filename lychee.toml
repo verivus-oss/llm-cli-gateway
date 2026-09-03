@@ -93,6 +93,10 @@ exclude = [
   # The link is stable and human-facing; do not fail the security gate
   # on transient bot traffic handling.
   "^https://datasette\\.io(/|$)",
+  # Socket's public package report repeatedly returns 503 to hosted CI. Keep
+  # the exclusion scoped to this package rather than hiding Socket links as a
+  # class.
+  "^https://socket\\.dev/npm/package/llm-cli-gateway$",
   # Anthropic / OpenAI / Google docs occasionally rate-limit anon
   # browsers. Their stability is not our gate; we re-verify the
   # canonical URL during research steps.
