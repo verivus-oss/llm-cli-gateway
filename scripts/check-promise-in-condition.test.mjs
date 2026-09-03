@@ -8,68 +8,81 @@
  * so the insertion is verified first, always.
  */
 import { execFileSync } from "node:child_process";
-import { readFileSync, writeFileSync } from "node:fs";
+import nodeFs, {
+  existsSync,
+  closeSync,
+  mkdirSync,
+  openSync,
+  readFileSync,
+  readdirSync,
+  renameSync,
+  rmSync,
+  symlinkSync,
+  writeFileSync,
+} from "node:fs";
+import nodePath, { dirname, join, resolve } from "node:path";
+import { gatedRelativePath } from "./lib/gated-path.mjs";
+import { makeScratchDir, scratchRoot } from "./lib/scratch-root.mjs";
+import { fileURLToPath } from "node:url";
 import { afterEach, describe, expect, it } from "vitest";
 
-const TARGET = "src/metrics.ts";
-const ANCHOR = "export class PerformanceMetrics {";
+const REPO_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "..");
+const CHECKER = join(REPO_ROOT, "scripts", "check-promise-in-condition.mjs");
+let fixtureRoot;
 
-// Every probe this file injects declares a method named probeSomething, so a
-// pristine src/metrics.ts can never match this.
-const PROBE_SHAPE = /\bprobe[A-Z]/;
-
-const original = readFileSync(TARGET, "utf8");
-
-// `original` is captured ONCE, at module load, and afterEach writes it back
-// verbatim. That is safe only if the file was pristine when we read it. If a
-// concurrent or crashed run had already injected, `original` would capture the
-// INJECTED text and afterEach would then write a real promise-in-condition
-// violation into a real source file, permanently and silently, on a run that
-// otherwise reports green.
-//
-// So refuse to start rather than bake it in. This does not make two concurrent
-// runs safe against each other, it makes them fail loudly instead of corrupting.
-// The full fix is a per-run probe file rather than a shared tracked one.
-if (PROBE_SHAPE.test(original)) {
-  throw new Error(
-    `${TARGET} already contains an injected probe. A previous run of this file ` +
-      `crashed, or two runs overlapped. Restore it with \`git checkout -- ${TARGET}\` ` +
-      `before running this suite; do NOT let afterEach write this state back.`
-  );
+// Every fixture writer goes through this so a symlinked `.scratch` is refused
+// before the first byte is written, and the write is bound to the directory
+// the check saw rather than to a path a concurrent swap could retarget.
+function newScratchDir(prefix) {
+  return makeScratchDir(REPO_ROOT, prefix);
 }
 
-// A crash between inject() and afterEach leaves a violation in a tracked source
-// file. Restore on the way out too, so an interrupted run does not hand the next
-// reader a dirty tree that looks like someone's edit.
-process.on("exit", () => {
+function runGate(root = fixtureRoot) {
+  const args = [CHECKER];
+  if (root) args.push("--root", root);
+  // A disk-backed descriptor preserves checker diagnostics in restricted runners
+  // that empty nested Node stdout/stderr pipes.
+  const captureRoot = newScratchDir("promise-output-");
+  const outputPath = join(captureRoot, "checker-output.txt");
+  const outputFd = openSync(outputPath, "w");
+  let exitCode = 0;
   try {
-    if (readFileSync(TARGET, "utf8") !== original) writeFileSync(TARGET, original);
-  } catch {
-    // Nothing useful to do while the process is already leaving.
-  }
-});
-
-function runGate() {
-  try {
-    execFileSync("node", ["scripts/check-promise-in-condition.mjs"], { encoding: "utf8" });
-    return { exitCode: 0, output: "" };
+    execFileSync("node", args, { cwd: REPO_ROOT, stdio: ["ignore", outputFd, outputFd] });
   } catch (err) {
-    return { exitCode: err.status ?? 1, output: `${err.stdout ?? ""}${err.stderr ?? ""}` };
+    exitCode = err.status ?? 1;
+  } finally {
+    closeSync(outputFd);
+  }
+  try {
+    return { exitCode, output: readFileSync(outputPath, "utf8") };
+  } finally {
+    rmSync(captureRoot, { recursive: true, force: true });
+    // The capture directory is per call; a surviving one is a leak, not a cache.
+    expect(existsSync(captureRoot)).toBe(false);
   }
 }
 
 function inject(snippet) {
-  const before = readFileSync(TARGET, "utf8");
-  // ASSERT THE INSERTION FIRST. A control whose violation never landed reports
-  // a green gate and is indistinguishable from a control that passed.
-  expect(before).toContain(ANCHOR);
-  const after = before.replace(ANCHOR, `${ANCHOR}\n${snippet}\n`);
-  expect(after).not.toBe(before);
-  writeFileSync(TARGET, after);
-  expect(readFileSync(TARGET, "utf8")).toContain(snippet.trim().split("\n")[0]);
+  expect(fixtureRoot).toBeUndefined();
+  fixtureRoot = newScratchDir("promise-condition-");
+  const sourceDir = join(fixtureRoot, "src");
+  const target = join(sourceDir, "probe.ts");
+  mkdirSync(sourceDir);
+  writeFileSync(
+    join(fixtureRoot, "tsconfig.json"),
+    JSON.stringify({ compilerOptions: { strict: true, target: "ES2022" }, include: ["src/**/*"] })
+  );
+  writeFileSync(target, `export class Fixture {\n${snippet}\n}\n`);
+  expect(readFileSync(target, "utf8")).toContain(snippet.trim().split("\n")[0]);
 }
 
-afterEach(() => writeFileSync(TARGET, original));
+afterEach(() => {
+  if (fixtureRoot) {
+    rmSync(fixtureRoot, { recursive: true, force: true });
+    expect(existsSync(fixtureRoot)).toBe(false);
+  }
+  fixtureRoot = undefined;
+});
 
 describe("promise-in-condition gate", () => {
   it("passes on the clean tree", () => {
@@ -300,5 +313,277 @@ describe("promise-in-condition gate", () => {
     return xs.filter(Boolean) as number[];
   }`);
     expect(runGate().exitCode).toBe(0);
+  });
+  it("fails closed with exit 2 when --root has no tsconfig.json, instead of scanning the cwd", () => {
+    fixtureRoot = newScratchDir("promise-condition-");
+    const r = runGate(fixtureRoot);
+    expect(r.exitCode).toBe(2);
+    expect(r.output).toContain("Cannot read file");
+    expect(r.output).not.toContain("promise-in-condition: 0 in production");
+  });
+
+  it("fails closed with exit 2 when the root tsconfig.json is malformed", () => {
+    fixtureRoot = newScratchDir("promise-condition-");
+    writeFileSync(join(fixtureRoot, "tsconfig.json"), "{ not json");
+    const r = runGate(fixtureRoot);
+    expect(r.exitCode).toBe(2);
+    expect(r.output).not.toContain("promise-in-condition: 0 in production");
+  });
+
+  it("fails closed with exit 2 when the root tsconfig.json parses but its options are invalid", () => {
+    // Distinct branch from the malformed-JSON case: the file reads and parses,
+    // and TypeScript rejects an option value. A review mutant made this
+    // branch exit 0 and the shipped suite did not notice.
+    fixtureRoot = newScratchDir("promise-condition-");
+    writeFileSync(
+      join(fixtureRoot, "tsconfig.json"),
+      JSON.stringify({
+        compilerOptions: { strict: true, target: "not-a-target" },
+        include: ["src/**/*"],
+      })
+    );
+    const r = runGate(fixtureRoot);
+    expect(r.exitCode).toBe(2);
+    expect(r.output).toContain("--target");
+    expect(r.output).not.toContain("promise-in-condition: 0 in production");
+  });
+
+  it("fails closed with exit 2 on malformed arguments", () => {
+    for (const argv of [
+      ["--root"],
+      ["--root", ""],
+      ["--roots", REPO_ROOT],
+      ["--root", REPO_ROOT, "extra"],
+    ]) {
+      let exitCode = 0;
+      try {
+        execFileSync("node", [CHECKER, ...argv], { cwd: REPO_ROOT, stdio: "ignore" });
+      } catch (err) {
+        exitCode = err.status ?? 1;
+      }
+      expect(exitCode, `argv ${JSON.stringify(argv)}`).toBe(2);
+    }
+  });
+
+  it("gates a Windows-separated path exactly like a POSIX one", () => {
+    expect(gatedRelativePath("/repo", "/repo/src/probe.ts", nodePath.posix)).toBe("src/probe.ts");
+    expect(gatedRelativePath("C:\\repo", "C:\\repo\\src\\probe.ts", nodePath.win32)).toBe(
+      "src/probe.ts"
+    );
+    expect(gatedRelativePath("/repo", "/repo/scripts/x.ts", nodePath.posix)).toBeNull();
+    expect(gatedRelativePath("/repo", "/repo/src-other/x.ts", nodePath.posix)).toBeNull();
+    expect(gatedRelativePath("C:\\repo", "C:\\repo\\srcs\\x.ts", nodePath.win32)).toBeNull();
+    expect(gatedRelativePath("/repo", "/repo/src", nodePath.posix)).toBeNull();
+  });
+
+  it("refuses to write fixtures through a symlinked .scratch", () => {
+    // Review measured this: `.scratch -> src` sent every fixture
+    // into tracked src/ while the case ran. The guard is exercised on a
+    // throwaway repo root, because replacing the real .scratch mid-suite is
+    // the kind of tree edit this file exists to stop.
+    fixtureRoot = newScratchDir("promise-guard-");
+    const fakeSrc = join(fixtureRoot, "src");
+    mkdirSync(fakeSrc);
+    symlinkSync("src", join(fixtureRoot, ".scratch"), "dir");
+    expect(() => makeScratchDir(fixtureRoot, "promise-condition-")).toThrow(/symbolic link/);
+    // Nothing may have been written through the link before the refusal.
+    expect(readdirSync(fakeSrc)).toEqual([]);
+  });
+
+  it("refuses a .scratch that exists as a regular file", () => {
+    fixtureRoot = newScratchDir("promise-guard-");
+    writeFileSync(join(fixtureRoot, ".scratch"), "");
+    expect(() => makeScratchDir(fixtureRoot, "promise-condition-")).toThrow(
+      /exists and is not a directory/
+    );
+  });
+
+  it("creates a missing .scratch as a real directory", () => {
+    fixtureRoot = newScratchDir("promise-guard-");
+    const dir = scratchRoot(fixtureRoot);
+    expect(dir).toBe(join(fixtureRoot, ".scratch"));
+    expect(existsSync(dir)).toBe(true);
+    const made = makeScratchDir(fixtureRoot, "promise-condition-");
+    expect(dirname(made)).toBe(dir);
+    expect(existsSync(made)).toBe(true);
+  });
+
+  // ── the swap window ────────────────────────────────────────────────────────
+  // Round 3 measured that a check followed by a path-based mkdtemp leaves a
+  // window in which .scratch can become a symlink to src. These two cases play
+  // the attacker at the worst moment, between the check and the write, by
+  // wrapping mkdtempSync. On the path-based helper both fail with the fixture
+  // under the fake src; on the descriptor-bound helper neither can.
+
+  function swappingFs(swap) {
+    let armed = true;
+    return {
+      ...nodeFs,
+      constants: nodeFs.constants,
+      mkdtempSync(prefix, opts) {
+        if (armed) {
+          armed = false;
+          swap();
+        }
+        return nodeFs.mkdtempSync(prefix, opts);
+      },
+    };
+  }
+
+  it("keeps the fixture out of src when .scratch is renamed away and replaced by a symlink mid-write", () => {
+    fixtureRoot = newScratchDir("promise-guard-");
+    const fakeSrc = join(fixtureRoot, "src");
+    const scratch = join(fixtureRoot, ".scratch");
+    const moved = join(fixtureRoot, ".scratch-moved");
+    mkdirSync(fakeSrc);
+    mkdirSync(scratch);
+    const made = makeScratchDir(
+      fixtureRoot,
+      "promise-condition-",
+      swappingFs(() => {
+        renameSync(scratch, moved);
+        symlinkSync("src", scratch, "dir");
+      })
+    );
+    expect(readdirSync(fakeSrc)).toEqual([]);
+    const name = nodePath.basename(made);
+    expect(readdirSync(moved)).toEqual([name]);
+    expect(name.startsWith("promise-condition-")).toBe(true);
+  });
+
+  it("fails closed when .scratch is deleted and replaced by a symlink mid-write", () => {
+    fixtureRoot = newScratchDir("promise-guard-");
+    const fakeSrc = join(fixtureRoot, "src");
+    const scratch = join(fixtureRoot, ".scratch");
+    mkdirSync(fakeSrc);
+    mkdirSync(scratch);
+    expect(() =>
+      makeScratchDir(
+        fixtureRoot,
+        "promise-condition-",
+        swappingFs(() => {
+          rmSync(scratch, { recursive: true });
+          symlinkSync("src", scratch, "dir");
+        })
+      )
+    ).toThrow();
+    expect(readdirSync(fakeSrc)).toEqual([]);
+  });
+
+  it("refuses when .scratch is swapped for a symlink between creation and the write", () => {
+    // A review survivor on the create path: after mkdir the helper must
+    // look again, through the descriptor, not trust what it just created.
+    fixtureRoot = newScratchDir("promise-guard-");
+    const fakeSrc = join(fixtureRoot, "src");
+    const scratch = join(fixtureRoot, ".scratch");
+    mkdirSync(fakeSrc);
+    const fs = {
+      ...nodeFs,
+      constants: nodeFs.constants,
+      mkdirSync(dir, opts) {
+        nodeFs.mkdirSync(dir, opts);
+        rmSync(scratch, { recursive: true });
+        symlinkSync("src", scratch, "dir");
+      },
+    };
+    expect(() => makeScratchDir(fixtureRoot, "promise-condition-", fs)).toThrow(/symbolic link/);
+    expect(readdirSync(fakeSrc)).toEqual([]);
+  });
+
+  it("refuses a .scratch that is the same directory as a tracked one, as a bind mount would be", () => {
+    // A review blocker: `mount --bind src .scratch` inside an
+    // unprivileged mount namespace gives open() a real directory whose inode
+    // IS src. The kernel-level shape needs a namespace to reproduce, so the
+    // test injects the one observable it produces: fstat of the descriptor
+    // reporting src's device and inode.
+    fixtureRoot = newScratchDir("promise-guard-");
+    const fakeSrc = join(fixtureRoot, "src");
+    const scratch = join(fixtureRoot, ".scratch");
+    mkdirSync(fakeSrc);
+    mkdirSync(scratch);
+    // A review survivor: a refusal that leaves the descriptor open is a
+    // leak per refusal, so the close is asserted, not assumed.
+    const closed = [];
+    const fs = {
+      ...nodeFs,
+      constants: nodeFs.constants,
+      fstatSync() {
+        return nodeFs.lstatSync(fakeSrc);
+      },
+      closeSync(fd) {
+        closed.push(fd);
+        return nodeFs.closeSync(fd);
+      },
+    };
+    expect(() => makeScratchDir(fixtureRoot, "promise-condition-", fs)).toThrow(
+      /same directory as src under/
+    );
+    expect(closed).toHaveLength(1);
+    expect(readdirSync(fakeSrc)).toEqual([]);
+    expect(readdirSync(scratch)).toEqual([]);
+  });
+
+  it("refuses a .scratch that is the same directory as the repository root", () => {
+    fixtureRoot = newScratchDir("promise-guard-");
+    mkdirSync(join(fixtureRoot, ".scratch"));
+    const fs = {
+      ...nodeFs,
+      constants: nodeFs.constants,
+      fstatSync() {
+        return nodeFs.lstatSync(fixtureRoot);
+      },
+    };
+    expect(() => makeScratchDir(fixtureRoot, "promise-condition-", fs)).toThrow(
+      /same directory as \. under/
+    );
+    expect(readdirSync(fixtureRoot).sort()).toEqual([".scratch"]);
+  });
+
+  it("does not follow symlinks while looking for an aliased tracked directory", () => {
+    // A link out of the fixture root must not drag the walk into unrelated
+    // trees; a dangling one must not throw.
+    fixtureRoot = newScratchDir("promise-guard-");
+    mkdirSync(join(fixtureRoot, ".scratch"));
+    symlinkSync("/", join(fixtureRoot, "escape"), "dir");
+    symlinkSync("nowhere", join(fixtureRoot, "dangling"), "dir");
+    const made = makeScratchDir(fixtureRoot, "promise-condition-");
+    expect(dirname(made)).toBe(join(fixtureRoot, ".scratch"));
+  });
+
+  it("rethrows a re-open failure that is not ENOENT after creating .scratch", () => {
+    // A review survivor: the re-open after mkdir has its own rethrow
+    // branch, and swallowing it (fd = -1) passed every case. First open
+    // sees ENOENT, mkdir runs, the second open is denied: the same denied
+    // object must surface, and nothing may be created through a bad fd.
+    fixtureRoot = newScratchDir("promise-guard-");
+    const denied = Object.assign(new Error("EACCES: permission denied"), { code: "EACCES" });
+    let opens = 0;
+    const fs = {
+      ...nodeFs,
+      constants: nodeFs.constants,
+      openSync(path, flags) {
+        opens += 1;
+        if (opens === 1) return nodeFs.openSync(path, flags);
+        throw denied;
+      },
+    };
+    expect(() => makeScratchDir(fixtureRoot, "promise-condition-", fs)).toThrow(denied);
+    expect(opens).toBe(2);
+    expect(existsSync(join(fixtureRoot, ".scratch"))).toBe(true);
+    expect(readdirSync(join(fixtureRoot, ".scratch"))).toEqual([]);
+  });
+
+  it("rethrows an open failure that is not ENOENT instead of creating over it", () => {
+    fixtureRoot = newScratchDir("promise-guard-");
+    const denied = Object.assign(new Error("EACCES: permission denied"), { code: "EACCES" });
+    const fs = {
+      ...nodeFs,
+      constants: nodeFs.constants,
+      openSync() {
+        throw denied;
+      },
+    };
+    expect(() => makeScratchDir(fixtureRoot, "promise-condition-", fs)).toThrow(denied);
+    expect(existsSync(join(fixtureRoot, ".scratch"))).toBe(false);
   });
 });
