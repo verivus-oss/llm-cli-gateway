@@ -39,3 +39,20 @@ export function launchContextEnv(context: LaunchContext | undefined): NodeJS.Pro
   }
   return env;
 }
+
+/**
+ * The child environment with the launch context applied: every LLM_GATEWAY_*
+ * launch variable is removed from the inherited env first, then the context's
+ * defined fields are set. A field the context leaves unset (the job id on a
+ * sync or ACP spawn, the session id on a CLI spawn) therefore cannot be
+ * supplied by a forged or inherited value; spawn-env isolation is a
+ * redirection denylist and does not cover these names.
+ */
+export function withLaunchContext(
+  env: NodeJS.ProcessEnv,
+  context: LaunchContext | undefined
+): NodeJS.ProcessEnv {
+  const out: NodeJS.ProcessEnv = { ...env };
+  for (const [, name] of LAUNCH_CONTEXT_ENV) delete out[name];
+  return { ...out, ...launchContextEnv(context) };
+}

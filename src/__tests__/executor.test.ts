@@ -145,6 +145,23 @@ describe("executeCli", () => {
       expect(result.stdout.trim()).toBe("corr-2:job-2:claude");
     });
 
+    it("strips an inherited or forged launch variable the context does not set", async () => {
+      // A sync spawn sets no job id; a forged one in the caller env must not
+      // survive into the child, and the same for an inherited session id.
+      const result = await executeCli(
+        "sh",
+        [
+          "-c",
+          "echo [${LLM_GATEWAY_JOB_ID-unset}][${LLM_GATEWAY_SESSION_ID-unset}]:$LLM_GATEWAY_PROVIDER",
+        ],
+        {
+          env: { LLM_GATEWAY_JOB_ID: "forged-job", LLM_GATEWAY_SESSION_ID: "forged-session" },
+          launchContext: { correlationId: "corr-3", provider: "claude" },
+        }
+      );
+      expect(result.stdout.trim()).toBe("[unset][unset]:claude");
+    });
+
     it("exports nothing when no launch context is given", async () => {
       const result = await executeCli("sh", [
         "-c",

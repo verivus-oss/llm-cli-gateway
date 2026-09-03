@@ -22,7 +22,7 @@ import {
   writeAndCloseChildStdin,
 } from "./child-stdin.js";
 
-import { launchContextEnv, type LaunchContext } from "./launch-context.js";
+import { launchContextEnv, withLaunchContext, type LaunchContext } from "./launch-context.js";
 
 export { launchContextEnv };
 export type { LaunchContext };
@@ -636,9 +636,10 @@ export function spawnCliProcess(
       windowsHide: true,
       windowsVerbatimArguments: resolved.windowsVerbatimArguments,
       stdio: options.stdio,
-      // The launch context is applied last so a caller-supplied env cannot
+      // The launch context is applied last, over an env stripped of every
+      // launch variable, so a caller-supplied or inherited value cannot
       // masquerade as a different gateway request.
-      env: { ...env, ...launchContextEnv(options.launchContext) },
+      env: withLaunchContext(env, options.launchContext),
     });
   } catch (error) {
     neutralWorkspace?.cleanup();

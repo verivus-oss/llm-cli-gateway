@@ -497,10 +497,21 @@ export function codexKitProbeSpawnOptions(input: {
   };
 }
 
-const runCodexKitPromptProbe: CodexKitPromptProbe = ({ cwd, args, env, launchContext }) =>
-  runCodexKitPromptProbeProcess(() =>
-    spawnCliProcess("codex", args, codexKitProbeSpawnOptions({ cwd, env, launchContext }))
-  );
+/**
+ * The default prompt probe: a real Codex child through the spawn chokepoint.
+ * The spawner is injectable so a test can observe the exact options the
+ * probe hands to it without a Codex binary.
+ */
+export function createCodexKitPromptProbe(
+  spawn: typeof spawnCliProcess = spawnCliProcess
+): CodexKitPromptProbe {
+  return ({ cwd, args, env, launchContext }) =>
+    runCodexKitPromptProbeProcess(() =>
+      spawn("codex", args, codexKitProbeSpawnOptions({ cwd, env, launchContext }))
+    );
+}
+
+const runCodexKitPromptProbe: CodexKitPromptProbe = createCodexKitPromptProbe();
 
 /** Exercise the real probe lifecycle with a controlled executable in tests. */
 export function runCodexKitPromptProbeForTest(spawnProbe: () => ChildProcess): Promise<string> {

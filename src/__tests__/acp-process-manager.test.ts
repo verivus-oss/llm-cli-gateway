@@ -243,6 +243,18 @@ describe("AcpProcessManager", () => {
       expect(withContext.env.LLM_GATEWAY_PROVIDER).toBe("grok");
       expect(withContext.env.LLM_GATEWAY_JOB_ID).toBeUndefined();
 
+      // A forged job id in the inherited env must not survive: the ACP path
+      // never sets one, and isolation is a redirection denylist.
+      const forgedJob = resolveProviderSpawn(
+        "grok",
+        config,
+        { LLM_GATEWAY_JOB_ID: "forged-job" },
+        "/workspace",
+        [],
+        { correlationId: "corr-acp", provider: "grok" }
+      );
+      expect(forgedJob.env.LLM_GATEWAY_JOB_ID).toBeUndefined();
+
       const without = resolveProviderSpawn("grok", config, { KEEP_ME: "1" }, "/workspace");
       expect(without.env.LLM_GATEWAY_CORRELATION_ID).toBeUndefined();
       expect(without.env.LLM_GATEWAY_SESSION_ID).toBeUndefined();

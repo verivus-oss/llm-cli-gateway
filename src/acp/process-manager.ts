@@ -65,7 +65,7 @@ import {
   type NeutralExecutionWorkspace,
 } from "../neutral-workspace.js";
 import { applySpawnEnvIsolation } from "../spawn-env-isolation.js";
-import { launchContextEnv, type LaunchContext } from "../launch-context.js";
+import { withLaunchContext, type LaunchContext } from "../launch-context.js";
 import type { Logger } from "../logger.js";
 import { noopLogger } from "../logger.js";
 import type { CliType } from "../session-manager.js";
@@ -316,10 +316,7 @@ export function resolveProviderSpawn(
     cwd,
     // The launch context is applied last so a caller-supplied env cannot
     // masquerade as a different gateway request.
-    env: {
-      ...buildProviderEnv(provider, effectiveConfig, baseEnv),
-      ...launchContextEnv(launchContext),
-    },
+    env: withLaunchContext(buildProviderEnv(provider, effectiveConfig, baseEnv), launchContext),
   };
 }
 
