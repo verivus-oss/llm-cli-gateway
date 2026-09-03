@@ -45,6 +45,8 @@ const MAX_ANCESTORS = 64;
 const MAX_RULE_FILES = 256;
 const MAX_RULE_DIRECTORIES = 512;
 const MAX_RULE_ENTRIES = 4096;
+const MAX_REPLAY_PATH_CHARS = 32 * 1024;
+const MAX_REPLAY_CONTEXT_CHARS = 10 * 1024 * 1024;
 
 interface InstructionSource {
   path: string;
@@ -309,19 +311,35 @@ export function captureJobReplayContext(
 }
 
 export function parseJobReplayContext(value: unknown): JobReplayContext | null {
-  if (typeof value !== "string" || value.length > 256 * 1024) return null;
+  // The producer admits up to 256 real filesystem paths. A 256 KiB reader
+  // ceiling was smaller than that valid producer envelope, so a record could
+  // exist in memory and disappear after restart. The bound now covers 256
+  // maximum Windows long paths plus the fixed digest metadata.
+  if (typeof value !== "string" || value.length > MAX_REPLAY_CONTEXT_CHARS) return null;
   try {
     const parsed: unknown = JSON.parse(value);
     if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) return null;
     const record = parsed as Partial<JobReplayContext>;
-    if (record.version !== 1 || !Array.isArray(record.instructionFiles)) return null;
-    if (record.repositoryHead !== null && typeof record.repositoryHead !== "string") return null;
+    if (
+      record.version !== 1 ||
+      !Array.isArray(record.instructionFiles) ||
+      record.instructionFiles.length > MAX_RULE_FILES
+    ) {
+      return null;
+    }
+    if (
+      record.repositoryHead !== null &&
+      (typeof record.repositoryHead !== "string" || record.repositoryHead.length > 256)
+    ) {
+      return null;
+    }
     const instructionFiles = record.instructionFiles.filter(
       (entry): entry is JobInstructionDigest => {
         if (!entry || typeof entry !== "object" || Array.isArray(entry)) return false;
         const item = entry as Partial<JobInstructionDigest>;
         return (
           typeof item.path === "string" &&
+          item.path.length <= MAX_REPLAY_PATH_CHARS &&
           isAbsolute(item.path) &&
           (typeof item.sha256 === "string" || item.sha256 === null) &&
           (typeof item.sourceBytes === "number" || item.sourceBytes === null) &&

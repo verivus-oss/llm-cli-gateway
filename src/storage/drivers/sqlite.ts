@@ -12,6 +12,7 @@
  * reports false. That is accurate rather than a limitation to hide, and it is
  * the honest answer to "is role separation in force here".
  */
+import { realpathSync } from "node:fs";
 import { resolve } from "node:path";
 import {
   openDatabase,
@@ -39,8 +40,23 @@ const DEFAULT_DRAIN_TIMEOUT_MS = 2000;
 
 const CLOSING_MESSAGE = "storage: sqlite driver is closing and is not accepting new work";
 
-/** Schema writers sharing one SQLite file must not race across driver instances. */
-const bootstrapQueues = new Map<string, Promise<void>>();
+/** Writers sharing one SQLite file must not race across driver instances. */
+const writeQueues = new Map<string, Promise<void>>();
+
+function databaseQueueKey(dbPath: string): string {
+  try {
+    // The constructor opens the file before the key is needed, so this also
+    // collapses symlink and relative-path aliases onto one physical database.
+    return realpathSync(dbPath);
+  } catch {
+    // SQLite's special in-memory names have no filesystem identity.
+    return resolve(dbPath);
+  }
+}
+
+function isDuplicateColumnMigrationRace(error: unknown): boolean {
+  return error instanceof Error && /duplicate column name/i.test(error.message);
+}
 
 /**
  * Prepared statements, cached per database handle.
@@ -230,6 +246,23 @@ export class SqliteStorageDriver implements StorageDriver {
   /** Transactions abandoned by the drain bound, so close() can report honestly. */
   private abandonedOnClose = 0;
 
+  /** Reserve both this handle and the shared SQLite file before a write starts. */
+  private enqueueWrite<T>(run: () => Promise<T>): Promise<T> {
+    const key = databaseQueueKey(this.dbPath);
+    const predecessor = writeQueues.get(key) ?? Promise.resolve();
+    const started = Promise.all([this.queue, predecessor]).then(run);
+    this.queue = started.catch(() => undefined);
+    const tail = started.then(
+      () => undefined,
+      () => undefined
+    );
+    writeQueues.set(key, tail);
+    void tail.then(() => {
+      if (writeQueues.get(key) === tail) writeQueues.delete(key);
+    });
+    return started;
+  }
+
   /**
    * Schema bootstrap: DDL, PRAGMAs and idempotent column migrations.
    *
@@ -248,25 +281,20 @@ export class SqliteStorageDriver implements StorageDriver {
     if (inTransactionOn(this)) return Promise.reject(nestedConnectionRefusal(this));
     const run = async (): Promise<T> => {
       if (this.closed) throw new Error("storage: sqlite driver is closed");
-      return runInTransaction(this, () => fn(this.connectionFor("write", true)));
+      for (let attempt = 0; ; attempt += 1) {
+        try {
+          return await runInTransaction(this, () => fn(this.connectionFor("write", true)));
+        } catch (error) {
+          // SQLite has no ADD COLUMN IF NOT EXISTS. Across processes, both can
+          // read the same table_info snapshot before one wins the ALTER. Retry
+          // the idempotent bootstrap so the loser revalidates the final schema.
+          // A legacy database can require several columns, so each stale
+          // snapshot gets one retry up to a defensive finite ceiling.
+          if (!isDuplicateColumnMigrationRace(error) || attempt >= 63) throw error;
+        }
+      }
     };
-    const key = resolve(this.dbPath);
-    const predecessor = bootstrapQueues.get(key) ?? Promise.resolve();
-    // Reserve this driver's queue immediately. If the reservation waited until
-    // the global predecessor settled, a transaction submitted in the meantime
-    // could overtake the bootstrap and prepare statements against a schema that
-    // does not exist yet.
-    const started = Promise.all([this.queue, predecessor]).then(run);
-    this.queue = started.catch(() => undefined);
-    const tail = started.then(
-      () => undefined,
-      () => undefined
-    );
-    bootstrapQueues.set(key, tail);
-    void tail.then(() => {
-      if (bootstrapQueues.get(key) === tail) bootstrapQueues.delete(key);
-    });
-    return started;
+    return this.enqueueWrite(run);
   }
 
   /**
@@ -365,9 +393,7 @@ export class SqliteStorageDriver implements StorageDriver {
     // also passed `run` as the rejection arm of `then`, and the two masked each
     // other, so neither could be shown to work. The caller still gets the real
     // rejection from `started`.
-    const started = this.queue.then(run);
-    this.queue = started.catch(() => undefined);
-    return started;
+    return this.enqueueWrite(run);
   }
 
   /**

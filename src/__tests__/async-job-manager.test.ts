@@ -5,6 +5,22 @@ import { describe, it, expect, vi } from "vitest";
 import { AsyncJobManager, type LlmCli } from "../async-job-manager.js";
 import { MemoryJobStore } from "../job-store.js";
 import { ensureDevinTranscriptPath } from "../devin-transcript.js";
+import { DEFAULT_JOB_LIMITS } from "../config.js";
+
+class LostTerminalAcknowledgementStore extends MemoryJobStore {
+  private loseFirstAcknowledgement = true;
+
+  override async recordComplete(
+    input: Parameters<MemoryJobStore["recordComplete"]>[0]
+  ): Promise<boolean> {
+    const applied = await super.recordComplete(input);
+    if (applied && this.loseFirstAcknowledgement) {
+      this.loseFirstAcknowledgement = false;
+      throw new Error("terminal acknowledgement lost after commit");
+    }
+    return applied;
+  }
+}
 
 /** Poll until predicate returns true, or reject after timeoutMs. */
 function waitFor(
@@ -117,6 +133,21 @@ describe("AsyncJobManager", () => {
       expect(result.stderr).toContain("command was not found");
     });
 
+    it("reconciles an atomic terminal capture whose acknowledgement is lost", async () => {
+      const store = new LostTerminalAcknowledgementStore();
+      const manager = new AsyncJobManager(undefined, undefined, store);
+      try {
+        const job = await manager.startJob("echo" as LlmCli, ["whole"], "capture-ack-lost");
+        await waitFor(async () => (await store.getById(job.id))?.status === "completed", 5000, 10);
+        expect(await store.getById(job.id)).toMatchObject({
+          status: "completed",
+          captureStatus: "not_captured",
+        });
+      } finally {
+        await manager.dispose();
+      }
+    });
+
     it("should return null for unknown job ID", async () => {
       const manager = new AsyncJobManager();
       expect(await manager.getJobSnapshot("nonexistent")).toBeNull();
@@ -174,6 +205,57 @@ printf '%s\n' 'done'
         expect(durable?.nativeTranscript).toContain('"content":"whole"');
         expect(durable?.captureStatus).toBe("captured_whole");
         expect(durable?.captureError).toBeNull();
+        expect(existsSync(transcriptPath)).toBe(false);
+      } finally {
+        await manager.dispose();
+        rmSync(transcriptPath, { force: true });
+        rmSync(temp, { recursive: true, force: true });
+        if (originalHome === undefined) delete process.env.HOME;
+        else process.env.HOME = originalHome;
+      }
+    });
+
+    it("removes an oversized Devin export after bounded capture is durable", async () => {
+      const temp = mkdtempSync(join(tmpdir(), "devin-capture-limit-"));
+      const fakeDevin = join(temp, "devin");
+      const correlationId = `capture-limit-${process.pid}-${Date.now()}`;
+      const originalHome = process.env.HOME;
+      process.env.HOME = temp;
+      const transcriptPath = ensureDevinTranscriptPath(correlationId, temp);
+      if (!transcriptPath) throw new Error("failed to mint Devin transcript path");
+      const store = new MemoryJobStore();
+      const manager = new AsyncJobManager(undefined, undefined, store, undefined, {
+        ...DEFAULT_JOB_LIMITS,
+        maxJobOutputBytes: 128,
+      });
+      writeFileSync(
+        fakeDevin,
+        `#!/usr/bin/env node
+const fs = require("node:fs");
+const args = process.argv.slice(2);
+const at = args.indexOf("--export");
+fs.writeFileSync(args[at + 1], JSON.stringify({ version: "ATIF-v1.7", messages: [{ role: "assistant", content: "x".repeat(4096) }] }));
+process.stdout.write("done\\n");
+`
+      );
+      chmodSync(fakeDevin, 0o755);
+
+      try {
+        const job = await manager.startJob(
+          "devin",
+          ["--export", transcriptPath, "-p", "capture"],
+          correlationId,
+          undefined,
+          undefined,
+          "text",
+          true,
+          { PATH: `${temp}:${process.env.PATH ?? ""}` }
+        );
+        await waitFor(async () => (await store.getById(job.id))?.captureStatus !== null, 5000, 10);
+        expect(await store.getById(job.id)).toMatchObject({
+          captureStatus: "captured_to_limit",
+          nativeTranscriptTruncated: true,
+        });
         expect(existsSync(transcriptPath)).toBe(false);
       } finally {
         await manager.dispose();

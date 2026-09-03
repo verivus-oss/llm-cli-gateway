@@ -58,6 +58,8 @@ const PG_LOCK_TIMEOUT_MS = 5_000;
 const PERSONAL_KIT_REDACTED_ARGS_JSON = '["[personal-config-kit arguments redacted]"]';
 const PERSONAL_KIT_FAILURE_WITHHELD =
   "Personal Agent Config Kit provider execution failed; detailed output is withheld";
+const CAPTURE_ACCOUNTING_RECOVERY_ERROR = "Gateway stopped before capture accounting completed";
+const LEGACY_DEFAULT_JOB_RETENTION_MS = 30 * 24 * 60 * 60 * 1000;
 
 function serializeKitTerminalMetadata(value: unknown): string | null {
   // Provider-native continuation handles are process-local and must never
@@ -345,11 +347,46 @@ export function createPostgresJobStoreOps(
   const withClient = <T>(fn: (client: StorageConnection) => Promise<T>): Promise<T> =>
     driver.transaction("write", fn);
 
-  async function rebaseExistingJobExpiryForUnboundedRetention(): Promise<void> {
-    if (config.retentionMs !== null) return;
-    await poolAffected("UPDATE jobs SET expires_at = $1 WHERE expires_at <> $1", [
-      config.farFutureIso,
-    ]);
+  async function rebaseExistingJobExpiryForRetentionPolicy(): Promise<void> {
+    if (config.retentionMs === null) {
+      // Rebase only live rows that carry the exact former 30-day default.
+      // Explicit finite policies retain their deadlines and expired rows stay
+      // eligible for the ordinary sweep instead of being resurrected.
+      await poolAffected(
+        `UPDATE jobs
+         SET expires_at = $1
+         WHERE expires_at::timestamptz >= clock_timestamp()
+           AND expires_at < $1
+           AND expires_at::timestamptz =
+             COALESCE(finished_at, started_at)::timestamptz
+               + ($2::double precision * interval '1 millisecond')`,
+        [config.farFutureIso, LEGACY_DEFAULT_JOB_RETENTION_MS]
+      );
+      return;
+    }
+    await poolAffected(
+      `UPDATE jobs
+       SET expires_at = to_char(
+         (finished_at::timestamptz + ($1::double precision * interval '1 millisecond'))
+           AT TIME ZONE 'UTC',
+         'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"'
+       )
+       WHERE expires_at = $2
+         AND status NOT IN ('queued', 'running')
+         AND finished_at IS NOT NULL`,
+      [config.retentionMs, config.farFutureIso]
+    );
+  }
+
+  async function reconcileMissingCaptureAccounting(): Promise<void> {
+    await poolAffected(
+      `UPDATE jobs
+       SET capture_status = 'not_captured', capture_error = $1
+       WHERE status NOT IN ('queued', 'running')
+         AND kit_execution_json IS NULL
+         AND capture_status IS NULL`,
+      [CAPTURE_ACCOUNTING_RECOVERY_ERROR]
+    );
   }
 
   async function init(): Promise<void> {
@@ -360,7 +397,8 @@ export function createPostgresJobStoreOps(
     if (await isJobStoreSchemaReady()) {
       await backfillLegacyOwnerHostnames();
       await scrubLegacyPersonalKitJobMaterial();
-      await rebaseExistingJobExpiryForUnboundedRetention();
+      await rebaseExistingJobExpiryForRetentionPolicy();
+      await reconcileMissingCaptureAccounting();
       return;
     }
     try {
@@ -581,7 +619,8 @@ export function createPostgresJobStoreOps(
     }
     await backfillLegacyOwnerHostnames();
     await scrubLegacyPersonalKitJobMaterial();
-    await rebaseExistingJobExpiryForUnboundedRetention();
+    await rebaseExistingJobExpiryForRetentionPolicy();
+    await reconcileMissingCaptureAccounting();
   }
 
   async function op(method: string, args: any[]): Promise<unknown> {
@@ -1051,6 +1090,7 @@ export function createPostgresJobStoreOps(
                capture_error = $8
            WHERE id = $1
              AND owner_instance = $9
+             AND kit_execution_json IS NULL
              AND capture_status IS NULL`,
           [
             input.id,
@@ -1091,7 +1131,35 @@ export function createPostgresJobStoreOps(
              finished_at = $10,
              expires_at = $11, http_status = $12, lease_deadline = NULL,
              kit_terminal_metadata_json = $13,
-             progress_json = COALESCE($14, progress_json)
+             progress_json = COALESCE($14, progress_json),
+             capture_status = CASE
+               WHEN kit_execution_json IS NULL AND $15::text IS NOT NULL THEN $15
+               ELSE capture_status
+             END,
+             output_dropped_bytes = CASE
+               WHEN kit_execution_json IS NULL AND $15::text IS NOT NULL THEN $16
+               ELSE output_dropped_bytes
+             END,
+             native_transcript = CASE
+               WHEN kit_execution_json IS NULL AND $15::text IS NOT NULL THEN $17
+               ELSE native_transcript
+             END,
+             native_transcript_bytes = CASE
+               WHEN kit_execution_json IS NULL AND $15::text IS NOT NULL THEN $18
+               ELSE native_transcript_bytes
+             END,
+             native_transcript_truncated = CASE
+               WHEN kit_execution_json IS NULL AND $15::text IS NOT NULL THEN $19
+               ELSE native_transcript_truncated
+             END,
+             native_transcript_dropped_bytes = CASE
+               WHEN kit_execution_json IS NULL AND $15::text IS NOT NULL THEN $20
+               ELSE native_transcript_dropped_bytes
+             END,
+             capture_error = CASE
+               WHEN kit_execution_json IS NULL AND $15::text IS NOT NULL THEN $21
+               ELSE capture_error
+             END
          WHERE id = $1 AND status IN ('queued', 'running', 'orphaned')`,
           [
             input.id,
@@ -1108,6 +1176,13 @@ export function createPostgresJobStoreOps(
             input.httpStatus ?? null,
             serializeKitTerminalMetadata(input.kitTerminalMetadata),
             input.progressJson ?? null,
+            input.capture?.captureStatus ?? null,
+            input.capture?.outputDroppedBytes ?? 0,
+            input.capture?.nativeTranscript ?? null,
+            input.capture?.nativeTranscriptBytes ?? 0,
+            input.capture?.nativeTranscriptTruncated ?? false,
+            input.capture?.nativeTranscriptDroppedBytes ?? 0,
+            input.capture?.captureError ?? null,
           ]
         );
         // Report whether the guard admitted the write, so the caller can tell a

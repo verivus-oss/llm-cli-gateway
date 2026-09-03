@@ -6,7 +6,7 @@
  * are tested without a server.
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { mkdtempSync, rmSync } from "node:fs";
+import { mkdtempSync, rmSync, symlinkSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { SqliteStorageDriver } from "../storage/drivers/sqlite.js";
@@ -291,6 +291,85 @@ describe("SqliteStorageDriver", () => {
       releaseFirst();
       await other.close();
     }
+  });
+
+  it("holds a peer write until an in-flight bootstrap finishes", async () => {
+    const other = new SqliteStorageDriver(join(dir, "t.db"));
+    const order: string[] = [];
+    let releaseBootstrap = () => {};
+    const holdBootstrap = new Promise<void>(resolveBootstrap => {
+      releaseBootstrap = resolveBootstrap;
+    });
+    try {
+      const bootstrap = driver.bootstrap(async () => {
+        order.push("bootstrap:start");
+        await holdBootstrap;
+        order.push("bootstrap:end");
+      });
+      const write = other.transaction("write", async () => {
+        order.push("write");
+      });
+      await Promise.resolve();
+      await Promise.resolve();
+      expect(order).toEqual(["bootstrap:start"]);
+      releaseBootstrap();
+      await Promise.all([bootstrap, write]);
+      expect(order).toEqual(["bootstrap:start", "bootstrap:end", "write"]);
+    } finally {
+      releaseBootstrap();
+      await other.close();
+    }
+  });
+
+  it("uses one write queue for symlink aliases of the same database", async () => {
+    if (process.platform === "win32") return;
+    const aliasPath = join(dir, "alias.db");
+    symlinkSync(join(dir, "t.db"), aliasPath);
+    const alias = new SqliteStorageDriver(aliasPath);
+    const order: string[] = [];
+    let releaseBootstrap = () => {};
+    const holdBootstrap = new Promise<void>(resolveBootstrap => {
+      releaseBootstrap = resolveBootstrap;
+    });
+    try {
+      const bootstrap = driver.bootstrap(async () => {
+        order.push("bootstrap:start");
+        await holdBootstrap;
+        order.push("bootstrap:end");
+      });
+      const write = alias.transaction("write", async () => {
+        order.push("alias:write");
+      });
+      await Promise.resolve();
+      await Promise.resolve();
+      expect(order).toEqual(["bootstrap:start"]);
+      releaseBootstrap();
+      await Promise.all([bootstrap, write]);
+      expect(order).toEqual(["bootstrap:start", "bootstrap:end", "alias:write"]);
+    } finally {
+      releaseBootstrap();
+      await alias.close();
+    }
+  });
+
+  it("revalidates an idempotent bootstrap after a duplicate-column race", async () => {
+    let attempts = 0;
+    await driver.bootstrap(async connection => {
+      attempts += 1;
+      if (attempts === 1) throw new Error("duplicate column name: raced_column");
+      await connection.execute(
+        "CREATE TABLE IF NOT EXISTS bootstrap_race_recovered (id INTEGER PRIMARY KEY)"
+      );
+    });
+
+    expect(attempts).toBe(2);
+    const tables = await driver.withConnection("analytics_read", connection =>
+      connection.query<{ name: string }>(
+        "SELECT name FROM sqlite_master WHERE type = 'table' AND name = ?",
+        ["bootstrap_race_recovered"]
+      )
+    );
+    expect(tables).toEqual([{ name: "bootstrap_race_recovered" }]);
   });
 
   it("refuses to open a transaction on a read class", async () => {

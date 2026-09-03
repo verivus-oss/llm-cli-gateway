@@ -649,17 +649,18 @@ function applyEnvOverrides(
   }
 
   const retEnv = process.env.LLM_GATEWAY_JOB_RETENTION_DAYS;
-  if (retEnv !== undefined) {
+  if (retEnv?.trim()) {
     const n = Number(retEnv);
-    if (Number.isFinite(n) && n > 0) {
-      out.retentionDays = n;
-      sources.envOverrides.push("LLM_GATEWAY_JOB_RETENTION_DAYS");
-      logWarn(
-        logger,
-        "LLM_GATEWAY_JOB_RETENTION_DAYS is deprecated; set [persistence].retentionDays in config.toml",
-        { retentionDays: n }
-      );
+    if (!Number.isFinite(n) || n <= 0) {
+      throw new Error("LLM_GATEWAY_JOB_RETENTION_DAYS must be a positive number when set");
     }
+    out.retentionDays = n;
+    sources.envOverrides.push("LLM_GATEWAY_JOB_RETENTION_DAYS");
+    logWarn(
+      logger,
+      "LLM_GATEWAY_JOB_RETENTION_DAYS is deprecated; set [persistence].retentionDays in config.toml",
+      { retentionDays: n }
+    );
   }
 
   const dedupEnv = process.env.LLM_GATEWAY_DEDUP_WINDOW_MS;

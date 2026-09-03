@@ -39,6 +39,15 @@ async function waitForTerminal(mgr: AsyncJobManager, id: string, timeoutMs = 300
   throw new Error(`job ${id} did not terminate within ${timeoutMs}ms`);
 }
 
+async function waitForCapture(store: MemoryJobStore, id: string, timeoutMs = 3000): Promise<void> {
+  const start = Date.now();
+  while (Date.now() - start < timeoutMs) {
+    if ((await store.getById(id))?.captureStatus !== null) return;
+    await new Promise(r => setTimeout(r, 10));
+  }
+  throw new Error(`job ${id} did not persist capture accounting within ${timeoutMs}ms`);
+}
+
 describe("Slice 1 — HttpJobRunner", () => {
   let server: Server;
   let baseUrl: string;
@@ -160,6 +169,12 @@ describe("Slice 1 — HttpJobRunner", () => {
     const res = await mgr.cancelJob(snapshot.id);
     expect(res.canceled).toBe(true);
     expect((await mgr.getJobSnapshot(snapshot.id))?.status).toBe("canceled");
+    await waitForCapture(store, snapshot.id);
+    expect(await store.getById(snapshot.id)).toMatchObject({
+      status: "canceled",
+      captureStatus: "not_captured",
+      captureError: "HTTP request was canceled before a complete response was received",
+    });
   });
 
   it("dedups two identical http requests but not when the model differs", async () => {

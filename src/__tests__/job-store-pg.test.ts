@@ -95,7 +95,52 @@ describe("PostgresJobStore", () => {
     expect(await store.recordComplete({ ...terminal, id: "pg-no-such-row" })).toBe(false);
   });
 
-  it("rebases older finite expiries when the resolved policy is unbounded", async () => {
+  it("commits terminal output and capture accounting in one update", async () => {
+    const finishedAt = new Date().toISOString();
+    await store.recordStart({
+      id: "pg-atomic-capture",
+      correlationId: "pg-atomic-capture-corr",
+      requestKey: "pg-atomic-capture-key",
+      cli: "claude",
+      args: ["-p", "capture"],
+      startedAt: finishedAt,
+      pid: 7,
+      ownerInstance: "pg-atomic-capture-owner",
+    });
+    expect(
+      await store.recordComplete({
+        id: "pg-atomic-capture",
+        status: "completed",
+        exitCode: 0,
+        stdout: "complete wire",
+        stderr: "",
+        outputTruncated: false,
+        error: null,
+        finishedAt,
+        capture: {
+          captureStatus: "captured_whole",
+          outputDroppedBytes: 0,
+          nativeTranscript: null,
+          nativeTranscriptBytes: 0,
+          nativeTranscriptTruncated: false,
+          nativeTranscriptDroppedBytes: 0,
+          captureError: null,
+        },
+      })
+    ).toBe(true);
+    expect(await store.getById("pg-atomic-capture")).toMatchObject({
+      status: "completed",
+      stdout: "complete wire",
+      captureStatus: "captured_whole",
+    });
+  });
+
+  it("rebases only live rows written with the former 30-day default", async () => {
+    await store.close();
+    const formerDefaultMs = 30 * 24 * 60 * 60 * 1000;
+    store = new PostgresJobStore(TEST_DATABASE_URL, undefined, {
+      retentionMs: formerDefaultMs,
+    });
     const startedAt = new Date().toISOString();
     await store.recordStart({
       id: "pg-old-finite-expiry",
@@ -116,15 +161,170 @@ describe("PostgresJobStore", () => {
       error: null,
       finishedAt: startedAt,
     });
-    await pool.query("UPDATE jobs SET expires_at = $1 WHERE id = $2", [
-      "2000-01-01T00:00:00.000Z",
-      "pg-old-finite-expiry",
-    ]);
+    await store.close();
+
+    const explicitFiniteMs = 7 * 24 * 60 * 60 * 1000;
+    store = new PostgresJobStore(TEST_DATABASE_URL, undefined, {
+      retentionMs: explicitFiniteMs,
+    });
+    await store.recordStart({
+      id: "pg-explicit-finite-expiry",
+      correlationId: "pg-explicit-finite-expiry-corr",
+      requestKey: "pg-explicit-finite-expiry-key",
+      cli: "claude",
+      args: ["-p", "bounded"],
+      startedAt,
+      pid: null,
+    });
+    await store.recordComplete({
+      id: "pg-explicit-finite-expiry",
+      status: "completed",
+      exitCode: 0,
+      stdout: "bounded",
+      stderr: "",
+      outputTruncated: false,
+      error: null,
+      finishedAt: startedAt,
+    });
     await store.close();
 
     store = new PostgresJobStore(TEST_DATABASE_URL, undefined, { retentionMs: null });
     expect(await store.getById("pg-old-finite-expiry")).toMatchObject({
       expiresAt: "9999-12-31T23:59:59.999Z",
+    });
+    expect(Date.parse((await store.getById("pg-explicit-finite-expiry"))!.expiresAt)).toBe(
+      Date.parse(startedAt) + explicitFiniteMs
+    );
+  });
+
+  it("does not resurrect an already-expired row under unbounded retention", async () => {
+    const startedAt = new Date().toISOString();
+    await store.recordStart({
+      id: "pg-expired-row",
+      correlationId: "pg-expired-row-corr",
+      requestKey: "pg-expired-row-key",
+      cli: "claude",
+      args: ["-p", "expired"],
+      startedAt,
+      pid: null,
+    });
+    await store.recordComplete({
+      id: "pg-expired-row",
+      status: "completed",
+      exitCode: 0,
+      stdout: "expired",
+      stderr: "",
+      outputTruncated: false,
+      error: null,
+      finishedAt: startedAt,
+    });
+    await pool.query("UPDATE jobs SET expires_at = $1 WHERE id = $2", [
+      "2000-01-01T00:00:00.000Z",
+      "pg-expired-row",
+    ]);
+    await store.close();
+
+    store = new PostgresJobStore(TEST_DATABASE_URL, undefined, { retentionMs: null });
+    expect(await store.getById("pg-expired-row")).toMatchObject({
+      expiresAt: "2000-01-01T00:00:00.000Z",
+    });
+    expect(await store.evictExpired()).toBe(1);
+  });
+
+  it("applies a later finite retention bound to terminal unbounded rows", async () => {
+    await store.close();
+    store = new PostgresJobStore(TEST_DATABASE_URL, undefined, { retentionMs: null });
+    const finishedAt = "2026-01-01T00:00:00.000Z";
+    await store.recordStart({
+      id: "pg-previously-unbounded",
+      correlationId: "pg-previously-unbounded-corr",
+      requestKey: "pg-previously-unbounded-key",
+      cli: "claude",
+      args: ["-p", "history"],
+      startedAt: finishedAt,
+      pid: null,
+    });
+    await store.recordComplete({
+      id: "pg-previously-unbounded",
+      status: "completed",
+      exitCode: 0,
+      stdout: "history",
+      stderr: "",
+      outputTruncated: false,
+      error: null,
+      finishedAt,
+    });
+    await store.close();
+
+    store = new PostgresJobStore(TEST_DATABASE_URL, undefined, { retentionMs: 1_000 });
+    expect(Date.parse((await store.getById("pg-previously-unbounded"))!.expiresAt)).toBe(
+      Date.parse(finishedAt) + 1_000
+    );
+    expect(await store.evictExpired()).toBe(1);
+  });
+
+  it("marks terminal rows without capture accounting as unavailable on reopen", async () => {
+    const finishedAt = new Date().toISOString();
+    await store.recordStart({
+      id: "pg-capture-accounting-gap",
+      correlationId: "pg-capture-accounting-gap-corr",
+      requestKey: "pg-capture-accounting-gap-key",
+      cli: "claude",
+      args: ["-p", "history"],
+      startedAt: finishedAt,
+      pid: null,
+    });
+    await store.recordComplete({
+      id: "pg-capture-accounting-gap",
+      status: "completed",
+      exitCode: 0,
+      stdout: "history",
+      stderr: "",
+      outputTruncated: false,
+      error: null,
+      finishedAt,
+    });
+    await store.close();
+
+    store = new PostgresJobStore(TEST_DATABASE_URL, undefined, { retentionMs: 60_000 });
+    expect(await store.getById("pg-capture-accounting-gap")).toMatchObject({
+      captureStatus: "not_captured",
+      captureError: "Gateway stopped before capture accounting completed",
+    });
+  });
+
+  it("rejects capture persistence for Personal Agent Config Kit rows", async () => {
+    const startedAt = new Date().toISOString();
+    await store.recordStart({
+      id: "pg-kit-capture",
+      correlationId: "pg-kit-capture-corr",
+      requestKey: "private-key-must-not-land",
+      cli: "claude",
+      args: ["private", "arguments"],
+      startedAt,
+      pid: null,
+      ownerInstance: "pg-kit-capture-owner",
+      kitExecution: kitExecution(),
+      kitSessionId: "pg-kit-capture-session",
+    });
+    expect(
+      await store.recordCapture({
+        id: "pg-kit-capture",
+        ownerInstance: "pg-kit-capture-owner",
+        captureStatus: "not_captured",
+        outputDroppedBytes: 9,
+        nativeTranscript: "private transcript",
+        nativeTranscriptBytes: 18,
+        nativeTranscriptTruncated: true,
+        nativeTranscriptDroppedBytes: 7,
+        captureError: "private capture error",
+      })
+    ).toBe(false);
+    expect(await store.getById("pg-kit-capture")).toMatchObject({
+      captureStatus: null,
+      outputDroppedBytes: 0,
+      nativeTranscript: null,
+      captureError: null,
     });
   });
 

@@ -39,6 +39,7 @@ import {
   isValidationRunStore,
   type AcknowledgedKitAttemptRelease,
   type HeartbeatOutcome,
+  type JobCompletionInput,
   type JobRecord,
   type JobStoreStatus,
   type KitAttemptFenceResult,
@@ -3119,7 +3120,19 @@ export class AsyncJobManager {
     result: ApiResult | null,
     error: Error | null
   ): Promise<void> {
-    if (job.status !== "running") return; // canceled or already settled
+    if (job.status === "canceled") {
+      // Cancellation commits promptly, before the aborted request has settled.
+      // Close that second half of the lifecycle when its promise resolves so a
+      // new 3.2 row never remains indistinguishable from legacy capture state.
+      job.exited = true;
+      job.closeObserved = true;
+      job.abort = null;
+      job.captureStatus = "not_captured";
+      job.captureError = "HTTP request was canceled before a complete response was received";
+      await this.persistComplete(job);
+      return;
+    }
+    if (job.status !== "running") return;
     if (job.terminationRequested) {
       job.status = "failed";
       job.exitCode = job.exitCode ?? 1;
@@ -3791,7 +3804,10 @@ export class AsyncJobManager {
       return;
     }
     if (!job.transcriptCapable) {
-      if (job.captureFormat === "api-response") {
+      if (job.captureFormat === "api-response" && job.status === "canceled") {
+        job.captureStatus = "not_captured";
+        job.captureError ??= "HTTP request was canceled before a complete response was received";
+      } else if (job.captureFormat === "api-response") {
         job.captureStatus = job.outputTruncated ? "captured_to_limit" : "captured_whole";
         job.captureError = null;
       } else {
@@ -3813,12 +3829,16 @@ export class AsyncJobManager {
   }
 
   private async persistCapture(job: AsyncJobRecord): Promise<boolean> {
-    if (job.capturePersisted) return true;
+    if (job.capturePersisted) {
+      this.cleanupDurableNativeTranscript(job);
+      return true;
+    }
     if (!this.store || job.kitExecution) return false;
     this.captureOutcome(job);
     if (job.captureStatus === null) return false;
+    let durable = false;
     try {
-      const applied = await this.store.recordCapture({
+      durable = await this.store.recordCapture({
         id: job.id,
         ownerInstance: this.instanceId,
         captureStatus: job.captureStatus,
@@ -3829,31 +3849,68 @@ export class AsyncJobManager {
         nativeTranscriptDroppedBytes: job.nativeTranscriptDroppedBytes,
         captureError: job.captureError,
       });
-      if (applied) job.capturePersisted = true;
-      if (
-        applied &&
-        job.captureStatus === "captured_whole" &&
-        job.nativeTranscript !== null &&
-        job.nativeTranscriptPath
-      ) {
-        const expected = job.nativeTranscriptPath;
-        if (gatewayDevinTranscriptPathFromArgs(job.args) === expected) {
-          try {
-            unlinkSync(expected);
-          } catch {
-            // The durable copy already succeeded. A later host cleanup may
-            // remove the exact gateway-owned source file.
-          }
-          releaseGatewayDevinTranscriptPath(expected);
-          job.nativeTranscriptPath = undefined;
-        }
-      }
-      if (applied && job.captureStatus !== "captured_whole") {
-        releaseGatewayDevinTranscriptPath(job.nativeTranscriptPath);
-      }
-      return applied;
     } catch (error) {
-      this.logger.error(`JobStore.recordCapture failed for ${job.id}`, error);
+      // PostgreSQL can commit an UPDATE and lose the acknowledgement on the
+      // return path. Read the owner-fenced row before deciding this is a retry;
+      // replaying the first-write-wins UPDATE would return false forever.
+      durable = await this.reconcileCaptureAcknowledgement(job);
+      if (!durable) {
+        this.logger.error(`JobStore.recordCapture failed for ${job.id}`, error);
+        return false;
+      }
+    }
+    if (!durable) durable = await this.reconcileCaptureAcknowledgement(job);
+    if (!durable) return false;
+    job.capturePersisted = true;
+    this.cleanupDurableNativeTranscript(job);
+    return true;
+  }
+
+  private cleanupDurableNativeTranscript(job: AsyncJobRecord): void {
+    const expected = job.nativeTranscriptPath;
+    if (!expected || gatewayDevinTranscriptPathFromArgs(job.args) !== expected) return;
+    try {
+      unlinkSync(expected);
+      job.nativeTranscriptPath = undefined;
+    } catch {
+      // Releasing the process-local pin lets the periodic, startup, and
+      // pre-launch sweeps retry the exact gateway-minted file after a crash or
+      // a transient unlink failure. Keep the path on the job so result reads
+      // can retry immediately while this process remains alive.
+    }
+    releaseGatewayDevinTranscriptPath(expected);
+  }
+
+  private captureForCompletion(job: AsyncJobRecord): JobCompletionInput["capture"] {
+    if (job.kitExecution || !job.closeObserved) return null;
+    this.captureOutcome(job);
+    if (job.captureStatus === null) return null;
+    return {
+      captureStatus: job.captureStatus,
+      outputDroppedBytes: job.outputDroppedBytes,
+      nativeTranscript: job.nativeTranscript,
+      nativeTranscriptBytes: job.nativeTranscriptBytes,
+      nativeTranscriptTruncated: job.nativeTranscriptTruncated,
+      nativeTranscriptDroppedBytes: job.nativeTranscriptDroppedBytes,
+      captureError: job.captureError,
+    };
+  }
+
+  private async reconcileCaptureAcknowledgement(job: AsyncJobRecord): Promise<boolean> {
+    if (!this.store) return false;
+    try {
+      const stored = await this.store.getById(job.id);
+      if (stored?.ownerInstance !== this.instanceId || stored.captureStatus === null) return false;
+      job.captureStatus = stored.captureStatus;
+      job.outputDroppedBytes = stored.outputDroppedBytes;
+      job.nativeTranscript = stored.nativeTranscript;
+      job.nativeTranscriptBytes = stored.nativeTranscriptBytes;
+      job.nativeTranscriptTruncated = stored.nativeTranscriptTruncated;
+      job.nativeTranscriptDroppedBytes = stored.nativeTranscriptDroppedBytes;
+      job.captureError = stored.captureError;
+      return true;
+    } catch (error) {
+      this.logger.error(`JobStore capture acknowledgement readback failed for ${job.id}`, error);
       return false;
     }
   }
@@ -3897,13 +3954,11 @@ export class AsyncJobManager {
     job.outputDirty = false;
     const isKit = Boolean(job.kitExecution);
     try {
-      // A normal close has the complete provider wire available now. Commit its
-      // capture accounting first, while the durable row is still open, so a
-      // crash cannot expose a terminal row with an unrecorded capture. Early
-      // signal paths have no close proof yet and persist capture on close.
-      if (!isKit && job.closeObserved && !(await this.persistCapture(job))) {
-        throw new Error("capture persistence was not acknowledged");
-      }
+      // A normal close has the complete provider wire available now. Commit
+      // output, terminal state, and capture accounting in one guarded update.
+      // Early signal paths have no close proof yet and persist capture after
+      // the child or HTTP request settles.
+      const capture = this.captureForCompletion(job);
       const applied = await this.store.recordComplete({
         id: job.id,
         status: job.status,
@@ -3917,6 +3972,7 @@ export class AsyncJobManager {
         finishedAt: job.finishedAt!,
         httpStatus: job.httpStatus,
         progressJson: this.progressTracker(job).serialize(),
+        capture,
       });
       // The terminal state is settled either way, so never replay
       // recordComplete: a throw (not a rejected guard) is what stays retryable.
@@ -3925,6 +3981,13 @@ export class AsyncJobManager {
       // Ownership is a SEPARATE fact from settlement, and only ownership
       // licenses the late-output write (here and at close).
       job.terminalRowOwned = applied;
+      if (capture) {
+        const captureDurable = applied || (await this.reconcileCaptureAcknowledgement(job));
+        if (captureDurable) {
+          job.capturePersisted = true;
+          this.cleanupDurableNativeTranscript(job);
+        }
+      }
       // An admitted terminal write wins the row back, including from the
       // mistakenly-orphaned case #139 deliberately still admits.
       if (applied) job.durableOutputRowLost = false;

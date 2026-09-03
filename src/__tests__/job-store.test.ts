@@ -27,6 +27,17 @@ function expireLease(dbPath: string, jobId: string): void {
   }
 }
 
+function kitExecution() {
+  return {
+    version: 1 as const,
+    releaseId: "capture-kit-release",
+    configStamp: "capture-kit-stamp",
+    scopeRoot: "/workspace/capture-kit",
+    scopeHead: "capture-kit-head",
+    contextIdentity: "capture-kit-context",
+  };
+}
+
 describe("JobStore", () => {
   let tempDir: string;
   let dbPath: string;
@@ -315,8 +326,9 @@ describe("JobStore", () => {
         expect(await migrated.getById("legacy-1")).toMatchObject({
           errorCategory: null,
           retryable: null,
-          expiresAt: "9999-12-31T23:59:59.999Z",
+          expiresAt: "2000-01-01T00:00:00.000Z",
         });
+        expect(await migrated.evictExpired()).toBe(1);
         // New inserts after migration can carry an owner.
         await migrated.recordStart({
           id: "new-1",
@@ -348,6 +360,144 @@ describe("JobStore", () => {
       } finally {
         await migrated.close();
         rmSync(legacyDir, { recursive: true, force: true });
+      }
+    });
+
+    it("rebases only live rows written with the former 30-day default", async () => {
+      const policyPath = join(tempDir, "former-default-retention.db");
+      const formerDefaultMs = 30 * 24 * 60 * 60 * 1000;
+      const formerDefault = new SqliteJobStore(policyPath, undefined, {
+        retentionMs: formerDefaultMs,
+      });
+      const finishedAt = new Date().toISOString();
+      await formerDefault.recordStart({
+        id: "former-default-row",
+        correlationId: "former-default-corr",
+        requestKey: "former-default-key",
+        cli: "claude",
+        args: ["-p", "history"],
+        startedAt: finishedAt,
+        pid: null,
+      });
+      await formerDefault.recordComplete({
+        id: "former-default-row",
+        status: "completed",
+        exitCode: 0,
+        stdout: "history",
+        stderr: "",
+        outputTruncated: false,
+        error: null,
+        finishedAt,
+      });
+      await formerDefault.close();
+
+      const explicitFiniteMs = 7 * 24 * 60 * 60 * 1000;
+      const explicitFinite = new SqliteJobStore(policyPath, undefined, {
+        retentionMs: explicitFiniteMs,
+      });
+      await explicitFinite.recordStart({
+        id: "explicit-finite-row",
+        correlationId: "explicit-finite-corr",
+        requestKey: "explicit-finite-key",
+        cli: "claude",
+        args: ["-p", "bounded"],
+        startedAt: finishedAt,
+        pid: null,
+      });
+      await explicitFinite.recordComplete({
+        id: "explicit-finite-row",
+        status: "completed",
+        exitCode: 0,
+        stdout: "bounded",
+        stderr: "",
+        outputTruncated: false,
+        error: null,
+        finishedAt,
+      });
+      await explicitFinite.close();
+
+      const unbounded = new SqliteJobStore(policyPath, undefined, { retentionMs: null });
+      try {
+        expect(await unbounded.getById("former-default-row")).toMatchObject({
+          expiresAt: "9999-12-31T23:59:59.999Z",
+        });
+        expect(Date.parse((await unbounded.getById("explicit-finite-row"))!.expiresAt)).toBe(
+          Date.parse(finishedAt) + explicitFiniteMs
+        );
+      } finally {
+        await unbounded.close();
+      }
+    });
+
+    it("applies a later finite retention bound to terminal unbounded rows", async () => {
+      const policyPath = join(tempDir, "retention-policy-change.db");
+      const unbounded = new SqliteJobStore(policyPath, undefined, { retentionMs: null });
+      const finishedAt = "2026-01-01T00:00:00.000Z";
+      await unbounded.recordStart({
+        id: "previously-unbounded",
+        correlationId: "previously-unbounded-corr",
+        requestKey: "previously-unbounded-key",
+        cli: "claude",
+        args: ["-p", "history"],
+        startedAt: finishedAt,
+        pid: null,
+      });
+      await unbounded.recordComplete({
+        id: "previously-unbounded",
+        status: "completed",
+        exitCode: 0,
+        stdout: "history",
+        stderr: "",
+        outputTruncated: false,
+        error: null,
+        finishedAt,
+      });
+      await unbounded.close();
+
+      const bounded = new SqliteJobStore(policyPath, undefined, { retentionMs: 1_000 });
+      try {
+        expect(Date.parse((await bounded.getById("previously-unbounded"))!.expiresAt)).toBe(
+          Date.parse(finishedAt) + 1_000
+        );
+        expect(await bounded.evictExpired()).toBe(1);
+      } finally {
+        await bounded.close();
+      }
+    });
+
+    it("marks terminal rows without capture accounting as unavailable on reopen", async () => {
+      const recoveryPath = join(tempDir, "capture-accounting-recovery.db");
+      const initial = new SqliteJobStore(recoveryPath, undefined, { retentionMs: null });
+      const finishedAt = new Date().toISOString();
+      await initial.recordStart({
+        id: "capture-accounting-gap",
+        correlationId: "capture-accounting-gap-corr",
+        requestKey: "capture-accounting-gap-key",
+        cli: "claude",
+        args: ["-p", "history"],
+        startedAt: finishedAt,
+        pid: null,
+      });
+      await initial.recordComplete({
+        id: "capture-accounting-gap",
+        status: "completed",
+        exitCode: 0,
+        stdout: "history",
+        stderr: "",
+        outputTruncated: false,
+        error: null,
+        finishedAt,
+      });
+      await initial.close();
+
+      const reopened = new SqliteJobStore(recoveryPath, undefined, { retentionMs: null });
+      try {
+        expect(await reopened.getById("capture-accounting-gap")).toMatchObject({
+          captureStatus: "not_captured",
+          captureError: "Gateway stopped before capture accounting completed",
+        });
+      } finally {
+        await reopened.close();
       }
     });
   });
@@ -628,6 +778,17 @@ describe("JobStore", () => {
         if (prev !== undefined) process.env.LLM_GATEWAY_JOB_RETENTION_DAYS = prev;
       }
     });
+
+    it("rejects an invalid retention environment override", () => {
+      const prev = process.env.LLM_GATEWAY_JOB_RETENTION_DAYS;
+      process.env.LLM_GATEWAY_JOB_RETENTION_DAYS = "forever";
+      try {
+        expect(() => resolveJobRetentionMs()).toThrow(/must be a positive number/);
+      } finally {
+        if (prev !== undefined) process.env.LLM_GATEWAY_JOB_RETENTION_DAYS = prev;
+        else delete process.env.LLM_GATEWAY_JOB_RETENTION_DAYS;
+      }
+    });
   });
 
   describe("U22 Mistral jobs persist through the durable store", () => {
@@ -775,6 +936,90 @@ describe("JobStore", () => {
         expect(row?.nativeTranscript, name).toContain("ATIF-v1.7");
         expect(row?.nativeTranscriptTruncated, name).toBe(true);
         expect(row?.nativeTranscriptDroppedBytes, name).toBe(41);
+        await backend.close();
+      }
+    });
+
+    it("rejects capture persistence for Personal Agent Config Kit rows", async () => {
+      for (const [name, backend] of backends()) {
+        const t = new Date().toISOString();
+        await backend.recordStart({
+          id: "kit-capture-parity",
+          correlationId: "kit-capture-parity-corr",
+          requestKey: "private-key-must-not-land",
+          cli: "claude",
+          args: ["private", "arguments"],
+          startedAt: t,
+          pid: null,
+          ownerInstance: "kit-capture-owner",
+          kitExecution: kitExecution(),
+          kitSessionId: "kit-capture-session",
+        });
+        expect(
+          await backend.recordCapture({
+            id: "kit-capture-parity",
+            ownerInstance: "kit-capture-owner",
+            captureStatus: "not_captured",
+            outputDroppedBytes: 9,
+            nativeTranscript: "private transcript",
+            nativeTranscriptBytes: 18,
+            nativeTranscriptTruncated: true,
+            nativeTranscriptDroppedBytes: 7,
+            captureError: "private capture error",
+          }),
+          name
+        ).toBe(false);
+        expect(await backend.getById("kit-capture-parity"), name).toMatchObject({
+          captureStatus: null,
+          outputDroppedBytes: 0,
+          nativeTranscript: null,
+          captureError: null,
+        });
+        await backend.close();
+      }
+    });
+
+    it("commits terminal output and capture accounting atomically", async () => {
+      for (const [name, backend] of backends()) {
+        const finishedAt = new Date().toISOString();
+        await backend.recordStart({
+          id: "atomic-capture-parity",
+          correlationId: "atomic-capture-corr",
+          requestKey: "atomic-capture-key",
+          cli: "claude",
+          args: ["-p", "capture"],
+          startedAt: finishedAt,
+          pid: 7,
+          ownerInstance: "atomic-capture-owner",
+        });
+        expect(
+          await backend.recordComplete({
+            id: "atomic-capture-parity",
+            status: "completed",
+            exitCode: 0,
+            stdout: "complete wire",
+            stderr: "",
+            outputTruncated: false,
+            error: null,
+            finishedAt,
+            capture: {
+              captureStatus: "captured_whole",
+              outputDroppedBytes: 0,
+              nativeTranscript: null,
+              nativeTranscriptBytes: 0,
+              nativeTranscriptTruncated: false,
+              nativeTranscriptDroppedBytes: 0,
+              captureError: null,
+            },
+          }),
+          name
+        ).toBe(true);
+        expect(await backend.getById("atomic-capture-parity"), name).toMatchObject({
+          status: "completed",
+          stdout: "complete wire",
+          captureStatus: "captured_whole",
+          outputDroppedBytes: 0,
+        });
         await backend.close();
       }
     });

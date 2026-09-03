@@ -87,9 +87,41 @@ export interface ValidationJobAdmission {
   role?: "provider" | "judge";
 }
 
+export interface JobCaptureInput {
+  id: string;
+  ownerInstance: string;
+  captureStatus: "captured_whole" | "captured_to_limit" | "not_captured";
+  outputDroppedBytes: number;
+  nativeTranscript: string | null;
+  nativeTranscriptBytes: number;
+  nativeTranscriptTruncated: boolean;
+  nativeTranscriptDroppedBytes: number;
+  captureError: string | null;
+}
+
+export interface JobCompletionInput {
+  id: string;
+  status: Exclude<JobStoreStatus, "running" | "queued">;
+  exitCode: number | null;
+  stdout: string;
+  stderr: string;
+  outputTruncated: boolean;
+  error: string | null;
+  errorCategory?: string | null;
+  retryable?: boolean | null;
+  finishedAt: string;
+  httpStatus?: number | null;
+  progressJson?: string | null;
+  kitTerminalMetadata?: PersonalKitTerminalMetadata | null;
+  /** Capture fields committed atomically with a normal close transition. */
+  capture?: Omit<JobCaptureInput, "id" | "ownerInstance"> | null;
+}
+
 const PERSONAL_KIT_REDACTED_ARGS_JSON = '["[personal-config-kit arguments redacted]"]';
 const PERSONAL_KIT_FAILURE_WITHHELD =
   "Personal Agent Config Kit provider execution failed; detailed output is withheld";
+const CAPTURE_ACCOUNTING_RECOVERY_ERROR = "Gateway stopped before capture accounting completed";
+const LEGACY_DEFAULT_JOB_RETENTION_MS = 30 * 24 * 60 * 60 * 1000;
 
 /**
  * Match a recovered fence to the caller that is replaying it. Legacy fences
@@ -286,9 +318,11 @@ const SQLITE_NOW_MS = "CAST(ROUND((julianday('now') - 2440587.5) * 86400000.0) A
 
 export function resolveJobRetentionMs(): number | null {
   const raw = process.env.LLM_GATEWAY_JOB_RETENTION_DAYS;
-  if (!raw) return null;
+  if (!raw?.trim()) return null;
   const days = Number(raw);
-  if (!Number.isFinite(days) || days <= 0) return null;
+  if (!Number.isFinite(days) || days <= 0) {
+    throw new Error("LLM_GATEWAY_JOB_RETENTION_DAYS must be a positive number when set");
+  }
   return days * 24 * 60 * 60 * 1000;
 }
 
@@ -946,17 +980,7 @@ export interface JobStore {
     progressJson: string
   ): Promise<boolean>;
   /** Persist terminal capture accounting and any bounded native transcript. */
-  recordCapture(input: {
-    id: string;
-    ownerInstance: string;
-    captureStatus: "captured_whole" | "captured_to_limit" | "not_captured";
-    outputDroppedBytes: number;
-    nativeTranscript: string | null;
-    nativeTranscriptBytes: number;
-    nativeTranscriptTruncated: boolean;
-    nativeTranscriptDroppedBytes: number;
-    captureError: string | null;
-  }): Promise<boolean>;
+  recordCapture(input: JobCaptureInput): Promise<boolean>;
   /**
    * Write the terminal row. Returns true when the row was actually written,
    * false when the completion guard rejected it because the row was already
@@ -971,23 +995,7 @@ export interface JobStore {
    * Only a caller whose own `recordComplete` returned true may follow up with
    * `recordOutput` to land output captured after the terminal write.
    */
-  recordComplete(input: {
-    id: string;
-    status: Exclude<JobStoreStatus, "running" | "queued">;
-    exitCode: number | null;
-    stdout: string;
-    stderr: string;
-    outputTruncated: boolean;
-    error: string | null;
-    errorCategory?: string | null;
-    retryable?: boolean | null;
-    finishedAt: string;
-    /** Slice 1: real HTTP status for http jobs; null for process jobs. */
-    httpStatus?: number | null;
-    progressJson?: string | null;
-    /** Compatibility input ignored at the durable persistence boundary. */
-    kitTerminalMetadata?: PersonalKitTerminalMetadata | null;
-  }): Promise<boolean>;
+  recordComplete(input: JobCompletionInput): Promise<boolean>;
   getById(id: string): Promise<JobRecord | null>;
   findByRequestKey(requestKey: string): Promise<JobRecord | null>;
   /**
@@ -1284,6 +1292,7 @@ const SQL_UPDATE_CAPTURE = `
           capture_error = @capture_error
       WHERE id = @id
         AND owner_instance = @owner_instance
+        AND kit_execution_json IS NULL
         AND capture_status IS NULL
     `;
 
@@ -1302,7 +1311,42 @@ const SQL_UPDATE_COMPLETE = `
                       finished_at = @finished_at, expires_at = @expires_at,
                       http_status = @http_status, lease_deadline = NULL,
                       kit_terminal_metadata_json = @kit_terminal_metadata_json,
-                      progress_json = COALESCE(@progress_json, progress_json)
+                      progress_json = COALESCE(@progress_json, progress_json),
+                      capture_status = CASE
+                        WHEN kit_execution_json IS NULL AND @capture_status IS NOT NULL
+                          THEN @capture_status
+                        ELSE capture_status
+                      END,
+                      output_dropped_bytes = CASE
+                        WHEN kit_execution_json IS NULL AND @capture_status IS NOT NULL
+                          THEN @output_dropped_bytes
+                        ELSE output_dropped_bytes
+                      END,
+                      native_transcript = CASE
+                        WHEN kit_execution_json IS NULL AND @capture_status IS NOT NULL
+                          THEN @native_transcript
+                        ELSE native_transcript
+                      END,
+                      native_transcript_bytes = CASE
+                        WHEN kit_execution_json IS NULL AND @capture_status IS NOT NULL
+                          THEN @native_transcript_bytes
+                        ELSE native_transcript_bytes
+                      END,
+                      native_transcript_truncated = CASE
+                        WHEN kit_execution_json IS NULL AND @capture_status IS NOT NULL
+                          THEN @native_transcript_truncated
+                        ELSE native_transcript_truncated
+                      END,
+                      native_transcript_dropped_bytes = CASE
+                        WHEN kit_execution_json IS NULL AND @capture_status IS NOT NULL
+                          THEN @native_transcript_dropped_bytes
+                        ELSE native_transcript_dropped_bytes
+                      END,
+                      capture_error = CASE
+                        WHEN kit_execution_json IS NULL AND @capture_status IS NOT NULL
+                          THEN @capture_error
+                        ELSE capture_error
+                      END
       WHERE id = @id AND status IN ('queued', 'running', 'orphaned')
     `;
 
@@ -1712,14 +1756,49 @@ export class SqliteJobStore implements JobStore, ValidationRunStore {
         "CREATE INDEX IF NOT EXISTS idx_jobs_kit_finalization ON jobs(kit_terminal_finalized, status)"
       );
       if (this.retentionMs === null) {
-        // Stable 3.2 changes the default from a finite lifetime to unbounded.
-        // Rebase rows written by an older default so merely upgrading cannot
-        // delete history that the resolved policy now promises to retain.
-        await conn.execute("UPDATE jobs SET expires_at = ? WHERE expires_at <> ?", [
-          FAR_FUTURE_ISO,
-          FAR_FUTURE_ISO,
-        ]);
+        // Stable 3.2 changes the default from 30 days to unbounded. Preserve
+        // only non-expired rows that match the exact former default. Explicit
+        // finite policies keep their own deadlines, while already-due rows
+        // remain eligible for the normal retention sweep.
+        await conn.execute(
+          `UPDATE jobs
+           SET expires_at = ?
+           WHERE expires_at >= strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
+             AND expires_at < ?
+             AND expires_at = strftime(
+               '%Y-%m-%dT%H:%M:%fZ',
+               julianday(COALESCE(finished_at, started_at)) + (? / 86400000.0)
+             )`,
+          [FAR_FUTURE_ISO, FAR_FUTURE_ISO, LEGACY_DEFAULT_JOB_RETENTION_MS]
+        );
+      } else {
+        // The inverse transition matters too. A later operator-selected bound
+        // applies to terminal history written while retention was unbounded;
+        // active rows stay at the far-future sentinel until they finish.
+        await conn.execute(
+          `UPDATE jobs
+           SET expires_at = strftime(
+             '%Y-%m-%dT%H:%M:%fZ',
+             julianday(finished_at) + (? / 86400000.0)
+           )
+           WHERE expires_at = ?
+             AND status NOT IN ('queued', 'running')
+             AND finished_at IS NOT NULL
+             AND julianday(finished_at) IS NOT NULL`,
+          [this.retentionMs, FAR_FUTURE_ISO]
+        );
       }
+      // A process may stop after the terminal row commits but before its close
+      // handler records capture accounting. The bytes cannot be reconstructed
+      // after restart, but the durable record must still say that explicitly.
+      await conn.execute(
+        `UPDATE jobs
+         SET capture_status = 'not_captured', capture_error = ?
+         WHERE status NOT IN ('queued', 'running')
+           AND kit_execution_json IS NULL
+           AND capture_status IS NULL`,
+        [CAPTURE_ACCOUNTING_RECOVERY_ERROR]
+      );
     });
 
     if (process.platform !== "win32") {
@@ -2290,17 +2369,7 @@ export class SqliteJobStore implements JobStore, ValidationRunStore {
     return Number(result.changes) === 1;
   }
 
-  async recordCapture(input: {
-    id: string;
-    ownerInstance: string;
-    captureStatus: "captured_whole" | "captured_to_limit" | "not_captured";
-    outputDroppedBytes: number;
-    nativeTranscript: string | null;
-    nativeTranscriptBytes: number;
-    nativeTranscriptTruncated: boolean;
-    nativeTranscriptDroppedBytes: number;
-    captureError: string | null;
-  }): Promise<boolean> {
+  async recordCapture(input: JobCaptureInput): Promise<boolean> {
     const result = await this.execSql(SQL_UPDATE_CAPTURE, [
       {
         id: input.id,
@@ -2320,21 +2389,7 @@ export class SqliteJobStore implements JobStore, ValidationRunStore {
   /**
    * Mark a job as completed/failed/canceled. Sets expires_at = now + retention.
    */
-  async recordComplete(input: {
-    id: string;
-    status: Exclude<JobStoreStatus, "running" | "queued">;
-    exitCode: number | null;
-    stdout: string;
-    stderr: string;
-    outputTruncated: boolean;
-    error: string | null;
-    errorCategory?: string | null;
-    retryable?: boolean | null;
-    finishedAt: string;
-    httpStatus?: number | null;
-    progressJson?: string | null;
-    kitTerminalMetadata?: PersonalKitTerminalMetadata | null;
-  }): Promise<boolean> {
+  async recordComplete(input: JobCompletionInput): Promise<boolean> {
     const expiresAt = retentionExpiryIso(input.finishedAt, this.retentionMs);
     const result = await this.execSql(SQL_UPDATE_COMPLETE, [
       {
@@ -2352,6 +2407,13 @@ export class SqliteJobStore implements JobStore, ValidationRunStore {
         http_status: input.httpStatus ?? null,
         progress_json: input.progressJson ?? null,
         kit_terminal_metadata_json: serializeKitTerminalMetadata(input.kitTerminalMetadata),
+        capture_status: input.capture?.captureStatus ?? null,
+        output_dropped_bytes: input.capture?.outputDroppedBytes ?? 0,
+        native_transcript: input.capture?.nativeTranscript ?? null,
+        native_transcript_bytes: input.capture?.nativeTranscriptBytes ?? 0,
+        native_transcript_truncated: input.capture?.nativeTranscriptTruncated ? 1 : 0,
+        native_transcript_dropped_bytes: input.capture?.nativeTranscriptDroppedBytes ?? 0,
+        capture_error: input.capture?.captureError ?? null,
       },
     ]);
     return Number(result.changes) === 1;
@@ -3173,17 +3235,7 @@ export class MemoryJobStore implements JobStore {
     return true;
   }
 
-  async recordCapture(input: {
-    id: string;
-    ownerInstance: string;
-    captureStatus: "captured_whole" | "captured_to_limit" | "not_captured";
-    outputDroppedBytes: number;
-    nativeTranscript: string | null;
-    nativeTranscriptBytes: number;
-    nativeTranscriptTruncated: boolean;
-    nativeTranscriptDroppedBytes: number;
-    captureError: string | null;
-  }): Promise<boolean> {
+  async recordCapture(input: JobCaptureInput): Promise<boolean> {
     const row = this.rows.get(input.id);
     if (
       !row ||
@@ -3203,21 +3255,7 @@ export class MemoryJobStore implements JobStore {
     return true;
   }
 
-  async recordComplete(input: {
-    id: string;
-    status: Exclude<JobStoreStatus, "running" | "queued">;
-    exitCode: number | null;
-    stdout: string;
-    stderr: string;
-    outputTruncated: boolean;
-    error: string | null;
-    errorCategory?: string | null;
-    retryable?: boolean | null;
-    finishedAt: string;
-    httpStatus?: number | null;
-    progressJson?: string | null;
-    kitTerminalMetadata?: PersonalKitTerminalMetadata | null;
-  }): Promise<boolean> {
+  async recordComplete(input: JobCompletionInput): Promise<boolean> {
     const row = this.rows.get(input.id);
     if (!row) return false;
     // #139: guarded completion, mirroring the sqlite WHERE guard. A terminal
@@ -3247,6 +3285,15 @@ export class MemoryJobStore implements JobStore {
     row.kitTerminalMetadata = null;
     if (input.progressJson !== undefined && input.progressJson !== null) {
       row.progressJson = input.progressJson;
+    }
+    if (row.kitExecution === null && input.capture) {
+      row.captureStatus = input.capture.captureStatus;
+      row.outputDroppedBytes = input.capture.outputDroppedBytes;
+      row.nativeTranscript = input.capture.nativeTranscript;
+      row.nativeTranscriptBytes = input.capture.nativeTranscriptBytes;
+      row.nativeTranscriptTruncated = input.capture.nativeTranscriptTruncated;
+      row.nativeTranscriptDroppedBytes = input.capture.nativeTranscriptDroppedBytes;
+      row.captureError = input.capture.captureError;
     }
     return true;
   }
@@ -3639,35 +3686,11 @@ export class PostgresJobStore implements JobStore, ValidationRunStore {
     return this.call("recordProgressIfStatus", id, status, progressJson);
   }
 
-  async recordCapture(input: {
-    id: string;
-    ownerInstance: string;
-    captureStatus: "captured_whole" | "captured_to_limit" | "not_captured";
-    outputDroppedBytes: number;
-    nativeTranscript: string | null;
-    nativeTranscriptBytes: number;
-    nativeTranscriptTruncated: boolean;
-    nativeTranscriptDroppedBytes: number;
-    captureError: string | null;
-  }): Promise<boolean> {
+  async recordCapture(input: JobCaptureInput): Promise<boolean> {
     return this.call("recordCapture", input);
   }
 
-  async recordComplete(input: {
-    id: string;
-    status: Exclude<JobStoreStatus, "running" | "queued">;
-    exitCode: number | null;
-    stdout: string;
-    stderr: string;
-    outputTruncated: boolean;
-    error: string | null;
-    errorCategory?: string | null;
-    retryable?: boolean | null;
-    finishedAt: string;
-    httpStatus?: number | null;
-    progressJson?: string | null;
-    kitTerminalMetadata?: PersonalKitTerminalMetadata | null;
-  }): Promise<boolean> {
+  async recordComplete(input: JobCompletionInput): Promise<boolean> {
     return this.call<boolean>("recordComplete", input);
   }
 

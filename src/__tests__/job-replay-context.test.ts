@@ -4,7 +4,7 @@ import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
-import { captureJobReplayContext } from "../job-replay-context.js";
+import { captureJobReplayContext, parseJobReplayContext } from "../job-replay-context.js";
 
 const roots: string[] = [];
 
@@ -121,5 +121,24 @@ describe("job replay context", () => {
       effectiveBytes: 0,
       truncated: true,
     });
+  });
+
+  it("rehydrates the largest valid rule-file roster after restart", () => {
+    const serialized = JSON.stringify({
+      version: 1,
+      repositoryHead: "a".repeat(40),
+      instructionFiles: Array.from({ length: 256 }, (_, index) => ({
+        path: `/${String(index).padStart(3, "0")}-${"x".repeat(1000)}`,
+        sha256: "b".repeat(64),
+        sourceBytes: 1,
+        effectiveBytes: 1,
+        effectiveLimitBytes: null,
+        truncated: false,
+        status: "captured",
+      })),
+    });
+
+    expect(serialized.length).toBeGreaterThan(256 * 1024);
+    expect(parseJobReplayContext(serialized)?.instructionFiles).toHaveLength(256);
   });
 });

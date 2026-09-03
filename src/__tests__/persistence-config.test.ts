@@ -200,6 +200,13 @@ describe("loadPersistenceConfig", () => {
     expect(cfg.retentionDays).toBe(5);
     expect(cfg.sources.envOverrides).toContain("LLM_GATEWAY_JOB_RETENTION_DAYS");
   });
+
+  it("rejects an invalid LLM_GATEWAY_JOB_RETENTION_DAYS override", () => {
+    pointToMissing();
+    vi.stubEnv("LLM_GATEWAY_LOGS_DB", "");
+    vi.stubEnv("LLM_GATEWAY_JOB_RETENTION_DAYS", "forever");
+    expect(() => loadPersistenceConfig(noopLogger)).toThrow(/must be a positive number/);
+  });
 });
 
 describe("loadProvidersConfig", () => {

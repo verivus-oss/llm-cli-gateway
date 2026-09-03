@@ -68,6 +68,19 @@ All notable changes to the llm-cli-gateway project.
   native transcripts.
 - Gateway-owned Devin exports are removed after direct inline runs and swept
   after crashes, missing close events, or failed durable capture writes.
+- Terminal output and capture accounting now commit in one guarded store
+  update after a normal close. Restart recovery marks an interrupted late
+  capture explicitly unavailable, and lost write acknowledgements are
+  reconciled from the owner-fenced row.
+- Every durably accounted Devin export is removed, including exports whose
+  retained copy reached the capture limit. Canceled HTTP requests finish their
+  capture lifecycle after the aborted request settles.
+- The unbounded-retention upgrade preserves only live rows written with the
+  former 30-day default. It neither resurrects expired rows nor overwrites an
+  explicit finite deadline, and a later finite policy applies to terminal rows
+  created while retention was unbounded.
+- SQLite schema bootstraps and writes share one physical-file queue in-process.
+  A cross-process duplicate-column race revalidates the idempotent bootstrap.
 
 ### Security
 
