@@ -22,36 +22,10 @@ import {
   writeAndCloseChildStdin,
 } from "./child-stdin.js";
 
-/**
- * Identifiers the gateway stamps into a provider child's environment so any
- * launcher, sandbox or shim downstream can correlate its own artefacts (a
- * container name, a per-call tmp directory, a log line) with the gateway's
- * request, job and session records. Only defined fields are exported.
- */
-export interface LaunchContext {
-  correlationId?: string;
-  jobId?: string;
-  sessionId?: string;
-  provider?: string;
-}
+import { launchContextEnv, type LaunchContext } from "./launch-context.js";
 
-const LAUNCH_CONTEXT_ENV: ReadonlyArray<[keyof LaunchContext, string]> = [
-  ["correlationId", "LLM_GATEWAY_CORRELATION_ID"],
-  ["jobId", "LLM_GATEWAY_JOB_ID"],
-  ["sessionId", "LLM_GATEWAY_SESSION_ID"],
-  ["provider", "LLM_GATEWAY_PROVIDER"],
-];
-
-/** Project a LaunchContext onto the LLM_GATEWAY_* environment variables. */
-export function launchContextEnv(context: LaunchContext | undefined): NodeJS.ProcessEnv {
-  const env: NodeJS.ProcessEnv = {};
-  if (!context) return env;
-  for (const [field, name] of LAUNCH_CONTEXT_ENV) {
-    const value = context[field];
-    if (typeof value === "string" && value.length > 0) env[name] = value;
-  }
-  return env;
-}
+export { launchContextEnv };
+export type { LaunchContext };
 
 export interface ExecuteOptions {
   timeout?: number;

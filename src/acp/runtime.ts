@@ -271,6 +271,11 @@ export async function runAcpRequest(
       hostServices,
       callbacks: { onSessionUpdate: update => normalizer.handle(update) },
       extraArgs,
+      launchContext: {
+        correlationId: req.correlationId,
+        sessionId: gatewaySessionId,
+        provider: req.provider,
+      },
     });
     const cwd = proc.resolved.cwd;
     const init = proc.client.agentInfo;

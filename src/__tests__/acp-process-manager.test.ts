@@ -225,6 +225,30 @@ describe("AcpProcessManager", () => {
       expect(resolved.args).not.toContain("grok agent stdio");
     });
 
+    it("exports the launch context into the provider env, last, and only when given", () => {
+      const config = makeConfig({
+        providers: {
+          grok: makeProviderConfig({ command: "grok", args: ["agent", "stdio"] }),
+        },
+      });
+      const baseEnv = { KEEP_ME: "1", LLM_GATEWAY_CORRELATION_ID: "forged" };
+      const withContext = resolveProviderSpawn("grok", config, baseEnv, "/workspace", [], {
+        correlationId: "corr-acp",
+        sessionId: "gw-acp-1",
+        provider: "grok",
+      });
+      expect(withContext.env.KEEP_ME).toBe("1");
+      expect(withContext.env.LLM_GATEWAY_CORRELATION_ID).toBe("corr-acp");
+      expect(withContext.env.LLM_GATEWAY_SESSION_ID).toBe("gw-acp-1");
+      expect(withContext.env.LLM_GATEWAY_PROVIDER).toBe("grok");
+      expect(withContext.env.LLM_GATEWAY_JOB_ID).toBeUndefined();
+
+      const without = resolveProviderSpawn("grok", config, { KEEP_ME: "1" }, "/workspace");
+      expect(without.env.LLM_GATEWAY_CORRELATION_ID).toBeUndefined();
+      expect(without.env.LLM_GATEWAY_SESSION_ID).toBeUndefined();
+      expect(without.env.LLM_GATEWAY_PROVIDER).toBeUndefined();
+    });
+
     it("falls back to the registry entrypoint when no provider config command", () => {
       const resolved = resolveProviderSpawn("mistral", makeConfig(), {}, "/workspace");
       expect(resolved.command).toBe("vibe-acp");
