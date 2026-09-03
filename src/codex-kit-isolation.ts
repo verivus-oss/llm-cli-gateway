@@ -511,8 +511,6 @@ export function createCodexKitPromptProbe(
     );
 }
 
-const runCodexKitPromptProbe: CodexKitPromptProbe = createCodexKitPromptProbe();
-
 /** Exercise the real probe lifecycle with a controlled executable in tests. */
 export function runCodexKitPromptProbeForTest(spawnProbe: () => ChildProcess): Promise<string> {
   return runCodexKitPromptProbeProcess(spawnProbe);
@@ -553,7 +551,10 @@ export async function createCodexKitIsolationPlan(
     ...envWithExtendedPath(baseEnv, getExtendedPath()),
     ...removals,
   };
-  const probe = options.probe ?? runCodexKitPromptProbe;
+  // The production default is the factory the test pins, not a separately
+  // captured instance: a review found a module-level copy could drift from
+  // the factory without any test noticing.
+  const probe = options.probe ?? createCodexKitPromptProbe();
   const discovered = inspectCodexKitPromptInput(
     await probe({
       cwd: canonicalCwd,

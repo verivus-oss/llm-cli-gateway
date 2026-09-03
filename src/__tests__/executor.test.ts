@@ -162,11 +162,15 @@ describe("executeCli", () => {
       expect(result.stdout.trim()).toBe("[unset][unset]:claude");
     });
 
-    it("exports nothing when no launch context is given", async () => {
-      const result = await executeCli("sh", [
-        "-c",
-        "echo [${LLM_GATEWAY_CORRELATION_ID-unset}][${LLM_GATEWAY_JOB_ID-unset}]",
-      ]);
+    it("exports nothing when no launch context is given, and strips inherited names", async () => {
+      // A probe or admin spawn carries no context; ids inherited from the
+      // gateway's own environment (a nested gateway, a forged caller env) must
+      // not label that child as some other request.
+      const result = await executeCli(
+        "sh",
+        ["-c", "echo [${LLM_GATEWAY_CORRELATION_ID-unset}][${LLM_GATEWAY_JOB_ID-unset}]"],
+        { env: { LLM_GATEWAY_CORRELATION_ID: "inherited", LLM_GATEWAY_JOB_ID: "inherited" } }
+      );
       expect(result.stdout.trim()).toBe("[unset][unset]");
     });
   });

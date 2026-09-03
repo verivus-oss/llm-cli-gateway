@@ -255,7 +255,13 @@ describe("AcpProcessManager", () => {
       );
       expect(forgedJob.env.LLM_GATEWAY_JOB_ID).toBeUndefined();
 
-      const without = resolveProviderSpawn("grok", config, { KEEP_ME: "1" }, "/workspace");
+      const without = resolveProviderSpawn(
+        "grok",
+        config,
+        { KEEP_ME: "1", LLM_GATEWAY_CORRELATION_ID: "inherited", LLM_GATEWAY_PROVIDER: "x" },
+        "/workspace"
+      );
+      expect(without.env.KEEP_ME).toBe("1");
       expect(without.env.LLM_GATEWAY_CORRELATION_ID).toBeUndefined();
       expect(without.env.LLM_GATEWAY_SESSION_ID).toBeUndefined();
       expect(without.env.LLM_GATEWAY_PROVIDER).toBeUndefined();
