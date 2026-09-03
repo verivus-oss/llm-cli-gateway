@@ -365,6 +365,51 @@ describe("AsyncJobManager shutdown fencing", () => {
     }
   });
 
+  it("does not deregister while a terminal process is awaiting close", async () => {
+    const testDir = mkdtempSync(join(tmpdir(), "async-shutdown-terminal-process-"));
+    const store = new SqliteJobStore(join(testDir, "jobs.db"));
+    const manager = new AsyncJobManager(undefined, undefined, store);
+    const deregisterInstance = store.deregisterInstance.bind(store);
+    let deregistered = false;
+    store.deregisterInstance = async instanceId => {
+      deregistered = true;
+      await deregisterInstance(instanceId);
+    };
+
+    try {
+      const started = await manager.startJobWithDedup(
+        "node" as LlmCli,
+        [
+          "-e",
+          "process.stdout.write('ready'); process.on('SIGTERM', () => setTimeout(() => process.exit(0), 2000)); setInterval(() => {}, 1000);",
+        ],
+        "shutdown-terminal-process-close",
+        { forceRefresh: true }
+      );
+      await waitFor(
+        async () => ((await manager.getJobSnapshot(started.snapshot.id))?.stdoutBytes ?? 0) >= 5
+      );
+      expect((await manager.cancelJob(started.snapshot.id)).canceled).toBe(true);
+      expect(await manager.getJobSnapshot(started.snapshot.id)).toMatchObject({
+        status: "canceled",
+        exited: false,
+      });
+
+      const startedAt = Date.now();
+      await manager.dispose({ timeoutMs: 75 });
+
+      expect(Date.now() - startedAt).toBeLessThan(1_000);
+      expect(deregistered).toBe(false);
+      await waitFor(
+        async () => (await manager.getJobSnapshot(started.snapshot.id))?.exited === true
+      );
+    } finally {
+      await manager.whenPendingWritesSettled();
+      await store.close();
+      rmSync(testDir, { recursive: true, force: true });
+    }
+  });
+
   it("bounds instance deregistration by the remaining shutdown deadline", async () => {
     const testDir = mkdtempSync(join(tmpdir(), "async-shutdown-deregister-"));
     const store = new SqliteJobStore(join(testDir, "jobs.db"));

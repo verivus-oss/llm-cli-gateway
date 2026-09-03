@@ -1759,8 +1759,16 @@ export class AsyncJobManager {
     // asynchronous terminal hooks to settle.
     while (Date.now() < deadline) {
       const stillActive = [...this.jobs.values()].some(job => isAsyncJobInProgress(job.status));
+      const hasOwnedProcessAwaitingClose = this.hasOwnedProcessAwaitingClose();
       const hasPendingTerminalPersistence = this.hasPendingTerminalPersistence();
-      if (!stillActive && !hasPendingTerminalPersistence && this.pendingWrites.size === 0) break;
+      if (
+        !stillActive &&
+        !hasOwnedProcessAwaitingClose &&
+        !hasPendingTerminalPersistence &&
+        this.pendingWrites.size === 0
+      ) {
+        break;
+      }
       const delay = new Promise<void>(resolve => setTimeout(resolve, 50));
       // Promise.allSettled([]) resolves in a microtask. Racing that empty
       // promise against the timer would spin until the deadline and starve an
@@ -1773,13 +1781,19 @@ export class AsyncJobManager {
     }
 
     const stillActive = [...this.jobs.values()].some(job => isAsyncJobInProgress(job.status));
+    const hasOwnedProcessAwaitingClose = this.hasOwnedProcessAwaitingClose();
     const hasPendingTerminalPersistence = this.hasPendingTerminalPersistence();
-    if (stillActive || hasPendingTerminalPersistence || this.pendingWrites.size > 0) {
+    if (
+      stillActive ||
+      hasOwnedProcessAwaitingClose ||
+      hasPendingTerminalPersistence ||
+      this.pendingWrites.size > 0
+    ) {
       // (5) do NOT deregister while jobs are still finalizing: let the lease
       // expire so another instance recovers them correctly rather than a
       // mid-write orphan. This includes terminal Kit rows whose captured output
-      // has not yet reached durable storage and terminal lifecycle hooks that
-      // have not settled.
+      // has not yet reached durable storage, terminal process rows still
+      // awaiting close, and terminal lifecycle hooks that have not settled.
       logWarn(
         this.logger,
         "#139 dispose timed out with unfinished owned job finalization; skipping deregister and letting the lease expire"
@@ -4163,6 +4177,13 @@ export class AsyncJobManager {
         !isAsyncJobInProgress(job.status) &&
         (!job.terminalPersistenceAcknowledged ||
           (!job.kitExecution && job.closeObserved && !job.capturePersisted))
+    );
+  }
+
+  /** True while an owned process can still emit output or require close cleanup. */
+  private hasOwnedProcessAwaitingClose(): boolean {
+    return [...this.jobs.values()].some(
+      job => job.transport === "process" && job.process !== null && !job.exited
     );
   }
 
