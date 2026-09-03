@@ -181,4 +181,69 @@ describe("AsyncJobManager shutdown fencing", () => {
       rmSync(testDir, { recursive: true, force: true });
     }
   });
+
+  it("bounds an immediate retry whose terminal store write stalls", async () => {
+    const testDir = mkdtempSync(join(tmpdir(), "async-shutdown-stalled-retry-"));
+    const store = new SqliteJobStore(join(testDir, "jobs.db"));
+    const manager = new AsyncJobManager(undefined, undefined, store);
+    const recordComplete = store.recordComplete.bind(store);
+    let releaseRetry: (() => void) | undefined;
+    const retryGate = new Promise<void>(resolve => {
+      releaseRetry = resolve;
+    });
+    let completeCalls = 0;
+    let deregistered = false;
+    store.recordComplete = input => {
+      completeCalls += 1;
+      if (completeCalls === 1) throw new Error("initial terminal-store failure");
+      return retryGate.then(() => recordComplete(input));
+    };
+    const deregisterInstance = store.deregisterInstance.bind(store);
+    store.deregisterInstance = async instanceId => {
+      deregistered = true;
+      await deregisterInstance(instanceId);
+    };
+
+    try {
+      const job = await manager.startJobWithDedup(
+        "sh" as LlmCli,
+        ["-c", "true"],
+        "shutdown-stalled-retry",
+        {
+          kitExecution: execution(),
+          kitSessionId: "gateway-shutdown-stalled-retry",
+          jobId: randomUUID(),
+          forceRefresh: true,
+        }
+      );
+      await waitFor(
+        async () => !isAsyncJobInProgress((await manager.getJobSnapshot(job.snapshot.id)!).status)
+      );
+      const inMemoryJob = (
+        manager as unknown as {
+          jobs: Map<
+            string,
+            {
+              terminalPersistenceAcknowledged?: boolean;
+              terminalWriteChain?: Promise<void>;
+            }
+          >;
+        }
+      ).jobs.get(job.snapshot.id);
+      await waitFor(() => inMemoryJob?.terminalWriteChain === undefined);
+      expect(inMemoryJob?.terminalPersistenceAcknowledged).toBe(false);
+
+      const startedAt = Date.now();
+      await manager.dispose({ timeoutMs: 75 });
+
+      expect(Date.now() - startedAt).toBeLessThan(1_000);
+      expect(completeCalls).toBeGreaterThanOrEqual(2);
+      expect(deregistered).toBe(false);
+    } finally {
+      releaseRetry?.();
+      await manager.whenPendingWritesSettled();
+      await store.close();
+      rmSync(testDir, { recursive: true, force: true });
+    }
+  });
 });

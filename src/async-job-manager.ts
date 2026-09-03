@@ -1681,6 +1681,22 @@ export class AsyncJobManager {
   async dispose(opts: { timeoutMs?: number } = {}): Promise<void> {
     const timeoutMs = opts.timeoutMs ?? 5000;
     if (this.disposed) return;
+    const deadline = Date.now() + timeoutMs;
+    const awaitWithinDeadline = async (operation: Promise<unknown>): Promise<boolean> => {
+      const remainingMs = deadline - Date.now();
+      if (remainingMs <= 0) return false;
+      let timer: NodeJS.Timeout | undefined;
+      try {
+        return await Promise.race([
+          operation.then(() => true),
+          new Promise<boolean>(resolve => {
+            timer = setTimeout(() => resolve(false), remainingMs);
+          }),
+        ]);
+      } finally {
+        if (timer) clearTimeout(timer);
+      }
+    };
     // (1) stop admission before anything else so no new job slips in mid-dispose.
     this.disposed = true;
     this.durableAdmission = false;
@@ -1696,22 +1712,23 @@ export class AsyncJobManager {
     // (3) terminalize queued work before signalling running work. A released
     // permit can otherwise grant a queued job while shutdown is in progress.
     const queued = [...this.jobs.values()].filter(job => job.status === "queued");
-    for (const job of queued) {
+    const queuedFinalizations = queued.map(job => {
       job.queueCancel?.();
-      await this.failQueuedJob(job, "Gateway is shutting down before execution", 1);
-    }
+      return this.failQueuedJob(job, "Gateway is shutting down before execution", 1);
+    });
+    await awaitWithinDeadline(Promise.allSettled(queuedFinalizations));
 
     // Terminal Kit writes may already be waiting on an unref retry timer. Make
     // one immediate attempt while dispose still owns the store and includes the
     // result in its drain fence.
-    for (const job of this.jobs.values()) {
-      await this.retryTerminalPersistenceNow(job);
-    }
+    const terminalRetries = [...this.jobs.values()].map(job =>
+      this.retryTerminalPersistenceNow(job)
+    );
+    await awaitWithinDeadline(Promise.allSettled(terminalRetries));
 
     // (4) abort/kill active owned jobs. Mark the shutdown fence before the
     // signal: SIGTERM is only a request, and the close event is the proof that
     // the provider can no longer mutate its native session.
-    const deadline = Date.now() + timeoutMs;
     const killEscalationDelayMs =
       timeoutMs <= 50 ? 0 : Math.max(25, Math.min(1_000, Math.floor(timeoutMs / 3)));
     const active = [...this.jobs.values()].filter(job => job.status === "running");
