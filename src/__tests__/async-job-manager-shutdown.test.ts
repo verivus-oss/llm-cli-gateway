@@ -410,6 +410,71 @@ describe("AsyncJobManager shutdown fencing", () => {
     }
   });
 
+  it("waits for close after the dead-process sweep infers exit", async () => {
+    const testDir = mkdtempSync(join(tmpdir(), "async-shutdown-inherited-pipe-"));
+    const store = new SqliteJobStore(join(testDir, "jobs.db"));
+    const manager = new AsyncJobManager(undefined, undefined, store);
+    const deregisterInstance = store.deregisterInstance.bind(store);
+    let deregistered = false;
+    store.deregisterInstance = async instanceId => {
+      deregistered = true;
+      await deregisterInstance(instanceId);
+    };
+    const internals = manager as unknown as {
+      jobs: Map<
+        string,
+        {
+          process: { pid?: number } | null;
+          exited: boolean;
+          closeObserved: boolean;
+        }
+      >;
+      evictCompletedJobs(): Promise<void>;
+    };
+
+    try {
+      const started = await manager.startJobWithDedup(
+        "node" as LlmCli,
+        [
+          "-e",
+          "const { spawn } = require('child_process'); spawn(process.execPath, ['-e', 'setTimeout(() => process.exit(0), 2000)'], { stdio: ['ignore', 'inherit', 'inherit'] }); process.stdout.write('ready'); setTimeout(() => process.exit(0), 50);",
+        ],
+        "shutdown-inherited-pipe-close",
+        { forceRefresh: true }
+      );
+      const job = internals.jobs.get(started.snapshot.id)!;
+      const pid = job.process?.pid;
+      expect(pid).toBeTypeOf("number");
+      await waitFor(() => {
+        try {
+          process.kill(pid!, 0);
+          return false;
+        } catch (error) {
+          return (error as NodeJS.ErrnoException).code === "ESRCH";
+        }
+      });
+      expect(job.closeObserved).toBe(false);
+
+      await internals.evictCompletedJobs();
+      expect(await manager.getJobSnapshot(started.snapshot.id)).toMatchObject({
+        status: "failed",
+        exited: true,
+      });
+      expect(job.closeObserved).toBe(false);
+
+      const startedAt = Date.now();
+      await manager.dispose({ timeoutMs: 75 });
+
+      expect(Date.now() - startedAt).toBeLessThan(1_000);
+      expect(deregistered).toBe(false);
+      await waitFor(() => job.closeObserved === true);
+    } finally {
+      await manager.whenPendingWritesSettled();
+      await store.close();
+      rmSync(testDir, { recursive: true, force: true });
+    }
+  });
+
   it("bounds instance deregistration by the remaining shutdown deadline", async () => {
     const testDir = mkdtempSync(join(tmpdir(), "async-shutdown-deregister-"));
     const store = new SqliteJobStore(join(testDir, "jobs.db"));

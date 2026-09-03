@@ -4183,7 +4183,7 @@ export class AsyncJobManager {
   /** True while an owned process can still emit output or require close cleanup. */
   private hasOwnedProcessAwaitingClose(): boolean {
     return [...this.jobs.values()].some(
-      job => job.transport === "process" && job.process !== null && !job.exited
+      job => job.transport === "process" && job.process !== null && !job.closeObserved
     );
   }
 
