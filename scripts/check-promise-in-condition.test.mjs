@@ -501,16 +501,24 @@ describe("promise-in-condition gate", () => {
     const scratch = join(fixtureRoot, ".scratch");
     mkdirSync(fakeSrc);
     mkdirSync(scratch);
+    // Codex's round-5 survivor: a refusal that leaves the descriptor open is a
+    // leak per refusal, so the close is asserted, not assumed.
+    const closed = [];
     const fs = {
       ...nodeFs,
       constants: nodeFs.constants,
       fstatSync() {
         return nodeFs.lstatSync(fakeSrc);
       },
+      closeSync(fd) {
+        closed.push(fd);
+        return nodeFs.closeSync(fd);
+      },
     };
     expect(() => makeScratchDir(fixtureRoot, "promise-condition-", fs)).toThrow(
       /same directory as src under/
     );
+    expect(closed).toHaveLength(1);
     expect(readdirSync(fakeSrc)).toEqual([]);
     expect(readdirSync(scratch)).toEqual([]);
   });
