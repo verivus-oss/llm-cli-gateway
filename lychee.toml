@@ -93,9 +93,6 @@ exclude = [
   # The link is stable and human-facing; do not fail the security gate
   # on transient bot traffic handling.
   "^https://datasette\\.io(/|$)",
-  # This research publisher serves 403 to the public CI user agent while the
-  # cited article remains available to ordinary browsers.
-  "^https://news\\.curiouslychase\\.com/",
   # Socket's public package report repeatedly returns 503 to hosted CI. Keep
   # the exclusion scoped to this package rather than hiding Socket links as a
   # class.
