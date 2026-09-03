@@ -147,7 +147,10 @@ function runCall(taskTag) {
           if (ev.type === "assistant" && ev.message?.content?.[0]?.text) {
             assistantText = ev.message.content[0].text;
           }
-        } catch {}
+        } catch {
+          // A partial or non-JSON line in the NDJSON stream is skipped, not fatal:
+          // the stream is read while it is still being written.
+        }
       }
       if (!result) {
         return reject(new Error(`No 'result' event in claude output; tail: ${stdout.slice(-500)}`));

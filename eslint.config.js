@@ -5,9 +5,55 @@ import securityPlugin from "eslint-plugin-security";
 
 export default [
   {
-    ignores: ["dist/**", "node_modules/**", "**/*.test.ts"],
+    ignores: [
+      "dist/**",
+      "node_modules/**",
+      "**/*.test.ts",
+      // Workflow-tool scripts, not standalone modules: they carry a top-level
+      // `return` because the runtime wraps them in a function. ESLint can only
+      // report that as a parse error, which is noise rather than a finding.
+      "docs/plans/*.workflow.js",
+      "docs/plans/*.workflow.mjs",
+    ],
   },
   js.configs.recommended,
+  {
+    // `.github/scripts` runs in CI under Node and was linted by nothing: the
+    // lint script scanned `src scripts` only, so 64 of the tree's `no-undef`
+    // errors were this config gap rather than defects. One of these fetches
+    // release secrets.
+    files: [".github/scripts/**/*.{js,mjs}", "docs/plans/**/*.mjs"],
+    languageOptions: {
+      ecmaVersion: 2022,
+      sourceType: "module",
+      globals: {
+        console: "readonly",
+        fetch: "readonly",
+        process: "readonly",
+        setTimeout: "readonly",
+        URL: "readonly",
+        URLSearchParams: "readonly",
+      },
+    },
+  },
+  {
+    // The published site's own JavaScript. It is deployed by direct upload, so
+    // nothing else compiles or type-checks it.
+    files: ["site/js/**/*.js"],
+    languageOptions: {
+      ecmaVersion: 2022,
+      sourceType: "script",
+      globals: {
+        console: "readonly",
+        document: "readonly",
+        localStorage: "readonly",
+        matchMedia: "readonly",
+        navigator: "readonly",
+        setTimeout: "readonly",
+        window: "readonly",
+      },
+    },
+  },
   {
     files: ["scripts/**/*.{js,mjs}"],
     languageOptions: {

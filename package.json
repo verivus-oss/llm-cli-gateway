@@ -106,7 +106,7 @@
     "supply-chain:baseline:refresh": "node scripts/supply-chain/refresh-baseline.mjs",
     "supply-chain:baseline:check": "node scripts/supply-chain/refresh-baseline.mjs --check",
     "test:supply-chain": "vitest run scripts/supply-chain/dep-drift-scan.test.mjs",
-    "lint": "eslint src scripts --ignore-pattern 'src/__tests__/**'",
+    "lint": "eslint src scripts site/js .github/scripts docs/plans --ignore-pattern 'src/__tests__/**'",
     "lint:fix": "eslint src scripts --ignore-pattern 'src/__tests__/**' --fix",
     "format": "prettier --write 'src/**/*.ts' 'scripts/**/*.{js,mjs}'",
     "format:check": "prettier --check 'src/**/*.ts' 'scripts/**/*.{js,mjs}'",
