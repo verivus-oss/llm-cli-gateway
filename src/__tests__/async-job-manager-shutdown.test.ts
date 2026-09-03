@@ -416,6 +416,8 @@ describe("AsyncJobManager shutdown fencing", () => {
     const manager = new AsyncJobManager(undefined, undefined, store);
     const deregisterInstance = store.deregisterInstance.bind(store);
     let deregistered = false;
+    let terminalHookCalls = 0;
+    let artifactCleanupCalls = 0;
     store.deregisterInstance = async instanceId => {
       deregistered = true;
       await deregisterInstance(instanceId);
@@ -440,7 +442,18 @@ describe("AsyncJobManager shutdown fencing", () => {
           "const { spawn } = require('child_process'); spawn(process.execPath, ['-e', 'setTimeout(() => process.exit(0), 2000)'], { stdio: ['ignore', 'inherit', 'inherit'] }); process.stdout.write('ready'); setTimeout(() => process.exit(0), 50);",
         ],
         "shutdown-inherited-pipe-close",
-        { forceRefresh: true }
+        {
+          forceRefresh: true,
+          kitExecution: execution(),
+          kitSessionId: "gateway-shutdown-inherited-pipe-close",
+          jobId: randomUUID(),
+          onTerminal: () => {
+            terminalHookCalls += 1;
+          },
+          artifactCleanup: () => {
+            artifactCleanupCalls += 1;
+          },
+        }
       );
       const job = internals.jobs.get(started.snapshot.id)!;
       const pid = job.process?.pid;
@@ -461,13 +474,18 @@ describe("AsyncJobManager shutdown fencing", () => {
         exited: true,
       });
       expect(job.closeObserved).toBe(false);
+      expect(terminalHookCalls).toBe(0);
+      expect(artifactCleanupCalls).toBe(0);
 
       const startedAt = Date.now();
       await manager.dispose({ timeoutMs: 75 });
 
       expect(Date.now() - startedAt).toBeLessThan(1_000);
       expect(deregistered).toBe(false);
+      expect(terminalHookCalls).toBe(0);
+      expect(artifactCleanupCalls).toBe(0);
       await waitFor(() => job.closeObserved === true);
+      await waitFor(() => terminalHookCalls === 1 && artifactCleanupCalls === 1);
     } finally {
       await manager.whenPendingWritesSettled();
       await store.close();

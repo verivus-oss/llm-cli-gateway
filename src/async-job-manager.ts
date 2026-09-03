@@ -3250,7 +3250,7 @@ export class AsyncJobManager {
 
   private async fireOnCompleteBody(job: AsyncJobRecord): Promise<void> {
     const liveProcessMayStillReadArtifacts =
-      job.transport === "process" && job.process !== null && !job.exited;
+      job.transport === "process" && job.process !== null && !job.closeObserved;
     // A signal request is not death proof. In particular, a child can ignore
     // SIGTERM while still mutating a provider-native session. Only the close
     // handler (or a definitive child error) may hand a Kit attempt to its
