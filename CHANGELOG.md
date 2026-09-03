@@ -4,8 +4,38 @@ All notable changes to the llm-cli-gateway project.
 
 ## [Unreleased]
 
+## [3.2.0] - 2026-09-03
+
+### Added
+
+- **Complete durable provider flight records.** Every non-Kit CLI job records
+  its exact launched argv, resolved working-directory scope, repository commit
+  when available, bounded instruction-file digests, capture grammar, and an
+  explicit whole, limited, or unavailable capture status. Claude, Codex,
+  Gemini, Grok, Mistral, and Cursor use their richest structured output wires.
+  Devin exports ATIF to a gateway-owned regular file that is copied into the
+  job row and then removed.
+- Local stdio callers can page raw stdout, stderr, and provider-native
+  transcripts, or request the linked job record from `llm_request_result` with
+  `includeJobRecord`. Remote HTTP and OAuth callers retain the prior projected
+  result surface and cannot retrieve raw transcripts or host replay paths.
+- Gemini, Mistral, and Cursor jobs now expose structured progress from their
+  captured event streams, joining the existing Claude, Codex, and Grok
+  structured progress paths.
+
 ### Changed
 
+- Durable jobs and request transcripts are now unbounded by default. Operators
+  can opt into independent `[persistence.retention].jobs` and
+  `[persistence.retention].requests` limits. The legacy
+  `[persistence].retentionDays` setting remains an optional job bound.
+- Caller presentation no longer controls the durable provider wire. Text and
+  JSON responses are projections of the richer stored capture, so asking for a
+  concise result no longer discards the underlying record.
+- `npm run check` now uses an explicit step runner. Independent low-cost gates
+  run concurrently, full tests and the supply-chain audit run alone, every
+  attempted step reports a result, and a failing child cannot hide later gate
+  outcomes.
 - **`pg` peer dependency raised from `^8.12.0` to `^8.22.0`** (optional peer;
   only PostgreSQL-backed installs are affected). The DSN admission gate's
   correctness is a property of `pg-connection-string`, not of `pg`, and pg
@@ -17,6 +47,29 @@ All notable changes to the llm-cli-gateway project.
 - `src/__tests__/pg-parser-contract.test.ts` pins the ten parser behaviours the
   gate depends on. A caret cannot pin a minor, so an upgrade that moves any of
   them fails this file by name rather than making the gate quietly unsound.
+
+### Fixed
+
+- PostgreSQL reporting and connection admission now share one core DSN gate.
+  The reporter derives its host, port, database, and environment provenance
+  from pg's own resolved projection, while all session, job-store,
+  flight-recorder, and migration connection paths reject ambiguous DSN shapes
+  before dialing them.
+- Devin's gateway-owned export path is excluded from deduplication identity, so
+  complete transcript capture does not make otherwise identical requests
+  unique.
+- Flight-recorder migration selection is derived from the tables each migration
+  targets, keeping bootstrap repair, SQLite, PostgreSQL, and schema-parity checks
+  aligned through migration 25.
+
+### Security
+
+- DSN-derived log fields use a fixed projection with bounded, escaped values.
+  Credential positions, raw connection strings, SSL file contents, and raw
+  PostgreSQL operation errors are never copied into operator health output.
+- The production dependency closure pins reviewed releases of `fast-uri`, `qs`,
+  `hasown`, and `side-channel`. The frozen production audit reports zero known
+  vulnerabilities for the release graph.
 
 ## [3.2.0-rc.1] - 2026-08-23: provider contracts that maintain themselves, one storage port under all three subsystems
 
