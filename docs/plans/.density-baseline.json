@@ -2,7 +2,7 @@
   "acp-provider-transport-research.dag.toml": 292,
   "async-flight-recorder.dag.toml": 860,
   "cache-awareness.dag.toml": 862,
-  "complete-flight-record.dag.toml": 84,
+  "complete-flight-record.dag.toml": 94,
   "cross-llm-validation-receipts.dag.toml": 506,
   "cursor-first-class-provider.dag.toml": 787,
   "durable-state-lifecycle.dag.toml": 306,

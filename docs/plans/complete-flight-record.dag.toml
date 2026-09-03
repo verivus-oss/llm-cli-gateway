@@ -81,3 +81,13 @@ role = "A complete record nothing can read is a complete record nobody has. A co
 action = "Project the captured transcript through llm_job_result and llm_request_result under the existing ownership checks, with an explicit remote-caller decision written beside the projection."
 constraint = "A transcript carries file contents, absolute paths and possibly secrets the provider echoed. redactSecrets covers URL userinfo and password= assignments only, which is not a transcript-grade control. Decide what is applied on the way OUT and pin it."
 affects = []
+
+[[node]]
+id = "c2a.the-record-must-not-cost-dedup"
+depends_on = []
+status = "done"
+role = "Capturing more per request added a request-local path to argv. Argv is the dedup identity, so the capture silently turned every devin request into a unique one."
+action = "DONE. CliRequestPrep carries dedupArgs, computed where the path is minted, and the four sites that build devin argv consume it. A derived-set test fails when a fifth site does not."
+constraint = "Found by cross-LLM review at adfaf88: the canonicalisation existed and was called at one of four sites. The helper itself had no test, and replacing its body with an identity function survived 4842."
+constraint_2 = "A CALLER-supplied export path stays in the identity. Two requests writing to different destinations differ in an effect the caller can observe, so they are not the same request."
+affects = ["c3.harvest-the-native-stores", "c4.bounded-and-honest"]

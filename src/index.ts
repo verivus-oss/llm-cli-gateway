@@ -5040,6 +5040,19 @@ interface CliRequestPrep {
   reviewIntegrity?: ReviewIntegrityResult;
   args: string[];
   /**
+   * `args` with request-local artifact paths replaced by a fixed token, for use
+   * as the dedup identity and NOWHERE else. A gateway-minted path carries the
+   * correlation id, so it differs on every request; left in the key it makes two
+   * identical requests look different and silently disables dedup.
+   *
+   * Every site that computes a dedup key must prefer this over `args`. It is a
+   * field rather than a call each handler remembers to make because the one that
+   * did remember was the only one of four that did.
+   * `src/__tests__/dedup-canonicalisation-sites.test.ts` derives the set of
+   * those sites from this file and fails when one of them reads `args`.
+   */
+  dedupArgs?: readonly string[];
+  /**
    * Sha256 of the assembled prompt's stable prefix bytes when the caller
    * supplied `promptParts`. Null when the legacy `prompt` field was used.
    * Populated by `resolvePromptOrPartsForPrep` and threaded into the
@@ -13499,6 +13512,10 @@ export function prepareDevinRequest(
   if (params.config) args.push("--config", params.config);
   // `--sandbox` is a safety control: bare boolean flag, never defaulted on.
   if (params.sandbox) args.push("--sandbox");
+  // Set only when the GATEWAY mints the export path. A caller-supplied one stays
+  // in the dedup key: two requests exporting to different destinations differ in
+  // an effect the caller can observe, so they are not the same request.
+  let gatewayTranscriptPath: string | null = null;
   // `--export` takes an optional path: `true` -> bare flag; string -> flag + path.
   //
   // DEFAULT ON. Without it a devin job records 23 bytes of final text and the
@@ -13511,8 +13528,8 @@ export function prepareDevinRequest(
   } else if (params.exportSession === true) {
     args.push("--export");
   } else if (params.exportSession === undefined) {
-    const transcript = ensureDevinTranscriptPath(corrId);
-    if (transcript) args.push("--export", transcript);
+    gatewayTranscriptPath = ensureDevinTranscriptPath(corrId);
+    if (gatewayTranscriptPath) args.push("--export", gatewayTranscriptPath);
   }
   // `--respect-workspace-trust` takes an optional value; emit the explicit bool.
   if (params.respectWorkspaceTrust !== undefined) {
@@ -13561,6 +13578,7 @@ export function prepareDevinRequest(
     approvalDecision,
     reviewIntegrity,
     args,
+    dedupArgs: devinTranscriptDedupArgs(args, gatewayTranscriptPath),
     stablePrefixHash: null,
     stablePrefixTokens: null,
   };
@@ -13802,13 +13820,7 @@ export async function handleDevinRequest(
         undefined,
         undefined,
         undefined,
-        // The export path carries the correlation id, which differs on every
-        // request. Left in argv it would make two identical requests look
-        // different and silently disable dedup for devin.
-        devinTranscriptDedupArgs(
-          sessionBoundDedupArgs(args, effectiveSessionId),
-          params.exportSession === undefined ? ensureDevinTranscriptPath(corrId) : null
-        ),
+        sessionBoundDedupArgs(prep.dedupArgs ?? args, effectiveSessionId),
         undefined,
         undefined,
         undefined,
@@ -14064,7 +14076,7 @@ export async function handleDevinRequestAsync(
         undefined,
         undefined,
         undefined,
-        sessionBoundDedupArgs(args, effectiveSessionId)
+        sessionBoundDedupArgs(prep.dedupArgs ?? args, effectiveSessionId)
       );
     },
     buildSuccessResponse: ({ job, value: { worktreeResolution, effectiveSessionId } }) => {
@@ -16405,7 +16417,7 @@ async function dispatchRoutedCli(
       undefined,
       undefined,
       undefined,
-      undefined,
+      prep.dedupArgs ? [...prep.dedupArgs] : undefined,
       undefined,
       undefined,
       undefined,
@@ -17038,7 +17050,12 @@ async function dispatchRoutedCliAsync(
       frHandoff.extractUsage,
       true,
       prep.stdinPayload,
-      effectiveCompress
+      effectiveCompress,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      prep.dedupArgs ? [...prep.dedupArgs] : undefined
     );
     cleanupHandedOff = true;
     return {
