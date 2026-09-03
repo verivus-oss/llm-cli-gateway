@@ -8,68 +8,67 @@
  * so the insertion is verified first, always.
  */
 import { execFileSync } from "node:child_process";
-import { readFileSync, writeFileSync } from "node:fs";
+import {
+  closeSync,
+  mkdirSync,
+  mkdtempSync,
+  openSync,
+  readFileSync,
+  rmSync,
+  writeFileSync,
+} from "node:fs";
+import { dirname, join, resolve } from "node:path";
+import { fileURLToPath } from "node:url";
 import { afterEach, describe, expect, it } from "vitest";
 
-const TARGET = "src/metrics.ts";
-const ANCHOR = "export class PerformanceMetrics {";
+const REPO_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "..");
+const CHECKER = join(REPO_ROOT, "scripts", "check-promise-in-condition.mjs");
+const SCRATCH_ROOT = join(REPO_ROOT, ".scratch");
+let fixtureRoot;
 
-// Every probe this file injects declares a method named probeSomething, so a
-// pristine src/metrics.ts can never match this.
-const PROBE_SHAPE = /\bprobe[A-Z]/;
-
-const original = readFileSync(TARGET, "utf8");
-
-// `original` is captured ONCE, at module load, and afterEach writes it back
-// verbatim. That is safe only if the file was pristine when we read it. If a
-// concurrent or crashed run had already injected, `original` would capture the
-// INJECTED text and afterEach would then write a real promise-in-condition
-// violation into a real source file, permanently and silently, on a run that
-// otherwise reports green.
-//
-// So refuse to start rather than bake it in. This does not make two concurrent
-// runs safe against each other, it makes them fail loudly instead of corrupting.
-// The full fix is a per-run probe file rather than a shared tracked one.
-if (PROBE_SHAPE.test(original)) {
-  throw new Error(
-    `${TARGET} already contains an injected probe. A previous run of this file ` +
-      `crashed, or two runs overlapped. Restore it with \`git checkout -- ${TARGET}\` ` +
-      `before running this suite; do NOT let afterEach write this state back.`
-  );
-}
-
-// A crash between inject() and afterEach leaves a violation in a tracked source
-// file. Restore on the way out too, so an interrupted run does not hand the next
-// reader a dirty tree that looks like someone's edit.
-process.on("exit", () => {
+function runGate(root = fixtureRoot) {
+  const args = [CHECKER];
+  if (root) args.push("--root", root);
+  mkdirSync(SCRATCH_ROOT, { recursive: true });
+  // A disk-backed descriptor preserves checker diagnostics in restricted runners
+  // that empty nested Node stdout/stderr pipes.
+  const captureRoot = mkdtempSync(join(SCRATCH_ROOT, "promise-output-"));
+  const outputPath = join(captureRoot, "checker-output.txt");
+  const outputFd = openSync(outputPath, "w");
+  let exitCode = 0;
   try {
-    if (readFileSync(TARGET, "utf8") !== original) writeFileSync(TARGET, original);
-  } catch {
-    // Nothing useful to do while the process is already leaving.
-  }
-});
-
-function runGate() {
-  try {
-    execFileSync("node", ["scripts/check-promise-in-condition.mjs"], { encoding: "utf8" });
-    return { exitCode: 0, output: "" };
+    execFileSync("node", args, { cwd: REPO_ROOT, stdio: ["ignore", outputFd, outputFd] });
   } catch (err) {
-    return { exitCode: err.status ?? 1, output: `${err.stdout ?? ""}${err.stderr ?? ""}` };
+    exitCode = err.status ?? 1;
+  } finally {
+    closeSync(outputFd);
+  }
+  try {
+    return { exitCode, output: readFileSync(outputPath, "utf8") };
+  } finally {
+    rmSync(captureRoot, { recursive: true, force: true });
   }
 }
 
 function inject(snippet) {
-  const before = readFileSync(TARGET, "utf8");
-  // ASSERT THE INSERTION FIRST. A control whose violation never landed reports
-  // a green gate and is indistinguishable from a control that passed.
-  expect(before).toContain(ANCHOR);
-  const after = before.replace(ANCHOR, `${ANCHOR}\n${snippet}\n`);
-  expect(after).not.toBe(before);
-  writeFileSync(TARGET, after);
-  expect(readFileSync(TARGET, "utf8")).toContain(snippet.trim().split("\n")[0]);
+  expect(fixtureRoot).toBeUndefined();
+  mkdirSync(SCRATCH_ROOT, { recursive: true });
+  fixtureRoot = mkdtempSync(join(SCRATCH_ROOT, "promise-condition-"));
+  const sourceDir = join(fixtureRoot, "src");
+  const target = join(sourceDir, "probe.ts");
+  mkdirSync(sourceDir);
+  writeFileSync(
+    join(fixtureRoot, "tsconfig.json"),
+    JSON.stringify({ compilerOptions: { strict: true, target: "ES2022" }, include: ["src/**/*"] })
+  );
+  writeFileSync(target, `export class Fixture {\n${snippet}\n}\n`);
+  expect(readFileSync(target, "utf8")).toContain(snippet.trim().split("\n")[0]);
 }
 
-afterEach(() => writeFileSync(TARGET, original));
+afterEach(() => {
+  if (fixtureRoot) rmSync(fixtureRoot, { recursive: true, force: true });
+  fixtureRoot = undefined;
+});
 
 describe("promise-in-condition gate", () => {
   it("passes on the clean tree", () => {

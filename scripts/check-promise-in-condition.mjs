@@ -55,12 +55,28 @@
  *                     never matches, which is a dead branch and not a dead guard.
  */
 import ts from "typescript";
-import { relative } from "node:path";
+import { relative, resolve, sep } from "node:path";
 
-const ROOT = process.cwd();
-const cfgPath = ts.findConfigFile(ROOT, ts.sys.fileExists, "tsconfig.json");
+const args = process.argv.slice(2);
+if (args.length !== 0 && (args.length !== 2 || args[0] !== "--root" || !args[1])) {
+  console.error("usage: check-promise-in-condition.mjs [--root <dir>]");
+  process.exit(2);
+}
+
+const ROOT = args.length === 2 ? resolve(args[1]) : process.cwd();
+const cfgPath = resolve(ROOT, "tsconfig.json");
 const cfg = ts.readConfigFile(cfgPath, ts.sys.readFile);
+if (cfg.error) {
+  console.error(ts.flattenDiagnosticMessageText(cfg.error.messageText, "\n"));
+  process.exit(2);
+}
 const parsed = ts.parseJsonConfigFileContent(cfg.config, ts.sys, ROOT);
+if (parsed.errors.length > 0) {
+  for (const error of parsed.errors) {
+    console.error(ts.flattenDiagnosticMessageText(error.messageText, "\n"));
+  }
+  process.exit(2);
+}
 const program = ts.createProgram(parsed.fileNames, parsed.options);
 const checker = program.getTypeChecker();
 
@@ -139,7 +155,9 @@ const TRUTHINESS_PREDICATES = new Set([
 const violations = [];
 for (const sf of program.getSourceFiles()) {
   if (sf.isDeclarationFile) continue;
-  const rel = relative(ROOT, sf.fileName);
+  // Separator-safe: the predicate is written against POSIX form so a Windows
+  // checkout (src\\probe.ts) is gated exactly like a POSIX one (src/probe.ts).
+  const rel = relative(ROOT, sf.fileName).split(sep).join("/");
   if (!rel.startsWith("src/")) continue;
 
   /**
