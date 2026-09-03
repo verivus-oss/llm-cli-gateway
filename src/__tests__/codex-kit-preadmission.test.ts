@@ -297,6 +297,14 @@ describe("Codex Kit argv pre-admission", () => {
 
     expect(response.isError).toBeUndefined();
     expect(createIsolationPlan).toHaveBeenCalledOnce();
+    // The Kit preflight spawns real Codex children at request time; the
+    // handler must hand them the request's ids, not only the context prefix.
+    expect(createIsolationPlan).toHaveBeenCalledWith(
+      expect.any(String),
+      expect.objectContaining({
+        launchContext: { correlationId: "valid-codex-kit-async", provider: "codex" },
+      })
+    );
     expect(createKitSession).toHaveBeenCalledOnce();
     expect(startJob).toHaveBeenCalledOnce();
   });
@@ -323,6 +331,12 @@ describe("Codex Kit argv pre-admission", () => {
 
     expect(response.isError).toBe(true);
     expect(createIsolationPlan).toHaveBeenCalledOnce();
+    expect(createIsolationPlan).toHaveBeenCalledWith(
+      expect.any(String),
+      expect.objectContaining({
+        launchContext: { correlationId: "valid-codex-kit-sync", provider: "codex" },
+      })
+    );
     expect(createKitSession).toHaveBeenCalledOnce();
     expect(startJobWithDedup).toHaveBeenCalledOnce();
   });

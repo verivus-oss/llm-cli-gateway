@@ -9,6 +9,7 @@ import {
   spawnCliProcess,
   unregisterProcessGroup,
 } from "./executor.js";
+import type { LaunchContext } from "./launch-context.js";
 import { isRedirectionEnvKey } from "./spawn-env-isolation.js";
 
 const CODEX_KIT_PROBE_PROMPT = "__gateway_personal_config_skill_probe__";
@@ -90,6 +91,8 @@ export type CodexKitPromptProbe = (input: {
   cwd: string;
   args: string[];
   env: NodeJS.ProcessEnv;
+  /** Gateway ids for the request this preflight belongs to; exported to the probe child. */
+  launchContext?: LaunchContext;
 }) => string | Promise<string>;
 
 export interface CodexKitIsolationOptions {
@@ -99,6 +102,12 @@ export interface CodexKitIsolationOptions {
   outputFormat: "text" | "json";
   probe?: CodexKitPromptProbe;
   baseEnv?: NodeJS.ProcessEnv;
+  /**
+   * Gateway ids for the request this preflight runs for. The probe is a real
+   * Codex child started at request time, so a downstream launcher must be able
+   * to correlate it like any other provider child.
+   */
+  launchContext?: LaunchContext;
 }
 
 export type CodexKitIsolationProjectionOptions = Pick<
@@ -465,14 +474,42 @@ function runCodexKitPromptProbeProcess(spawnProbe: () => ChildProcess): Promise<
   });
 }
 
-const runCodexKitPromptProbe: CodexKitPromptProbe = ({ cwd, args, env }) =>
-  runCodexKitPromptProbeProcess(() =>
-    spawnCliProcess("codex", args, {
-      cwd,
-      env,
-      stdio: ["ignore", "pipe", "pipe"],
-    })
-  );
+/**
+ * Spawn options for the prompt probe, kept as a pure function so the wiring of
+ * the launch context into the child is observable by a test without a Codex
+ * binary.
+ */
+export function codexKitProbeSpawnOptions(input: {
+  cwd: string;
+  env: NodeJS.ProcessEnv;
+  launchContext?: LaunchContext;
+}): {
+  cwd: string;
+  env: NodeJS.ProcessEnv;
+  stdio: ["ignore", "pipe", "pipe"];
+  launchContext?: LaunchContext;
+} {
+  return {
+    cwd: input.cwd,
+    env: input.env,
+    stdio: ["ignore", "pipe", "pipe"],
+    launchContext: input.launchContext,
+  };
+}
+
+/**
+ * The default prompt probe: a real Codex child through the spawn chokepoint.
+ * The spawner is injectable so a test can observe the exact options the
+ * probe hands to it without a Codex binary.
+ */
+export function createCodexKitPromptProbe(
+  spawn: typeof spawnCliProcess = spawnCliProcess
+): CodexKitPromptProbe {
+  return ({ cwd, args, env, launchContext }) =>
+    runCodexKitPromptProbeProcess(() =>
+      spawn("codex", args, codexKitProbeSpawnOptions({ cwd, env, launchContext }))
+    );
+}
 
 /** Exercise the real probe lifecycle with a controlled executable in tests. */
 export function runCodexKitPromptProbeForTest(spawnProbe: () => ChildProcess): Promise<string> {
@@ -514,12 +551,16 @@ export async function createCodexKitIsolationPlan(
     ...envWithExtendedPath(baseEnv, getExtendedPath()),
     ...removals,
   };
-  const probe = options.probe ?? runCodexKitPromptProbe;
+  // The production default is the factory the test pins, not a separately
+  // captured instance: a review found a module-level copy could drift from
+  // the factory without any test noticing.
+  const probe = options.probe ?? createCodexKitPromptProbe();
   const discovered = inspectCodexKitPromptInput(
     await probe({
       cwd: canonicalCwd,
       args: probeArgs(canonicalCwd, projectRoot, []),
       env: probeEnv,
+      launchContext: options.launchContext,
     })
   );
   if (discovered.developerMessageCount === 0) {
@@ -533,6 +574,7 @@ export async function createCodexKitIsolationPlan(
       cwd: canonicalCwd,
       args: probeArgs(canonicalCwd, projectRoot, ["-c", skillsOverride]),
       env: probeEnv,
+      launchContext: options.launchContext,
     })
   );
   if (verified.developerMessageCount === 0) {

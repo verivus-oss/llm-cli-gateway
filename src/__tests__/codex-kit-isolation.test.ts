@@ -12,6 +12,8 @@ import {
   createCodexKitIsolationProjection,
   inspectCodexKitPromptInput,
   runCodexKitPromptProbeForTest,
+  codexKitProbeSpawnOptions,
+  createCodexKitPromptProbe,
 } from "../codex-kit-isolation.js";
 import { prepareCodexRequest } from "../index.js";
 import { validateUpstreamCliArgs } from "../upstream-contracts.js";
@@ -143,6 +145,56 @@ describe("Codex Personal Agent Config isolation", () => {
     expect(projection.args).toContain("skills.config=[]");
     expect(projection.env).toEqual({});
     expect(projection.skillPaths).toEqual([]);
+  });
+
+  it("forwards the launch context to both probe passes and into the spawn options", async () => {
+    testDir = mkdtempSync(join(tmpdir(), "codex-kit-isolation-"));
+    const seen: Array<unknown> = [];
+    const launchContext = { correlationId: "corr-kit-probe", provider: "codex" };
+    await createCodexKitIsolationPlan(testDir, {
+      contextPrefix: "<gateway-personal-config>Kit context</gateway-personal-config>",
+      sandboxMode: "workspace-write",
+      outputFormat: "text",
+      baseEnv: { PATH: process.env.PATH },
+      launchContext,
+      probe: input => {
+        seen.push(input.launchContext);
+        return promptInput("provider-owned developer policy only");
+      },
+    });
+    expect(seen).toEqual([launchContext, launchContext]);
+    const options = codexKitProbeSpawnOptions({ cwd: testDir, env: { A: "1" }, launchContext });
+    expect(options.launchContext).toEqual(launchContext);
+    expect(options.stdio).toEqual(["ignore", "pipe", "pipe"]);
+    expect(codexKitProbeSpawnOptions({ cwd: testDir, env: {} }).launchContext).toBeUndefined();
+  });
+
+  it("the default probe hands the launch context to the spawn chokepoint", async () => {
+    // The pure options builder and the custom-probe path were both tested; the
+    // default probe's own composition of the two was not, and a mutant that
+    // dropped the context there survived a review round.
+    const calls: Array<{ command: string; args: string[]; options: Record<string, unknown> }> = [];
+    const launchContext = { correlationId: "corr-default-probe", provider: "codex" };
+    const spawnStub: typeof spawnCliProcess = (command, args, options) => {
+      calls.push({ command, args: [...args], options: { ...options } });
+      return spawnCliProcess(process.execPath, ["-e", "process.stdout.write('probe ok')"], {
+        cwd: options.cwd,
+        env: process.env,
+        stdio: options.stdio,
+      });
+    };
+    const probe = createCodexKitPromptProbe(spawnStub);
+    const output = await probe({
+      cwd: process.cwd(),
+      args: ["--probe"],
+      env: { PATH: process.env.PATH ?? "" },
+      launchContext,
+    });
+    expect(output).toBe("probe ok");
+    expect(calls).toHaveLength(1);
+    expect(calls[0]?.command).toBe("codex");
+    expect(calls[0]?.args).toEqual(["--probe"]);
+    expect(calls[0]?.options.launchContext).toEqual(launchContext);
   });
 
   it("uses a two-pass nonblocking probe and appends every gateway control", async () => {

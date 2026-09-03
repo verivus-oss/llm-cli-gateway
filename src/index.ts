@@ -1913,6 +1913,7 @@ async function awaitJobOrDefer(
         env: env ? ({ ...process.env, ...env } as NodeJS.ProcessEnv) : undefined,
         stdin,
         cwd,
+        launchContext: { correlationId: corrId, provider: cli },
       });
       return { ...executed, captureFormat: capturePlan.captureFormat };
     } finally {
@@ -11729,6 +11730,7 @@ export async function handleCodexRequest(
         contextPrefix: kitPrefix!,
         sandboxMode: resolveCodexKitSandboxMode(kit.context.preferences),
         outputFormat: resolveCodexKitOutputFormat(kit.context.preferences),
+        launchContext: { correlationId, provider: "codex" },
       });
       kitSession = await resolvePersonalKitSession(
         runtime,
@@ -16065,6 +16067,7 @@ export async function handleCodexRequestAsync(
         contextPrefix: kitPrefix!,
         sandboxMode: resolveCodexKitSandboxMode(kit.context.preferences),
         outputFormat: resolveCodexKitOutputFormat(kit.context.preferences),
+        launchContext: { correlationId: params.correlationId, provider: "codex" },
       });
       kitSession = await resolvePersonalKitSession(
         runtime,

@@ -13,7 +13,7 @@ import { PassThrough } from "node:stream";
 
 import { describe, expect, it, vi } from "vitest";
 
-import type { AcpChildProcess, AcpSpawnFn } from "../acp/process-manager.js";
+import type { AcpChildProcess, AcpSpawnFn, ProcessEnv } from "../acp/process-manager.js";
 import {
   runAcpRequest,
   extractAcpPromptUsage,
@@ -165,6 +165,27 @@ function deps(agent: FakeAgent, over: Partial<AcpRuntimeDeps> = {}): AcpRuntimeD
     ...over,
   };
 }
+
+describe("ACP runtime launch context", () => {
+  it("exports correlation id, gateway session id and provider into the spawned env", async () => {
+    const agent = new FakeAgent();
+    const envs: ProcessEnv[] = [];
+    const spawn: AcpSpawnFn = resolved => {
+      envs.push(resolved.env);
+      return agent;
+    };
+    await runAcpRequest(deps(agent, { spawn }), {
+      provider: "mistral",
+      prompt: "hi",
+      correlationId: "corr-acp-run",
+    });
+    expect(envs).toHaveLength(1);
+    expect(envs[0]?.LLM_GATEWAY_CORRELATION_ID).toBe("corr-acp-run");
+    expect(envs[0]?.LLM_GATEWAY_PROVIDER).toBe("mistral");
+    expect(envs[0]?.LLM_GATEWAY_SESSION_ID).toMatch(/^gw-/);
+    expect(envs[0]?.LLM_GATEWAY_JOB_ID).toBeUndefined();
+  });
+});
 
 describe("ACP runtime — config gates (fail closed)", () => {
   it("throws AcpDisabledError when [acp].enabled is off", async () => {

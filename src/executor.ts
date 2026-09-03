@@ -22,6 +22,11 @@ import {
   writeAndCloseChildStdin,
 } from "./child-stdin.js";
 
+import { launchContextEnv, withLaunchContext, type LaunchContext } from "./launch-context.js";
+
+export { launchContextEnv };
+export type { LaunchContext };
+
 export interface ExecuteOptions {
   timeout?: number;
   idleTimeout?: number;
@@ -37,6 +42,8 @@ export interface ExecuteOptions {
    * legacy stdio:["ignore","pipe","pipe"] shape.
    */
   stdin?: string;
+  /** Gateway identifiers exported to the child as LLM_GATEWAY_* variables. */
+  launchContext?: LaunchContext;
 }
 
 export interface ExecuteResult {
@@ -553,6 +560,8 @@ export function spawnCliProcess(
     env: NodeJS.ProcessEnv;
     stdio: SpawnOptions["stdio"];
     logger?: Logger;
+    /** Gateway identifiers exported to the child as LLM_GATEWAY_* variables. */
+    launchContext?: LaunchContext;
   }
 ): ChildProcess {
   // Reject a many-element argv before command resolution performs platform
@@ -627,7 +636,10 @@ export function spawnCliProcess(
       windowsHide: true,
       windowsVerbatimArguments: resolved.windowsVerbatimArguments,
       stdio: options.stdio,
-      env,
+      // The launch context is applied last, over an env stripped of every
+      // launch variable, so a caller-supplied or inherited value cannot
+      // masquerade as a different gateway request.
+      env: withLaunchContext(env, options.launchContext),
     });
   } catch (error) {
     neutralWorkspace?.cleanup();
@@ -656,7 +668,7 @@ export async function executeCli(
     provider: command,
     platform: process.platform,
   });
-  const { timeout, idleTimeout, cwd, env: extraEnv, stdin } = options;
+  const { timeout, idleTimeout, cwd, env: extraEnv, stdin, launchContext } = options;
   const extendedPath = getExtendedPath();
   const baseEnv = envWithExtendedPath(process.env, extendedPath);
   const circuitBreaker = getCircuitBreaker(command);
@@ -670,6 +682,7 @@ export async function executeCli(
         stdio,
         env: { ...baseEnv, ...(extraEnv ?? {}) },
         logger: options.logger,
+        launchContext,
       });
 
       let stdout = "";

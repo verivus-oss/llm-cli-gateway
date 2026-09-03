@@ -65,6 +65,7 @@ import {
   type NeutralExecutionWorkspace,
 } from "../neutral-workspace.js";
 import { applySpawnEnvIsolation } from "../spawn-env-isolation.js";
+import { withLaunchContext, type LaunchContext } from "../launch-context.js";
 import type { Logger } from "../logger.js";
 import { noopLogger } from "../logger.js";
 import type { CliType } from "../session-manager.js";
@@ -178,6 +179,12 @@ export interface StartProviderOptions {
    * or free-form prompt text.
    */
   readonly extraArgs?: readonly string[];
+  /**
+   * Gateway identifiers exported to the provider child as LLM_GATEWAY_*
+   * variables, merged last so nothing in the inherited env can forge them.
+   * The CLI transport does the same at `spawnCliProcess`.
+   */
+  readonly launchContext?: LaunchContext;
 }
 
 /** A live (or terminal) managed provider process plus its protocol surfaces. */
@@ -262,7 +269,8 @@ export function resolveProviderSpawn(
   config: AcpConfig,
   baseEnv: ProcessEnv,
   cwd: string,
-  extraArgs: readonly string[] = []
+  extraArgs: readonly string[] = [],
+  launchContext?: LaunchContext
 ): ResolvedAcpSpawn {
   const providerConfig = config.providers[provider];
   const registryEntry = getAcpProviderEntry(provider);
@@ -306,7 +314,9 @@ export function resolveProviderSpawn(
     command,
     args: [...combinedArgs],
     cwd,
-    env: buildProviderEnv(provider, effectiveConfig, baseEnv),
+    // The launch context is applied last so a caller-supplied env cannot
+    // masquerade as a different gateway request.
+    env: withLaunchContext(buildProviderEnv(provider, effectiveConfig, baseEnv), launchContext),
   };
 }
 
@@ -391,7 +401,8 @@ export class AcpProcessManager {
         this.config,
         this.baseEnv,
         effectiveCwd,
-        options.extraArgs
+        options.extraArgs,
+        options.launchContext
       );
     } catch (error) {
       neutralWorkspace?.cleanup();
