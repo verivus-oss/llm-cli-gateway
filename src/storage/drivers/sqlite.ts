@@ -12,7 +12,7 @@
  * reports false. That is accurate rather than a limitation to hide, and it is
  * the honest answer to "is role separation in force here".
  */
-import { realpathSync } from "node:fs";
+import { statSync } from "node:fs";
 import { resolve } from "node:path";
 import {
   openDatabase,
@@ -45,9 +45,11 @@ const writeQueues = new Map<string, Promise<void>>();
 
 function databaseQueueKey(dbPath: string): string {
   try {
-    // The constructor opens the file before the key is needed, so this also
-    // collapses symlink and relative-path aliases onto one physical database.
-    return realpathSync(dbPath);
+    // The constructor opens the file before the key is needed. Device and
+    // inode identity collapses relative, symlink, and hard-link aliases onto
+    // the same physical database.
+    const identity = statSync(dbPath);
+    return `${identity.dev}:${identity.ino}`;
   } catch {
     // SQLite's special in-memory names have no filesystem identity.
     return resolve(dbPath);

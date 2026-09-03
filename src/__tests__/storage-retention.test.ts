@@ -206,6 +206,8 @@ describe("the transcript termination", () => {
     const stats = await recorder.readStorageStats("2030-01-01T00:00:00.000Z");
     expect(stats.requestsBeyondRetention).toBe(2);
     expect(stats.requestRows).toBe(4);
+    expect(stats.oldestRequest).toBe(OLD);
+    expect(stats.newestRequest).toBe(NEW);
   });
 
   it("compacts only when an operator asks, and returns the bytes it freed", async () => {

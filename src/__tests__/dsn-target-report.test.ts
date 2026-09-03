@@ -1516,6 +1516,12 @@ describe("redactDsn names the server pg will actually reach", () => {
     const fsModule = require("fs") as { readFileSync: typeof readFileSync };
     expect(fsModule.readFileSync, "the guard outlived the helper").toBe(pristineReadFileSync);
     expect(fsModule.readFileSync("package.json", "utf8").length).toBeGreaterThan(0);
+    const control = readsDuring(() => {
+      fsModule.readFileSync("package.json", "utf8");
+      return "read";
+    });
+    expect(control.result).toBe("read");
+    expect(control.reads).toContain("package.json");
   });
 
   it("refuses a string that is not a PostgreSQL DSN rather than inventing a target", () => {

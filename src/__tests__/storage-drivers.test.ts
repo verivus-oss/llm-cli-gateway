@@ -6,7 +6,7 @@
  * are tested without a server.
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { mkdtempSync, rmSync, symlinkSync } from "node:fs";
+import { linkSync, mkdtempSync, rmSync, symlinkSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { SqliteStorageDriver } from "../storage/drivers/sqlite.js";
@@ -325,6 +325,37 @@ describe("SqliteStorageDriver", () => {
     if (process.platform === "win32") return;
     const aliasPath = join(dir, "alias.db");
     symlinkSync(join(dir, "t.db"), aliasPath);
+    const alias = new SqliteStorageDriver(aliasPath);
+    const order: string[] = [];
+    let releaseBootstrap = () => {};
+    const holdBootstrap = new Promise<void>(resolveBootstrap => {
+      releaseBootstrap = resolveBootstrap;
+    });
+    try {
+      const bootstrap = driver.bootstrap(async () => {
+        order.push("bootstrap:start");
+        await holdBootstrap;
+        order.push("bootstrap:end");
+      });
+      const write = alias.transaction("write", async () => {
+        order.push("alias:write");
+      });
+      await Promise.resolve();
+      await Promise.resolve();
+      expect(order).toEqual(["bootstrap:start"]);
+      releaseBootstrap();
+      await Promise.all([bootstrap, write]);
+      expect(order).toEqual(["bootstrap:start", "bootstrap:end", "alias:write"]);
+    } finally {
+      releaseBootstrap();
+      await alias.close();
+    }
+  });
+
+  it("uses one write queue for hard-link aliases of the same database", async () => {
+    if (process.platform === "win32") return;
+    const aliasPath = join(dir, "hardlink.db");
+    linkSync(join(dir, "t.db"), aliasPath);
     const alias = new SqliteStorageDriver(aliasPath);
     const order: string[] = [];
     let releaseBootstrap = () => {};

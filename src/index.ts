@@ -22964,6 +22964,7 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
       // block and the disposition cannot disagree about the same recorder.
       const recorderHealth = flightRecorderHealth(flightRecorder);
       const disposition = storageDisposition(persistence, recorderHealth);
+      const remoteHealthCaller = callerIsRemote();
       // s11: the resolved policy, what the last sweep did, and what a bound
       // WOULD delete on the subsystems that have none. The hypothetical is the
       // useful number on an unchanged host: every destructive bound is off by
@@ -22994,7 +22995,8 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
       };
       const persistenceBlock = {
         backend: persistence.backend,
-        dbPath: persistence.path,
+        dbPath:
+          remoteHealthCaller && persistence.path !== null ? persistence.backend : persistence.path,
         retentionDays: persistence.retentionDays,
         retention: retentionBlock,
         dsn: persistence.dsn ? "[redacted]" : null,
@@ -23004,7 +23006,12 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
         asyncJobsEnabled: asyncJobsEffective,
         durableAdmission,
         acknowledgeEphemeral: persistence.acknowledgeEphemeral,
-        sources: persistence.sources,
+        sources: remoteHealthCaller
+          ? {
+              configFile: persistence.sources.configFile ? "[configured]" : null,
+              envOverrides: persistence.sources.envOverrides,
+            }
+          : persistence.sources,
         // Reachable per-role credentials, and which operation classes are
         // running wider than they asked for. Without this, "role separation is
         // configured" and "role separation is in force" are indistinguishable
@@ -23030,18 +23037,22 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
       // LLM_GATEWAY_LOGS_DB in both cases.
       const recorderEnabled = disposition.requestHistory.enabled;
       const recorderEngine = flightRecorderEngineDecision(persistence.backend);
-      const recorderMessage = flightRecorderHealthMessage(recorderHealth);
+      const recorderTarget = recorderEnabled
+        ? recorderEngine.engine === "postgres"
+          ? POSTGRES_RECORDER_TARGET
+          : remoteHealthCaller
+            ? "sqlite"
+            : (recorderHealth.path ?? resolveFlightRecorderDbPath())
+        : null;
+      const recorderMessage = flightRecorderHealthMessage({
+        ...recorderHealth,
+        path: recorderTarget,
+      });
       const flightRecorderBlock = {
         engine: recorderEnabled ? recorderEngine.engine : null,
-        // The recorder's OWN target, so a postgres host is not shown the SQLite
-        // file it stopped writing to.
-        path:
-          recorderHealth.path ??
-          (recorderEnabled
-            ? recorderEngine.engine === "postgres"
-              ? POSTGRES_RECORDER_TARGET
-              : resolveFlightRecorderDbPath()
-            : null),
+        // PostgreSQL diagnostics are deliberately opaque. Remote callers also
+        // receive an opaque SQLite engine label instead of a host path.
+        path: recorderTarget,
         enabled: recorderEnabled,
         // The five-way answer. `enabled: false` alone could not tell an
         // operator whether to change a setting or to go and look at a file.
@@ -23061,7 +23072,7 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
           [
             recorderMessage,
             recorderEnabled && recorderEngine.engine === "postgres"
-              ? `Request history is using PostgreSQL. Rows written to the previous SQLite recorder, if any, are still in ${resolveFlightRecorderDbPath()} and were NOT migrated; nothing reads them from here.`
+              ? "Request history is using PostgreSQL. Rows written to the previous SQLite recorder, if any, were NOT migrated; nothing reads them from here."
               : null,
           ]
             .filter((line): line is string => line !== null)

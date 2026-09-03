@@ -75,10 +75,10 @@ All notable changes to the llm-cli-gateway project.
 - Every durably accounted Devin export is removed, including exports whose
   retained copy reached the capture limit. Canceled HTTP requests finish their
   capture lifecycle after the aborted request settles.
-- The unbounded-retention upgrade preserves only live rows written with the
-  former 30-day default. It neither resurrects expired rows nor overwrites an
-  explicit finite deadline, and a later finite policy applies to terminal rows
-  created while retention was unbounded.
+- The unbounded-retention default applies to new job history without rewriting
+  existing finite deadlines or sweeping them while the current policy is
+  unbounded. A later finite policy applies to terminal rows created while
+  retention was unbounded.
 - SQLite schema bootstraps and writes share one physical-file queue in-process.
   A cross-process duplicate-column race revalidates the idempotent bootstrap.
 

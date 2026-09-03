@@ -60,9 +60,12 @@ export function providerCaptureStreamIsComplete(
       return hasJsonEvent(
         stdout,
         event =>
-          typeof event.generationStatus === "string" &&
-          event.generationStatus !== "running" &&
-          event.generationStatus !== "pending"
+          event.type === "message" &&
+          event.role === "assistant" &&
+          (event.generationStatus === undefined ||
+            (typeof event.generationStatus === "string" &&
+              event.generationStatus !== "running" &&
+              event.generationStatus !== "pending"))
       );
     case "cursor":
       return hasJsonEvent(stdout, event => event.type === "result");

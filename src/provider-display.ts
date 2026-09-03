@@ -26,7 +26,6 @@ import {
   captureFormatCarriesTranscript,
   providerCaptureStreamIsComplete,
 } from "./provider-capture.js";
-import { redactAcpMessage } from "./acp/errors.js";
 
 export interface ProviderDisplayInput {
   /** Provider that produced `stdout` (e.g. "codex", "grok", "claude"). */
@@ -42,6 +41,15 @@ export interface ProviderDisplayInput {
    * llm_job_result readback: false (locks the current readback asymmetry).
    */
   readonly applyGrokDisplay: boolean;
+}
+
+const PROVIDER_RESPONSE_UNAVAILABLE =
+  "[provider transcript withheld: response projection unavailable]";
+
+function projectionFallback(cli: string, captureFormat: string | null, stdout: string): string {
+  return captureFormatCarriesTranscript(cli, captureFormat)
+    ? PROVIDER_RESPONSE_UNAVAILABLE
+    : stdout;
 }
 
 function inferCaptureFormat(
@@ -96,7 +104,9 @@ function lastJsonLine(
 function projectCapturedJson(cli: string, captureFormat: string | null, stdout: string): string {
   if (cli === "claude" && captureFormat === "stream-json") {
     const result = lastJsonLine(stdout, value => value.type === "result");
-    return result ? JSON.stringify(result) : stdout;
+    return result
+      ? JSON.stringify(result)
+      : JSON.stringify({ error: PROVIDER_RESPONSE_UNAVAILABLE });
   }
   if (cli === "gemini" && captureFormat === "stream-json") {
     const result = lastJsonLine(
@@ -104,11 +114,13 @@ function projectCapturedJson(cli: string, captureFormat: string | null, stdout: 
       value => value.type === "result" || value.event === "result"
     );
     const body = result?.event === "result" ? result.result : result;
-    return body && typeof body === "object" ? JSON.stringify(body) : stdout;
+    return body && typeof body === "object"
+      ? JSON.stringify(body)
+      : JSON.stringify({ error: PROVIDER_RESPONSE_UNAVAILABLE });
   }
   if (cli === "grok" && captureFormat === "streaming-json") {
     const parsed = parseGrokOutput("streaming-json", stdout);
-    if (!parsed) return stdout;
+    if (!parsed) return JSON.stringify({ error: PROVIDER_RESPONSE_UNAVAILABLE });
     const projected: Record<string, unknown> = {};
     for (const key of [
       "text",
@@ -127,11 +139,15 @@ function projectCapturedJson(cli: string, captureFormat: string | null, stdout: 
       stdout,
       value => value.type === "message" && value.role === "assistant"
     );
-    return result ? JSON.stringify(result) : stdout;
+    return result
+      ? JSON.stringify(result)
+      : JSON.stringify({ error: PROVIDER_RESPONSE_UNAVAILABLE });
   }
   if (cli === "cursor" && captureFormat === "stream-json") {
     const result = lastJsonLine(stdout, value => value.type === "result");
-    return result ? JSON.stringify(result) : stdout;
+    return result
+      ? JSON.stringify(result)
+      : JSON.stringify({ error: PROVIDER_RESPONSE_UNAVAILABLE });
   }
   return stdout;
 }
@@ -143,7 +159,10 @@ function projectCapturedJson(cli: string, captureFormat: string | null, stdout: 
  */
 export function applyProviderDisplayText(input: ProviderDisplayInput): string {
   const { cli, outputFormat, stdout, applyGrokDisplay } = input;
-  const captureFormat = input.captureFormat ?? inferCaptureFormat(cli, outputFormat, stdout);
+  const captureFormat =
+    input.captureFormat === undefined
+      ? inferCaptureFormat(cli, outputFormat, stdout)
+      : input.captureFormat;
   const callerWantsStructured = ["json", "stream-json", "streaming", "streaming-json"].includes(
     outputFormat ?? ""
   );
@@ -154,31 +173,35 @@ export function applyProviderDisplayText(input: ProviderDisplayInput): string {
   // reconstructed final agent_message, not the raw JSONL event stream.
   if (cli === "codex" && outputFormat !== "json") {
     const response = codexDisplayText(stdout);
-    return response === "" && stdout !== "" ? stdout : response;
+    return response === "" && stdout !== ""
+      ? projectionFallback(cli, captureFormat, stdout)
+      : response;
   }
   // grok --output-format streaming-json emits raw NDJSON deltas; grokDisplayText
   // concatenates the text deltas into the final reply (no-op outside
   // streaming-json). Behind the flag so readback can keep omitting it.
   if (cli === "grok" && applyGrokDisplay) {
     const response = grokDisplayText(captureFormat ?? undefined, stdout);
-    return response === "" && stdout !== "" ? stdout : response;
+    return response === "" && stdout !== ""
+      ? projectionFallback(cli, captureFormat, stdout)
+      : response;
   }
   if (!callerWantsStructured && cli === "claude" && captureFormat === "stream-json") {
     return lastJsonLine(stdout, value => value.type === "result")
       ? parseStreamJson(stdout).text
-      : stdout;
+      : PROVIDER_RESPONSE_UNAVAILABLE;
   }
   if (!callerWantsStructured && cli === "gemini" && captureFormat === "stream-json") {
     const response = parseGeminiStreamJson(stdout)?.response;
-    return response === undefined ? stdout : response;
+    return response === undefined ? PROVIDER_RESPONSE_UNAVAILABLE : response;
   }
   if (!callerWantsStructured && cli === "mistral" && captureFormat === "streaming") {
     const response = parseVibeStream(stdout)?.response;
-    return response === undefined ? stdout : response;
+    return response === undefined ? PROVIDER_RESPONSE_UNAVAILABLE : response;
   }
   if (!callerWantsStructured && cli === "cursor" && captureFormat === "stream-json") {
     const response = parseCursorStreamJson(stdout)?.response;
-    return response === undefined ? stdout : response;
+    return response === undefined ? PROVIDER_RESPONSE_UNAVAILABLE : response;
   }
   return stdout;
 }
@@ -193,7 +216,11 @@ export function projectRemoteProviderOutput(
   stdout: string,
   captureFormat?: string | null
 ): string {
-  const resolvedFormat = captureFormat ?? inferCaptureFormat(cli, undefined, stdout);
+  // Flight-recorder responses are already projected display text and do not
+  // carry a capture grammar. Treat an omitted format as plain text. Inferring
+  // from JSON-shaped prose or a path can misclassify an ordinary answer as a
+  // provider wire and either redact or withhold it.
+  const resolvedFormat = captureFormat === undefined ? null : captureFormat;
   if (
     captureFormatCarriesTranscript(cli, resolvedFormat) &&
     !providerCaptureStreamIsComplete(cli, resolvedFormat, stdout)
@@ -208,7 +235,7 @@ export function projectRemoteProviderOutput(
     applyGrokDisplay: true,
   });
   if (captureFormatCarriesTranscript(cli, resolvedFormat) && display === stdout) {
-    return "[provider transcript withheld: response projection unavailable]";
+    return PROVIDER_RESPONSE_UNAVAILABLE;
   }
-  return redactAcpMessage(display);
+  return display;
 }

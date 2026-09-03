@@ -1,6 +1,6 @@
 import { chmodSync, existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import { describe, it, expect, vi } from "vitest";
 import { AsyncJobManager, type LlmCli } from "../async-job-manager.js";
 import { MemoryJobStore } from "../job-store.js";
@@ -258,6 +258,112 @@ process.stdout.write("done\\n");
         });
         expect(existsSync(transcriptPath)).toBe(false);
       } finally {
+        await manager.dispose();
+        rmSync(transcriptPath, { force: true });
+        rmSync(temp, { recursive: true, force: true });
+        if (originalHome === undefined) delete process.env.HOME;
+        else process.env.HOME = originalHome;
+      }
+    });
+
+    it("accounts for a Devin export when streams consume the entire capture budget", async () => {
+      const temp = mkdtempSync(join(tmpdir(), "devin-capture-zero-budget-"));
+      const fakeDevin = join(temp, "devin");
+      const correlationId = `capture-zero-budget-${process.pid}-${Date.now()}`;
+      const originalHome = process.env.HOME;
+      process.env.HOME = temp;
+      const transcriptPath = ensureDevinTranscriptPath(correlationId, temp);
+      if (!transcriptPath) throw new Error("failed to mint Devin transcript path");
+      const store = new MemoryJobStore();
+      const manager = new AsyncJobManager(undefined, undefined, store, undefined, {
+        ...DEFAULT_JOB_LIMITS,
+        maxJobOutputBytes: 5,
+      });
+      writeFileSync(
+        fakeDevin,
+        `#!/usr/bin/env node
+const fs = require("node:fs");
+const args = process.argv.slice(2);
+const at = args.indexOf("--export");
+fs.writeFileSync(args[at + 1], JSON.stringify({ version: "ATIF-v1.7", messages: [{ role: "assistant", content: "whole" }] }));
+process.stdout.write("done\\n");
+`
+      );
+      chmodSync(fakeDevin, 0o755);
+
+      try {
+        const job = await manager.startJob(
+          "devin",
+          ["--export", transcriptPath, "-p", "capture"],
+          correlationId,
+          undefined,
+          undefined,
+          "text",
+          true,
+          { PATH: `${temp}:${process.env.PATH ?? ""}` }
+        );
+        await waitFor(async () => (await store.getById(job.id))?.captureStatus !== null, 5000, 10);
+        expect(await store.getById(job.id)).toMatchObject({
+          captureStatus: "not_captured",
+          nativeTranscript: null,
+          nativeTranscriptTruncated: true,
+          nativeTranscriptDroppedBytes: expect.any(Number),
+          captureError: "Provider native transcript exceeded the remaining capture budget",
+        });
+        expect((await store.getById(job.id))!.nativeTranscriptDroppedBytes).toBeGreaterThan(0);
+        expect(existsSync(transcriptPath)).toBe(false);
+      } finally {
+        await manager.dispose();
+        rmSync(transcriptPath, { force: true });
+        rmSync(temp, { recursive: true, force: true });
+        if (originalHome === undefined) delete process.env.HOME;
+        else process.env.HOME = originalHome;
+      }
+    });
+
+    it("retries a transient Devin export unlink failure", async () => {
+      if (process.platform === "win32" || (process.getuid?.() ?? 1) === 0) return;
+      const temp = mkdtempSync(join(tmpdir(), "devin-capture-unlink-retry-"));
+      const fakeDevin = join(temp, "devin");
+      const correlationId = `capture-unlink-retry-${process.pid}-${Date.now()}`;
+      const originalHome = process.env.HOME;
+      process.env.HOME = temp;
+      const transcriptPath = ensureDevinTranscriptPath(correlationId, temp);
+      if (!transcriptPath) throw new Error("failed to mint Devin transcript path");
+      const store = new MemoryJobStore();
+      const manager = new AsyncJobManager(undefined, undefined, store);
+      writeFileSync(
+        fakeDevin,
+        `#!/usr/bin/env node
+const fs = require("node:fs");
+const path = require("node:path");
+const args = process.argv.slice(2);
+const at = args.indexOf("--export");
+const out = args[at + 1];
+fs.writeFileSync(out, JSON.stringify({ version: "ATIF-v1.7", messages: [{ role: "assistant", content: "whole" }] }));
+fs.chmodSync(path.dirname(out), 0o500);
+process.stdout.write("done\\n");
+`
+      );
+      chmodSync(fakeDevin, 0o755);
+
+      try {
+        const job = await manager.startJob(
+          "devin",
+          ["--export", transcriptPath, "-p", "capture"],
+          correlationId,
+          undefined,
+          undefined,
+          "text",
+          true,
+          { PATH: `${temp}:${process.env.PATH ?? ""}` }
+        );
+        await waitFor(async () => (await store.getById(job.id))?.captureStatus !== null, 5000, 10);
+        expect(existsSync(transcriptPath)).toBe(true);
+        chmodSync(dirname(transcriptPath), 0o700);
+        await waitFor(() => !existsSync(transcriptPath), 5000, 25);
+      } finally {
+        chmodSync(dirname(transcriptPath), 0o700);
         await manager.dispose();
         rmSync(transcriptPath, { force: true });
         rmSync(temp, { recursive: true, force: true });

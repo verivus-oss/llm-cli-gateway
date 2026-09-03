@@ -47,6 +47,12 @@ function flushOnSigtermArgs(early: string, late: string): string[] {
 }
 
 const FLUSH_ON_SIGTERM = flushOnSigtermArgs("EARLY_BYTES", "LATE_FLUSH_MARKER");
+const DELAYED_FLUSH_ON_SIGTERM = [
+  "-e",
+  `process.on("SIGTERM", () => { setTimeout(() => { process.stdout.write("LATE_FLUSH_MARKER", () => process.exit(0)); }, 500); });` +
+    `process.stdout.write("EARLY_BYTES");` +
+    `setInterval(() => {}, 1000);`,
+];
 
 describe("recordComplete reports whether the completion guard admitted the write", () => {
   let tempDir: string;
@@ -161,6 +167,26 @@ describe("late child output survives a terminal-status-before-close transition",
     expect(row?.stdout).toContain("LATE_FLUSH_MARKER");
   }, 60_000);
 
+  it("does not freeze capture accounting when a result is read before close", async () => {
+    const job = await manager.startJob(
+      "node" as LlmCli,
+      DELAYED_FLUSH_ON_SIGTERM,
+      "corr-cancel-capture-read"
+    );
+    await waitFor(
+      async () => ((await manager.getJobSnapshot(job.id))?.stdoutBytes ?? 0) >= 11,
+      25_000
+    );
+
+    expect((await manager.cancelJob(job.id)).canceled).toBe(true);
+    await manager.getJobResult(job.id);
+    expect((await store.getById(job.id))?.captureStatus).toBeNull();
+
+    await waitFor(async () => (await manager.getJobSnapshot(job.id))?.exited === true, 25_000);
+    await waitFor(async () => (await store.getById(job.id))?.captureStatus !== null, 25_000);
+    expect((await store.getById(job.id))?.stdout).toContain("LATE_FLUSH_MARKER");
+  }, 60_000);
+
   it("refreshes the flight-recorder response with bytes flushed after cancel", async () => {
     const rec = new FlightRecorder(join(tempDir, "logs.db"));
     const frManager = new AsyncJobManager(undefined, undefined, store, rec);
@@ -248,9 +274,9 @@ describe("late child output survives a terminal-status-before-close transition",
       record.process = { pid: 0x7ffffff0 };
       await internals.evictCompletedJobs();
 
-      // The sweep wrote the row from the bytes known at that instant.
-      expect((await readPersistedRequest(rec, "corr-esrch"))?.response).toContain("EARLY_BYTES");
-      expect((await readPersistedRequest(rec, "corr-esrch"))?.response ?? "").not.toContain("LATE");
+      // A speculative dead-process signal does not finalize the flight row
+      // from a pipe that has not closed yet.
+      expect((await readPersistedRequest(rec, "corr-esrch"))?.response).toBeNull();
 
       // Now let the real child flush and close.
       process.kill(realPid, "SIGTERM");

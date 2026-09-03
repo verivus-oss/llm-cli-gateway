@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { planProviderCapture } from "../provider-capture.js";
+import { planProviderCapture, providerCaptureStreamIsComplete } from "../provider-capture.js";
 
 describe("provider capture planning", () => {
   it.each([
@@ -40,5 +40,26 @@ describe("provider capture planning", () => {
     ]);
     expect(plan.captureFormat).toBe(value);
     expect(plan.transcriptCapable).toBe(true);
+  });
+});
+
+describe("provider capture completeness", () => {
+  it("requires a Mistral assistant message instead of any completed entry", () => {
+    const userOnly = JSON.stringify({
+      type: "message",
+      role: "user",
+      generationStatus: "completed",
+      sessionId: "m1",
+    });
+    expect(providerCaptureStreamIsComplete("mistral", "streaming", userOnly)).toBe(false);
+
+    const assistant = JSON.stringify({
+      type: "message",
+      role: "assistant",
+      generationStatus: "completed",
+      sessionId: "m1",
+      content: [{ type: "text", text: "done" }],
+    });
+    expect(providerCaptureStreamIsComplete("mistral", "streaming", assistant)).toBe(true);
   });
 });

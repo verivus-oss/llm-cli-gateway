@@ -719,6 +719,8 @@ describe("s11: the transcript termination on PostgreSQL", () => {
     const stats = await recorder.readStorageStats(CUTOFF);
     expect(stats.requestRows).toBe(2);
     expect(stats.requestsBeyondRetention).toBe(1);
+    expect(stats.oldestRequest).toBe("2020-01-01T00:00:00.000Z");
+    expect(stats.newestRequest).toBe("2099-01-01T00:00:00.000Z");
   });
 
   it("reports NO reclaimable bytes, because that is not a question here", async () => {

@@ -135,7 +135,46 @@ describe("PostgresJobStore", () => {
     });
   });
 
-  it("rebases only live rows written with the former 30-day default", async () => {
+  it("accepts late capture only after an early terminal transition", async () => {
+    const finishedAt = new Date().toISOString();
+    await store.recordStart({
+      id: "pg-late-capture",
+      correlationId: "pg-late-capture-corr",
+      requestKey: "pg-late-capture-key",
+      cli: "claude",
+      args: ["-p", "capture"],
+      startedAt: finishedAt,
+      pid: 7,
+      ownerInstance: "pg-late-capture-owner",
+    });
+    const capture = {
+      id: "pg-late-capture",
+      ownerInstance: "pg-late-capture-owner",
+      captureStatus: "captured_whole" as const,
+      outputDroppedBytes: 0,
+      nativeTranscript: null,
+      nativeTranscriptBytes: 0,
+      nativeTranscriptTruncated: false,
+      nativeTranscriptDroppedBytes: 0,
+      captureError: null,
+    };
+    expect(await store.recordCapture(capture)).toBe(false);
+    expect(
+      await store.recordComplete({
+        id: "pg-late-capture",
+        status: "canceled",
+        exitCode: null,
+        stdout: "partial",
+        stderr: "",
+        outputTruncated: false,
+        error: "canceled",
+        finishedAt,
+      })
+    ).toBe(true);
+    expect(await store.recordCapture(capture)).toBe(true);
+  });
+
+  it("does not rewrite existing finite deadlines when the default becomes unbounded", async () => {
     await store.close();
     const formerDefaultMs = 30 * 24 * 60 * 60 * 1000;
     store = new PostgresJobStore(TEST_DATABASE_URL, undefined, {
@@ -189,15 +228,15 @@ describe("PostgresJobStore", () => {
     await store.close();
 
     store = new PostgresJobStore(TEST_DATABASE_URL, undefined, { retentionMs: null });
-    expect(await store.getById("pg-old-finite-expiry")).toMatchObject({
-      expiresAt: "9999-12-31T23:59:59.999Z",
-    });
+    expect(Date.parse((await store.getById("pg-old-finite-expiry"))!.expiresAt)).toBe(
+      Date.parse(startedAt) + formerDefaultMs
+    );
     expect(Date.parse((await store.getById("pg-explicit-finite-expiry"))!.expiresAt)).toBe(
       Date.parse(startedAt) + explicitFiniteMs
     );
   });
 
-  it("does not resurrect an already-expired row under unbounded retention", async () => {
+  it("does not evict a pre-existing deadline while retention is unbounded", async () => {
     const startedAt = new Date().toISOString();
     await store.recordStart({
       id: "pg-expired-row",
@@ -228,7 +267,8 @@ describe("PostgresJobStore", () => {
     expect(await store.getById("pg-expired-row")).toMatchObject({
       expiresAt: "2000-01-01T00:00:00.000Z",
     });
-    expect(await store.evictExpired()).toBe(1);
+    expect(await store.evictExpired()).toBe(0);
+    expect(await store.getById("pg-expired-row")).not.toBeNull();
   });
 
   it("applies a later finite retention bound to terminal unbounded rows", async () => {
@@ -273,6 +313,7 @@ describe("PostgresJobStore", () => {
       args: ["-p", "history"],
       startedAt: finishedAt,
       pid: null,
+      ownerInstance: "pg-capture-accounting-dead-owner",
     });
     await store.recordComplete({
       id: "pg-capture-accounting-gap",
@@ -288,6 +329,65 @@ describe("PostgresJobStore", () => {
 
     store = new PostgresJobStore(TEST_DATABASE_URL, undefined, { retentionMs: 60_000 });
     expect(await store.getById("pg-capture-accounting-gap")).toMatchObject({
+      captureStatus: "not_captured",
+      captureError: "Gateway stopped before capture accounting completed",
+    });
+    expect(
+      await store.recordCapture({
+        id: "pg-capture-accounting-gap",
+        ownerInstance: "pg-capture-accounting-dead-owner",
+        captureStatus: "captured_whole",
+        outputDroppedBytes: 0,
+        nativeTranscript: null,
+        nativeTranscriptBytes: 0,
+        nativeTranscriptTruncated: false,
+        nativeTranscriptDroppedBytes: 0,
+        captureError: null,
+      })
+    ).toBe(true);
+    expect((await store.getById("pg-capture-accounting-gap"))?.captureStatus).toBe(
+      "captured_whole"
+    );
+  });
+
+  it("does not replace capture accounting while the owning instance is live", async () => {
+    const ownerId = "pg-capture-accounting-live-owner";
+    const finishedAt = new Date().toISOString();
+    await store.registerInstance({
+      instanceId: ownerId,
+      role: "stdio",
+      hostname: "pg-capture-host",
+      pid: 7,
+    });
+    await store.recordStart({
+      id: "pg-capture-accounting-live-gap",
+      correlationId: "pg-capture-accounting-live-gap-corr",
+      requestKey: "pg-capture-accounting-live-gap-key",
+      cli: "claude",
+      args: ["-p", "history"],
+      startedAt: finishedAt,
+      pid: null,
+      ownerInstance: ownerId,
+    });
+    await store.recordComplete({
+      id: "pg-capture-accounting-live-gap",
+      status: "canceled",
+      exitCode: null,
+      stdout: "partial",
+      stderr: "",
+      outputTruncated: false,
+      error: "canceled",
+      finishedAt,
+    });
+    await store.close();
+
+    store = new PostgresJobStore(TEST_DATABASE_URL, undefined, { retentionMs: null });
+    expect((await store.getById("pg-capture-accounting-live-gap"))?.captureStatus).toBeNull();
+    await store.deregisterInstance(ownerId);
+    await store.close();
+
+    store = new PostgresJobStore(TEST_DATABASE_URL, undefined, { retentionMs: null });
+    expect(await store.getById("pg-capture-accounting-live-gap")).toMatchObject({
       captureStatus: "not_captured",
       captureError: "Gateway stopped before capture accounting completed",
     });
@@ -463,7 +563,7 @@ describe("PostgresJobStore", () => {
         nativeTranscriptDroppedBytes: 2,
         captureError: null,
       })
-    ).toBe(true);
+    ).toBe(false);
     await store.recordComplete({
       id: "pg-job-1",
       status: "completed",
@@ -473,6 +573,15 @@ describe("PostgresJobStore", () => {
       outputTruncated: false,
       error: null,
       finishedAt,
+      capture: {
+        captureStatus: "captured_to_limit",
+        outputDroppedBytes: 7,
+        nativeTranscript: '{"atif":true}',
+        nativeTranscriptBytes: 13,
+        nativeTranscriptTruncated: true,
+        nativeTranscriptDroppedBytes: 2,
+        captureError: null,
+      },
     });
     expect(
       await store.recordCapture({

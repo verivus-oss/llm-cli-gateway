@@ -33,6 +33,7 @@ import { POSTGRES_JOB_STORE_REQUIRED_COLUMNS } from "./postgres-job-store-schema
 import { principalCanAccess } from "./request-context.js";
 import type { PostgresStorageDriver } from "./storage/drivers/postgres.js";
 import type { StorageConnection } from "./storage/store.js";
+import { CAPTURE_ACCOUNTING_RECOVERY_ERROR } from "./job-store-constants.js";
 
 /** What the worker used to receive as `workerData`. */
 export interface PostgresJobStoreOpsConfig {
@@ -58,8 +59,6 @@ const PG_LOCK_TIMEOUT_MS = 5_000;
 const PERSONAL_KIT_REDACTED_ARGS_JSON = '["[personal-config-kit arguments redacted]"]';
 const PERSONAL_KIT_FAILURE_WITHHELD =
   "Personal Agent Config Kit provider execution failed; detailed output is withheld";
-const CAPTURE_ACCOUNTING_RECOVERY_ERROR = "Gateway stopped before capture accounting completed";
-const LEGACY_DEFAULT_JOB_RETENTION_MS = 30 * 24 * 60 * 60 * 1000;
 
 function serializeKitTerminalMetadata(value: unknown): string | null {
   // Provider-native continuation handles are process-local and must never
@@ -348,22 +347,7 @@ export function createPostgresJobStoreOps(
     driver.transaction("write", fn);
 
   async function rebaseExistingJobExpiryForRetentionPolicy(): Promise<void> {
-    if (config.retentionMs === null) {
-      // Rebase only live rows that carry the exact former 30-day default.
-      // Explicit finite policies retain their deadlines and expired rows stay
-      // eligible for the ordinary sweep instead of being resurrected.
-      await poolAffected(
-        `UPDATE jobs
-         SET expires_at = $1
-         WHERE expires_at::timestamptz >= clock_timestamp()
-           AND expires_at < $1
-           AND expires_at::timestamptz =
-             COALESCE(finished_at, started_at)::timestamptz
-               + ($2::double precision * interval '1 millisecond')`,
-        [config.farFutureIso, LEGACY_DEFAULT_JOB_RETENTION_MS]
-      );
-      return;
-    }
+    if (config.retentionMs === null) return;
     await poolAffected(
       `UPDATE jobs
        SET expires_at = to_char(
@@ -384,7 +368,12 @@ export function createPostgresJobStoreOps(
        SET capture_status = 'not_captured', capture_error = $1
        WHERE status NOT IN ('queued', 'running')
          AND kit_execution_json IS NULL
-         AND capture_status IS NULL`,
+         AND capture_status IS NULL
+         AND owner_instance IS NOT NULL
+         AND NOT EXISTS (
+           SELECT 1 FROM gateway_instances AS gi
+           WHERE gi.instance_id = jobs.owner_instance
+         )`,
       [CAPTURE_ACCOUNTING_RECOVERY_ERROR]
     );
   }
@@ -1047,11 +1036,26 @@ export function createPostgresJobStoreOps(
         });
       }
       case "gcInstances": {
-        const result = await poolAffected(
-          `DELETE FROM gateway_instances WHERE last_heartbeat < ${PG_NOW_MS} - $1::bigint`,
-          [args[0]]
-        );
-        return result.rowCount ?? 0;
+        return withClient(async client => {
+          const result = await client.execute(
+            `DELETE FROM gateway_instances WHERE last_heartbeat < ${PG_NOW_MS} - $1::bigint`,
+            [args[0]]
+          );
+          await client.execute(
+            `UPDATE jobs
+             SET capture_status = 'not_captured', capture_error = $1
+             WHERE status NOT IN ('queued', 'running')
+               AND kit_execution_json IS NULL
+               AND capture_status IS NULL
+               AND owner_instance IS NOT NULL
+               AND NOT EXISTS (
+                 SELECT 1 FROM gateway_instances AS gi
+                 WHERE gi.instance_id = jobs.owner_instance
+               )`,
+            [CAPTURE_ACCOUNTING_RECOVERY_ERROR]
+          );
+          return result.rowsAffected;
+        });
       }
       case "recordOutput": {
         // Status-fenced, matching SQL_UPDATE_OUTPUT on SQLite. Unfenced, a
@@ -1091,7 +1095,11 @@ export function createPostgresJobStoreOps(
            WHERE id = $1
              AND owner_instance = $9
              AND kit_execution_json IS NULL
-             AND capture_status IS NULL`,
+             AND (
+               capture_status IS NULL
+               OR (capture_status = 'not_captured' AND capture_error = $10)
+             )
+             AND status NOT IN ('queued', 'running', 'orphaned')`,
           [
             input.id,
             input.captureStatus,
@@ -1102,6 +1110,7 @@ export function createPostgresJobStoreOps(
             input.nativeTranscriptDroppedBytes,
             input.captureError,
             input.ownerInstance,
+            CAPTURE_ACCOUNTING_RECOVERY_ERROR,
           ]
         );
         return (result.rowCount ?? 0) === 1;
@@ -1133,31 +1142,38 @@ export function createPostgresJobStoreOps(
              kit_terminal_metadata_json = $13,
              progress_json = COALESCE($14, progress_json),
              capture_status = CASE
-               WHEN kit_execution_json IS NULL AND $15::text IS NOT NULL THEN $15
+               WHEN kit_execution_json IS NULL AND capture_status IS NULL AND $15::text IS NOT NULL
+                 THEN $15
                ELSE capture_status
              END,
              output_dropped_bytes = CASE
-               WHEN kit_execution_json IS NULL AND $15::text IS NOT NULL THEN $16
+               WHEN kit_execution_json IS NULL AND capture_status IS NULL AND $15::text IS NOT NULL
+                 THEN $16
                ELSE output_dropped_bytes
              END,
              native_transcript = CASE
-               WHEN kit_execution_json IS NULL AND $15::text IS NOT NULL THEN $17
+               WHEN kit_execution_json IS NULL AND capture_status IS NULL AND $15::text IS NOT NULL
+                 THEN $17
                ELSE native_transcript
              END,
              native_transcript_bytes = CASE
-               WHEN kit_execution_json IS NULL AND $15::text IS NOT NULL THEN $18
+               WHEN kit_execution_json IS NULL AND capture_status IS NULL AND $15::text IS NOT NULL
+                 THEN $18
                ELSE native_transcript_bytes
              END,
              native_transcript_truncated = CASE
-               WHEN kit_execution_json IS NULL AND $15::text IS NOT NULL THEN $19
+               WHEN kit_execution_json IS NULL AND capture_status IS NULL AND $15::text IS NOT NULL
+                 THEN $19
                ELSE native_transcript_truncated
              END,
              native_transcript_dropped_bytes = CASE
-               WHEN kit_execution_json IS NULL AND $15::text IS NOT NULL THEN $20
+               WHEN kit_execution_json IS NULL AND capture_status IS NULL AND $15::text IS NOT NULL
+                 THEN $20
                ELSE native_transcript_dropped_bytes
              END,
              capture_error = CASE
-               WHEN kit_execution_json IS NULL AND $15::text IS NOT NULL THEN $21
+               WHEN kit_execution_json IS NULL AND capture_status IS NULL AND $15::text IS NOT NULL
+                 THEN $21
                ELSE capture_error
              END
          WHERE id = $1 AND status IN ('queued', 'running', 'orphaned')`,
@@ -1256,6 +1272,7 @@ export function createPostgresJobStoreOps(
         return (result.rowCount ?? 0) > 0;
       }
       case "evictExpired": {
+        if (config.retentionMs === null) return 0;
         const result = await retentionAffected(
           `DELETE FROM jobs
          WHERE expires_at < $1

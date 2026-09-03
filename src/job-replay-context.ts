@@ -46,7 +46,7 @@ const MAX_RULE_FILES = 256;
 const MAX_RULE_DIRECTORIES = 512;
 const MAX_RULE_ENTRIES = 4096;
 const MAX_REPLAY_PATH_CHARS = 32 * 1024;
-const MAX_REPLAY_CONTEXT_CHARS = 10 * 1024 * 1024;
+const MAX_REPLAY_CONTEXT_CHARS = 20 * 1024 * 1024;
 
 interface InstructionSource {
   path: string;
@@ -314,7 +314,7 @@ export function parseJobReplayContext(value: unknown): JobReplayContext | null {
   // The producer admits up to 256 real filesystem paths. A 256 KiB reader
   // ceiling was smaller than that valid producer envelope, so a record could
   // exist in memory and disappear after restart. The bound now covers 256
-  // maximum Windows long paths plus the fixed digest metadata.
+  // maximum long paths after JSON escape expansion plus fixed digest metadata.
   if (typeof value !== "string" || value.length > MAX_REPLAY_CONTEXT_CHARS) return null;
   try {
     const parsed: unknown = JSON.parse(value);

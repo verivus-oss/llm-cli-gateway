@@ -30,6 +30,7 @@ import {
 } from "./storage/drivers/postgres.js";
 import { SqliteStorageDriver } from "./storage/drivers/sqlite.js";
 import type { StorageConnection } from "./storage/store.js";
+import { CAPTURE_ACCOUNTING_RECOVERY_ERROR } from "./job-store-constants.js";
 import {
   createPostgresJobStoreOps,
   type PostgresJobStoreOps,
@@ -120,8 +121,6 @@ export interface JobCompletionInput {
 const PERSONAL_KIT_REDACTED_ARGS_JSON = '["[personal-config-kit arguments redacted]"]';
 const PERSONAL_KIT_FAILURE_WITHHELD =
   "Personal Agent Config Kit provider execution failed; detailed output is withheld";
-const CAPTURE_ACCOUNTING_RECOVERY_ERROR = "Gateway stopped before capture accounting completed";
-const LEGACY_DEFAULT_JOB_RETENTION_MS = 30 * 24 * 60 * 60 * 1000;
 
 /**
  * Match a recovered fence to the caller that is replaying it. Legacy fences
@@ -1293,7 +1292,24 @@ const SQL_UPDATE_CAPTURE = `
       WHERE id = @id
         AND owner_instance = @owner_instance
         AND kit_execution_json IS NULL
+        AND (
+          capture_status IS NULL
+          OR (capture_status = 'not_captured' AND capture_error = @recovery_error)
+        )
+        AND status NOT IN ('queued', 'running', 'orphaned')
+    `;
+
+const SQL_RECONCILE_CAPTURE_ACCOUNTING = `
+      UPDATE jobs
+      SET capture_status = 'not_captured', capture_error = @capture_error
+      WHERE status NOT IN ('queued', 'running')
+        AND kit_execution_json IS NULL
         AND capture_status IS NULL
+        AND owner_instance IS NOT NULL
+        AND NOT EXISTS (
+          SELECT 1 FROM gateway_instances AS gi
+          WHERE gi.instance_id = jobs.owner_instance
+        )
     `;
 
 const SQL_UPDATE_COMPLETE = `
@@ -1313,37 +1329,51 @@ const SQL_UPDATE_COMPLETE = `
                       kit_terminal_metadata_json = @kit_terminal_metadata_json,
                       progress_json = COALESCE(@progress_json, progress_json),
                       capture_status = CASE
-                        WHEN kit_execution_json IS NULL AND @capture_status IS NOT NULL
+                        WHEN kit_execution_json IS NULL
+                          AND capture_status IS NULL
+                          AND @capture_status IS NOT NULL
                           THEN @capture_status
                         ELSE capture_status
                       END,
                       output_dropped_bytes = CASE
-                        WHEN kit_execution_json IS NULL AND @capture_status IS NOT NULL
+                        WHEN kit_execution_json IS NULL
+                          AND capture_status IS NULL
+                          AND @capture_status IS NOT NULL
                           THEN @output_dropped_bytes
                         ELSE output_dropped_bytes
                       END,
                       native_transcript = CASE
-                        WHEN kit_execution_json IS NULL AND @capture_status IS NOT NULL
+                        WHEN kit_execution_json IS NULL
+                          AND capture_status IS NULL
+                          AND @capture_status IS NOT NULL
                           THEN @native_transcript
                         ELSE native_transcript
                       END,
                       native_transcript_bytes = CASE
-                        WHEN kit_execution_json IS NULL AND @capture_status IS NOT NULL
+                        WHEN kit_execution_json IS NULL
+                          AND capture_status IS NULL
+                          AND @capture_status IS NOT NULL
                           THEN @native_transcript_bytes
                         ELSE native_transcript_bytes
                       END,
                       native_transcript_truncated = CASE
-                        WHEN kit_execution_json IS NULL AND @capture_status IS NOT NULL
+                        WHEN kit_execution_json IS NULL
+                          AND capture_status IS NULL
+                          AND @capture_status IS NOT NULL
                           THEN @native_transcript_truncated
                         ELSE native_transcript_truncated
                       END,
                       native_transcript_dropped_bytes = CASE
-                        WHEN kit_execution_json IS NULL AND @capture_status IS NOT NULL
+                        WHEN kit_execution_json IS NULL
+                          AND capture_status IS NULL
+                          AND @capture_status IS NOT NULL
                           THEN @native_transcript_dropped_bytes
                         ELSE native_transcript_dropped_bytes
                       END,
                       capture_error = CASE
-                        WHEN kit_execution_json IS NULL AND @capture_status IS NOT NULL
+                        WHEN kit_execution_json IS NULL
+                          AND capture_status IS NULL
+                          AND @capture_status IS NOT NULL
                           THEN @capture_error
                         ELSE capture_error
                       END
@@ -1755,23 +1785,7 @@ export class SqliteJobStore implements JobStore, ValidationRunStore {
       await conn.execute(
         "CREATE INDEX IF NOT EXISTS idx_jobs_kit_finalization ON jobs(kit_terminal_finalized, status)"
       );
-      if (this.retentionMs === null) {
-        // Stable 3.2 changes the default from 30 days to unbounded. Preserve
-        // only non-expired rows that match the exact former default. Explicit
-        // finite policies keep their own deadlines, while already-due rows
-        // remain eligible for the normal retention sweep.
-        await conn.execute(
-          `UPDATE jobs
-           SET expires_at = ?
-           WHERE expires_at >= strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
-             AND expires_at < ?
-             AND expires_at = strftime(
-               '%Y-%m-%dT%H:%M:%fZ',
-               julianday(COALESCE(finished_at, started_at)) + (? / 86400000.0)
-             )`,
-          [FAR_FUTURE_ISO, FAR_FUTURE_ISO, LEGACY_DEFAULT_JOB_RETENTION_MS]
-        );
-      } else {
+      if (this.retentionMs !== null) {
         // The inverse transition matters too. A later operator-selected bound
         // applies to terminal history written while retention was unbounded;
         // active rows stay at the far-future sentinel until they finish.
@@ -1791,14 +1805,9 @@ export class SqliteJobStore implements JobStore, ValidationRunStore {
       // A process may stop after the terminal row commits but before its close
       // handler records capture accounting. The bytes cannot be reconstructed
       // after restart, but the durable record must still say that explicitly.
-      await conn.execute(
-        `UPDATE jobs
-         SET capture_status = 'not_captured', capture_error = ?
-         WHERE status NOT IN ('queued', 'running')
-           AND kit_execution_json IS NULL
-           AND capture_status IS NULL`,
-        [CAPTURE_ACCOUNTING_RECOVERY_ERROR]
-      );
+      await conn.execute(SQL_RECONCILE_CAPTURE_ACCOUNTING, [
+        { capture_error: CAPTURE_ACCOUNTING_RECOVERY_ERROR },
+      ]);
     });
 
     if (process.platform !== "win32") {
@@ -2324,8 +2333,15 @@ export class SqliteJobStore implements JobStore, ValidationRunStore {
   }
 
   async gcInstances(instanceGcMs: number): Promise<number> {
-    const result = await this.execSql(SQL_GC_INSTANCES, [{ gc_ms: instanceGcMs }]);
-    return Number(result.changes);
+    return this.driver.transaction("write", async conn => {
+      const result = await this.execSql(SQL_GC_INSTANCES, [{ gc_ms: instanceGcMs }], conn);
+      await this.execSql(
+        SQL_RECONCILE_CAPTURE_ACCOUNTING,
+        [{ capture_error: CAPTURE_ACCOUNTING_RECOVERY_ERROR }],
+        conn
+      );
+      return Number(result.changes);
+    });
   }
 
   /**
@@ -2381,6 +2397,7 @@ export class SqliteJobStore implements JobStore, ValidationRunStore {
         native_transcript_truncated: input.nativeTranscriptTruncated ? 1 : 0,
         native_transcript_dropped_bytes: input.nativeTranscriptDroppedBytes,
         capture_error: input.captureError,
+        recovery_error: CAPTURE_ACCOUNTING_RECOVERY_ERROR,
       },
     ]);
     return Number(result.changes) === 1;
@@ -2505,6 +2522,7 @@ export class SqliteJobStore implements JobStore, ValidationRunStore {
    * Delete rows whose expires_at has passed. Returns number of rows deleted.
    */
   async evictExpired(): Promise<number> {
+    if (this.retentionMs === null) return 0;
     const now = new Date().toISOString();
     const result = await this.execRetentionSql(SQL_DELETE_EXPIRED, [now]);
     return Number(result.changes);
@@ -3240,8 +3258,15 @@ export class MemoryJobStore implements JobStore {
     if (
       !row ||
       row.ownerInstance !== input.ownerInstance ||
-      row.captureStatus !== null ||
-      row.kitExecution !== null
+      (row.captureStatus !== null &&
+        !(
+          row.captureStatus === "not_captured" &&
+          row.captureError === CAPTURE_ACCOUNTING_RECOVERY_ERROR
+        )) ||
+      row.kitExecution !== null ||
+      row.status === "queued" ||
+      row.status === "running" ||
+      row.status === "orphaned"
     ) {
       return false;
     }
@@ -3286,7 +3311,7 @@ export class MemoryJobStore implements JobStore {
     if (input.progressJson !== undefined && input.progressJson !== null) {
       row.progressJson = input.progressJson;
     }
-    if (row.kitExecution === null && input.capture) {
+    if (row.kitExecution === null && row.captureStatus === null && input.capture) {
       row.captureStatus = input.capture.captureStatus;
       row.outputDroppedBytes = input.capture.outputDroppedBytes;
       row.nativeTranscript = input.capture.nativeTranscript;
@@ -3386,6 +3411,7 @@ export class MemoryJobStore implements JobStore {
   }
 
   async evictExpired(): Promise<number> {
+    if (this.retentionMs === null) return 0;
     const nowIso = new Date().toISOString();
     let removed = 0;
     for (const [id, row] of this.rows) {

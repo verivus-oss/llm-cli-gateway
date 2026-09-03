@@ -30,7 +30,14 @@
     "storage": {
       "description": "Storage health for the flight recorder and the job store. Added at schema_version 1.1: 1.0 reported none, so a corrupt or unreadable transcript database produced a report byte-identical to a quiet one. `scanned` is false for a caller that ran no asynchronous scan, and every measurement is null in that case rather than zero.",
       "type": "object",
-      "required": ["scanned", "flight_recorder", "job_store", "retention", "co_resident", "warnings"],
+      "required": [
+        "scanned",
+        "flight_recorder",
+        "job_store",
+        "retention",
+        "co_resident",
+        "warnings"
+      ],
       "properties": {
         "scanned": { "type": "boolean" },
         "flight_recorder": {
@@ -93,7 +100,7 @@
             "unbounded": {
               "type": "array",
               "items": { "type": "string" },
-              "description": "Subsystems the policy does not bound, derived from it. The two destructive bounds default to OFF, so an unchanged installation lists `requests` and `wedgedValidationRuns` here."
+              "description": "Subsystems the policy does not bound, derived from it. All three destructive bounds default to OFF, so an unchanged installation lists `jobs`, `requests`, and `wedgedValidationRuns` here."
             },
             "policy": {
               "type": ["object", "null"],

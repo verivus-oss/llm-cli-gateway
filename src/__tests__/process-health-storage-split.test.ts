@@ -66,7 +66,8 @@ describe("llm_process_health discloses storage disposition", () => {
 
   async function health(
     persistence: PersistenceConfig,
-    recorder: FlightRecorder | PostgresFlightRecorder | NoopFlightRecorder = flight
+    recorder: FlightRecorder | PostgresFlightRecorder | NoopFlightRecorder = flight,
+    transport: "stdio" | "http" = "stdio"
   ): Promise<Record<string, any>> {
     const server = createGatewayServer({
       sessionManager: new FileSessionManager(join(tmp, "sessions.json")),
@@ -80,8 +81,11 @@ describe("llm_process_health discloses storage disposition", () => {
     });
     const reg = (server as unknown as Record<string, Record<string, RegisteredTool>>)
       ._registeredTools;
-    const res = await runWithRequestContext({ transport: "stdio", authScopes: [] }, () =>
-      reg["llm_process_health"].handler({}, {})
+    const res = await runWithRequestContext(
+      transport === "http"
+        ? { transport, authScopes: [], authPrincipal: "remote-health-test" }
+        : { transport, authScopes: [] },
+      () => reg["llm_process_health"].handler({}, {})
     );
     return JSON.parse(res.content[0].text);
   }
@@ -180,11 +184,12 @@ describe("llm_process_health discloses storage disposition", () => {
     }
   });
 
-  it("names PostgreSQL without exposing its DSN", async () => {
+  it("reports an opaque PostgreSQL target without exposing its DSN", async () => {
+    const configuredDsn = "postgresql://secret-user:secret-password@private-db.invalid/gateway";
     const recorder = postgresRecorder();
     try {
       const res = await health(
-        mkPersistence({ backend: "postgres", path: null, dsn: "postgres://x" }),
+        mkPersistence({ backend: "postgres", path: null, dsn: configuredDsn }),
         recorder
       );
 
@@ -194,12 +199,30 @@ describe("llm_process_health discloses storage disposition", () => {
 
       // The recorder block supplies what was missing.
       expect(res.flightRecorder.engine).toBe("postgres");
-      expect(res.flightRecorder.path).toBe("postgresql host 127.0.0.1 port 5432 database gateway");
+      expect(res.flightRecorder.path).toBe("postgresql");
       expect(res.flightRecorder.enabled).toBe(true);
       expect(res.flightRecorder.followsPersistenceBackend).toBe(true);
+      expect(res.persistence.dsn).toBe("[redacted]");
+      expect(JSON.stringify(res)).not.toContain(configuredDsn);
+      expect(JSON.stringify(res)).not.toContain("secret-password");
     } finally {
       await recorder.close();
     }
+  });
+
+  it("keeps host paths out of remote process health", async () => {
+    const configFile = join(tmp, "private-config.toml");
+    const persistence = mkPersistence({
+      path: join(tmp, "private-jobs.db"),
+      sources: { configFile, envOverrides: [] },
+    });
+    const res = await health(persistence, flight, "http");
+    const serialized = JSON.stringify(res);
+
+    expect(res.persistence.dbPath).toBe("sqlite");
+    expect(res.persistence.sources.configFile).toBe("[configured]");
+    expect(res.flightRecorder.path).toBe("sqlite");
+    expect(serialized).not.toContain(tmp);
   });
 
   it("wires the generic PostgreSQL formatter into runtime retention health", async () => {
@@ -261,7 +284,7 @@ describe("llm_process_health discloses storage disposition", () => {
       expect(res.flightRecorder.warning).toContain("Request history is using PostgreSQL");
       expect(res.flightRecorder.warning).not.toContain("moved to PostgreSQL");
       expect(res.flightRecorder.warning).toContain("were NOT migrated");
-      expect(res.flightRecorder.warning).toContain(join(tmp, "logs.db"));
+      expect(res.flightRecorder.warning).not.toContain(join(tmp, "logs.db"));
     } finally {
       await recorder.close();
     }

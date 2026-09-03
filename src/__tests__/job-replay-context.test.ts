@@ -128,7 +128,7 @@ describe("job replay context", () => {
       version: 1,
       repositoryHead: "a".repeat(40),
       instructionFiles: Array.from({ length: 256 }, (_, index) => ({
-        path: `/${String(index).padStart(3, "0")}-${"x".repeat(1000)}`,
+        path: `/${String(index).padStart(3, "0")}-${"\\".repeat(32 * 1024 - 6)}`,
         sha256: "b".repeat(64),
         sourceBytes: 1,
         effectiveBytes: 1,
@@ -138,7 +138,7 @@ describe("job replay context", () => {
       })),
     });
 
-    expect(serialized.length).toBeGreaterThan(256 * 1024);
+    expect(serialized.length).toBeGreaterThan(16 * 1024 * 1024);
     expect(parseJobReplayContext(serialized)?.instructionFiles).toHaveLength(256);
   });
 });

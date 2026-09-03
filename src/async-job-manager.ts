@@ -808,6 +808,8 @@ interface AsyncJobRecord {
   capturePersisted: boolean;
   /** Exact gateway-owned Devin export path, never reconstructed from arbitrary argv. */
   nativeTranscriptPath?: string;
+  /** One prompt retry before a failed unlink falls back to the durable stale sweep. */
+  nativeTranscriptCleanupRetried?: boolean;
   /**
    * Native compressor PR-1 (spec 5.2): effective enqueue-time compression
    * decision. Persisted alongside output_format; NULL/undefined on legacy
@@ -3758,6 +3760,8 @@ export class AsyncJobManager {
       const bytesToRead = Math.min(info.size, availableBytes);
       if (bytesToRead === 0) {
         closeSync(fd);
+        job.nativeTranscriptTruncated = info.size > 0;
+        job.nativeTranscriptDroppedBytes = info.size;
         job.captureError = "Provider native transcript exceeded the remaining capture budget";
         return;
       }
@@ -3834,9 +3838,13 @@ export class AsyncJobManager {
       return true;
     }
     if (!this.store || job.kitExecution) return false;
+    // Early cancel, timeout, and overflow transitions are terminal before the
+    // provider closes. A result read in that interval must not freeze capture
+    // accounting from a partial wire that late-output rescue will extend.
+    if (!job.closeObserved) return false;
     this.captureOutcome(job);
     if (job.captureStatus === null) return false;
-    let durable = false;
+    let durable: boolean;
     try {
       durable = await this.store.recordCapture({
         id: job.id,
@@ -3873,10 +3881,15 @@ export class AsyncJobManager {
       unlinkSync(expected);
       job.nativeTranscriptPath = undefined;
     } catch {
-      // Releasing the process-local pin lets the periodic, startup, and
-      // pre-launch sweeps retry the exact gateway-minted file after a crash or
-      // a transient unlink failure. Keep the path on the job so result reads
-      // can retry immediately while this process remains alive.
+      if (!job.nativeTranscriptCleanupRetried) {
+        job.nativeTranscriptCleanupRetried = true;
+        const retry = setTimeout(() => this.cleanupDurableNativeTranscript(job), 1000);
+        retry.unref?.();
+        return;
+      }
+      // The exact path itself is the durable retry record after this bounded
+      // in-process attempt. Releasing its pin lets startup, periodic, and
+      // pre-launch stale sweeps remove it after a crash or persistent fault.
     }
     releaseGatewayDevinTranscriptPath(expected);
   }

@@ -173,7 +173,7 @@ describe("applyProviderDisplayText", () => {
     }
   });
 
-  it("preserves an incomplete local rich stream when no reply can be projected", () => {
+  it("does not return an incomplete rich stream when no reply can be projected", () => {
     const incomplete = JSON.stringify({
       type: "item.started",
       item: { type: "command_execution", command: "/usr/bin/private-tool" },
@@ -186,7 +186,7 @@ describe("applyProviderDisplayText", () => {
         stdout: incomplete,
         applyGrokDisplay: true,
       })
-    ).toBe(incomplete);
+    ).toBe("[provider transcript withheld: response projection unavailable]");
   });
 
   it("projects only the terminal reply for a remote rich capture", () => {
@@ -211,5 +211,12 @@ describe("applyProviderDisplayText", () => {
     expect(projectRemoteProviderOutput("claude", capture, "stream-json")).toBe(
       "[provider transcript withheld: terminal response unavailable]"
     );
+  });
+
+  it.each([
+    '{"answer":"ordinary JSON-shaped prose"}',
+    "See https://example.invalid/a and /workspace/readme.md",
+  ])("preserves an already-projected flight-recorder response: %s", response => {
+    expect(projectRemoteProviderOutput("claude", response)).toBe(response);
   });
 });

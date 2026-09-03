@@ -326,9 +326,11 @@ describe("JobStore", () => {
         expect(await migrated.getById("legacy-1")).toMatchObject({
           errorCategory: null,
           retryable: null,
+          captureStatus: null,
           expiresAt: "2000-01-01T00:00:00.000Z",
         });
-        expect(await migrated.evictExpired()).toBe(1);
+        expect(await migrated.evictExpired()).toBe(0);
+        expect(await migrated.getById("legacy-1")).not.toBeNull();
         // New inserts after migration can carry an owner.
         await migrated.recordStart({
           id: "new-1",
@@ -363,7 +365,7 @@ describe("JobStore", () => {
       }
     });
 
-    it("rebases only live rows written with the former 30-day default", async () => {
+    it("does not rewrite existing finite deadlines when the default becomes unbounded", async () => {
       const policyPath = join(tempDir, "former-default-retention.db");
       const formerDefaultMs = 30 * 24 * 60 * 60 * 1000;
       const formerDefault = new SqliteJobStore(policyPath, undefined, {
@@ -418,14 +420,63 @@ describe("JobStore", () => {
 
       const unbounded = new SqliteJobStore(policyPath, undefined, { retentionMs: null });
       try {
-        expect(await unbounded.getById("former-default-row")).toMatchObject({
-          expiresAt: "9999-12-31T23:59:59.999Z",
-        });
+        expect(Date.parse((await unbounded.getById("former-default-row"))!.expiresAt)).toBe(
+          Date.parse(finishedAt) + formerDefaultMs
+        );
         expect(Date.parse((await unbounded.getById("explicit-finite-row"))!.expiresAt)).toBe(
           Date.parse(finishedAt) + explicitFiniteMs
         );
       } finally {
         await unbounded.close();
+      }
+    });
+
+    it("does not replace capture accounting while the owning instance is live", async () => {
+      const recoveryPath = join(tempDir, "capture-accounting-live-owner.db");
+      const ownerId = "capture-accounting-live-owner";
+      const initial = new SqliteJobStore(recoveryPath, undefined, { retentionMs: null });
+      const finishedAt = new Date().toISOString();
+      await initial.registerInstance({
+        instanceId: ownerId,
+        role: "stdio",
+        hostname: "capture-host",
+        pid: 7,
+      });
+      await initial.recordStart({
+        id: "capture-accounting-live-gap",
+        correlationId: "capture-accounting-live-gap-corr",
+        requestKey: "capture-accounting-live-gap-key",
+        cli: "claude",
+        args: ["-p", "history"],
+        startedAt: finishedAt,
+        pid: null,
+        ownerInstance: ownerId,
+      });
+      await initial.recordComplete({
+        id: "capture-accounting-live-gap",
+        status: "canceled",
+        exitCode: null,
+        stdout: "partial",
+        stderr: "",
+        outputTruncated: false,
+        error: "canceled",
+        finishedAt,
+      });
+      await initial.close();
+
+      const sibling = new SqliteJobStore(recoveryPath, undefined, { retentionMs: null });
+      expect((await sibling.getById("capture-accounting-live-gap"))?.captureStatus).toBeNull();
+      await sibling.deregisterInstance(ownerId);
+      await sibling.close();
+
+      const afterOwnerExit = new SqliteJobStore(recoveryPath, undefined, { retentionMs: null });
+      try {
+        expect(await afterOwnerExit.getById("capture-accounting-live-gap")).toMatchObject({
+          captureStatus: "not_captured",
+          captureError: "Gateway stopped before capture accounting completed",
+        });
+      } finally {
+        await afterOwnerExit.close();
       }
     });
 
@@ -477,6 +528,7 @@ describe("JobStore", () => {
         args: ["-p", "history"],
         startedAt: finishedAt,
         pid: null,
+        ownerInstance: "capture-accounting-dead-owner",
       });
       await initial.recordComplete({
         id: "capture-accounting-gap",
@@ -496,6 +548,22 @@ describe("JobStore", () => {
           captureStatus: "not_captured",
           captureError: "Gateway stopped before capture accounting completed",
         });
+        expect(
+          await reopened.recordCapture({
+            id: "capture-accounting-gap",
+            ownerInstance: "capture-accounting-dead-owner",
+            captureStatus: "captured_whole",
+            outputDroppedBytes: 0,
+            nativeTranscript: null,
+            nativeTranscriptBytes: 0,
+            nativeTranscriptTruncated: false,
+            nativeTranscriptDroppedBytes: 0,
+            captureError: null,
+          })
+        ).toBe(true);
+        expect((await reopened.getById("capture-accounting-gap"))?.captureStatus).toBe(
+          "captured_whole"
+        );
       } finally {
         await reopened.close();
       }
@@ -886,20 +954,6 @@ describe("JobStore", () => {
           name
         ).toBe(false);
         expect(
-          await backend.recordCapture({
-            id: "capture-parity",
-            ownerInstance: "capture-owner",
-            captureStatus: "captured_to_limit",
-            outputDroppedBytes: 0,
-            nativeTranscript: '{"version":"ATIF-v1.7"}',
-            nativeTranscriptBytes: 23,
-            nativeTranscriptTruncated: true,
-            nativeTranscriptDroppedBytes: 41,
-            captureError: null,
-          }),
-          name
-        ).toBe(true);
-        expect(
           await backend.recordComplete({
             id: "capture-parity",
             status: "completed",
@@ -909,6 +963,15 @@ describe("JobStore", () => {
             outputTruncated: false,
             error: null,
             finishedAt: t,
+            capture: {
+              captureStatus: "captured_to_limit",
+              outputDroppedBytes: 0,
+              nativeTranscript: '{"version":"ATIF-v1.7"}',
+              nativeTranscriptBytes: 23,
+              nativeTranscriptTruncated: true,
+              nativeTranscriptDroppedBytes: 41,
+              captureError: null,
+            },
           }),
           name
         ).toBe(true);
@@ -1019,6 +1082,53 @@ describe("JobStore", () => {
           stdout: "complete wire",
           captureStatus: "captured_whole",
           outputDroppedBytes: 0,
+        });
+        await backend.close();
+      }
+    });
+
+    it("accepts late capture only after an early terminal transition", async () => {
+      for (const [name, backend] of backends()) {
+        const finishedAt = new Date().toISOString();
+        await backend.recordStart({
+          id: "late-capture-parity",
+          correlationId: "late-capture-corr",
+          requestKey: "late-capture-key",
+          cli: "claude",
+          args: ["-p", "capture"],
+          startedAt: finishedAt,
+          pid: 7,
+          ownerInstance: "late-capture-owner",
+        });
+        const capture = {
+          id: "late-capture-parity",
+          ownerInstance: "late-capture-owner",
+          captureStatus: "captured_whole" as const,
+          outputDroppedBytes: 0,
+          nativeTranscript: null,
+          nativeTranscriptBytes: 0,
+          nativeTranscriptTruncated: false,
+          nativeTranscriptDroppedBytes: 0,
+          captureError: null,
+        };
+        expect(await backend.recordCapture(capture), name).toBe(false);
+        expect(
+          await backend.recordComplete({
+            id: "late-capture-parity",
+            status: "canceled",
+            exitCode: null,
+            stdout: "partial",
+            stderr: "",
+            outputTruncated: false,
+            error: "canceled",
+            finishedAt,
+          }),
+          name
+        ).toBe(true);
+        expect(await backend.recordCapture(capture), name).toBe(true);
+        expect(await backend.getById("late-capture-parity"), name).toMatchObject({
+          status: "canceled",
+          captureStatus: "captured_whole",
         });
         await backend.close();
       }
