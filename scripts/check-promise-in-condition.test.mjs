@@ -329,6 +329,24 @@ describe("promise-in-condition gate", () => {
     expect(r.output).not.toContain("promise-in-condition: 0 in production");
   });
 
+  it("fails closed with exit 2 when the root tsconfig.json parses but its options are invalid", () => {
+    // Distinct branch from the malformed-JSON case: the file reads and parses,
+    // and TypeScript rejects an option value. Codex's round-2 mutant made this
+    // branch exit 0 and the shipped suite did not notice.
+    fixtureRoot = mkdtempSync(join(scratchDir(), "promise-condition-"));
+    writeFileSync(
+      join(fixtureRoot, "tsconfig.json"),
+      JSON.stringify({
+        compilerOptions: { strict: true, target: "not-a-target" },
+        include: ["src/**/*"],
+      })
+    );
+    const r = runGate(fixtureRoot);
+    expect(r.exitCode).toBe(2);
+    expect(r.output).toContain("--target");
+    expect(r.output).not.toContain("promise-in-condition: 0 in production");
+  });
+
   it("fails closed with exit 2 on malformed arguments", () => {
     for (const argv of [
       ["--root"],
