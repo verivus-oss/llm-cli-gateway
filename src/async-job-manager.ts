@@ -3718,10 +3718,14 @@ export class AsyncJobManager {
   private persistComplete(job: AsyncJobRecord): Promise<boolean> {
     const previous = job.terminalWriteChain ?? Promise.resolve();
     const write = previous.catch(() => undefined).then(() => this.persistCompleteBody(job));
-    job.terminalWriteChain = write.then(
+    const chain = write.then(
       () => undefined,
       () => undefined
     );
+    job.terminalWriteChain = chain;
+    void chain.then(() => {
+      if (job.terminalWriteChain === chain) job.terminalWriteChain = undefined;
+    });
     // A swallowed copy: pendingWrites only needs to know when this SETTLES, and
     // trackPendingWrite's `void p.finally(...)` would otherwise turn a rejection
     // into an unhandled one on top of whatever the caller already does with it.
@@ -4127,7 +4131,8 @@ export class AsyncJobManager {
     if (
       (job.terminalPersistenceAcknowledged && !capturePending) ||
       job.finishedAt === null ||
-      isAsyncJobInProgress(job.status)
+      isAsyncJobInProgress(job.status) ||
+      job.terminalWriteChain !== undefined
     ) {
       return;
     }

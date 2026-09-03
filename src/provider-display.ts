@@ -46,8 +46,12 @@ export interface ProviderDisplayInput {
 const PROVIDER_RESPONSE_UNAVAILABLE =
   "[provider transcript withheld: response projection unavailable]";
 
+function carriesJsonObjectLine(stdout: string): boolean {
+  return lastJsonLine(stdout, () => true) !== null;
+}
+
 function projectionFallback(cli: string, captureFormat: string | null, stdout: string): string {
-  return captureFormatCarriesTranscript(cli, captureFormat)
+  return captureFormatCarriesTranscript(cli, captureFormat) && carriesJsonObjectLine(stdout)
     ? PROVIDER_RESPONSE_UNAVAILABLE
     : stdout;
 }
@@ -104,9 +108,7 @@ function lastJsonLine(
 function projectCapturedJson(cli: string, captureFormat: string | null, stdout: string): string {
   if (cli === "claude" && captureFormat === "stream-json") {
     const result = lastJsonLine(stdout, value => value.type === "result");
-    return result
-      ? JSON.stringify(result)
-      : JSON.stringify({ error: PROVIDER_RESPONSE_UNAVAILABLE });
+    return result ? JSON.stringify(result) : projectionFallback(cli, captureFormat, stdout);
   }
   if (cli === "gemini" && captureFormat === "stream-json") {
     const result = lastJsonLine(
@@ -116,11 +118,11 @@ function projectCapturedJson(cli: string, captureFormat: string | null, stdout: 
     const body = result?.event === "result" ? result.result : result;
     return body && typeof body === "object"
       ? JSON.stringify(body)
-      : JSON.stringify({ error: PROVIDER_RESPONSE_UNAVAILABLE });
+      : projectionFallback(cli, captureFormat, stdout);
   }
   if (cli === "grok" && captureFormat === "streaming-json") {
     const parsed = parseGrokOutput("streaming-json", stdout);
-    if (!parsed) return JSON.stringify({ error: PROVIDER_RESPONSE_UNAVAILABLE });
+    if (!parsed) return projectionFallback(cli, captureFormat, stdout);
     const projected: Record<string, unknown> = {};
     for (const key of [
       "text",
@@ -139,15 +141,11 @@ function projectCapturedJson(cli: string, captureFormat: string | null, stdout: 
       stdout,
       value => value.type === "message" && value.role === "assistant"
     );
-    return result
-      ? JSON.stringify(result)
-      : JSON.stringify({ error: PROVIDER_RESPONSE_UNAVAILABLE });
+    return result ? JSON.stringify(result) : projectionFallback(cli, captureFormat, stdout);
   }
   if (cli === "cursor" && captureFormat === "stream-json") {
     const result = lastJsonLine(stdout, value => value.type === "result");
-    return result
-      ? JSON.stringify(result)
-      : JSON.stringify({ error: PROVIDER_RESPONSE_UNAVAILABLE });
+    return result ? JSON.stringify(result) : projectionFallback(cli, captureFormat, stdout);
   }
   return stdout;
 }
@@ -189,19 +187,19 @@ export function applyProviderDisplayText(input: ProviderDisplayInput): string {
   if (!callerWantsStructured && cli === "claude" && captureFormat === "stream-json") {
     return lastJsonLine(stdout, value => value.type === "result")
       ? parseStreamJson(stdout).text
-      : PROVIDER_RESPONSE_UNAVAILABLE;
+      : projectionFallback(cli, captureFormat, stdout);
   }
   if (!callerWantsStructured && cli === "gemini" && captureFormat === "stream-json") {
     const response = parseGeminiStreamJson(stdout)?.response;
-    return response === undefined ? PROVIDER_RESPONSE_UNAVAILABLE : response;
+    return response === undefined ? projectionFallback(cli, captureFormat, stdout) : response;
   }
   if (!callerWantsStructured && cli === "mistral" && captureFormat === "streaming") {
     const response = parseVibeStream(stdout)?.response;
-    return response === undefined ? PROVIDER_RESPONSE_UNAVAILABLE : response;
+    return response === undefined ? projectionFallback(cli, captureFormat, stdout) : response;
   }
   if (!callerWantsStructured && cli === "cursor" && captureFormat === "stream-json") {
     const response = parseCursorStreamJson(stdout)?.response;
-    return response === undefined ? PROVIDER_RESPONSE_UNAVAILABLE : response;
+    return response === undefined ? projectionFallback(cli, captureFormat, stdout) : response;
   }
   return stdout;
 }
@@ -223,6 +221,7 @@ export function projectRemoteProviderOutput(
   const resolvedFormat = captureFormat === undefined ? null : captureFormat;
   if (
     captureFormatCarriesTranscript(cli, resolvedFormat) &&
+    carriesJsonObjectLine(stdout) &&
     !providerCaptureStreamIsComplete(cli, resolvedFormat, stdout)
   ) {
     return "[provider transcript withheld: terminal response unavailable]";
@@ -234,7 +233,11 @@ export function projectRemoteProviderOutput(
     stdout,
     applyGrokDisplay: true,
   });
-  if (captureFormatCarriesTranscript(cli, resolvedFormat) && display === stdout) {
+  if (
+    captureFormatCarriesTranscript(cli, resolvedFormat) &&
+    carriesJsonObjectLine(stdout) &&
+    display === stdout
+  ) {
     return PROVIDER_RESPONSE_UNAVAILABLE;
   }
   return display;

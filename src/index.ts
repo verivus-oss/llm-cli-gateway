@@ -23037,13 +23037,21 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
       // LLM_GATEWAY_LOGS_DB in both cases.
       const recorderEnabled = disposition.requestHistory.enabled;
       const recorderEngine = flightRecorderEngineDecision(persistence.backend);
-      const recorderTarget = recorderEnabled
-        ? recorderEngine.engine === "postgres"
-          ? POSTGRES_RECORDER_TARGET
-          : remoteHealthCaller
-            ? "sqlite"
-            : (recorderHealth.path ?? resolveFlightRecorderDbPath())
-        : null;
+      const rawRecorderTarget =
+        recorderHealth.path ??
+        (recorderEnabled
+          ? recorderEngine.engine === "postgres"
+            ? POSTGRES_RECORDER_TARGET
+            : resolveFlightRecorderDbPath()
+          : null);
+      const recorderTarget =
+        rawRecorderTarget === null
+          ? null
+          : recorderEngine.engine === "postgres"
+            ? POSTGRES_RECORDER_TARGET
+            : remoteHealthCaller
+              ? "sqlite"
+              : rawRecorderTarget;
       const recorderMessage = flightRecorderHealthMessage({
         ...recorderHealth,
         path: recorderTarget,

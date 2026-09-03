@@ -65,7 +65,7 @@ describe("AsyncJobManager Claude MCP artifacts", () => {
     testHome = mkdtempSync(join(tmpdir(), "async-mcp-artifact-home-"));
     process.env.HOME = testHome;
     dbPath = join(testHome, "jobs.db");
-    store = new SqliteJobStore(dbPath);
+    store = new SqliteJobStore(dbPath, undefined, { retentionMs: 30 * 24 * 60 * 60 * 1000 });
     manager = new AsyncJobManager(noopLogger, undefined, store);
     // Durable admission is restored asynchronously and Kit/durable paths refuse
     // to start until it settles. C5 made the store's own initialisation genuinely

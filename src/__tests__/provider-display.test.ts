@@ -213,6 +213,20 @@ describe("applyProviderDisplayText", () => {
     );
   });
 
+  it("preserves plain fallback text when a provider did not emit its requested rich wire", () => {
+    const response = "provider diagnostic: retrying the same operation";
+    expect(projectRemoteProviderOutput("claude", response, "stream-json")).toBe(response);
+    expect(
+      applyProviderDisplayText({
+        cli: "claude",
+        outputFormat: "text",
+        captureFormat: "stream-json",
+        stdout: response,
+        applyGrokDisplay: true,
+      })
+    ).toBe(response);
+  });
+
   it.each([
     '{"answer":"ordinary JSON-shaped prose"}',
     "See https://example.invalid/a and /workspace/readme.md",

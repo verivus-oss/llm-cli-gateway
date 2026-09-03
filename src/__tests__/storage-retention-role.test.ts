@@ -49,7 +49,7 @@ describe("SqliteJobStore.evictExpired", () => {
       return original.call(this, operation, fn);
     });
 
-    const store = new SqliteJobStore(tempDb());
+    const store = new SqliteJobStore(tempDb(), undefined, { retentionMs: 1000 });
     await store.evictExpired();
     await store.close();
     spy.mockRestore();
@@ -72,7 +72,7 @@ describe("SqliteJobStore.evictExpired", () => {
       return original.call(this, operation, fn);
     });
 
-    const store = new SqliteJobStore(tempDb());
+    const store = new SqliteJobStore(tempDb(), undefined, { retentionMs: 1000 });
     await store.recordStart({
       id: "job-1",
       correlationId: "corr-1",
@@ -89,7 +89,7 @@ describe("SqliteJobStore.evictExpired", () => {
   });
 
   it("resolves `retention` to the writable handle, so nothing else changes", async () => {
-    const store = new SqliteJobStore(tempDb());
+    const store = new SqliteJobStore(tempDb(), undefined, { retentionMs: 1000 });
     await store.recordStart({
       id: "job-2",
       correlationId: "corr-2",
