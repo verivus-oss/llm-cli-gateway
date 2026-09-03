@@ -2,6 +2,7 @@ import js from "@eslint/js";
 import tsParser from "@typescript-eslint/parser";
 import tsPlugin from "@typescript-eslint/eslint-plugin";
 import securityPlugin from "eslint-plugin-security";
+import { CALLER_INFLUENCED_FS_MODULES } from "./scripts/fs-path-scope.mjs";
 
 export default [
   {
@@ -82,8 +83,21 @@ export default [
       "no-var": "error",
       "prefer-const": "error",
       "security/detect-child-process": "off",
-      "security/detect-non-literal-fs-filename": "warn",
-      "security/detect-object-injection": "warn",
+      // OFF by default, ON for the modules where a caller-supplied value can
+      // reach a path. See scripts/fs-path-scope.mjs for the two provenance
+      // classes and scripts/check-fs-path-scope.mjs for the check that keeps
+      // them honest against the tree.
+      "security/detect-non-literal-fs-filename": "off",
+      // OFF everywhere, and this is a measurement rather than a preference.
+      // Sampled hits were array indexing (`args[index]`), keys already bounded
+      // by a union type (`UPSTREAM_CLI_CONTRACTS[cli]` where cli is CliType),
+      // and own-key iteration (`rawSessions[sessionId]` straight out of
+      // Object.entries). The one write with a derived key,
+      // `pointers[canonicalPointerKey]` in session-manager, is guarded by a
+      // canonicaliser that throws on a malformed key. The rule cannot see
+      // types, so in this codebase it reports the type system's work as a
+      // finding, 392 times.
+      "security/detect-object-injection": "off",
     },
   },
   {
@@ -146,8 +160,12 @@ export default [
       "@typescript-eslint/no-misused-promises": "error",
       "no-var": "error",
       "security/detect-child-process": "off",
-      "security/detect-non-literal-fs-filename": "warn",
-      "security/detect-object-injection": "warn",
+      // The spread above re-enables the security preset for this glob, so both
+      // rules are turned off here as well. The caller-influenced modules
+      // re-enable the filesystem one in the last block of this file.
+      "security/detect-non-literal-fs-filename": "off",
+      "security/detect-object-injection": "off",
+
       "@typescript-eslint/explicit-function-return-type": [
         "warn",
         {
@@ -171,6 +189,12 @@ export default [
           format: ["camelCase", "UPPER_CASE", "snake_case"],
         },
       ],
+    },
+  },
+  {
+    files: CALLER_INFLUENCED_FS_MODULES,
+    rules: {
+      "security/detect-non-literal-fs-filename": "warn",
     },
   },
 ];
