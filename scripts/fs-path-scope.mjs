@@ -66,5 +66,6 @@ export const GATEWAY_OWNED_FS_MODULES = [
   "src/provider-surface.ts",
   "src/provider-tool-capabilities.ts",
   "src/sqlite-driver.ts",
+  "src/storage/drivers/sqlite.ts",
   "src/storage-cli.ts",
 ];
