@@ -3,28 +3,27 @@
 
 [meta]
 surface = "what is launched, what is captured, what is projected back, and what retention keeps"
-status = "c1 measured 2026-09-02, evidence in docs/evidence/c1-capture-ceiling-2026-09-02.md; c2 onward open"
+status = "done 2026-09-03 at d64ba20; c1 evidence remains in docs/evidence/c1-capture-ceiling-2026-09-02.md"
 issue = "https://github.com/verivusai-labs/llm-cli-gateway/issues/296"
 
 # THE REQUIREMENT
 #
 # Every request to every agent tool records what went in, the exact argv, the
-# reasoning, and the tool-use transcript. Today two of seven providers come
-# close and five record only the final sentence.
+# reasoning, and the tool-use transcript. The c1 evidence records the original
+# gap; commit d64ba20 closes it for all seven provider paths.
 
 [facts]
-measured_at = "source read at 5aa45b2; per-provider stdout shapes and row counts are #296's measurements against one Postgres deployment on 3.2.0-rc.1"
-capture_follows_the_caller = "output_format is a caller parameter and the gateway persists whatever wire the caller asked for. Nothing asks for the richest one, so what is recorded is a caller's display preference"
-gemini_refusal_is_stale = "the gateway refuses gemini stream-json saying agy emits text only. agy 1.1.24 emits an init event with cwd and 57 tools, per-tool step_update events with parameters, and usage. The registry declares outputFormats text; the binary does not agree."
-available_unused = "MEASURED. grok streaming-json, mistral streaming and cursor stream-json all carry tool calls and reasoning PROSE, in wires the gateway already accepts as outputFormat values and never selects. devin has no --format at 3000.6.11; it has --export."
-devin_export_is_the_outlier = "devin --export writes an ATIF-v1.7 document, 92 KB against 23 bytes of stdout for a one-line task, carrying the system prompt, tool definitions, token totals AND the instruction files in force verbatim by path. devin_request_async already exposes it as exportSession and nothing sets it."
-size_is_already_large = "codex event streams median 362 KB per job today, and executor.ts caps process output at 50 MB"
-retention_would_eat_it = "RETENTION_SUBSYSTEMS bounds jobs at 30 days and leaves requests unbounded, so the complete record is the one that is swept"
+measured_at = "implemented and source-verified at d64ba20; the original provider probes remain recorded against their installed binaries in the c1 evidence"
+capture_is_independent = "each provider launches in its richest supported capture wire; the caller output format is a projection and no longer controls the durable record"
+capture_formats = "claude stream-json, codex json, gemini stream-json, grok streaming-json, mistral streaming, devin ATIF-v1.7 export, cursor stream-json"
+devin_export_is_bounded = "the gateway mints an exact correlation-keyed path, refuses links and non-regular files, validates a complete ATIF object, persists it within the shared job ceiling, then removes only that exact source path"
+capture_is_honest = "capture_status distinguishes captured_whole, captured_to_limit and not_captured; dropped byte counts and stable errors explain incomplete capture"
+retention_keeps_it = "jobs and requests are both unbounded by default, with independent opt-in operator bounds"
 
 [non_goals]
-no_silent_launch_change = "a provider launched in a different wire returns different bytes. The caller's requested format is a PROJECTION of the captured one, never a thing the capture quietly overwrites."
+no_caller_contract_change = "the richer launch wire is internal. The caller's requested format remains an explicit projection of the capture and is pinned against the preceding provider presentation."
 no_claimed_reasoning = "a provider that emits no reasoning must record that it emitted none. Storing an empty field that reads like a complete record is worse than storing nothing."
-no_unbounded_write = "capture has a ceiling and the ceiling is recorded when it is hit. A truncated transcript that does not say it was truncated is a false record."
+no_unaccounted_write = "capture uses the configured job-output ceiling. Operators may choose a very large ceiling, but the record still states whether bytes were dropped."
 no_new_disclosure_by_default = "a full transcript contains file contents the agent read. Whatever a remote HTTP caller could read before, it reads no more of after."
 
 [[node]]
@@ -42,7 +41,7 @@ id = "c2.capture-is-not-the-caller-projection"
 critical = true
 depends_on = ["c1.measure-the-ceiling"]
 role = "The single structural change. What is recorded and what is returned are the same string today, so a caller asking for text destroys the record."
-action = "Launch in the richest wire c1 proved for that provider. Persist the raw stream. Derive the caller's requested output_format from it at return time."
+action = "DONE at d64ba20. ProviderCapturePlan selects the rich wire before launch and ProviderDisplayInput projects text or JSON after capture. Durable args_json and capture_format name the actual launch and grammar."
 constraint = "Every provider needs a rich-to-text and rich-to-json projection, and each one is a place a caller's output silently changes. Pin the projections against the current text output per provider before switching the launch wire."
 constraint_2 = "Record the wire that was captured on the job row. Reading a stream without knowing which grammar it is in is not reading it."
 affects = ["c4.bounded-and-honest", "c5.retention-follows-information", "c6.reachable-and-scoped"]
@@ -51,8 +50,8 @@ affects = ["c4.bounded-and-honest", "c5.retention-follows-information", "c6.reac
 id = "c3.native-store-harvest"
 depends_on = ["c1.measure-the-ceiling"]
 role = "For a provider whose stdout will never carry the transcript, the transcript still exists: on disk, in the provider's own session store."
-action = "After a job terminates, copy the provider's native session artefact for that run into the durable record. Precedent exists in the mistral Kit path, which already binds a gateway-owned session directory."
-constraint = "The join must be KEYED. #296 found grok's summary.json request_id matches nothing on the gateway side and gemini reaches the store with no session key at all, so today the only join is directory plus start time. Under a neutral cwd that join is worthless."
+action = "DONE at d64ba20. Rich stdout covers six providers. Devin alone needs native harvest, so the gateway securely copies its exact ATIF export into native_transcript and accounts for its bytes and truncation before deleting the gateway-owned temporary artifact."
+constraint = "The harvested Devin artifact is keyed by an exact gateway-minted correlation path. Other providers use rich stdout; the Gemini cwd and start-time native-history join remains non-unique and is not used as a capture key."
 constraint_2 = "Harvesting reads a file the provider wrote. Treat it as untrusted input on the way in, exactly as review-prompt.ts fences repository evidence."
 affects = ["c4.bounded-and-honest", "c6.reachable-and-scoped"]
 
@@ -61,16 +60,16 @@ id = "c4.bounded-and-honest"
 critical = true
 depends_on = ["c2.capture-is-not-the-caller-projection", "c3.native-store-harvest"]
 role = "Complete capture multiplies durable volume by the size of a transcript. A ceiling that is hit silently converts a complete record into a plausible partial one."
-action = "One ceiling per job, recorded on the row with the byte count that was dropped and where. output_truncated already exists and is FALSE on all 3,620 jobs measured, which is a claim this node has to keep true or replace."
+action = "DONE at d64ba20. The stdout and stderr stream plus any native transcript share max_job_output_bytes. The row stores capture_status, output_dropped_bytes, native_transcript_bytes, native_transcript_truncated, native_transcript_dropped_bytes and capture_error."
 constraint = "Distinguish three states and never merge them: captured whole, captured to a stated ceiling, and not captured because this provider cannot emit it. The third is c1's finding made durable."
 affects = ["c5.retention-follows-information"]
 
 [[node]]
 id = "c5.retention-follows-information"
 depends_on = ["c4.bounded-and-honest"]
-role = "Keeping everything and deleting it in 30 days is the current default, and it is the opposite of the requirement."
-action = "Take the retention decision for jobs and requests together, with #287. The doctor warning added under job-record-replayability r5 fires once a request has outlived the job bound; it is a report, not the decision."
-constraint = "Neither default moves without an explicit decision: changing either deletes or retains data on every installed host."
+role = "Keeping everything while deleting it in 30 days was the previous default, and it was the opposite of the requirement."
+action = "DONE at d64ba20. Both destructive defaults are off. Jobs and requests remain unbounded until an operator sets the corresponding persistence retention bound, and the health surfaces report the resolved policy."
+constraint = "The explicit decision at d64ba20 makes both defaults unbounded, so an upgrade deletes nothing. Operators retain independent opt-in bounds."
 affects = []
 
 [[node]]
@@ -78,8 +77,8 @@ id = "c6.reachable-and-scoped"
 critical = true
 depends_on = ["c2.capture-is-not-the-caller-projection", "c3.native-store-harvest"]
 role = "A complete record nothing can read is a complete record nobody has. A complete record everyone can read is a disclosure."
-action = "Project the captured transcript through llm_job_result and llm_request_result under the existing ownership checks, with an explicit remote-caller decision written beside the projection."
-constraint = "A transcript carries file contents, absolute paths and possibly secrets the provider echoed. redactSecrets covers URL userinfo and password= assignments only, which is not a transcript-grade control. Decide what is applied on the way OUT and pin it."
+action = "DONE at d64ba20. Owning local stdio callers can read raw job capture and can opt into the linked jobRecord on llm_request_result. includeJobRecord defaults false. Remote callers receive neither raw transcript nor host replay paths, and a remote raw-result request is refused."
+constraint = "A transcript carries file contents, absolute paths and possibly secrets the provider echoed. It is local-only data, not a redacted remote projection. Remote retrieval is refused and pinned by ownership-boundary tests."
 affects = []
 
 [[node]]
@@ -90,4 +89,4 @@ role = "Capturing more per request added a request-local path to argv. Argv is t
 action = "DONE. CliRequestPrep carries dedupArgs, computed where the path is minted, and the four sites that build devin argv consume it. A derived-set test fails when a fifth site does not."
 constraint = "Found by cross-LLM review at adfaf88: the canonicalisation existed and was called at one of four sites. The helper itself had no test, and replacing its body with an identity function survived 4842."
 constraint_2 = "A CALLER-supplied export path stays in the identity. Two requests writing to different destinations differ in an effect the caller can observe, so they are not the same request."
-affects = ["c3.harvest-the-native-stores", "c4.bounded-and-honest"]
+affects = ["c3.native-store-harvest", "c4.bounded-and-honest"]
