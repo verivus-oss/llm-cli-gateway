@@ -1893,6 +1893,7 @@ async function awaitJobOrDefer(
         env: env ? ({ ...process.env, ...env } as NodeJS.ProcessEnv) : undefined,
         stdin,
         cwd,
+        launchContext: { correlationId: corrId, provider: cli },
       });
     } finally {
       // Release the run slot and per-request resources (outputSchema temp

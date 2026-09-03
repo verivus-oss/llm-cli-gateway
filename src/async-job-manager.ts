@@ -4464,6 +4464,7 @@ export class AsyncJobManager {
       stdio: stdin === undefined ? ["ignore", "pipe", "pipe"] : ["pipe", "pipe", "pipe"],
       env: { ...baseEnv, ...(extraEnv ?? {}) },
       logger: this.logger,
+      launchContext: { correlationId, jobId: id, provider: cli },
     });
     job.process = child;
     // #139: flip the durable row queued -> running and stamp the REAL child pid

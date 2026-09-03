@@ -22,6 +22,37 @@ import {
   writeAndCloseChildStdin,
 } from "./child-stdin.js";
 
+/**
+ * Identifiers the gateway stamps into a provider child's environment so any
+ * launcher, sandbox or shim downstream can correlate its own artefacts (a
+ * container name, a per-call tmp directory, a log line) with the gateway's
+ * request, job and session records. Only defined fields are exported.
+ */
+export interface LaunchContext {
+  correlationId?: string;
+  jobId?: string;
+  sessionId?: string;
+  provider?: string;
+}
+
+const LAUNCH_CONTEXT_ENV: ReadonlyArray<[keyof LaunchContext, string]> = [
+  ["correlationId", "LLM_GATEWAY_CORRELATION_ID"],
+  ["jobId", "LLM_GATEWAY_JOB_ID"],
+  ["sessionId", "LLM_GATEWAY_SESSION_ID"],
+  ["provider", "LLM_GATEWAY_PROVIDER"],
+];
+
+/** Project a LaunchContext onto the LLM_GATEWAY_* environment variables. */
+export function launchContextEnv(context: LaunchContext | undefined): NodeJS.ProcessEnv {
+  const env: NodeJS.ProcessEnv = {};
+  if (!context) return env;
+  for (const [field, name] of LAUNCH_CONTEXT_ENV) {
+    const value = context[field];
+    if (typeof value === "string" && value.length > 0) env[name] = value;
+  }
+  return env;
+}
+
 export interface ExecuteOptions {
   timeout?: number;
   idleTimeout?: number;
@@ -37,6 +68,8 @@ export interface ExecuteOptions {
    * legacy stdio:["ignore","pipe","pipe"] shape.
    */
   stdin?: string;
+  /** Gateway identifiers exported to the child as LLM_GATEWAY_* variables. */
+  launchContext?: LaunchContext;
 }
 
 export interface ExecuteResult {
@@ -553,6 +586,8 @@ export function spawnCliProcess(
     env: NodeJS.ProcessEnv;
     stdio: SpawnOptions["stdio"];
     logger?: Logger;
+    /** Gateway identifiers exported to the child as LLM_GATEWAY_* variables. */
+    launchContext?: LaunchContext;
   }
 ): ChildProcess {
   // Reject a many-element argv before command resolution performs platform
@@ -627,7 +662,9 @@ export function spawnCliProcess(
       windowsHide: true,
       windowsVerbatimArguments: resolved.windowsVerbatimArguments,
       stdio: options.stdio,
-      env,
+      // The launch context is applied last so a caller-supplied env cannot
+      // masquerade as a different gateway request.
+      env: { ...env, ...launchContextEnv(options.launchContext) },
     });
   } catch (error) {
     neutralWorkspace?.cleanup();
@@ -656,7 +693,7 @@ export async function executeCli(
     provider: command,
     platform: process.platform,
   });
-  const { timeout, idleTimeout, cwd, env: extraEnv, stdin } = options;
+  const { timeout, idleTimeout, cwd, env: extraEnv, stdin, launchContext } = options;
   const extendedPath = getExtendedPath();
   const baseEnv = envWithExtendedPath(process.env, extendedPath);
   const circuitBreaker = getCircuitBreaker(command);
@@ -670,6 +707,7 @@ export async function executeCli(
         stdio,
         env: { ...baseEnv, ...(extraEnv ?? {}) },
         logger: options.logger,
+        launchContext,
       });
 
       let stdout = "";

@@ -9,6 +9,7 @@ import {
   resolveCommandForSpawn,
   shouldDetachProviderProcess,
   unregisterProcessGroup,
+  launchContextEnv,
 } from "../executor.js";
 import { spawn } from "child_process";
 import type { ChildProcess } from "child_process";
@@ -114,6 +115,42 @@ describe("executeCli", () => {
       expect(result.stdout).toContain("line1");
       expect(result.stdout).toContain("line1000");
       expect(result.code).toBe(0);
+    });
+  });
+
+  describe("launch context", () => {
+    it("projects only defined identifiers onto LLM_GATEWAY_* variables", () => {
+      expect(launchContextEnv(undefined)).toEqual({});
+      expect(
+        launchContextEnv({ correlationId: "corr-1", jobId: "job-1", provider: "codex" })
+      ).toEqual({
+        LLM_GATEWAY_CORRELATION_ID: "corr-1",
+        LLM_GATEWAY_JOB_ID: "job-1",
+        LLM_GATEWAY_PROVIDER: "codex",
+      });
+      expect(launchContextEnv({ correlationId: "", sessionId: "s-1" })).toEqual({
+        LLM_GATEWAY_SESSION_ID: "s-1",
+      });
+    });
+
+    it("exports the launch context to the child and lets it override a caller env", async () => {
+      const result = await executeCli(
+        "sh",
+        ["-c", "echo $LLM_GATEWAY_CORRELATION_ID:$LLM_GATEWAY_JOB_ID:$LLM_GATEWAY_PROVIDER"],
+        {
+          env: { LLM_GATEWAY_CORRELATION_ID: "forged" },
+          launchContext: { correlationId: "corr-2", jobId: "job-2", provider: "claude" },
+        }
+      );
+      expect(result.stdout.trim()).toBe("corr-2:job-2:claude");
+    });
+
+    it("exports nothing when no launch context is given", async () => {
+      const result = await executeCli("sh", [
+        "-c",
+        "echo [${LLM_GATEWAY_CORRELATION_ID-unset}][${LLM_GATEWAY_JOB_ID-unset}]",
+      ]);
+      expect(result.stdout.trim()).toBe("[unset][unset]");
     });
   });
 
