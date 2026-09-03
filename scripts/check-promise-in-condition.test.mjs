@@ -332,7 +332,7 @@ describe("promise-in-condition gate", () => {
 
   it("fails closed with exit 2 when the root tsconfig.json parses but its options are invalid", () => {
     // Distinct branch from the malformed-JSON case: the file reads and parses,
-    // and TypeScript rejects an option value. Codex's round-2 mutant made this
+    // and TypeScript rejects an option value. A review mutant made this
     // branch exit 0 and the shipped suite did not notice.
     fixtureRoot = newScratchDir("promise-condition-");
     writeFileSync(
@@ -377,7 +377,7 @@ describe("promise-in-condition gate", () => {
   });
 
   it("refuses to write fixtures through a symlinked .scratch", () => {
-    // The round-2 board measured this: `.scratch -> src` sent every fixture
+    // Review measured this: `.scratch -> src` sent every fixture
     // into tracked src/ while the case ran. The guard is exercised on a
     // throwaway repo root, because replacing the real .scratch mid-suite is
     // the kind of tree edit this file exists to stop.
@@ -471,7 +471,7 @@ describe("promise-in-condition gate", () => {
   });
 
   it("refuses when .scratch is swapped for a symlink between creation and the write", () => {
-    // Grok's round-3 survivor on the create path: after mkdir the helper must
+    // A review survivor on the create path: after mkdir the helper must
     // look again, through the descriptor, not trust what it just created.
     fixtureRoot = newScratchDir("promise-guard-");
     const fakeSrc = join(fixtureRoot, "src");
@@ -491,7 +491,7 @@ describe("promise-in-condition gate", () => {
   });
 
   it("refuses a .scratch that is the same directory as a tracked one, as a bind mount would be", () => {
-    // Codex's round-4 blocker: `mount --bind src .scratch` inside an
+    // A review blocker: `mount --bind src .scratch` inside an
     // unprivileged mount namespace gives open() a real directory whose inode
     // IS src. The kernel-level shape needs a namespace to reproduce, so the
     // test injects the one observable it produces: fstat of the descriptor
@@ -501,7 +501,7 @@ describe("promise-in-condition gate", () => {
     const scratch = join(fixtureRoot, ".scratch");
     mkdirSync(fakeSrc);
     mkdirSync(scratch);
-    // Codex's round-5 survivor: a refusal that leaves the descriptor open is a
+    // A review survivor: a refusal that leaves the descriptor open is a
     // leak per refusal, so the close is asserted, not assumed.
     const closed = [];
     const fs = {
@@ -551,7 +551,7 @@ describe("promise-in-condition gate", () => {
   });
 
   it("rethrows a re-open failure that is not ENOENT after creating .scratch", () => {
-    // Grok's round-4 survivor: the re-open after mkdir has its own rethrow
+    // A review survivor: the re-open after mkdir has its own rethrow
     // branch, and swallowing it (fd = -1) passed every case. First open
     // sees ENOENT, mkdir runs, the second open is denied: the same denied
     // object must surface, and nothing may be created through a bad fd.

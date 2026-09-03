@@ -2,8 +2,8 @@
  * Create throwaway fixture directories under `<repoRoot>/.scratch` without ever
  * following a symlink named `.scratch` into the tracked tree.
  *
- * Two board findings shaped this file. Round 2 measured that a `.scratch`
- * symlinked to `src` sent every fixture into tracked `src/`. Round 3 measured
+ * Two review findings shaped this file. The first measured that a `.scratch`
+ * symlinked to `src` sent every fixture into tracked `src/`. The second measured
  * that checking `.scratch` and then handing back a path string leaves a window
  * (p50 about 18 microseconds, max about 2 ms on this host) in which a swap to a
  * symlink still lands `mkdtemp` under `src/`. A check followed by a path-based
@@ -30,7 +30,7 @@ function sameInode(a, b) {
 }
 
 /**
- * Round-4 board finding: a bind mount of `src` over `.scratch` (possible for
+ * A later review finding: a bind mount of `src` over `.scratch` (possible for
  * an unprivileged user inside their own mount namespace) is a real directory
  * to `open`, so the descriptor check passes and fixtures land in `src/`. The
  * mount is invisible from outside that namespace, so only the mounter's own
