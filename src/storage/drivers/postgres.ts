@@ -547,8 +547,8 @@ type PgPoolWithEvents = PgPoolLike & {
  *
  * `onPoolError` is REQUIRED rather than optional. `pg` emits "error" on the
  * pool when a backend fails while idle, and an EventEmitter with no "error"
- * listener throws to the top of the process. The worker registered one
- * (`:325`); losing it in the port would turn a recoverable idle-pool error into
+ * listener throws to the top of the process. The worker registered one;
+ * losing it in the port would turn a recoverable idle-pool error into
  * a crash, so the listener is attached here where the pool is built and cannot
  * be forgotten at a call site.
  */
