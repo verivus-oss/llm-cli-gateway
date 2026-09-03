@@ -333,8 +333,14 @@ describe("a whole transcript round trip", () => {
     expect(recorder.health().closed).toBe(true);
   });
 
-  it("uses an opaque identity on health surfaces", () => {
-    expect(recorder.health().path).toBe("postgresql");
+  it("uses the safe target projection on health surfaces", () => {
+    const path = recorder.health().path;
+    const target = new URL(BASE_DSN);
+    expect(path).toBe(
+      `postgresql host ${target.hostname} port ${target.port} database ${target.pathname.slice(1)}`
+    );
+    expect(path).not.toContain("://");
+    expect(path).not.toContain("@");
   });
 });
 
@@ -361,8 +367,8 @@ describe("the five states", () => {
     }
   });
 
-  it("does not copy a DSN-derived socket path into health", async () => {
-    const marker = "dsn-health-secret";
+  it("names a socket target while keeping its operation error opaque", async () => {
+    const marker = "dsn-health-target";
     const url = new URL(BASE_DSN);
     url.searchParams.set("host", `/tmp/${marker}`);
     const logError = vi.fn();
@@ -374,8 +380,13 @@ describe("the five states", () => {
       await expect(broken.readStorageStats()).rejects.toThrow();
       const health = broken.health();
       expect(health.state).toBe("degraded");
+      expect(health.path).toBe(
+        `postgresql socket /tmp/${marker} port ${url.port} database ${url.pathname.slice(1)}`
+      );
       expect(health.error).toBe("PostgreSQL operation failed");
       expect(health.error).not.toContain(marker);
+      expect(health.path).not.toContain("://");
+      expect(health.path).not.toContain("@");
       expect(health.failureCount).toBeGreaterThan(0);
       const logs = logError.mock.calls
         .flat()
@@ -387,8 +398,8 @@ describe("the five states", () => {
     }
   });
 
-  it("keeps doctor warnings opaque when its configured PostgreSQL recorder fails", async () => {
-    const marker = "doctor-dsn-health-secret";
+  it("names the configured target while keeping doctor operation errors opaque", async () => {
+    const marker = "doctor-dsn-health-target";
     const url = new URL(BASE_DSN);
     url.searchParams.set("host", `/tmp/${marker}`);
     const dir = mkdtempSync(join(tmpdir(), "doctor-pg-health-"));
@@ -406,9 +417,13 @@ describe("the five states", () => {
     try {
       const storage = await collectStorageHealth();
       expect(storage.job_store.backend).toBe("postgres");
-      expect(storage.flight_recorder.path).toMatch(/^postgresql (?:host|socket) /);
+      expect(storage.flight_recorder.path).toBe(
+        `postgresql socket /tmp/${marker} port ${url.port} database ${url.pathname.slice(1)}`
+      );
+      expect(storage.flight_recorder.path).not.toContain("://");
+      expect(storage.flight_recorder.path).not.toContain("@");
       expect(storage.flight_recorder.error).toBe("PostgreSQL operation failed");
-      expect(storage.warnings.join(" ")).not.toContain(marker);
+      expect(storage.warnings.join(" ")).toContain(marker);
       expect(storage.warnings.join(" ")).toContain("PostgreSQL operation failed");
     } finally {
       if (savedConfig === undefined) delete process.env.LLM_GATEWAY_CONFIG;
