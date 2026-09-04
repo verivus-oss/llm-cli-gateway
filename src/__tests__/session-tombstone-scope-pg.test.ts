@@ -746,10 +746,11 @@ describe("PostgreSQL sessions hide worktree-cleanup tombstones", () => {
   });
 
   it("serialises two concurrent deletions of the same session", async () => {
-    // `FOR UPDATE` on the classification CTE is what makes the second deletion
-    // re-read the row after the first commits. Without it both statements
-    // classify the same pre-deletion snapshot and both stage, which is a second
-    // observer notification for a removal that already happened.
+    // NOTE: this no longer pins `FOR UPDATE`. Once the arms carried the
+    // exclusion too, they rescue the outcome with or without the lock, and a
+    // reviewer showed the mutant surviving here. The lock is pinned by
+    // `re-reads ownership after waiting` above. This case still asserts the
+    // serialisation a caller observes, which is worth keeping on its own.
     const session = await manager.createSession("claude", "concurrent delete");
     await manager.updateSessionMetadata(session.id, {
       worktreePath: "/tmp/worktree-concurrent",
@@ -804,6 +805,70 @@ describe("PostgreSQL sessions hide worktree-cleanup tombstones", () => {
 
     const pending = await manager.listPendingWorktreeCleanupSessions(OWNER_HOST);
     expect(pending.map(row => row.id)).toEqual([session.id]);
+  });
+
+  it("re-reads ownership after waiting, so a row that gains a worktree is staged", async () => {
+    // What `FOR UPDATE` on the classification CTE is FOR, and the only test
+    // that pins it. The earlier concurrency case stopped detecting its removal
+    // once the arms carried the exclusion too: with two deletions the arms
+    // rescue the outcome either way. Ownership CHANGING under the classifier is
+    // the case they cannot rescue, because a stale snapshot routes the row into
+    // the delete arm, which then destroys a session that owns a worktree and
+    // leaves no tombstone behind.
+    const session = await manager.createSession("claude", "gains a worktree");
+    const statement = deleteOrStageSessionsSql("id = $1");
+
+    const writer = await pool.connect();
+    const deleter = await pool.connect();
+    const observer = await pool.connect();
+    try {
+      await writer.query("BEGIN");
+      await writer.query(
+        `UPDATE sessions SET metadata = COALESCE(metadata, '{}'::jsonb) || $2::jsonb WHERE id = $1`,
+        [
+          session.id,
+          JSON.stringify({
+            worktreePath: "/tmp/worktree-gained",
+            worktreeName: "wt-gained",
+            worktreeOwnerHostname: OWNER_HOST,
+            worktreeOwnerInstanceId: "instance-gained",
+          }),
+        ]
+      );
+
+      await deleter.query("BEGIN");
+      const deleterPid = Number(
+        (await deleter.query<{ pid: number }>("SELECT pg_backend_pid() AS pid")).rows[0]!.pid
+      );
+      const blocked = deleter.query(statement, [session.id]);
+
+      let waiting = false;
+      for (let attempt = 0; attempt < 400 && !waiting; attempt += 1) {
+        const blockers = await observer.query<{ blocked: boolean }>(
+          "SELECT cardinality(pg_blocking_pids($1)) > 0 AS blocked",
+          [deleterPid]
+        );
+        waiting = blockers.rows[0]?.blocked === true;
+        if (!waiting) await new Promise(resolve => setTimeout(resolve, 25));
+      }
+      expect(waiting).toBe(true);
+
+      await writer.query("COMMIT");
+      await blocked;
+      await deleter.query("COMMIT");
+    } finally {
+      writer.release();
+      deleter.release();
+      observer.release();
+    }
+
+    // Staged, not deleted. Without the lock the classification uses the
+    // pre-update snapshot, the row goes down the delete arm, and the worktree
+    // is orphaned with no record.
+    expect(await manager.getSession(session.id)).toBeNull();
+    expect(
+      (await manager.listPendingWorktreeCleanupSessions(OWNER_HOST)).map(row => row.id)
+    ).toEqual([session.id]);
   });
 
   describe("finalization fences", () => {

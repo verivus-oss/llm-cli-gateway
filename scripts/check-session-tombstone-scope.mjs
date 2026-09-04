@@ -35,7 +35,7 @@ export const GOVERNED_FILE = "src/session-manager-pg.ts";
  * census true of that file and silent about the rest of the tree, which is a
  * different claim from the one it prints.
  */
-function productionSources(directory = join(ROOT, "src"), out = []) {
+export function productionSources(directory = join(ROOT, "src"), out = []) {
   for (const entry of readdirSync(directory)) {
     const full = join(directory, entry);
     if (statSync(full).isDirectory()) {
@@ -67,12 +67,31 @@ const TABLE_REFERENCE = String.raw`(?:ONLY )?(?:(?:"?[A-Za-z_]\w*"?)\.)?"?sessio
  */
 const BARE_TABLE_READ =
   String.raw`(?<!\b(?:CREATE|ALTER|DROP|TEMPORARY|UNLOGGED) )TABLE ` + TABLE_REFERENCE;
+
+/**
+ * Statements that read or destroy rows while naming no FROM, UPDATE or JOIN.
+ * `COPY sessions TO STDOUT` reads every row, `TRUNCATE sessions` removes them
+ * all, `MERGE INTO sessions` writes them. A reviewer walked through the first
+ * of these while this gate printed a clean census.
+ */
+const OTHER_ROW_STATEMENTS = String.raw`\b(COPY|TRUNCATE|MERGE INTO) ` + TABLE_REFERENCE;
+
 const SESSION_TABLE = new RegExp(
-  String.raw`\b(FROM|UPDATE|INTO|JOIN) ` + TABLE_REFERENCE + "|" + BARE_TABLE_READ,
+  String.raw`\b(FROM|UPDATE|INTO|JOIN) ` +
+    TABLE_REFERENCE +
+    "|" +
+    BARE_TABLE_READ +
+    "|" +
+    OTHER_ROW_STATEMENTS,
   "i"
 );
 const SESSION_ROW_READ = new RegExp(
-  String.raw`\b(FROM|UPDATE|JOIN) ` + TABLE_REFERENCE + "|" + BARE_TABLE_READ,
+  String.raw`\b(FROM|UPDATE|JOIN) ` +
+    TABLE_REFERENCE +
+    "|" +
+    BARE_TABLE_READ +
+    "|" +
+    OTHER_ROW_STATEMENTS,
   "i"
 );
 
@@ -89,7 +108,7 @@ const INTERPOLATED_TABLE = /\b(FROM|UPDATE|INTO|JOIN|TABLE) (?:ONLY )?\$\{/i;
  * template strings in modules that touch no database.
  */
 const SQL_SHAPE =
-  /\b(SELECT |INSERT INTO |UPDATE |DELETE FROM |CREATE |ALTER TABLE |DROP (TABLE|VIEW) |TABLE [A-Za-z_"]|WITH [A-Za-z_]\w* AS \()/i;
+  /\b(SELECT |INSERT INTO |UPDATE |DELETE FROM |CREATE |ALTER TABLE |DROP (TABLE|VIEW) |TABLE [A-Za-z_"]|COPY |TRUNCATE |MERGE INTO |WITH [A-Za-z_]\w* AS \()/i;
 
 /**
  * A literal that ENDS on the keyword introducing a table name has handed the
@@ -100,6 +119,43 @@ const SQL_SHAPE =
  * clean census.
  */
 const SPLIT_TABLE_REFERENCE = /(?<!\bFOR )\b(FROM|UPDATE|INTO|JOIN|TABLE) *$/i;
+
+/**
+ * SQL assembled by concatenation, in any shape.
+ *
+ * The end-of-literal rule above catches a split at the keyword boundary and
+ * misses one INSIDE the identifier: `"SELECT id FROM sess" + "ions WHERE ..."`
+ * is valid once joined and invisible to a scanner reading one literal at a
+ * time. Rather than chase the split point, a SQL literal adjacent to a `+` is
+ * refused outright. Statements in these modules are single literals.
+ */
+/**
+ * Does the text around this literal assemble a statement about `sessions`?
+ *
+ * Both split-reference rules need this. SQL_SHAPE is deliberately loose and
+ * matches English prose containing "update" or "copy", and the SQL-comment
+ * strip can truncate such prose so it ENDS on a keyword: the note "via 'grok
+ * update --version <target>'" became "...grok update " and read as a dangling
+ * table reference. Requiring the neighbourhood to name the table removes that
+ * whole class without weakening either rule.
+ *
+ * The concatenation joint is closed before looking, which is what finds a split
+ * INSIDE the identifier: `"... FROM sess" + "ions ..."` becomes
+ * `... FROM sessions ...`. `\bsessions\b` still does not match inside
+ * `active_sessions`, because the underscore is a word character.
+ */
+function assemblesSessionsStatement(body, start, end) {
+  const window = body.slice(Math.max(0, start - 200), end + 200);
+  return /\bsessions\b/i.test(window.replace(/["'`]\s*\+\s*["'`]/g, ""));
+}
+
+/** A SQL literal sitting next to a `+`. Statements here are single literals. */
+function isConcatenated(body, start, end) {
+  return (
+    /\+\s*$/.test(body.slice(Math.max(0, start - 40), start)) ||
+    /^\s*\+/.test(body.slice(end, end + 40))
+  );
+}
 
 const PREDICATE = "sessionNotTombstonedSql(";
 
@@ -141,10 +197,21 @@ export function sessionStatements(source) {
     // Whitespace is NORMALISED before matching. These literals wrap, and a
     // pattern that spelled the gaps as a single space matched or missed on the
     // fill width rather than on the statement.
-    const sql = match[0].replace(/\s+/g, " ");
+    // SQL comments removed, then whitespace normalised, in that order. These
+    // literals wrap, so a pattern spelling the gaps as one space matched on
+    // fill width rather than on the statement; and `FROM--x` before a newline
+    // and the table name is a valid read no keyword-then-space pattern sees.
+    const sql = match[0]
+      .replace(/\/\*[\s\S]*?\*\//g, " ")
+      .replace(/--[^\n]*/g, " ")
+      .replace(/\s+/g, " ");
     if (!SQL_SHAPE.test(sql)) continue;
     const interpolatedTable = INTERPOLATED_TABLE.test(sql);
-    const splitTable = SPLIT_TABLE_REFERENCE.test(sql.slice(0, -1));
+    const literalEnd = match.index + match[0].length;
+    const splitTable =
+      (SPLIT_TABLE_REFERENCE.test(sql.slice(0, -1)) ||
+        isConcatenated(blanked, match.index, literalEnd)) &&
+      assemblesSessionsStatement(blanked, match.index, literalEnd);
     if (!SESSION_TABLE.test(sql) && !interpolatedTable && !splitTable) continue;
     const line = blanked.slice(0, match.index).split("\n").length;
     // A module-level helper resolves to its own name. Scanning only for
@@ -231,8 +298,8 @@ export function violations(statements, file = GOVERNED_FILE) {
     }
     if (s.splitTable) {
       return [
-        `${file}: ${s.method} splits a table reference across string literals; ` +
-          `keep the statement in one literal`,
+        `${file}: ${s.method} assembles a session statement from more than one ` +
+          `string literal; keep the statement in one literal`,
       ];
     }
     if (s.insertOnly || s.scoped || s.exempted) return [];

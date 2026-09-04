@@ -74,6 +74,25 @@ function forceGitWorktreeRemoveFailure(): () => void {
   };
 }
 
+/** A `git` on PATH that fails only `worktree list`, leaving everything else. */
+function forceGitWorktreeListFailure(): () => void {
+  const originalPath = process.env.PATH;
+  const gitBinary = execFileSync("which", ["git"], { encoding: "utf8" }).trim();
+  const fakeBin = mkdtempSync(join(tmpdir(), "wt-list-failure-"));
+  const fakeGit = join(fakeBin, "git");
+  writeFileSync(
+    fakeGit,
+    `#!/bin/sh\ncase " $* " in\n  *" worktree list "*) exit 43 ;;\nesac\nexec "${gitBinary}" "$@"\n`
+  );
+  chmodSync(fakeGit, 0o755);
+  process.env.PATH = `${fakeBin}:${originalPath ?? ""}`;
+  return () => {
+    if (originalPath === undefined) delete process.env.PATH;
+    else process.env.PATH = originalPath;
+    rmSync(fakeBin, { recursive: true, force: true });
+  };
+}
+
 function observeDurableWorktreeCleanup(
   manager: FileSessionManager
 ): () => Promise<void> | undefined {
@@ -1131,6 +1150,62 @@ describe("worktree creation token (issue #305 ABA window)", () => {
     const handle = await createWorktree({ repoRoot, name: "colliding", logger: noopLogger });
     expect(basename(adminDirOf(handle.path))).toBe("colliding1");
     expect(await readWorktreeOwnerToken(handle.path, noopLogger)).toBe(handle.token);
+  });
+
+  it("does not report a removal for a worktree that was only moved", async () => {
+    // THE FALSE SUCCESS. `git worktree move` rewrites the entry's `gitdir` and
+    // leaves the session's recorded path stale, so the path is gone while the
+    // worktree is alive and registered elsewhere. Reading that absence as a
+    // completed removal made the caller finalize the durable record, and the
+    // worktree then leaked with nothing pointing at it.
+    const handle = await createWorktree({ repoRoot, name: "relocated", logger: noopLogger });
+    const session = sessionFor(handle, "session-relocated");
+    const moved = join(repoRoot, ".worktrees", "relocated-elsewhere");
+    execFileSync("git", ["worktree", "move", handle.path, moved], {
+      cwd: repoRoot,
+      stdio: "ignore",
+    });
+    expect(existsSync(handle.path)).toBe(false);
+    expect(existsSync(moved)).toBe(true);
+
+    expect(await cleanup(session)).toBe(false);
+    expect(warnings.some(w => w.includes("still registered at"))).toBe(true);
+    expect(warnings.some(w => w.includes(moved))).toBe(true);
+    // Still alive, and the record is retained so the operator can act on it.
+    expect(existsSync(moved)).toBe(true);
+    expect(await readWorktreeOwnerToken(moved, noopLogger)).toBe(handle.token);
+  });
+
+  it("still reports success when the worktree is genuinely gone, after a move check", async () => {
+    // The other half: the token search must not turn every absent path into a
+    // refusal, or the round-2 immortal-tombstone defect comes straight back.
+    const handle = await createWorktree({ repoRoot, name: "genuinely", logger: noopLogger });
+    const session = sessionFor(handle, "session-genuinely");
+    expect(await cleanup(session)).toBe(true);
+    warnings.length = 0;
+    expect(await cleanup(session)).toBe(true);
+    expect(warnings.some(w => w.includes("still registered at"))).toBe(false);
+  });
+
+  it("refuses rather than concluding a removal when it cannot enumerate worktrees", async () => {
+    // Failing open here would restore the false success by another route: an
+    // enumeration that errors would read as "nothing live carries this token".
+    const handle = await createWorktree({ repoRoot, name: "unlistable", logger: noopLogger });
+    const session = sessionFor(handle, "session-unlistable");
+    const moved = join(repoRoot, ".worktrees", "unlistable-elsewhere");
+    execFileSync("git", ["worktree", "move", handle.path, moved], {
+      cwd: repoRoot,
+      stdio: "ignore",
+    });
+
+    const restoreGit = forceGitWorktreeListFailure();
+    try {
+      expect(await cleanup(session)).toBe(false);
+      expect(warnings.some(w => w.includes("git worktree list failed"))).toBe(true);
+    } finally {
+      restoreGit();
+    }
+    expect(existsSync(moved)).toBe(true);
   });
 
   it("keeps the token across a git worktree move, which renames nothing", async () => {

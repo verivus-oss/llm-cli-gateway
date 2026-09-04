@@ -30,9 +30,15 @@ All notable changes to the llm-cli-gateway project.
   a managed worktree's path and branch both derive from its name, so a crash in
   that window left a record naming a path a later session could legitimately
   recreate; the retry then deleted the replacement. Each worktree now carries a
-  per-creation token in its Git admin directory, mirrored in durable session
-  metadata, and both cleanup and same-session reuse require the two to agree. A
-  worktree created before the token has neither side and is still cleanable.
+  per-creation token, asked of git rather than guessed from the worktree's name,
+  and both cleanup and same-session reuse require it to match. Cleanup also
+  refuses to report a removal for a worktree that was only moved, since
+  `git worktree move` leaves the recorded path stale while the worktree is alive
+  elsewhere. **A worktree created before this release carries no token, so a
+  session cannot prove it created what stands at its recorded path and will no
+  longer remove it.** Those worktrees stay on disk, their durable records are
+  retained and listed for cleanup, and the warning names the path to remove by
+  hand. Deleting a live replacement is the outcome this refuses.
 - **The file-backed store no longer hands a deleted Kit session back as live.**
   Every Personal Agent Config Kit path read the session row directly and none
   checked for a cleanup tombstone, so a deleted session could still be claimed,

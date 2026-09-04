@@ -59,8 +59,8 @@ id = "hide-tombstones-from-reads"
 depends_on = []
 actor = "assistant"
 status = """
-done 2026-09-04. 35 statements name the table: 23 carry the predicate, 6 insert
-a new row and are exempt by SHAPE, 6 carry a reason at the site.
+done 2026-09-04. The census MOVED as the gate learned to see more: 35/23/6/6
+over one file at authorship, 32/20/6/6 over every module now. Read the gate.
 `session:tombstone:scope:check` derives the set and is in `npm run check`. The
 predicate is NOT uniform, found by doing it: an existence probe before an INSERT
 must stay unfiltered or the INSERT meets a key violation instead of the caller's

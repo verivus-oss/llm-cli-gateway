@@ -797,6 +797,7 @@ describe("remoteSafeSession + callerIsRemote", () => {
       worktreePath: "/home/operator/src/prod/.worktrees/abc123",
       worktreeOwnerHostname: "developer-workstation",
       worktreeOwnerInstanceId: "gateway-instance-uuid",
+      worktreeToken: "b0f1f5a2-0000-4000-8000-000000000001",
       worktreeCleanupPending: true,
       worktreeCleanupPendingDeletion: true,
     },
@@ -808,6 +809,7 @@ describe("remoteSafeSession + callerIsRemote", () => {
     expect(safe.metadata?.worktreePath).toBe(join(".worktrees", "abc123"));
     expect(safe.metadata?.worktreeOwnerHostname).toBeUndefined();
     expect(safe.metadata?.worktreeOwnerInstanceId).toBeUndefined();
+    expect(safe.metadata?.worktreeToken).toBeUndefined();
     expect(safe.metadata?.worktreeCleanupPending).toBeUndefined();
     expect(safe.metadata?.worktreeCleanupPendingDeletion).toBeUndefined();
     expect(safe.metadata?.workspaceAlias).toBe("gateway");
@@ -825,6 +827,10 @@ describe("remoteSafeSession + callerIsRemote", () => {
     const safe = publicSafeSession(baseSession);
     expect(safe.metadata?.worktreeOwnerHostname).toBeUndefined();
     expect(safe.metadata?.worktreeOwnerInstanceId).toBeUndefined();
+    // The creation token is gateway-internal identity. Both reviewers deleted
+    // its strip and all 5085 tests stayed green, because the fixture carried no
+    // token to leak.
+    expect(safe.metadata?.worktreeToken).toBeUndefined();
     expect(safe.metadata?.worktreeCleanupPending).toBeUndefined();
     expect(safe.metadata?.worktreeCleanupPendingDeletion).toBeUndefined();
     expect(safe.metadata?.workspaceRoot).toBe("/home/operator/src/prod");

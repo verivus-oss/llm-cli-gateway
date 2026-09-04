@@ -708,6 +708,43 @@ describe("PostgreSQLSessionManager", () => {
     ).rejects.toThrow(/same-host gateway-owned Git worktree/);
   });
 
+  it("refuses to reuse a live worktree whose creation token is not this session's", async () => {
+    // Git identity proves a gateway worktree lives at the path, not that it is
+    // THIS session's. Both reviewers deleted the token conjunction from the
+    // reuse check and 129 tests stayed green, because nothing drove a
+    // replacement through reuse.
+    const repoRoot = initGitRepository();
+    try {
+      const session = await manager.createSession("claude", "reuse token mismatch");
+      const runtime = resolveGatewayServerRuntime({ sessionManager: manager });
+      const resolution = await resolveWorktreeForRequest(
+        { name: "pg-reuse-token" },
+        session.id,
+        runtime,
+        { repoRoot }
+      );
+      expect(resolution.worktreePath).toBeTruthy();
+      // Reuse works while the token agrees.
+      const reused = await resolveWorktreeForRequest(true, session.id, runtime, { repoRoot });
+      expect(reused.worktreePath).toBe(resolution.worktreePath);
+
+      // Now the session claims a worktree it did not create. The live one at
+      // that path is a perfectly valid gateway worktree, which is the point.
+      const persisted = (await manager.getSession(session.id))!;
+      expect(persisted.metadata?.worktreeToken).toBeTruthy();
+      await manager.updateSessionMetadata(session.id, {
+        ...persisted.metadata,
+        worktreeToken: "00000000-0000-4000-8000-000000000000",
+      });
+
+      await expect(
+        resolveWorktreeForRequest(true, session.id, runtime, { repoRoot })
+      ).rejects.toThrow(/same-host gateway-owned Git worktree/);
+    } finally {
+      rmSync(repoRoot, { recursive: true, force: true });
+    }
+  });
+
   it("database-side expiry removes no worktree and invokes no observer", async () => {
     const repoRoot = initGitRepository();
     try {

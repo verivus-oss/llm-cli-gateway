@@ -1,3 +1,4 @@
+import { execFileSync } from "node:child_process";
 import { readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -5,6 +6,7 @@ import { describe, expect, it } from "vitest";
 import {
   GOVERNED_FILE,
   guardedMethods,
+  productionSources,
   sessionStatements,
   stripComments,
   violations,
@@ -151,11 +153,73 @@ describe("the bypasses two reviewers walked through", () => {
     expect(fires("DROP TABLE sessions")).toEqual([]);
   });
 
+  it("scans the whole production tree, not just the module it started from", () => {
+    const modules = productionSources();
+    expect(modules.length).toBeGreaterThan(100);
+    expect(modules.some(file => file.endsWith("/src/migrate.ts"))).toBe(true);
+    expect(modules.some(file => file.endsWith(`/${GOVERNED_FILE}`))).toBe(true);
+    expect(modules.some(file => file.includes("/__tests__/"))).toBe(false);
+    expect(modules.every(file => file.endsWith(".ts"))).toBe(true);
+  });
+
+  it("actually scans that tree when RUN, which asserting the helper does not show", () => {
+    // Both reviewers narrowed `main()` to a single file and every test here
+    // stayed green while the gate printed "1 production modules scanned". The
+    // helper being correct says nothing about `main()` still calling it, so
+    // this asserts the number the command PRINTS, against the same derivation.
+    const printed = execFileSync(
+      "node",
+      [join(ROOT, "scripts/check-session-tombstone-scope.mjs")],
+      {
+        encoding: "utf8",
+      }
+    );
+    const scanned = /(\d+) production modules scanned/.exec(printed);
+    expect(scanned, printed).not.toBeNull();
+    expect(Number(scanned[1])).toBe(productionSources().length);
+    expect(Number(scanned[1])).toBeGreaterThan(100);
+  });
+
+  it("sees the row statements that name no FROM at all", () => {
+    // `COPY sessions TO STDOUT` reads every row, `TRUNCATE` destroys them,
+    // `MERGE INTO` writes them. A reviewer walked through the first while the
+    // gate printed a clean census.
+    expect(fires("COPY sessions TO STDOUT")).toHaveLength(1);
+    expect(fires("TRUNCATE sessions")).toHaveLength(1);
+    expect(fires("MERGE INTO sessions USING x ON x.id = sessions.id")).toHaveLength(1);
+  });
+
+  it("sees a table reference hidden behind an SQL comment", () => {
+    const body = "  meth() {\n    q(`SELECT id FROM--x\n       sessions WHERE id = $1`);\n  }\n";
+    expect(violations(sessionStatements(body))).toHaveLength(1);
+  });
+
+  it("refuses SQL split inside the identifier, not only at the joint", () => {
+    // The end-of-literal rule catches a split at the keyword boundary and
+    // misses one mid-word. Closing the joint before looking finds both.
+    const midWord = '  meth() {\n    q("SELECT id FROM sess" + "ions WHERE id = $1");\n  }\n';
+    const failures = violations(sessionStatements(midWord));
+    expect(failures).toHaveLength(1);
+    expect(failures[0]).toContain("more than one string literal");
+  });
+
+  it("does not fire on prose that merely sits beside a concatenation", () => {
+    // SQL_SHAPE matches English "update" and "copy", and the SQL-comment strip
+    // can truncate such prose so it ends on a keyword. Six unrelated message
+    // strings were flagged before the rule required the table to be named.
+    expect(
+      violations(sessionStatements('  meth() {\n    log("will update " + "the config");\n  }\n'))
+    ).toEqual([]);
+    expect(
+      violations(sessionStatements('  meth() {\n    log("grok update " + "--version x");\n  }\n'))
+    ).toEqual([]);
+  });
+
   it("refuses a table reference split across concatenated literals", () => {
     const body = '  meth() {\n    q("SELECT id, cli FROM " + "sessions WHERE id = $1");\n  }\n';
     const failures = violations(sessionStatements(body));
     expect(failures).toHaveLength(1);
-    expect(failures[0]).toContain("splits a table reference");
+    expect(failures[0]).toContain("more than one string literal");
     // Ending on a lock clause is not a split reference.
     expect(
       fires("SELECT id FROM sessions WHERE id = $1 AND ${sessionNotTombstonedSql()} FOR UPDATE")

@@ -40,8 +40,42 @@ async function makeServer(asyncJobsEnabled: boolean) {
  * one class where a sentence is false by construction rather than pretending to
  * more.
  */
-const TOMBSTONE_VISIBILITY_LIE =
-  /(still\s+returns?\s+tombstones?|tombstones?\s+(are|is)\s+visible|returns?\s+a\s+deleted\s+session)/i;
+const TOMBSTONE_VISIBILITY_LIE = new RegExp(
+  [
+    // "... returns / exposes / reveals ... tombstones | a deleted session"
+    String.raw`\b(returns?|exposes?|reveals?|surfaces?|lists?)\b[^.]{0,40}\b(cleanup\s+)?tombstones?\b`,
+    String.raw`\b(returns?|exposes?|reveals?|surfaces?|lists?)\b[^.]{0,40}\bdeleted\s+sessions?\b`,
+    // "... tombstones | deleted sessions are visible ..."
+    String.raw`\b((cleanup\s+)?tombstones?|deleted\s+sessions?)\b[^.]{0,40}\b(are|is)\s+visible\b`,
+  ].join("|"),
+  "i"
+);
+
+describe("the contradiction detector itself", () => {
+  // Gutting the regex left this suite 12/12 green, so the pattern was asserted
+  // by nothing. It is a narrow detector and its narrowness is the point, but
+  // its narrowness has to be measured rather than assumed.
+  it("matches the claims that contradict the behaviour suite", () => {
+    for (const lie of [
+      "PostgreSQL getSession still returns tombstones to callers.",
+      "session_get exposes cleanup tombstones to callers.",
+      "Deleted sessions are visible through session_list.",
+      "session_get returns a deleted session until cleanup completes.",
+    ]) {
+      expect(lie).toMatch(TOMBSTONE_VISIBILITY_LIE);
+    }
+  });
+
+  it("does not match the true statements the descriptions actually make", () => {
+    for (const truth of [
+      "Both managers stage a caller-hidden cleanup tombstone before cleanup runs.",
+      "A tombstone is not bounded by retention.",
+      "Deletion processed by a different host removes no worktree.",
+    ]) {
+      expect(truth).not.toMatch(TOMBSTONE_VISIBILITY_LIE);
+    }
+  });
+});
 
 describe("MCP tool-surface usability (post-usability-review regressions)", () => {
   it("every registered tool carries a clear description (>= 20 chars, per .cursorrules)", async () => {

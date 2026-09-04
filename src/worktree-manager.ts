@@ -515,6 +515,43 @@ async function resolveWorktreeAdminDirectory(
 }
 
 /**
+ * The live worktree carrying this token, if any, wherever git now says it is.
+ *
+ * A recorded path going missing does NOT establish that the worktree was
+ * removed. `git worktree move` relocates the checkout and rewrites the entry's
+ * `gitdir`, leaving the session's recorded path stale while the worktree is
+ * alive and registered somewhere else. Treating that absence as success let
+ * cleanup report a removal that never happened, and the caller then finalized
+ * the durable record, so the worktree leaked with nothing left pointing at it.
+ *
+ * The token is the only durable link that survives a move, which is why the
+ * search is over tokens rather than paths.
+ */
+async function findLiveWorktreeByToken(
+  repoRoot: string,
+  token: string,
+  logger: Logger
+): Promise<string | null> {
+  let registrations: RegisteredWorktree[];
+  try {
+    registrations = await listRegisteredWorktrees(repoRoot, logger);
+  } catch {
+    // Refuse to conclude anything from a failed enumeration. The caller treats
+    // a null as "no live worktree found", so failing open here would resurrect
+    // the very false success this function exists to prevent; the enumeration
+    // failing is instead reported as a live worktree of unknown location.
+    return "unknown (git worktree list failed)";
+  }
+  for (const registration of registrations) {
+    if ((await readWorktreeOwnerToken(registration.path, logger)) === token) {
+      return registration.path;
+    }
+  }
+  return null;
+}
+
+/**
+ * The token this worktree was created with, or null when there is none to read./**
  * The token this worktree was created with, or null when there is none to read.
  *
  * Null covers four different situations on purpose, and every caller must treat
@@ -763,17 +800,33 @@ export async function cleanupSessionWorktree(
   }
   const repoRoot = worktreePath.slice(0, markerIdx);
 
-  // ONLY when something is still there. `git worktree remove` deletes the
-  // administrative directory (builtin/worktree.c, `delete_git_dir` calls
-  // `remove_dir_recursively` on it), so a SUCCESSFUL removal always destroys
-  // the marker. Checking identity against an absent path therefore reads the
-  // evidence of success as evidence of a foreign worktree, and an earlier
-  // version of this did exactly that: after a crash between the removal and the
-  // durable acknowledgement, the retry refused forever and the tombstone became
-  // immortal. An absent path means the removal already happened; there is
-  // nothing left to delete and nothing left to identify.
+  // `git worktree remove` deletes the administrative directory
+  // (builtin/worktree.c, `delete_git_dir` calls `remove_dir_recursively` on
+  // it), so a SUCCESSFUL removal always destroys the marker. Checking identity
+  // against an absent path therefore reads the evidence of success as evidence
+  // of a foreign worktree, and an earlier version did exactly that: after a
+  // crash between the removal and the durable acknowledgement, the retry
+  // refused forever and the tombstone became immortal.
+  //
+  // But an absent recorded path is not by itself evidence of removal either.
+  // `git worktree move` leaves the recorded path stale while the worktree is
+  // alive elsewhere, and reporting success there made the caller finalize the
+  // durable record for a worktree that still exists. Absence only means the
+  // removal happened once nothing live still carries this session's token.
+  const recordedToken = typeof meta.worktreeToken === "string" ? meta.worktreeToken : null;
+  if (!existsSync(worktreePath) && recordedToken !== null) {
+    const relocated = await findLiveWorktreeByToken(repoRoot, recordedToken, logger);
+    if (relocated) {
+      logWarn(
+        logger,
+        `worktree for session ${session.id} is no longer at its recorded path but is still registered at ${relocated}; not reporting a removal that did not happen`
+      );
+      return false;
+    }
+  }
+
   if (existsSync(worktreePath)) {
-    const recorded = typeof meta.worktreeToken === "string" ? meta.worktreeToken : null;
+    const recorded = recordedToken;
     const onDisk = await readWorktreeOwnerToken(worktreePath, logger);
 
     // A session recorded before creation tokens existed cannot prove it owns
