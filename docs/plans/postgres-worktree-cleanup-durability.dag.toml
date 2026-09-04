@@ -234,3 +234,28 @@ beside it. Evidence: docs/evidence/postgres-worktree-cleanup-2026-09-04.md.
 """
 idempotent = true
 validation = "Each guard has a mutation that only its own test kills; the four move scenarios are exercised end to end against real PostgreSQL."
+
+[[steps]]
+id = "round-5-review-repairs"
+depends_on = ["round-4-review-repairs"]
+actor = "assistant"
+status = """
+done 2026-09-05. Two blockers, one per seat, both real and both in code written
+the round before. CODEX (run died mid-review, finding survived): the entry's
+`gitdir` is not promised absolute, and `worktree.useRelativePaths=true` is a
+supported setting, so resolving it against the process cwd made an ORDINARY
+move read as a removal. Resolved against the administrative directory now.
+GROK: a moved worktree whose checkout is then missing was finalized, on my
+argument that a retry would reach the same answer forever. That argument is
+wrong when the absence is transient, and the reviewer restored the checkout to
+prove it; it is indeterminate now, and the operator is told where the worktree
+was last seen. FOUND while repairing: the absent-path shortcut cannot simply be
+deleted, because three cases legitimately have git refuse a removal that did
+happen, so the confirmation asks about the `gateway/<name>` branch as well as
+the path. REMOVED: the repo-wide `git worktree prune`, which took no scope and
+discarded other worktrees' registrations. Two more gate bypasses closed, comma
+join and a parenthesised table. Evidence:
+docs/evidence/postgres-worktree-cleanup-2026-09-04.md.
+"""
+idempotent = true
+validation = "Each repair has a mutation only its own test kills; the relative-gitdir and moved-then-missing cases are shipped tests."

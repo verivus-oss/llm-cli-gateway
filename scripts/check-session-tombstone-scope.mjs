@@ -56,7 +56,7 @@ export function productionSources(directory = join(ROOT, "src"), out = []) {
  * `UPDATE ONLY sessions` all read a session row and all scanned as clean while
  * the gate printed a complete-looking census.
  */
-const TABLE_REFERENCE = String.raw`(?:ONLY )?(?:(?:"?[A-Za-z_]\w*"?)\.)?"?sessions"?\b`;
+const TABLE_REFERENCE = String.raw`\(?(?:ONLY )?(?:(?:"?[A-Za-z_]\w*"?)\.)?"?sessions"?\b`;
 
 /**
  * `TABLE sessions` is a complete statement in PostgreSQL and is exactly
@@ -76,13 +76,24 @@ const BARE_TABLE_READ =
  */
 const OTHER_ROW_STATEMENTS = String.raw`\b(COPY|TRUNCATE|MERGE INTO) ` + TABLE_REFERENCE;
 
+/**
+ * A comma join names the table with no keyword in front of it.
+ * `FROM other o, sessions s` is an inner join and reads session rows, and a
+ * reviewer walked through it while this gate printed a clean census. The
+ * keyword still has to appear somewhere before the comma, so ordinary prose
+ * containing ", sessions" is not swept in.
+ */
+const COMMA_JOINED_TABLE = String.raw`\b(FROM|UPDATE|JOIN|USING) [^;]*?, *` + TABLE_REFERENCE;
+
 const SESSION_TABLE = new RegExp(
   String.raw`\b(FROM|UPDATE|INTO|JOIN|USING) ` +
     TABLE_REFERENCE +
     "|" +
     BARE_TABLE_READ +
     "|" +
-    OTHER_ROW_STATEMENTS,
+    OTHER_ROW_STATEMENTS +
+    "|" +
+    COMMA_JOINED_TABLE,
   "i"
 );
 const SESSION_ROW_READ = new RegExp(
@@ -91,7 +102,9 @@ const SESSION_ROW_READ = new RegExp(
     "|" +
     BARE_TABLE_READ +
     "|" +
-    OTHER_ROW_STATEMENTS,
+    OTHER_ROW_STATEMENTS +
+    "|" +
+    COMMA_JOINED_TABLE,
   "i"
 );
 

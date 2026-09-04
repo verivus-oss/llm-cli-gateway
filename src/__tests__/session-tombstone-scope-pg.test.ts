@@ -998,7 +998,7 @@ describe("PostgreSQL sessions hide worktree-cleanup tombstones", () => {
       }
     });
 
-    it("finalizes only once git has stopped registering the worktree", async () => {
+    it("retains the tombstone when a moved worktree is not at its new location", async () => {
       const repo = seedRepository("pg-renamed-away");
       try {
         const handle = await createWorktree({
@@ -1010,9 +1010,51 @@ describe("PostgreSQL sessions hide worktree-cleanup tombstones", () => {
         git(repo, "worktree", "move", handle.path, moved);
         // Renamed outside git: the registration survives pointing at a path
         // that is not there, which is also what an unavailable volume looks
-        // like. This is the shape the reviewer's reproduction used.
-        renameSync(moved, join(repo, ".worktrees", "subject-outside-git"));
+        // like. Round 4 finalized here. Round 5 showed why that is wrong: the
+        // checkout can come back, and once the record is gone nothing can
+        // clean it.
+        const renamed = join(repo, ".worktrees", "subject-outside-git");
+        renameSync(moved, renamed);
         const tomb = await stage("pg-renamed-away", handle);
+
+        // The REASON is asserted, not just the refusal. Two independent guards
+        // refuse this shape, so asserting only the boolean passes whichever one
+        // is left standing and measures neither.
+        const warnings: string[] = [];
+        const capturing = { ...noopLogger, warn: (m: string) => warnings.push(m) };
+        const reported = await cleanupSessionWorktree(tomb, capturing, {
+          expectedOwnerHostname: OWNER_HOST,
+          requireOwnerMetadata: true,
+        });
+        expect(reported).toBe(false);
+        expect(
+          warnings.some(w => w.includes("which is not there now")),
+          warnings.join(" | ")
+        ).toBe(true);
+        expect(
+          (await manager.listPendingWorktreeCleanupSessions(OWNER_HOST)).map(row => row.id)
+        ).toContain(tomb.id);
+        // Nothing was destroyed, so the retry after the checkout returns works.
+        expect(existsSync(handle.adminDirectory)).toBe(true);
+        expect(existsSync(renamed)).toBe(true);
+      } finally {
+        rmSync(repo, { recursive: true, force: true });
+      }
+    });
+
+    it("finalizes a worktree git has genuinely stopped registering", async () => {
+      const repo = seedRepository("pg-really-gone");
+      try {
+        const handle = await createWorktree({
+          repoRoot: repo,
+          name: "subject",
+          logger: noopLogger,
+        });
+        // Deleted out of band: git still lists it, and `git worktree remove`
+        // clears the entry itself. This is the case that must NOT be retained,
+        // or every ordinary deletion becomes an immortal tombstone.
+        rmSync(handle.path, { recursive: true, force: true });
+        const tomb = await stage("pg-really-gone", handle);
 
         const reported = await cleanupSessionWorktree(tomb, noopLogger, {
           expectedOwnerHostname: OWNER_HOST,
@@ -1020,8 +1062,6 @@ describe("PostgreSQL sessions hide worktree-cleanup tombstones", () => {
         });
         expect(reported).toBe(true);
         expect(await manager.finalizePendingWorktreeCleanup(tomb)).toBe(true);
-        // The property the reviewer measured, asserted on git and not on the
-        // return value: the registration the old code left behind is gone.
         expect(git(repo, "worktree", "list", "--porcelain")).not.toContain(".worktrees");
         expect(existsSync(handle.adminDirectory)).toBe(false);
       } finally {

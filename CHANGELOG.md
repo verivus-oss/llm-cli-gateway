@@ -33,14 +33,22 @@ All notable changes to the llm-cli-gateway project.
   that window left a record naming a path a later session could legitimately
   recreate; the retry then deleted the replacement. Each worktree now carries a
   per-creation token, asked of git rather than guessed from the worktree's name,
-  and both cleanup and same-session reuse require it to match. The Git
+  and both cleanup and same-session reuse require it to match. A removal is
+  reported only when git performed one: a refused removal is retained for retry
+  even when the recorded path is absent, checked against both the registered
+  path and the `gateway/<name>` branch, because a worktree that moved is absent
+  from its recorded path while it is perfectly alive somewhere else. The Git
   administrative directory is recorded alongside it, because `git worktree
   remove` deletes that directory and `git worktree move` leaves it alone, so it
   answers whether a removal happened without reading anything a move or an
   unavailable volume can take away. Cleanup refuses to report a removal for a
   worktree that was only moved, and refuses equally when it cannot establish
-  the answer: a marker it cannot read, or a repository it cannot resolve, is a
-  failure to look and not a removal. **A worktree created before this release carries no token, so a
+  the answer: a marker it cannot read, a repository it cannot resolve, or a
+  worktree that moved and is then not at its new location, is a failure to look
+  and not a removal. The last of those is deliberately not treated as a removal
+  even though the checkout is missing, because a volume that is not mounted and
+  a directory that was deleted are indistinguishable, and finalizing the record
+  for the first leaves a tree that nothing can ever clean. **A worktree created before this release carries no token, so a
   session cannot prove it created what stands at its recorded path and will no
   longer remove it.** Those worktrees stay on disk, their durable records are
   retained and listed for cleanup, and the warning names the path to remove by

@@ -912,7 +912,14 @@ describe("worktree creation token (issue #305 ABA window)", () => {
     execFileSync("git", ["worktree", "list", "--porcelain"], { cwd: repoRoot, encoding: "utf8" })
       .split("\n")
       .filter(line => line.startsWith("worktree "))
-      .map(line => realpathSync(line.slice("worktree ".length)));
+      .map(line => {
+        const raw = line.slice("worktree ".length);
+        try {
+          return realpathSync(raw);
+        } catch {
+          return raw;
+        }
+      });
 
   const cleanup = (session: { id: string; metadata?: Record<string, unknown> }) =>
     cleanupSessionWorktree(session, logger, {
@@ -1299,12 +1306,12 @@ describe("worktree creation token (issue #305 ABA window)", () => {
     expect(existsSync(moved)).toBe(true);
   });
 
-  it("reports a removal only once git has stopped registering the worktree", async () => {
-    // The other half of the same blocker. A checkout that is not where git
-    // expects it makes `git worktree remove` fail, and an absent recorded path
-    // was read as success on its own, leaving the registration behind while the
-    // durable record was finalized. Success now means the entry is gone, and
-    // the assertion is on git's own listing rather than on the return value.
+  it("refuses a moved worktree whose checkout is not where git says it is", async () => {
+    // Round 5, grok. This finalized, on the argument that a retry would reach
+    // the same answer forever. It does not: the checkout can come BACK, and
+    // once the record is finalized and the registration pruned there is nothing
+    // left to clean it with. Deleted and temporarily-unavailable are
+    // indistinguishable here, so the destructive reading is not the one to take.
     const handle = await createWorktree({ repoRoot, name: "renamed", logger: noopLogger });
     const session = sessionWithAdminDirFor(handle, "session-renamed");
     const moved = join(repoRoot, ".worktrees", "renamed-elsewhere");
@@ -1312,49 +1319,90 @@ describe("worktree creation token (issue #305 ABA window)", () => {
       cwd: repoRoot,
       stdio: "ignore",
     });
-    const admin = adminDirOf(moved);
-    // Rename outside git, which is what an unavailable volume looks like too:
-    // the registration survives and points at a path that is not there.
+    const admin = handle.adminDirectory;
     const renamed = join(repoRoot, ".worktrees", "renamed-outside-git");
     renameSync(moved, renamed);
-    expect(existsSync(admin)).toBe(true);
 
-    expect(await cleanup(session)).toBe(true);
-    expect(
-      registeredPaths().includes(
-        realpathSync(repoRoot) + sep + join(".worktrees", "renamed-elsewhere")
-      )
-    ).toBe(false);
-    expect(existsSync(admin)).toBe(false);
-    // Disclosed residual: the directory tree renamed out from under git is not
-    // removed, because nothing left in the repository names it.
-    expect(existsSync(renamed)).toBe(true);
+    expect(await cleanup(session)).toBe(false);
+    expect(warnings.some(w => w.includes("which is not there now"))).toBe(true);
+    // Nothing was destroyed, so a retry after the checkout comes back can work.
+    expect(existsSync(admin)).toBe(true);
+    expect(registeredPaths().length).toBe(2);
+
+    // And it does: restored, the same session cleans up for real.
+    renameSync(renamed, moved);
+    expect(await cleanup(session)).toBe(false);
+    expect(warnings.some(w => w.includes("still registered at"))).toBe(true);
+    expect(existsSync(moved)).toBe(true);
   });
 
-  it("does not report a removal it could not confirm", async () => {
-    // Pruning is only evidence once its result is read back. If the listing
-    // that would confirm the entry is gone cannot be run, that is a failure to
-    // look, and the durable record is retained for a retry that can look.
-    // `git worktree remove` succeeds outright when the checkout is simply gone
-    // and the entry still names it, so reaching the confirmation needs the
-    // shape where it does NOT: the registration points somewhere else, and the
-    // recorded path git is asked about is not a working tree.
-    const handle = await createWorktree({ repoRoot, name: "unconfirmable", logger: noopLogger });
-    const session = sessionFor(handle, "session-unconfirmable");
-    const moved = join(repoRoot, ".worktrees", "unconfirmable-elsewhere");
+  it("resolves a relative gitdir against the admin directory, not the process cwd", async () => {
+    // Round 5, codex. `worktree.useRelativePaths=true` is a supported git
+    // setting and writes `../../../.worktrees/<name>/.git` into the entry, so
+    // resolving it against the gateway's own working directory found nothing
+    // and an ORDINARY move made a live worktree read as removed.
+    const relativeRepo = mkdtempSync(join(tmpdir(), "wt-relative-"));
+    try {
+      const run = (...args: string[]): void => {
+        execFileSync("git", args, { cwd: relativeRepo, stdio: "ignore" });
+      };
+      run("init", "-q", "-b", "main", ".");
+      run("config", "user.email", "test@example.test");
+      run("config", "user.name", "Test");
+      run("config", "worktree.useRelativePaths", "true");
+      writeFileSync(join(relativeRepo, "tracked"), "seed");
+      run("add", "tracked");
+      run("commit", "-qm", "seed");
+
+      const handle = await createWorktree({
+        repoRoot: relativeRepo,
+        name: "relative",
+        logger: noopLogger,
+      });
+      // The premise: git really did write a relative link.
+      expect(readFileSync(join(handle.adminDirectory, "gitdir"), "utf8").trim()).not.toMatch(
+        /^[/\\]/
+      );
+      const moved = join(relativeRepo, ".worktrees", "relative-moved");
+      execFileSync("git", ["worktree", "move", handle.path, moved], {
+        cwd: relativeRepo,
+        stdio: "ignore",
+      });
+
+      expect(await cleanup(sessionWithAdminDirFor(handle, "session-relative"))).toBe(false);
+      expect(warnings.some(w => w.includes("still registered at"))).toBe(true);
+      expect(existsSync(moved)).toBe(true);
+    } finally {
+      rmSync(relativeRepo, { recursive: true, force: true });
+    }
+  });
+
+  it("does not report a removal when git refused to perform one", async () => {
+    // The absent recorded path used to be enough on its own. It is not: a
+    // session that predates creation tokens carries no identity, so nothing
+    // stops cleanup reaching the removal, and after a move git refuses because
+    // the recorded path is not a working tree. Refusing is the answer; the
+    // worktree is still registered and still on disk.
+    const handle = await createWorktree({ repoRoot, name: "refused", logger: noopLogger });
+    const moved = join(repoRoot, ".worktrees", "refused-elsewhere");
     execFileSync("git", ["worktree", "move", handle.path, moved], {
       cwd: repoRoot,
       stdio: "ignore",
     });
-    renameSync(moved, join(repoRoot, ".worktrees", "unconfirmable-outside-git"));
+    const legacySession = {
+      id: "session-refused",
+      metadata: {
+        worktreePath: handle.path,
+        worktreeName: handle.name,
+        worktreeOwnerHostname: hostname(),
+        worktreeOwnerInstanceId: "instance-refused",
+      },
+    };
 
-    const restoreGit = forceGitWorktreeListFailure();
-    try {
-      expect(await cleanup(session)).toBe(false);
-      expect(warnings.some(w => w.includes("could not confirm"))).toBe(true);
-    } finally {
-      restoreGit();
-    }
+    expect(await cleanup(legacySession)).toBe(false);
+    expect(warnings.some(w => w.includes("is not a working tree"))).toBe(true);
+    expect(existsSync(moved)).toBe(true);
+    expect(registeredPaths().length).toBe(2);
   });
 
   it("keeps the token across a git worktree move, which renames nothing", async () => {

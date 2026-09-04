@@ -646,7 +646,14 @@ function readAdminMarker(adminDirectory: string): MarkerReading {
  */
 function checkoutForAdminDirectory(adminDirectory: string): string | null {
   try {
-    return dirname(readFileSync(join(adminDirectory, "gitdir"), "utf8").trim());
+    const recorded = readFileSync(join(adminDirectory, "gitdir"), "utf8").trim();
+    // RESOLVED against the administrative directory, because git does not
+    // promise this path is absolute. `worktree.useRelativePaths=true` is a
+    // supported setting and writes `../../../.worktrees/<name>/.git`, which
+    // `existsSync` then resolves against the gateway's own working directory
+    // and finds nothing. An ordinary `git worktree move` was enough to make a
+    // live worktree read as removed and lose its durable record.
+    return dirname(resolvePath(adminDirectory, recorded));
   } catch {
     return null;
   }
@@ -673,7 +680,7 @@ function checkoutForAdminDirectory(adminDirectory: string): string | null {
  */
 async function locateLiveWorktree(
   repoRoot: string,
-  identity: { token: string | null; adminDirectory: string | null },
+  identity: { token: string | null; adminDirectory: string | null; recordedPath: string },
   logger: Logger
 ): Promise<WorktreeSearchResult> {
   const listing = await listWorktreeAdminDirectories(repoRoot, logger);
@@ -690,7 +697,7 @@ async function locateLiveWorktree(
     if (identity.token !== null && marker.kind === "token" && marker.token !== identity.token) {
       return { kind: "removed" };
     }
-    return liveOrPrunable(match);
+    return liveOrPrunable(match, identity.recordedPath);
   }
 
   if (identity.token === null) {
@@ -701,7 +708,7 @@ async function locateLiveWorktree(
   for (const directory of listing.directories) {
     const marker = readAdminMarker(directory);
     if (marker.kind === "token" && marker.token === identity.token) {
-      return liveOrPrunable(directory);
+      return liveOrPrunable(directory, identity.recordedPath);
     }
     if (marker.kind === "unreadable") unreadable.push(marker.reason);
   }
@@ -729,10 +736,27 @@ async function locateLiveWorktree(
  * and the gateway reports the removal of what git knew about, not of a
  * directory tree neither of them can name any more.
  */
-function liveOrPrunable(adminDirectory: string): WorktreeSearchResult {
+function liveOrPrunable(adminDirectory: string, recordedPath: string): WorktreeSearchResult {
   const checkout = checkoutForAdminDirectory(adminDirectory);
   if (checkout === null) return { kind: "live", path: adminDirectory };
-  return existsSync(checkout) ? { kind: "live", path: checkout } : { kind: "removed" };
+  if (existsSync(checkout)) return { kind: "live", path: checkout };
+  // The checkout is not there. That is only a removal when the registration
+  // still names the path this session recorded, because then the removal about
+  // to run targets exactly that entry and git clears it.
+  //
+  // When the registration points SOMEWHERE ELSE and that is missing, the
+  // worktree moved and then went away, and the two reasons are
+  // indistinguishable: deleted, or on a volume that is not mounted right now.
+  // An earlier version finalized here on the argument that a retry would reach
+  // the same answer forever. That argument is wrong when the absence is
+  // temporary: restoring the checkout after the record was finalized leaves a
+  // directory tree that nothing will ever clean, while refusing costs only a
+  // visible pending-cleanup row naming where the worktree was last seen.
+  if (canonicalPath(checkout) === canonicalPath(recordedPath)) return { kind: "removed" };
+  return {
+    kind: "indeterminate",
+    reason: `the worktree moved to ${checkout}, which is not there now`,
+  };
 }
 
 function canonicalPath(path: string): string {
@@ -957,6 +981,53 @@ export function createWorktreeSessionCleanupHook(
   };
 }
 
+/**
+ * After git refused a removal whose path is absent, has the removal already
+ * happened?
+ *
+ * Read only, deliberately. An earlier version ran `git worktree prune` first,
+ * which takes no scope here and deletes EVERY prunable administrative directory
+ * in the repository: a cleanup for one worktree quietly discarding another's
+ * registration is a side effect nothing asked for.
+ *
+ * Two questions, because the recorded path alone answered the wrong one. A
+ * worktree that MOVED is absent from its recorded path while it is perfectly
+ * alive somewhere else, so the branch is asked about too: `git worktree move`
+ * carries `gateway/<name>` with it, and a session that predates creation tokens
+ * has no other identity to check. Only when nothing is registered at the path
+ * and nothing holds the branch has the removal actually happened.
+ */
+async function removalAlreadyHappened(
+  managed: { repoRoot: string; path: string; name?: string },
+  logger: Logger
+): Promise<boolean> {
+  let registrations: RegisteredWorktree[];
+  try {
+    registrations = await listRegisteredWorktrees(managed.repoRoot, logger);
+  } catch (error) {
+    logWarn(
+      logger,
+      `could not confirm that git no longer registers ${managed.path}: ${describeError(error)}`
+    );
+    return false;
+  }
+  const canonical = canonicalPath(managed.path);
+  const branch = managed.name ? `refs/heads/gateway/${managed.name}` : null;
+  const survivor = registrations.find(
+    registration =>
+      canonicalPath(registration.path) === canonical ||
+      (branch !== null && registration.branch === branch)
+  );
+  if (survivor) {
+    logWarn(
+      logger,
+      `git still registers this worktree at ${survivor.path}; not reporting a removal`
+    );
+    return false;
+  }
+  return true;
+}
+
 /** Remove the exact worktree authorized by durable session provenance. */
 export async function cleanupSessionWorktree(
   session: { id: string; metadata?: Record<string, unknown> },
@@ -1014,7 +1085,7 @@ export async function cleanupSessionWorktree(
   if (!existsSync(worktreePath) && (recordedToken !== null || recordedAdminDirectory !== null)) {
     const located = await locateLiveWorktree(
       repoRoot,
-      { token: recordedToken, adminDirectory: recordedAdminDirectory },
+      { token: recordedToken, adminDirectory: recordedAdminDirectory, recordedPath: worktreePath },
       logger
     );
     if (located.kind === "live") {
@@ -1076,46 +1147,6 @@ export async function removeWorktree(opts: RemoveWorktreeOptions): Promise<void>
   await removeWorktreeWithResult(opts);
 }
 
-/**
- * Prune the stale administrative entry for a checkout that is no longer there,
- * and report whether git has genuinely stopped registering that path.
- *
- * `git worktree prune` is the operation for exactly this state: an entry whose
- * `gitdir` names a path that no longer exists. Reading the registration list
- * back afterwards is what turns "we ran a command" into evidence; a prune whose
- * result is never read establishes nothing, and failing to look is reported as
- * failure rather than as an empty result.
- */
-async function registrationCleared(
-  repoRoot: string,
-  path: string,
-  logger: Logger
-): Promise<boolean> {
-  try {
-    await execGit(repoRoot, ["worktree", "prune"], logger);
-    const canonical = canonicalPath(path);
-    const stillRegistered = (await listRegisteredWorktrees(repoRoot, logger)).some(
-      registration => canonicalPath(registration.path) === canonical
-    );
-    if (stillRegistered) {
-      logWarn(logger, `git still registers a worktree at ${path} after pruning; not a removal`);
-      return false;
-    }
-    return true;
-  } catch (error) {
-    logWarn(
-      logger,
-      `could not confirm that git no longer registers ${path}: ${describeError(error)}`
-    );
-    return false;
-  }
-}
-
-/**
- * Remove a managed worktree and report whether no live gateway-owned worktree
- * remains at the path. Callers that must release durable ownership use this
- * result instead of treating best-effort logging as successful cleanup.
- */
 export async function removeWorktreeWithResult(opts: RemoveWorktreeOptions): Promise<boolean> {
   const logger = opts.logger ?? noopLogger;
   if (!opts.repoRoot || !opts.path) {
@@ -1174,14 +1205,12 @@ export async function removeWorktreeWithResult(opts: RemoveWorktreeOptions): Pro
         `git worktree remove --force failed (code ${remove.code}): ${remove.stderr.trim()}`
       );
       if (managed.exists && existsSync(managed.path)) return false;
-      // The checkout is not at this path and git refused anyway, which is what
-      // a stale registration looks like ("is not a working tree"). An absent
-      // directory was previously read as success on its own, and that is the
-      // hole every false-removal defect in this module has come through: the
-      // administrative entry survives, git still lists the worktree, and the
-      // durable record that would have driven a retry gets finalized. Clear the
-      // entry and CONFIRM it is gone before calling this a removal.
-      if (!(await registrationCleared(managed.repoRoot, managed.path, logger))) return false;
+      // git refused and the recorded path is absent. That is what an ALREADY
+      // COMPLETED removal looks like from a retry, and also what a worktree
+      // that moved away looks like, and an earlier version could not tell them
+      // apart: it read the absent path as success on its own, which is how
+      // every false removal in this module reached the finalizer.
+      if (!(await removalAlreadyHappened(managed, logger))) return false;
     }
     if (managed.name) {
       const branch = `gateway/${managed.name}`;

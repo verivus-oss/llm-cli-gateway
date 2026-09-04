@@ -248,6 +248,25 @@ it("sees a session read that names no FROM of its own", () => {
   expect(violations(sessionStatements(source))).toHaveLength(1);
 });
 
+it("sees a comma join, which names the table with no keyword in front of it", () => {
+  // `FROM other o, sessions s` is an inner join and reads session rows. Round 5
+  // walked through it while the gate printed a clean census.
+  const source = `function m() { return pool.query(\`SELECT s.id FROM other o, sessions s WHERE o.id = s.id\`); }`;
+  expect(violations(sessionStatements(source))).toHaveLength(1);
+});
+
+it("sees a parenthesised table reference", () => {
+  const source = `function m() { return pool.query(\`SELECT id FROM (sessions) WHERE id = $1\`); }`;
+  expect(violations(sessionStatements(source))).toHaveLength(1);
+});
+
+it("does not sweep in a column that happens to be called sessions", () => {
+  // The comma rule must not fire on a select list, or it would refuse
+  // legitimate statements that never touch the table.
+  const source = `function m() { return pool.query(\`SELECT id, sessions FROM other WHERE id = $1\`); }`;
+  expect(sessionStatements(source)).toHaveLength(0);
+});
+
 it("does not treat an upsert as an insert", () => {
   // `ON CONFLICT ... DO UPDATE` writes rows that already exist. A reviewer
   // changed a tombstone's description through one while the gate classified
