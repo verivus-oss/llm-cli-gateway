@@ -56,16 +56,32 @@ function productionSources(directory = join(ROOT, "src"), out = []) {
  * `UPDATE ONLY sessions` all read a session row and all scanned as clean while
  * the gate printed a complete-looking census.
  */
-const TABLE_REFERENCE = String.raw`(?:ONLY\s+)?(?:(?:"?[A-Za-z_]\w*"?)\.)?"?sessions"?\b`;
-const SESSION_TABLE = new RegExp(String.raw`\b(FROM|UPDATE|INTO|JOIN)\s+` + TABLE_REFERENCE, "i");
-const SESSION_ROW_READ = new RegExp(String.raw`\b(FROM|UPDATE|JOIN)\s+` + TABLE_REFERENCE, "i");
+const TABLE_REFERENCE = String.raw`(?:ONLY )?(?:(?:"?[A-Za-z_]\w*"?)\.)?"?sessions"?\b`;
+
+/**
+ * `TABLE sessions` is a complete statement in PostgreSQL and is exactly
+ * `SELECT * FROM sessions`. A reviewer read a tombstone back with it while this
+ * gate printed a clean census, because the keyword list had no entry for a form
+ * that names no FROM. The lookbehind keeps `CREATE TABLE`, `ALTER TABLE` and
+ * `DROP TABLE`, which are schema statements rather than row reads, out of it.
+ */
+const BARE_TABLE_READ =
+  String.raw`(?<!\b(?:CREATE|ALTER|DROP|TEMPORARY|UNLOGGED) )TABLE ` + TABLE_REFERENCE;
+const SESSION_TABLE = new RegExp(
+  String.raw`\b(FROM|UPDATE|INTO|JOIN) ` + TABLE_REFERENCE + "|" + BARE_TABLE_READ,
+  "i"
+);
+const SESSION_ROW_READ = new RegExp(
+  String.raw`\b(FROM|UPDATE|JOIN) ` + TABLE_REFERENCE + "|" + BARE_TABLE_READ,
+  "i"
+);
 
 /**
  * A table name assembled at runtime. `FROM ${table}` is unreadable to any
  * static gate, so it is refused outright rather than analysed: this module has
  * no legitimate reason to compute a table name.
  */
-const INTERPOLATED_TABLE = /\b(FROM|UPDATE|INTO|JOIN)\s+(?:ONLY\s+)?\$\{/i;
+const INTERPOLATED_TABLE = /\b(FROM|UPDATE|INTO|JOIN|TABLE) (?:ONLY )?\$\{/i;
 
 /**
  * Is this literal SQL at all? Ordinary prose and non-SQL templates say "from
@@ -73,10 +89,17 @@ const INTERPOLATED_TABLE = /\b(FROM|UPDATE|INTO|JOIN)\s+(?:ONLY\s+)?\$\{/i;
  * template strings in modules that touch no database.
  */
 const SQL_SHAPE =
-  /\b(SELECT\s|INSERT\s+INTO\s|UPDATE\s|DELETE\s+FROM\s|CREATE\s|ALTER\s+TABLE\s|DROP\s+(TABLE|VIEW)\s|WITH\s+[A-Za-z_]\w*\s+AS\s*\()/i;
+  /\b(SELECT |INSERT INTO |UPDATE |DELETE FROM |CREATE |ALTER TABLE |DROP (TABLE|VIEW) |TABLE [A-Za-z_"]|WITH [A-Za-z_]\w* AS \()/i;
 
-/** DDL. A view or table definition is not a caller-facing read of a row. */
-const DDL_STATEMENT = /\b(CREATE|ALTER|DROP)\s+(OR\s+REPLACE\s+)?(VIEW|TABLE|INDEX|FUNCTION)\b/i;
+/**
+ * A literal that ENDS on the keyword introducing a table name has handed the
+ * table to whatever is concatenated next, and no scanner over single literals
+ * can follow it. Refused rather than analysed, for the same reason as an
+ * interpolated table name: a reviewer read a session row through
+ * `"SELECT id FROM " + "sessions WHERE id = $1"` while this gate printed a
+ * clean census.
+ */
+const SPLIT_TABLE_REFERENCE = /(?<!\bFOR )\b(FROM|UPDATE|INTO|JOIN|TABLE) *$/i;
 
 const PREDICATE = "sessionNotTombstonedSql(";
 
@@ -115,9 +138,14 @@ export function sessionStatements(source) {
   const blanked = stripComments(source);
   const statements = [];
   for (const match of blanked.matchAll(STRING_LITERAL)) {
-    if (!SQL_SHAPE.test(match[0])) continue;
-    const interpolatedTable = INTERPOLATED_TABLE.test(match[0]);
-    if (!SESSION_TABLE.test(match[0]) && !interpolatedTable) continue;
+    // Whitespace is NORMALISED before matching. These literals wrap, and a
+    // pattern that spelled the gaps as a single space matched or missed on the
+    // fill width rather than on the statement.
+    const sql = match[0].replace(/\s+/g, " ");
+    if (!SQL_SHAPE.test(sql)) continue;
+    const interpolatedTable = INTERPOLATED_TABLE.test(sql);
+    const splitTable = SPLIT_TABLE_REFERENCE.test(sql.slice(0, -1));
+    if (!SESSION_TABLE.test(sql) && !interpolatedTable && !splitTable) continue;
     const line = blanked.slice(0, match.index).split("\n").length;
     // A module-level helper resolves to its own name. Scanning only for
     // indented class members walked past the enclosing function and attributed
@@ -147,11 +175,11 @@ export function sessionStatements(source) {
       method,
       topLevel,
       line,
-      sql: match[0],
+      sql,
       interpolatedTable,
-      ddl: DDL_STATEMENT.test(match[0]),
-      scoped: SPLICED_PREDICATE.test(match[0]),
-      insertOnly: !interpolatedTable && !SESSION_ROW_READ.test(match[0]),
+      splitTable,
+      scoped: SPLICED_PREDICATE.test(sql),
+      insertOnly: !interpolatedTable && !splitTable && !SESSION_ROW_READ.test(sql),
       exempted: preceding.includes(EXEMPT_MARKER),
     });
   }
@@ -201,7 +229,13 @@ export function violations(statements, file = GOVERNED_FILE) {
     if (s.interpolatedTable) {
       return [`${file}: ${s.method} builds a table name at runtime; spell the table literally`];
     }
-    if (s.ddl || s.insertOnly || s.scoped || s.exempted) return [];
+    if (s.splitTable) {
+      return [
+        `${file}: ${s.method} splits a table reference across string literals; ` +
+          `keep the statement in one literal`,
+      ];
+    }
+    if (s.insertOnly || s.scoped || s.exempted) return [];
     return [
       `${file}: ${s.method} reads or mutates a session row without ` +
         `${PREDICATE}) spliced as a bare interpolation, and without a ` +
@@ -228,14 +262,13 @@ function main() {
     process.exit(1);
   }
   const inserts = statements.filter(s => s.insertOnly).length;
-  const ddl = statements.filter(s => !s.insertOnly && s.ddl).length;
-  const exempt = statements.filter(s => !s.insertOnly && !s.ddl && s.exempted).length;
-  const scoped = statements.length - inserts - ddl - exempt;
+  const exempt = statements.filter(s => !s.insertOnly && s.exempted).length;
+  const scoped = statements.length - inserts - exempt;
   console.log(
     `session tombstone scope: ${files.length} production modules scanned; ` +
       `${statements.length} statements name sessions; ` +
       `${scoped} carry the predicate, ${inserts} insert a new row, ` +
-      `${ddl} are DDL, ${exempt} are exempt with a stated reason.`
+      `${exempt} are exempt with a stated reason.`
   );
 }
 

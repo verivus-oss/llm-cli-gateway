@@ -3329,7 +3329,7 @@ export async function resolveWorktreeForRequest(
         // THIS session's. Path and branch both derive from the name, so only
         // the creation token separates a reused worktree from a later one that
         // took the same name after this one was removed.
-        (await readWorktreeOwnerToken(repoRoot, existingName, runtime.logger)) ===
+        (await readWorktreeOwnerToken(existingPath, runtime.logger)) ===
           (typeof session?.metadata?.worktreeToken === "string"
             ? session.metadata.worktreeToken
             : null);

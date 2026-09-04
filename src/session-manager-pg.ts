@@ -166,13 +166,41 @@ const TOMBSTONE_PATCH_SQL = `'{"worktreeCleanupPending": true, "${WORKTREE_CLEAN
  *
  * The tombstone exclusion is spliced HERE, not required of the caller. An
  * earlier version took it in `predicate` and checked that the string mentioned
- * the key, which proved presence of a substring rather than exclusion of a row:
- * a tautology, an SQL comment, or an `OR ... IS NOT NULL` all satisfied it, and
- * the last one re-staged the tombstones it was supposed to exclude. A required
- * argument is vigilance; splicing it is the property. `predicate` now carries
- * only the caller's own scoping.
+ * the key, which proved presence of a substring rather than exclusion of a row.
+ *
+ * Wrapping the caller's predicate in parentheses is NOT sufficient on its own
+ * either, and a reviewer proved it against a real server: `id = $1) OR true --`
+ * closes the parenthesis, introduces an OR, and comments out both the closing
+ * parenthesis and the conjunct that follows. So the exclusion is ALSO applied
+ * in the two arms, where the predicate's text cannot reach: `target` only
+ * classifies, and a row it wrongly admits is still touched by neither arm.
+ * The syntactic check below is the cheap outer layer, not the guarantee.
  */
+/**
+ * Refuse a caller predicate that could terminate the expression it is spliced
+ * into. A comment introducer can discard everything after it and an unbalanced
+ * parenthesis can close the wrapper early; together they turn a conjunct into a
+ * disjunct. This does not make the splice safe on its own, which is why the
+ * arms carry the exclusion too, but a predicate that contains either of these
+ * is a programming error and should not reach PostgreSQL at all.
+ */
+function assertPredicateCannotEscape(predicate: string): void {
+  if (predicate.includes("--") || predicate.includes("/*")) {
+    throw new Error("A session deletion predicate may not contain an SQL comment");
+  }
+  let depth = 0;
+  for (const character of predicate) {
+    if (character === "(") depth += 1;
+    else if (character === ")") depth -= 1;
+    if (depth < 0) break;
+  }
+  if (depth !== 0) {
+    throw new Error("A session deletion predicate may not contain unbalanced parentheses");
+  }
+}
+
 export function deleteOrStageSessionsSql(predicate: string): string {
+  assertPredicateCannotEscape(predicate);
   return `WITH target AS (
             SELECT id, ${DURABLY_OWNED_WORKTREE_SQL} AS owned
               FROM sessions
@@ -183,10 +211,12 @@ export function deleteOrStageSessionsSql(predicate: string): string {
             UPDATE sessions
                SET metadata = COALESCE(metadata, '{}'::jsonb) || ${TOMBSTONE_PATCH_SQL}
              WHERE id IN (SELECT id FROM target WHERE owned)
+               AND ${sessionNotTombstonedSql()}
             RETURNING ${SESSION_COLUMNS}
           ), removed AS (
             DELETE FROM sessions
              WHERE id IN (SELECT id FROM target WHERE NOT owned)
+               AND ${sessionNotTombstonedSql()}
             RETURNING ${SESSION_COLUMNS}
           ), cleared_active AS (
             DELETE FROM active_sessions WHERE session_id IN (SELECT id FROM staged)

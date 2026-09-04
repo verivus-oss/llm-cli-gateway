@@ -56,6 +56,10 @@ export const POSTGRES_IMMUTABLE_MIGRATION_SHA256 = {
   // there rather than the build here.
   "026_worktree_cleanup_on_session_expiry.sql":
     "17ca3438cac0ee08b2279206e72973f18ae4c7f51b80647decf091625866836d",
+  // 027 redefines the `session_summary` view, which every applied database
+  // already records a checksum for. Pinned at authorship for the same reason.
+  "027_session_summary_excludes_tombstones.sql":
+    "21a378c72b62338f7efd160fef8f74a3144726c9242722fcafa5abac90ecda2a",
 } as const;
 
 /**

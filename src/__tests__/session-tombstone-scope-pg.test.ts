@@ -612,6 +612,39 @@ describe("PostgreSQL sessions hide worktree-cleanup tombstones", () => {
     });
   });
 
+  it("keeps tombstones out of the operator-facing session_summary view", async () => {
+    // Nothing in the gateway reads this view, so it is not a runtime leak. It
+    // is what an operator sees when they inspect the database directly, and it
+    // listed deleted sessions as live with `is_active` computed for them.
+    await pool.query(
+      readFileSync("migrations/027_session_summary_excludes_tombstones.sql", "utf8")
+    );
+    const live = await manager.createSession("claude", "live for the view");
+    const doomed = await manager.createSession("claude", "tombstoned for the view");
+    await manager.updateSessionMetadata(doomed.id, {
+      worktreePath: "/tmp/worktree-view",
+      worktreeName: "wt-view",
+      worktreeOwnerHostname: OWNER_HOST,
+      worktreeOwnerInstanceId: "instance-view",
+    });
+    expect(await manager.deleteSession(doomed.id)).toBe(true);
+    await survives(doomed.id);
+
+    const rows = await pool.query<{ id: string }>("SELECT id FROM session_summary");
+    expect(rows.rows.map(row => row.id)).toContain(live.id);
+    expect(rows.rows.map(row => row.id)).not.toContain(doomed.id);
+    // The row is still there for cleanup retry; only the view hides it.
+    expect(
+      Number(
+        (
+          await pool.query<{ n: number }>("SELECT COUNT(*)::int AS n FROM sessions WHERE id = $1", [
+            doomed.id,
+          ])
+        ).rows[0]!.n
+      )
+    ).toBe(1);
+  });
+
   it("reports a rejected removal observer instead of discarding it", async () => {
     // The rejection used to go into an empty catch. A failed worktree removal
     // is exactly the case the tombstone is retained for, so an operator was
@@ -653,16 +686,28 @@ describe("PostgreSQL sessions hide worktree-cleanup tombstones", () => {
     const bypasses = [
       "id = $1",
       "id = $1 AND 'worktreeCleanupPendingDeletion' <> 'unused'",
-      "id = $1 -- worktreeCleanupPendingDeletion",
       "id = $1 OR metadata->>'worktreeCleanupPendingDeletion' IS NOT NULL",
     ];
     for (const predicate of bypasses) {
       const sql = deleteOrStageSessionsSql(predicate);
-      // Spliced by the builder, and the caller's predicate is parenthesised so
-      // a trailing OR cannot reach past it.
       expect(sql).toContain(`WHERE (${predicate})`);
-      expect(sql).toContain(sessionNotTombstonedSql());
+      // Three times: once in the classification, and once in each arm, where
+      // the caller's text cannot reach it.
+      expect(sql.split(sessionNotTombstonedSql()).length - 1).toBe(3);
     }
+  });
+
+  it("refuses a predicate that could terminate the expression it is spliced into", () => {
+    // `id = $1) OR true --` closes the wrapper, ORs, and comments out both the
+    // closing parenthesis and the conjunct after it. A reviewer got a tombstone
+    // back that way on a real server.
+    expect(() => deleteOrStageSessionsSql("id = $1) OR true --")).toThrow(
+      /unbalanced parentheses|SQL comment/
+    );
+    expect(() => deleteOrStageSessionsSql("id = $1 -- comment")).toThrow(/SQL comment/);
+    expect(() => deleteOrStageSessionsSql("id = $1 /* comment */")).toThrow(/SQL comment/);
+    expect(() => deleteOrStageSessionsSql("id = $1)")).toThrow(/unbalanced parentheses/);
+    expect(() => deleteOrStageSessionsSql("(id = $1 OR cli = $2)")).not.toThrow();
   });
 
   it("never lets a caller predicate reach a tombstone, against the real server", async () => {
@@ -676,6 +721,26 @@ describe("PostgreSQL sessions hide worktree-cleanup tombstones", () => {
       ).replace(/\?/g, "$1"),
       [stored.id]
     );
+    expect(rows.rows).toEqual([]);
+    await survives(session.id);
+  });
+
+  it("keeps the exclusion in the arms when the classification is defeated", async () => {
+    // The classification CTE is built from caller text and can in principle be
+    // subverted; the arms are entirely the builder's. Simulating the worst case
+    // by removing the classification's own exclusion, the arms must still
+    // refuse to touch a tombstone.
+    const session = await manager.createSession("claude", "arms hold");
+    const stored = await tombstone(session);
+    const defeated = deleteOrStageSessionsSql("id = $1").replace(
+      `WHERE (id = $1)
+               AND ${sessionNotTombstonedSql()}`,
+      "WHERE (id = $1)"
+    );
+    expect(defeated).not.toContain(`WHERE (id = $1)
+               AND ${sessionNotTombstonedSql()}`);
+    expect(defeated.split(sessionNotTombstonedSql()).length - 1).toBe(2);
+    const rows = await pool.query(defeated, [stored.id]);
     expect(rows.rows).toEqual([]);
     await survives(session.id);
   });

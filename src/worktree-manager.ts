@@ -1,7 +1,7 @@
 import { spawn } from "child_process";
 import { randomUUID } from "crypto";
 import { existsSync, lstatSync, mkdirSync, readFileSync, realpathSync, writeFileSync } from "fs";
-import { basename, isAbsolute, join, relative, resolve as resolvePath, sep } from "path";
+import { basename, dirname, isAbsolute, join, relative, resolve as resolvePath, sep } from "path";
 import { logWarn, noopLogger, type Logger } from "./logger.js";
 
 const GIT_TIMEOUT_MS = 10_000;
@@ -459,39 +459,75 @@ async function listRegisteredWorktrees(
  * recreate. The retry then deletes the replacement, and the replacement's
  * session survives in the store pointing at a directory that is gone.
  *
- * This marker is what tells the two apart. It is written once per creation
- * into the worktree's Git ADMIN directory rather than into the checkout: the
- * checkout belongs to the caller and an agent working there would commit it,
- * while the admin directory is created by `git worktree add`, is invisible to
- * the working tree, and is removed by `git worktree remove`.
+ * This marker is what tells the two apart. It is written once per creation into
+ * the worktree's Git ADMIN directory rather than into the checkout, because the
+ * checkout belongs to the caller and an agent working there would commit it.
+ *
+ * It is NOT hidden from that agent, and must not be relied on as if it were.
+ * The `.git` entry in a linked worktree is a FILE containing
+ * `gitdir: <admin dir>` (git-worktree(1) DETAILS), so anything in the
+ * administrative directory is reachable from inside the checkout by following
+ * it. This is an accident-detector for the remove-then-acknowledge window, not
+ * a control against a hostile process working in the worktree.
  */
 const GATEWAY_WORKTREE_MARKER = "gateway-owner.json";
 
-/** `<git common dir>/worktrees/<name>`, created by `git worktree add`. */
-async function worktreeAdminDirectory(
-  repoRoot: string,
-  name: string,
+/**
+ * The administrative directory git ACTUALLY gave this worktree, resolved from
+ * the worktree itself.
+ *
+ * Not `<common>/worktrees/<name>`. git-worktree(1) DETAILS says the private
+ * sub-directory's name is "usually the base name of the linked worktree's path,
+ * possibly appended with a number to make it unique", and the same section says
+ * outright: "do not make any assumption about whether a path belongs to
+ * $GIT_DIR or $GIT_COMMON_DIR ... Use `git rev-parse --git-path` to get the
+ * final path." Guessing by name is what that sentence forbids, and it is not
+ * theoretical: a stale `worktrees/beta` entry left by a dead worktree elsewhere
+ * makes a new `.worktrees/beta` get `worktrees/beta1`, so the guess reads and
+ * writes ANOTHER worktree's directory.
+ *
+ * Three conditions, because `rev-parse` alone is a trap. An ordinary directory
+ * that merely sits inside the repository resolves UPWARD and returns the main
+ * repository's `.git` with exit 0, so a naive resolver would put the gateway's
+ * marker inside `.git` itself. The result is accepted only when the path is its
+ * own toplevel and the resolved directory is a direct child of
+ * `<git common dir>/worktrees`.
+ */
+async function resolveWorktreeAdminDirectory(
+  worktreePath: string,
   logger: Logger
 ): Promise<string | null> {
-  const commonDirectory = await canonicalGitCommonDirectory(repoRoot, logger);
+  if (!existsSync(worktreePath)) return null;
+  const gitDir = await execGit(worktreePath, ["rev-parse", "--absolute-git-dir"], logger);
+  if (gitDir.code !== 0) return null;
+  const topLevel = await execGit(worktreePath, ["rev-parse", "--show-toplevel"], logger);
+  if (topLevel.code !== 0) return null;
+  const commonDirectory = await canonicalGitCommonDirectory(worktreePath, logger);
   if (!commonDirectory) return null;
-  const admin = join(commonDirectory, "worktrees", name);
-  return existsSync(admin) ? admin : null;
+  try {
+    const resolved = realpathSync(gitDir.stdout.trim());
+    if (realpathSync(topLevel.stdout.trim()) !== realpathSync(worktreePath)) return null;
+    if (dirname(resolved) !== realpathSync(join(commonDirectory, "worktrees"))) return null;
+    return resolved;
+  } catch {
+    return null;
+  }
 }
 
 /**
- * The token this worktree was created with, or null when the marker is absent.
+ * The token this worktree was created with, or null when there is none to read.
  *
- * Absent is NOT an error: worktrees created before this marker existed have
- * none, and the caller decides what that means. It is only an error for a
- * marker to be present and disagree.
+ * Null covers four different situations on purpose, and every caller must treat
+ * them alike because none of them is evidence of ownership: the path is gone,
+ * the path is not a managed worktree, the worktree predates this marker, or the
+ * marker is unreadable. Only a token that is PRESENT and EQUAL authorises
+ * anything.
  */
 export async function readWorktreeOwnerToken(
-  repoRoot: string,
-  name: string,
+  worktreePath: string,
   logger: Logger
 ): Promise<string | null> {
-  const admin = await worktreeAdminDirectory(repoRoot, name, logger);
+  const admin = await resolveWorktreeAdminDirectory(worktreePath, logger);
   if (!admin) return null;
   try {
     const parsed: unknown = JSON.parse(readFileSync(join(admin, GATEWAY_WORKTREE_MARKER), "utf8"));
@@ -635,15 +671,31 @@ export async function createWorktree(opts: CreateWorktreeOptions): Promise<Workt
   // After the checkout, so a failed creation is torn down above rather than
   // leaving a marker behind for a worktree that does not exist.
   const token = randomUUID();
-  const admin = await worktreeAdminDirectory(repoRoot, name, logger);
-  if (!admin) {
+  try {
+    const admin = await resolveWorktreeAdminDirectory(finalTarget.path, logger);
+    if (!admin) {
+      throw new WorktreeError(
+        "Git administrative directory for the new worktree could not be resolved; refusing to create a worktree with no owner marker"
+      );
+    }
+    writeFileSync(join(admin, GATEWAY_WORKTREE_MARKER), JSON.stringify({ token }), {
+      mode: 0o600,
+    });
+    // READ IT BACK. `writeFileSync` returns void, so nothing above establishes
+    // that the marker exists and is readable; a call whose return value is
+    // never read has not been exercised. A worktree whose identity cannot be
+    // read back is worse than one with no identity, because cleanup would
+    // refuse it forever.
+    if ((await readWorktreeOwnerToken(finalTarget.path, logger)) !== token) {
+      throw new WorktreeError(
+        "Owner marker for the new worktree could not be read back; refusing to create an unidentifiable worktree"
+      );
+    }
+  } catch (error) {
     await execGit(repoRoot, ["worktree", "remove", "--force", finalTarget.path], logger);
     await execGit(repoRoot, ["branch", "-D", branch], logger);
-    throw new WorktreeError(
-      "Git admin directory for the new worktree could not be resolved; refusing to create a worktree with no owner marker"
-    );
+    throw error;
   }
-  writeFileSync(join(admin, GATEWAY_WORKTREE_MARKER), JSON.stringify({ token }), { mode: 0o600 });
 
   return {
     name,
@@ -711,20 +763,37 @@ export async function cleanupSessionWorktree(
   }
   const repoRoot = worktreePath.slice(0, markerIdx);
 
-  // The worktree at this path must be the one this session created, not merely
-  // one with the same name. Path and branch both derive from the name, so they
-  // cannot answer that; the creation token can. A cleanup that is retried after
-  // the removal-then-finalize window would otherwise delete a live worktree a
-  // later session legitimately created at the same name.
-  if (worktreeName !== undefined) {
-    // `null` on both sides, never `undefined` on one: an absent metadata field
-    // and an absent marker are the same statement, and comparing the two
-    // spellings directly stranded every worktree that predates the marker.
+  // ONLY when something is still there. `git worktree remove` deletes the
+  // administrative directory (builtin/worktree.c, `delete_git_dir` calls
+  // `remove_dir_recursively` on it), so a SUCCESSFUL removal always destroys
+  // the marker. Checking identity against an absent path therefore reads the
+  // evidence of success as evidence of a foreign worktree, and an earlier
+  // version of this did exactly that: after a crash between the removal and the
+  // durable acknowledgement, the retry refused forever and the tombstone became
+  // immortal. An absent path means the removal already happened; there is
+  // nothing left to delete and nothing left to identify.
+  if (existsSync(worktreePath)) {
     const recorded = typeof meta.worktreeToken === "string" ? meta.worktreeToken : null;
-    const onDisk = await readWorktreeOwnerToken(repoRoot, worktreeName, logger);
-    // Absent on BOTH sides is a worktree created before the marker existed:
-    // proceed, because refusing would strand it forever. Absent on one side
-    // only, or present and different, means this is not the same object.
+    const onDisk = await readWorktreeOwnerToken(worktreePath, logger);
+
+    // A session recorded before creation tokens existed cannot prove it owns
+    // the live worktree at its path, so it removes nothing.
+    //
+    // Treating "no token on either side" as a match was the obvious
+    // compatibility rule and it reopened the exact defect the token exists to
+    // close: a reviewer deleted a live replacement with a stale legacy record,
+    // because `null === null`. On a DESTRUCTIVE operation an unprovable claim
+    // has to fail closed. The cost is bounded and visible: the worktree stays
+    // on disk and the durable record is retained, so the session still appears
+    // in the pending-cleanup listing for an operator to resolve by hand. The
+    // cost of the alternative is someone else's working tree.
+    if (recorded === null) {
+      logWarn(
+        logger,
+        `worktree on session ${session.id} predates gateway creation tokens; refusing to remove a worktree this session cannot prove it created. Remove ${worktreePath} manually if it is stale.`
+      );
+      return false;
+    }
     if (recorded !== onDisk) {
       logWarn(
         logger,

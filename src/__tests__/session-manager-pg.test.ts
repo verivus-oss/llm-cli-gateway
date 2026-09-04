@@ -608,18 +608,20 @@ describe("PostgreSQLSessionManager", () => {
         let attempt = 0;
         attempt < 200 &&
         !logger.warn.mock.calls.some(([message]) =>
-          String(message).includes("no longer carries this session's creation token")
+          String(message).includes("Skipping cleanup for a non-managed worktree path")
         );
         attempt += 1
       ) {
         await new Promise(resolve => setTimeout(resolve, 10));
       }
 
-      // The recorded name no longer names a worktree carrying this session's
-      // creation token, so cleanup refuses before it can remove anything. That
-      // refusal is the point: the record must survive a failed removal.
+      // The recorded NAME no longer matches Git's registration for the live
+      // path, so removal refuses. Identity by token is resolved from the path
+      // and still agrees; it is the name that is wrong, which is why this is
+      // the layout refusal rather than the token one. Either way the record
+      // must survive a failed removal, and that is what this test asserts.
       expect(logger.warn).toHaveBeenCalledWith(
-        expect.stringContaining("no longer carries this session's creation token"),
+        "Skipping cleanup for a non-managed worktree path",
         undefined
       );
       expect(existsSync(resolution.worktreePath!)).toBe(true);

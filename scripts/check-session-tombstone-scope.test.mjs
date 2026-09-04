@@ -18,9 +18,9 @@ const tally = source => {
   const statements = sessionStatements(source);
   return {
     total: statements.length,
-    scoped: statements.filter(s => !s.insertOnly && !s.ddl && s.scoped).length,
+    scoped: statements.filter(s => !s.insertOnly && s.scoped).length,
     insertOnly: statements.filter(s => s.insertOnly).length,
-    exempt: statements.filter(s => !s.insertOnly && !s.ddl && s.exempted).length,
+    exempt: statements.filter(s => !s.insertOnly && s.exempted).length,
     failures: violations(statements).length,
   };
 };
@@ -32,8 +32,8 @@ describe("the governed file", () => {
   // bucket to the third is exactly the drift this gate exists to catch.
   it("has every session-row statement scoped, inserting, or exempt with a reason", () => {
     expect(tally(SOURCE)).toEqual({
-      total: 32,
-      scoped: 20,
+      total: 31,
+      scoped: 19,
       insertOnly: 6,
       exempt: 6,
       failures: 0,
@@ -60,9 +60,9 @@ describe("negative controls", () => {
     // table and pass `"s"`, and a control that removed only the default form
     // reported 21 of 23 while looking like a clean sweep.
     const mutated = SOURCE.replaceAll(/\$\{sessionNotTombstonedSql\([^)]*\)\}/g, "");
-    expect(SOURCE.split(PREDICATE_CALL).length - 1).toBe(18);
+    expect(SOURCE.split(PREDICATE_CALL).length - 1).toBe(20);
     expect(SOURCE.split('sessionNotTombstonedSql("s")').length - 1).toBe(2);
-    expect(tally(mutated).failures).toBe(20);
+    expect(tally(mutated).failures).toBe(19);
   });
 
   it("fires when one statement loses the predicate", () => {
@@ -82,7 +82,7 @@ describe("negative controls", () => {
 
   it("fires on a new unscoped read added to the file", () => {
     const added = `${SOURCE}\nconst leak = \`SELECT id FROM sessions WHERE cli = $1\`;\n`;
-    expect(tally(added)).toMatchObject({ total: 33, failures: 1 });
+    expect(tally(added)).toMatchObject({ total: 32, failures: 1 });
   });
 });
 
@@ -124,10 +124,42 @@ describe("the bypasses two reviewers walked through", () => {
     expect(sessionStatements(body)).toEqual([]);
   });
 
-  it("treats a view definition as DDL rather than a caller-facing read", () => {
-    expect(fires("CREATE OR REPLACE VIEW session_summary AS SELECT s.id FROM sessions s")).toEqual(
-      []
-    );
+  it("governs a view definition, because it reads rows like anything else", () => {
+    // The DDL exemption is GONE. A reviewer hid a live read behind it twice:
+    // `CREATE TABLE copy AS SELECT * FROM sessions` copied a tombstone on a
+    // real server, and a trailing `-- CREATE VIEW decoy` comment made an
+    // ordinary read scan as DDL. The `session_summary` view carries the
+    // predicate now instead of an exemption.
+    expect(fires("CREATE OR REPLACE VIEW session_summary AS SELECT s.id FROM sessions s")).toEqual([
+      expect.stringContaining("reads or mutates a session row"),
+    ]);
+    expect(
+      fires(
+        'CREATE OR REPLACE VIEW session_summary AS SELECT s.id FROM sessions s WHERE ${sessionNotTombstonedSql("s")}'
+      )
+    ).toEqual([]);
+    expect(fires("CREATE TABLE copy AS SELECT * FROM sessions")).toHaveLength(1);
+  });
+
+  it("sees a bare TABLE read, which names no FROM at all", () => {
+    // `TABLE sessions` is exactly `SELECT * FROM sessions` in PostgreSQL, and a
+    // reviewer read a tombstone back with it while this gate printed a clean
+    // census. Schema statements that merely contain the keyword are not reads.
+    expect(fires("TABLE sessions")).toHaveLength(1);
+    expect(fires("TABLE public.sessions")).toHaveLength(1);
+    expect(fires("ALTER TABLE sessions ALTER COLUMN id TYPE TEXT")).toEqual([]);
+    expect(fires("DROP TABLE sessions")).toEqual([]);
+  });
+
+  it("refuses a table reference split across concatenated literals", () => {
+    const body = '  meth() {\n    q("SELECT id, cli FROM " + "sessions WHERE id = $1");\n  }\n';
+    const failures = violations(sessionStatements(body));
+    expect(failures).toHaveLength(1);
+    expect(failures[0]).toContain("splits a table reference");
+    // Ending on a lock clause is not a split reference.
+    expect(
+      fires("SELECT id FROM sessions WHERE id = $1 AND ${sessionNotTombstonedSql()} FOR UPDATE")
+    ).toEqual([]);
   });
 });
 
