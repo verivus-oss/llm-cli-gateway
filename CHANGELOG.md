@@ -11,7 +11,9 @@ All notable changes to the llm-cli-gateway project.
   cleanup tombstone for a session that owns a gateway worktree, instead of
   deleting its row and making one unrecorded removal attempt. A failed removal
   is retained for retry by the host that owns the worktree, and the record is
-  finalized only after verified Git removal. Deletion processed by a different
+  finalized only once Git no longer registers the worktree. That is read back
+  rather than inferred: an absent recorded path used to count as a removal on
+  its own, which left the registration behind. Deletion processed by a different
   host removes no worktree and leaves that record intact. The database-side
   `cleanup_expired_sessions` function stages the same tombstone rather than
   deleting a worktree-bearing session; it invokes no gateway observer and so
@@ -31,10 +33,14 @@ All notable changes to the llm-cli-gateway project.
   that window left a record naming a path a later session could legitimately
   recreate; the retry then deleted the replacement. Each worktree now carries a
   per-creation token, asked of git rather than guessed from the worktree's name,
-  and both cleanup and same-session reuse require it to match. Cleanup also
-  refuses to report a removal for a worktree that was only moved, since
-  `git worktree move` leaves the recorded path stale while the worktree is alive
-  elsewhere. **A worktree created before this release carries no token, so a
+  and both cleanup and same-session reuse require it to match. The Git
+  administrative directory is recorded alongside it, because `git worktree
+  remove` deletes that directory and `git worktree move` leaves it alone, so it
+  answers whether a removal happened without reading anything a move or an
+  unavailable volume can take away. Cleanup refuses to report a removal for a
+  worktree that was only moved, and refuses equally when it cannot establish
+  the answer: a marker it cannot read, or a repository it cannot resolve, is a
+  failure to look and not a removal. **A worktree created before this release carries no token, so a
   session cannot prove it created what stands at its recorded path and will no
   longer remove it.** Those worktrees stay on disk, their durable records are
   retained and listed for cleanup, and the warning names the path to remove by

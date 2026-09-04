@@ -4,6 +4,7 @@ import {
   FileSessionStorageFaultError,
   remoteSafeSession,
   callerIsRemote,
+  INTERNAL_WORKTREE_METADATA_KEYS,
   publicSafeSession,
   sessionGenerationIdentity,
   type Session,
@@ -798,6 +799,7 @@ describe("remoteSafeSession + callerIsRemote", () => {
       worktreeOwnerHostname: "developer-workstation",
       worktreeOwnerInstanceId: "gateway-instance-uuid",
       worktreeToken: "b0f1f5a2-0000-4000-8000-000000000001",
+      worktreeAdminDirectory: "/home/operator/src/prod/.git/worktrees/abc123",
       worktreeCleanupPending: true,
       worktreeCleanupPendingDeletion: true,
     },
@@ -807,11 +809,14 @@ describe("remoteSafeSession + callerIsRemote", () => {
     const safe = remoteSafeSession(baseSession);
     expect(safe.metadata?.workspaceRoot).toBeUndefined();
     expect(safe.metadata?.worktreePath).toBe(join(".worktrees", "abc123"));
-    expect(safe.metadata?.worktreeOwnerHostname).toBeUndefined();
-    expect(safe.metadata?.worktreeOwnerInstanceId).toBeUndefined();
-    expect(safe.metadata?.worktreeToken).toBeUndefined();
-    expect(safe.metadata?.worktreeCleanupPending).toBeUndefined();
-    expect(safe.metadata?.worktreeCleanupPendingDeletion).toBeUndefined();
+    // Derived from the module's own list rather than retyped here. A key added
+    // to the projection but not to this fixture would otherwise be "stripped"
+    // by a test that never had it: both reviewers deleted the token strip and
+    // every test stayed green for exactly that reason.
+    for (const key of INTERNAL_WORKTREE_METADATA_KEYS) {
+      expect(baseSession.metadata?.[key], `fixture must carry ${key}`).toBeDefined();
+      expect(safe.metadata?.[key], `${key} must not reach a remote caller`).toBeUndefined();
+    }
     expect(safe.metadata?.workspaceAlias).toBe("gateway");
     expect(safe.metadata?.model).toBe("opus");
     // No absolute operator path anywhere in the projection.
@@ -825,14 +830,15 @@ describe("remoteSafeSession + callerIsRemote", () => {
 
   it("strips internal worktree ownership from the local public projection", () => {
     const safe = publicSafeSession(baseSession);
-    expect(safe.metadata?.worktreeOwnerHostname).toBeUndefined();
-    expect(safe.metadata?.worktreeOwnerInstanceId).toBeUndefined();
-    // The creation token is gateway-internal identity. Both reviewers deleted
-    // its strip and all 5085 tests stayed green, because the fixture carried no
-    // token to leak.
-    expect(safe.metadata?.worktreeToken).toBeUndefined();
-    expect(safe.metadata?.worktreeCleanupPending).toBeUndefined();
-    expect(safe.metadata?.worktreeCleanupPendingDeletion).toBeUndefined();
+    // The creation token and the administrative directory are gateway-internal
+    // identity. Both reviewers deleted the token strip and every test stayed
+    // green, because the fixture carried no token to leak; the set is derived
+    // from the module now, so a key cannot be added without a fixture value.
+    expect(INTERNAL_WORKTREE_METADATA_KEYS.length).toBeGreaterThanOrEqual(6);
+    for (const key of INTERNAL_WORKTREE_METADATA_KEYS) {
+      expect(baseSession.metadata?.[key], `fixture must carry ${key}`).toBeDefined();
+      expect(safe.metadata?.[key], `${key} must not reach a caller`).toBeUndefined();
+    }
     expect(safe.metadata?.workspaceRoot).toBe("/home/operator/src/prod");
     expect(safe.metadata?.worktreePath).toBe("/home/operator/src/prod/.worktrees/abc123");
   });

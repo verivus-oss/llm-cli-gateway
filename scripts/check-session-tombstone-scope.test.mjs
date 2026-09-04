@@ -1,12 +1,13 @@
 import { execFileSync } from "node:child_process";
 import { readFileSync } from "node:fs";
-import { dirname, join } from "node:path";
+import { dirname, join, relative } from "node:path";
 import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
 import {
   GOVERNED_FILE,
   guardedMethods,
   productionSources,
+  scan,
   sessionStatements,
   stripComments,
   violations,
@@ -180,6 +181,17 @@ describe("the bypasses two reviewers walked through", () => {
     expect(Number(scanned[1])).toBeGreaterThan(100);
   });
 
+  it("reports the set it read, not a count it computed separately", () => {
+    // Asserting the printed NUMBER was still defeatable in one line: keep the
+    // discovered list for the count and hand the scanner a different array.
+    // Round 4 did exactly that and this file stayed 25/25. The scan is a value
+    // now, so the set that was read is the thing under assertion.
+    const read = scan();
+    const expected = productionSources().map(file => relative(ROOT, file));
+    expect(read.files).toEqual(expected);
+    expect(read.perFile.map(entry => entry.file)).toEqual(expected);
+  });
+
   it("sees the row statements that name no FROM at all", () => {
     // `COPY sessions TO STDOUT` reads every row, `TRUNCATE` destroys them,
     // `MERGE INTO` writes them. A reviewer walked through the first while the
@@ -225,6 +237,43 @@ describe("the bypasses two reviewers walked through", () => {
       fires("SELECT id FROM sessions WHERE id = $1 AND ${sessionNotTombstonedSql()} FOR UPDATE")
     ).toEqual([]);
   });
+});
+
+it("sees a session read that names no FROM of its own", () => {
+  // `DELETE FROM other USING sessions WHERE ...` reads session rows,
+  // tombstones included, and names `other` in its FROM. A reviewer executed
+  // this against a real fixture and matched a tombstone while the gate
+  // printed a clean census.
+  const source = `function m() { return pool.query(\`DELETE FROM other USING sessions WHERE other.id = sessions.id\`); }`;
+  expect(violations(sessionStatements(source))).toHaveLength(1);
+});
+
+it("does not treat an upsert as an insert", () => {
+  // `ON CONFLICT ... DO UPDATE` writes rows that already exist. A reviewer
+  // changed a tombstone's description through one while the gate classified
+  // the statement insertOnly and exempted it by shape.
+  const upsert = `function m() { return pool.query(\`INSERT INTO sessions (id, cli, description) VALUES ($1, $2, $3) ON CONFLICT (id) DO UPDATE SET description = $3\`); }`;
+  expect(sessionStatements(upsert)[0].insertOnly).toBe(false);
+  expect(violations(sessionStatements(upsert))).toHaveLength(1);
+  // `DO NOTHING` writes nothing it did not create, so it stays an insert.
+  const doNothing = `function m() { return pool.query(\`INSERT INTO sessions (id, cli) VALUES ($1, $2) ON CONFLICT (id) DO NOTHING\`); }`;
+  expect(sessionStatements(doNothing)[0].insertOnly).toBe(true);
+  expect(violations(sessionStatements(doNothing))).toHaveLength(0);
+});
+
+it("refuses SQL whose VERB is split, which leaves no verb to recognise", () => {
+  // The shape test asks for a verb, so `"SELEC" + "T id FROM sessions"` was
+  // discarded before any concatenation rule ran: neither half is SQL-shaped.
+  // A reviewer read a tombstone through it.
+  const source = `function m() { return pool.query("SELEC" + "T id, cli, metadata FROM sessions WHERE id = $1"); }`;
+  expect(violations(sessionStatements(source))).toHaveLength(1);
+});
+
+it("still ignores prose that names the table but joins nothing", () => {
+  // The counterpart to the rule above: admitting verbless literals must not
+  // turn every sentence mentioning the table into a failure.
+  const source = `function m() { return log("removed 3 rows from sessions during migration"); }`;
+  expect(sessionStatements(source)).toHaveLength(0);
 });
 
 describe("what the scanner counts", () => {

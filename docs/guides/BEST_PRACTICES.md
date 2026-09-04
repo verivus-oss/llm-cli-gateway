@@ -372,7 +372,8 @@ Gateway worktrees work with file-backed and PostgreSQL session managers, but
 their filesystem ownership remains host-local. For session deletion,
 `session_clear_all`, and file-backed TTL eviction, both managers retain a failed
 cleanup for retry when a manager is registered on the owning host, and finalize
-the record only after verified Git removal. Deletion processed by another host
+the record only once Git no longer registers the worktree, read back rather than
+inferred from the recorded path being absent. Deletion processed by another host
 removes no worktree and leaves that record intact. The database-side
 `cleanup_expired_sessions` function stages the same record instead of deleting a
 worktree-bearing session; it invokes no gateway observer and so attempts no

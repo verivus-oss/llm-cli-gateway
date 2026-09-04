@@ -1,5 +1,10 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import { readFileSync } from "node:fs";
+import { execFileSync } from "node:child_process";
+import { existsSync, mkdtempSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { createWorktree, cleanupSessionWorktree } from "../worktree-manager.js";
+import { noopLogger } from "../logger.js";
 import { PostgreSQLSessionManager, deleteOrStageSessionsSql } from "../session-manager-pg.js";
 import {
   sessionGenerationIdentity,
@@ -25,6 +30,21 @@ import { cleanTestDatabase, setupTestDatabase, setupTestStorageDriver } from "./
  * fenced method that nothing here drives fails instead of shipping unexercised.
  */
 const GUARDED_METHODS: string[] = guardedMethods(readFileSync("src/session-manager-pg.ts", "utf8"));
+
+const git = (cwd: string, ...args: string[]): string =>
+  execFileSync("git", args, { cwd, encoding: "utf8" }).trim();
+
+/** A real repository with one commit, so git worktrees behave as in production. */
+function seedRepository(label: string): string {
+  const root = mkdtempSync(join(tmpdir(), `tombstone-wt-${label}-`));
+  git(root, "init", "-q", "-b", "main");
+  git(root, "config", "user.email", "test@example.test");
+  git(root, "config", "user.name", "Test");
+  writeFileSync(join(root, "tracked"), "seed");
+  git(root, "add", "tracked");
+  git(root, "commit", "-qm", "seed");
+  return root;
+}
 
 const execution = (overrides: Partial<KitExecutionRef> = {}): KitExecutionRef => ({
   version: 1,
@@ -919,6 +939,94 @@ describe("PostgreSQL sessions hide worktree-cleanup tombstones", () => {
       const stored = (await manager.getSession(live.id))!;
       expect(await manager.finalizePendingWorktreeCleanup(stored)).toBe(false);
       expect(await manager.getSession(live.id)).not.toBeNull();
+    });
+  });
+
+  /**
+   * The round-4 blocker, end to end on real PostgreSQL and real git.
+   *
+   * Both seats reproduced this outside the suite and neither reproduction was
+   * shipped, so the defect could return with everything green. These build a
+   * real repository, a real gateway worktree, a real PostgreSQL tombstone, and
+   * call the production cleanup and finalizer.
+   */
+  describe("a moved worktree, through PostgreSQL", () => {
+    const stage = async (
+      label: string,
+      handle: { path: string; name: string; token: string; adminDirectory: string }
+    ): Promise<Session> => {
+      const session = await manager.createSession("claude", label);
+      await manager.updateSessionMetadata(session.id, {
+        worktreePath: handle.path,
+        worktreeName: handle.name,
+        worktreeToken: handle.token,
+        worktreeAdminDirectory: handle.adminDirectory,
+        worktreeOwnerHostname: OWNER_HOST,
+        worktreeOwnerInstanceId: `instance-${label}`,
+      });
+      expect(await manager.deleteSession(session.id)).toBe(true);
+      return (await manager.listPendingWorktreeCleanupSessions(OWNER_HOST)).find(
+        row => row.id === session.id
+      )!;
+    };
+
+    it("retains the tombstone when the worktree only moved and its marker is gone", async () => {
+      const repo = seedRepository("pg-marker-deleted");
+      try {
+        const handle = await createWorktree({
+          repoRoot: repo,
+          name: "subject",
+          logger: noopLogger,
+        });
+        const moved = join(repo, ".worktrees", "subject-moved");
+        git(repo, "worktree", "move", handle.path, moved);
+        rmSync(join(handle.adminDirectory, "gateway-owner.json"), { force: true });
+        const tomb = await stage("pg-marker-deleted", handle);
+
+        const reported = await cleanupSessionWorktree(tomb, noopLogger, {
+          expectedOwnerHostname: OWNER_HOST,
+          requireOwnerMetadata: true,
+        });
+        expect(reported).toBe(false);
+        // Not finalized, so the owning host still has a record to retry.
+        expect(
+          (await manager.listPendingWorktreeCleanupSessions(OWNER_HOST)).map(row => row.id)
+        ).toContain(tomb.id);
+        expect(existsSync(moved)).toBe(true);
+      } finally {
+        rmSync(repo, { recursive: true, force: true });
+      }
+    });
+
+    it("finalizes only once git has stopped registering the worktree", async () => {
+      const repo = seedRepository("pg-renamed-away");
+      try {
+        const handle = await createWorktree({
+          repoRoot: repo,
+          name: "subject",
+          logger: noopLogger,
+        });
+        const moved = join(repo, ".worktrees", "subject-moved");
+        git(repo, "worktree", "move", handle.path, moved);
+        // Renamed outside git: the registration survives pointing at a path
+        // that is not there, which is also what an unavailable volume looks
+        // like. This is the shape the reviewer's reproduction used.
+        renameSync(moved, join(repo, ".worktrees", "subject-outside-git"));
+        const tomb = await stage("pg-renamed-away", handle);
+
+        const reported = await cleanupSessionWorktree(tomb, noopLogger, {
+          expectedOwnerHostname: OWNER_HOST,
+          requireOwnerMetadata: true,
+        });
+        expect(reported).toBe(true);
+        expect(await manager.finalizePendingWorktreeCleanup(tomb)).toBe(true);
+        // The property the reviewer measured, asserted on git and not on the
+        // return value: the registration the old code left behind is gone.
+        expect(git(repo, "worktree", "list", "--porcelain")).not.toContain(".worktrees");
+        expect(existsSync(handle.adminDirectory)).toBe(false);
+      } finally {
+        rmSync(repo, { recursive: true, force: true });
+      }
     });
   });
 

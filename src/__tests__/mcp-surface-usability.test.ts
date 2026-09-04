@@ -35,21 +35,42 @@ async function makeServer(asyncJobsEnabled: boolean) {
 }
 
 /**
- * Claims that contradict `session-tombstone-scope-pg.test.ts`. Narrow on
- * purpose: a phrase gate cannot decide whether prose is true, so it polices the
- * one class where a sentence is false by construction rather than pretending to
- * more.
+ * Verbs that put a session row in a caller's hands.
+ *
+ * Round 4 got past the previous list twice with ordinary English: "hands back"
+ * and "leak through" are the same claim as "returns", and neither was here.
+ * The list is the detector's whole reach, so it is spelled out once and both
+ * directions of the self-test read from it.
  */
-const TOMBSTONE_VISIBILITY_LIE = new RegExp(
+const HANDS_TO_CALLER = String.raw`(returns?|exposes?|reveals?|surfaces?|lists?|hands?(\s+\w+)?\s+back|hands?\s+back|hands?|leaks?|yields?|gives?(\s+\w+)?\s+back|shows?|includes?)`;
+
+/**
+ * A claim that a caller-facing read hands back a tombstone.
+ *
+ * This matches PHRASES, and a phrase gate is not a truth gate: it cannot know
+ * whether a sentence is true, only whether it is shaped like the specific
+ * falsehood the behaviour suite disproves. Two consequences are load-bearing
+ * and neither is fixed by widening it further. It misses any paraphrase not
+ * built from these verbs. And it would flag a TRUE sentence built from them,
+ * which is why the owning-host listing -- the one API that really does return
+ * tombstones -- is excluded by name rather than by hoping no one writes it.
+ * The behaviour suite is what establishes the behaviour; this only stops the
+ * documentation drifting into stating the opposite.
+ */
+const OWNING_HOST_LISTING = /listPendingWorktreeCleanupSessions/i;
+const TOMBSTONE_VISIBILITY_CLAIM = new RegExp(
   [
-    // "... returns / exposes / reveals ... tombstones | a deleted session"
-    String.raw`\b(returns?|exposes?|reveals?|surfaces?|lists?)\b[^.]{0,40}\b(cleanup\s+)?tombstones?\b`,
-    String.raw`\b(returns?|exposes?|reveals?|surfaces?|lists?)\b[^.]{0,40}\bdeleted\s+sessions?\b`,
-    // "... tombstones | deleted sessions are visible ..."
-    String.raw`\b((cleanup\s+)?tombstones?|deleted\s+sessions?)\b[^.]{0,40}\b(are|is)\s+visible\b`,
+    String.raw`\b` + HANDS_TO_CALLER + String.raw`\b[^.]{0,60}\b(cleanup\s+)?tombstones?\b`,
+    String.raw`\b` + HANDS_TO_CALLER + String.raw`\b[^.]{0,60}\bdeleted\s+sessions?\b`,
+    String.raw`\b((cleanup\s+)?tombstones?|deleted\s+sessions?)\b[^.]{0,60}\b(are|is|remain|stay)s?\s+(visible|readable|available)\b`,
+    String.raw`\b((cleanup\s+)?tombstones?|deleted\s+sessions?)\b[^.]{0,60}\b(leak|leaks|come|comes)\s+(back\s+)?(through|out\s+of)\b`,
   ].join("|"),
   "i"
 );
+const TOMBSTONE_VISIBILITY_LIE = {
+  test: (sentence: string): boolean =>
+    !OWNING_HOST_LISTING.test(sentence) && TOMBSTONE_VISIBILITY_CLAIM.test(sentence),
+};
 
 describe("the contradiction detector itself", () => {
   // Gutting the regex left this suite 12/12 green, so the pattern was asserted
@@ -61,8 +82,13 @@ describe("the contradiction detector itself", () => {
       "session_get exposes cleanup tombstones to callers.",
       "Deleted sessions are visible through session_list.",
       "session_get returns a deleted session until cleanup completes.",
+      // Round 4 wrote both of these past the previous pattern.
+      "session_get hands cleanup tombstones back to callers.",
+      "getSession still hands back a tombstone.",
+      "Tombstones leak through session_get.",
+      "Tombstones remain visible to getSession.",
     ]) {
-      expect(lie).toMatch(TOMBSTONE_VISIBILITY_LIE);
+      expect(TOMBSTONE_VISIBILITY_LIE.test(lie), lie).toBe(true);
     }
   });
 
@@ -71,8 +97,11 @@ describe("the contradiction detector itself", () => {
       "Both managers stage a caller-hidden cleanup tombstone before cleanup runs.",
       "A tombstone is not bounded by retention.",
       "Deletion processed by a different host removes no worktree.",
+      // True, and built from the detector's own verbs: the owning-host listing
+      // is the one read that really does return tombstones.
+      "listPendingWorktreeCleanupSessions lists cleanup tombstones for the owning host.",
     ]) {
-      expect(truth).not.toMatch(TOMBSTONE_VISIBILITY_LIE);
+      expect(TOMBSTONE_VISIBILITY_LIE.test(truth), truth).toBe(false);
     }
   });
 });
@@ -113,7 +142,9 @@ describe("MCP tool-surface usability (post-usability-review regressions)", () =>
     expect(description).toMatch(
       /[Bb]oth managers stage a caller-hidden cleanup tombstone before cleanup runs and retain a failed removal for retry by the host that owns the worktree/i
     );
-    expect(description).toMatch(/finalizing the record only after verified Git removal/i);
+    expect(description).toMatch(
+      /finalizing the record only once Git no longer registers the worktree, read back rather than inferred/i
+    );
     expect(description).toMatch(/file-backed TTL eviction uses the same tombstone retry path/i);
     expect(description).toMatch(
       /[Dd]eletion processed by a different host removes no worktree and leaves the owning host's record intact/i
@@ -129,7 +160,7 @@ describe("MCP tool-surface usability (post-usability-review regressions)", () =>
     // that a paragraph is TRUE, and a reviewer proved it by inserting a false
     // sentence that passed. This is the narrow class that IS checkable: a claim
     // that a deleted session is still visible contradicts the suite directly.
-    expect(description).not.toMatch(TOMBSTONE_VISIBILITY_LIE);
+    expect(TOMBSTONE_VISIBILITY_LIE.test(description), description).toBe(false);
   });
 
   it("session_clear_all describes its per-session worktree cleanup guarantees", async () => {
@@ -144,7 +175,9 @@ describe("MCP tool-surface usability (post-usability-review regressions)", () =>
     expect(description).toMatch(
       /[Bb]oth managers stage a caller-hidden cleanup tombstone before cleanup runs and retain a failed removal for retry by the host that owns the worktree/i
     );
-    expect(description).toMatch(/finalizing the record only after verified Git removal/i);
+    expect(description).toMatch(
+      /finalizing the record only once Git no longer registers the worktree, read back rather than inferred/i
+    );
     expect(description).toMatch(/file-backed TTL eviction uses the same tombstone retry path/i);
     expect(description).toMatch(
       /[Dd]eletion processed by a different host removes no worktree and leaves the owning host's record intact/i
@@ -155,7 +188,7 @@ describe("MCP tool-surface usability (post-usability-review regressions)", () =>
     expect(description).toMatch(/tombstone is not bounded by retention/i);
     expect(description).not.toMatch(/not retained for automatic retry/i);
     expect(description).not.toMatch(/performs no worktree cleanup/i);
-    expect(description).not.toMatch(TOMBSTONE_VISIBILITY_LIE);
+    expect(TOMBSTONE_VISIBILITY_LIE.test(description), description).toBe(false);
   });
 
   it("workspace tools are described as remote-only and not a stdio path-access fallback", async () => {
@@ -374,8 +407,12 @@ describe("MCP tool-surface usability (post-usability-review regressions)", () =>
         /retried when a manager is registered on the owning host/i
       );
       expect(description, `${toolName}.worktree must say the record outlives a failure`).toMatch(
-        /finalized only after verified Git removal/i
+        /finalized only once Git no longer registers the worktree, which is read back rather than inferred/i
       );
+      expect(
+        description,
+        `${toolName}.worktree must say that failing to look is not a removal`
+      ).toMatch(/whose owner marker cannot be read, is not a removal/i);
       expect(description, `${toolName}.worktree must scope retry to the owning host`).toMatch(
         /[Dd]eletion processed by another host removes no worktree and leaves the owning host's record intact/i
       );

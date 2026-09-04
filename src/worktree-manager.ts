@@ -1,6 +1,14 @@
 import { spawn } from "child_process";
 import { randomUUID } from "crypto";
-import { existsSync, lstatSync, mkdirSync, readFileSync, realpathSync, writeFileSync } from "fs";
+import {
+  existsSync,
+  lstatSync,
+  mkdirSync,
+  readdirSync,
+  readFileSync,
+  realpathSync,
+  writeFileSync,
+} from "fs";
 import { basename, dirname, isAbsolute, join, relative, resolve as resolvePath, sep } from "path";
 import { logWarn, noopLogger, type Logger } from "./logger.js";
 
@@ -74,6 +82,17 @@ export interface WorktreeHandle {
    * mirrored into durable session metadata. See `GATEWAY_WORKTREE_MARKER`.
    */
   token: string;
+  /**
+   * The Git administrative directory git gave this worktree, mirrored into
+   * durable session metadata alongside the token.
+   *
+   * It is recorded because it answers "was this worktree removed?" without
+   * reading anything the checkout owns: `git worktree remove` deletes it and
+   * `git worktree move` leaves it alone, so a deleted or unreadable marker, or
+   * a checkout on storage that has gone away, cannot make a live worktree look
+   * removed.
+   */
+  adminDirectory: string;
 }
 
 export interface CreateWorktreeOptions {
@@ -515,7 +534,126 @@ async function resolveWorktreeAdminDirectory(
 }
 
 /**
- * The live worktree carrying this token, if any, wherever git now says it is.
+ * The outcome of asking whether a session's worktree is still alive.
+ *
+ * Three cases, not two, and that is the whole point. An earlier version
+ * answered `string | null` and every way of FAILING to look collapsed into the
+ * same `null` the caller read as "nothing found, the removal happened". Both
+ * halves of this module's history are that mistake: first a failed
+ * `git worktree list`, then a failed per-worktree marker read one level in.
+ * Making "could not tell" a value the caller has to destructure is what stops
+ * it being spelled the same way as "proven gone".
+ */
+type WorktreeSearchResult =
+  { kind: "live"; path: string } | { kind: "removed" } | { kind: "indeterminate"; reason: string };
+
+/** One admin directory's marker, or why it could not be established. */
+type MarkerReading =
+  { kind: "token"; token: string } | { kind: "none" } | { kind: "unreadable"; reason: string };
+
+function describeError(error: unknown): string {
+  return error instanceof Error ? error.message : String(error);
+}
+
+/**
+ * Every linked worktree's administrative directory, read from the repository
+ * rather than from the checkouts.
+ *
+ * This is deliberately not `git worktree list` plus a walk into each checkout.
+ * That walk is what made cleanup fail open: a checkout on unavailable storage,
+ * or one whose marker is unreadable, answered the same way as a worktree that
+ * simply is not ours. The admin directories live under the repository's common
+ * directory, so they are readable exactly when the repository is, and the
+ * marker survives `git worktree move` untouched.
+ *
+ * An absent `worktrees` directory is a real answer, not a failure: git removes
+ * it along with the last linked worktree.
+ */
+async function listWorktreeAdminDirectories(
+  repoRoot: string,
+  logger: Logger
+): Promise<{ directories: string[] } | { failure: string }> {
+  // `execGit` REJECTS when git cannot be spawned at all, and this function's
+  // contract is to answer with a failure rather than to throw one past the
+  // caller: an exception escaping here would leave `cleanupSessionWorktree` to
+  // reject, which is a third spelling of the same "failure read as something
+  // else" defect.
+  let commonDirectory: string | null;
+  try {
+    commonDirectory = await canonicalGitCommonDirectory(repoRoot, logger);
+  } catch (error) {
+    return {
+      failure: `git could not resolve the common directory of ${repoRoot}: ${describeError(error)}`,
+    };
+  }
+  if (!commonDirectory) {
+    return { failure: `git could not resolve the common directory of ${repoRoot}` };
+  }
+  const container = join(commonDirectory, "worktrees");
+  try {
+    return {
+      directories: readdirSync(container, { withFileTypes: true })
+        .filter(entry => entry.isDirectory())
+        .map(entry => join(container, entry.name)),
+    };
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") return { directories: [] };
+    return { failure: `${container} could not be listed: ${describeError(error)}` };
+  }
+}
+
+/**
+ * Read one admin directory's owner marker.
+ *
+ * A missing marker file means this worktree carries no gateway identity, which
+ * is a fact. Anything else -- a permission error, an I/O error, a marker that
+ * does not parse -- is a failure to look, and is reported as such so that no
+ * caller can mistake it for a worktree that is not ours.
+ */
+function readAdminMarker(adminDirectory: string): MarkerReading {
+  let raw: string;
+  try {
+    raw = readFileSync(join(adminDirectory, GATEWAY_WORKTREE_MARKER), "utf8");
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") return { kind: "none" };
+    return {
+      kind: "unreadable",
+      reason: `${adminDirectory} owner marker could not be read: ${describeError(error)}`,
+    };
+  }
+  try {
+    const token = (JSON.parse(raw) as { token?: unknown }).token;
+    if (typeof token === "string" && token.length > 0) return { kind: "token", token };
+  } catch (error) {
+    return {
+      kind: "unreadable",
+      reason: `${adminDirectory} owner marker does not parse: ${describeError(error)}`,
+    };
+  }
+  // The gateway writes this file, so a present-but-tokenless marker is a
+  // corruption of our own record and not evidence that the worktree is
+  // someone else's.
+  return { kind: "unreadable", reason: `${adminDirectory} owner marker carries no token` };
+}
+
+/**
+ * The checkout an admin directory currently points at.
+ *
+ * git-worktree(1) DETAILS: the admin directory holds a `gitdir` file naming the
+ * worktree's `.git` file, and `git worktree move` rewrites exactly that. Used
+ * for the operator-facing message only; a failure to read it does not change
+ * any decision.
+ */
+function checkoutForAdminDirectory(adminDirectory: string): string | null {
+  try {
+    return dirname(readFileSync(join(adminDirectory, "gitdir"), "utf8").trim());
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Is the worktree this session created still alive, wherever git now keeps it?
  *
  * A recorded path going missing does NOT establish that the worktree was
  * removed. `git worktree move` relocates the checkout and rewrites the entry's
@@ -524,34 +662,88 @@ async function resolveWorktreeAdminDirectory(
  * cleanup report a removal that never happened, and the caller then finalized
  * the durable record, so the worktree leaked with nothing left pointing at it.
  *
- * The token is the only durable link that survives a move, which is why the
- * search is over tokens rather than paths.
+ * Two pieces of identity, and the admin directory is the stronger one.
+ * `git worktree remove` deletes the admin directory (builtin/worktree.c,
+ * `delete_git_dir`) and `git worktree move` leaves it exactly where it was, so
+ * its presence answers the question directly and without reading anything that
+ * a move or an unavailable volume can take away. The token is what tells a
+ * recycled admin directory -- git may hand the same name to a later worktree --
+ * apart from ours, and is the only identity sessions created before the admin
+ * directory was recorded have.
  */
-async function findLiveWorktreeByToken(
+async function locateLiveWorktree(
   repoRoot: string,
-  token: string,
+  identity: { token: string | null; adminDirectory: string | null },
   logger: Logger
-): Promise<string | null> {
-  let registrations: RegisteredWorktree[];
-  try {
-    registrations = await listRegisteredWorktrees(repoRoot, logger);
-  } catch {
-    // Refuse to conclude anything from a failed enumeration. The caller treats
-    // a null as "no live worktree found", so failing open here would resurrect
-    // the very false success this function exists to prevent; the enumeration
-    // failing is instead reported as a live worktree of unknown location.
-    return "unknown (git worktree list failed)";
-  }
-  for (const registration of registrations) {
-    if ((await readWorktreeOwnerToken(registration.path, logger)) === token) {
-      return registration.path;
+): Promise<WorktreeSearchResult> {
+  const listing = await listWorktreeAdminDirectories(repoRoot, logger);
+  if ("failure" in listing) return { kind: "indeterminate", reason: listing.failure };
+
+  if (identity.adminDirectory !== null) {
+    const recorded = canonicalPath(identity.adminDirectory);
+    const match = listing.directories.find(directory => canonicalPath(directory) === recorded);
+    if (!match) return { kind: "removed" };
+    // The directory is still registered. It is ours unless its marker proves it
+    // now belongs to a different creation, in which case ours was removed and
+    // git reused the name.
+    const marker = readAdminMarker(match);
+    if (identity.token !== null && marker.kind === "token" && marker.token !== identity.token) {
+      return { kind: "removed" };
     }
+    return liveOrPrunable(match);
   }
-  return null;
+
+  if (identity.token === null) {
+    return { kind: "indeterminate", reason: "session carries no worktree identity" };
+  }
+
+  const unreadable: string[] = [];
+  for (const directory of listing.directories) {
+    const marker = readAdminMarker(directory);
+    if (marker.kind === "token" && marker.token === identity.token) {
+      return liveOrPrunable(directory);
+    }
+    if (marker.kind === "unreadable") unreadable.push(marker.reason);
+  }
+  // Not finding the token among the worktrees we could read says nothing about
+  // the ones we could not.
+  if (unreadable.length > 0) {
+    return { kind: "indeterminate", reason: unreadable.join("; ") };
+  }
+  return { kind: "removed" };
 }
 
 /**
- * The token this worktree was created with, or null when there is none to read./**
+ * A registered administrative directory is a LIVE worktree only while the
+ * checkout it points at is still there.
+ *
+ * When it is not, the entry is the stale kind `git worktree prune` exists to
+ * clear, and refusing on it would be worse than useless: a retry takes the same
+ * path to the same answer, so the durable record would never be resolvable by
+ * the retry it is retained for, only by hand. Removal handles that case, and
+ * confirms the entry is gone before reporting success.
+ *
+ * The cost is stated rather than hidden: a checkout that is missing because its
+ * volume is unavailable, or because it was renamed outside git, is
+ * indistinguishable from one that was deleted. Git has no worktree either way,
+ * and the gateway reports the removal of what git knew about, not of a
+ * directory tree neither of them can name any more.
+ */
+function liveOrPrunable(adminDirectory: string): WorktreeSearchResult {
+  const checkout = checkoutForAdminDirectory(adminDirectory);
+  if (checkout === null) return { kind: "live", path: adminDirectory };
+  return existsSync(checkout) ? { kind: "live", path: checkout } : { kind: "removed" };
+}
+
+function canonicalPath(path: string): string {
+  try {
+    return realpathSync(path);
+  } catch {
+    return resolvePath(path);
+  }
+}
+
+/**
  * The token this worktree was created with, or null when there is none to read.
  *
  * Null covers four different situations on purpose, and every caller must treat
@@ -708,6 +900,7 @@ export async function createWorktree(opts: CreateWorktreeOptions): Promise<Workt
   // After the checkout, so a failed creation is torn down above rather than
   // leaving a marker behind for a worktree that does not exist.
   const token = randomUUID();
+  let adminDirectory: string;
   try {
     const admin = await resolveWorktreeAdminDirectory(finalTarget.path, logger);
     if (!admin) {
@@ -728,6 +921,7 @@ export async function createWorktree(opts: CreateWorktreeOptions): Promise<Workt
         "Owner marker for the new worktree could not be read back; refusing to create an unidentifiable worktree"
       );
     }
+    adminDirectory = admin;
   } catch (error) {
     await execGit(repoRoot, ["worktree", "remove", "--force", finalTarget.path], logger);
     await execGit(repoRoot, ["branch", "-D", branch], logger);
@@ -741,6 +935,7 @@ export async function createWorktree(opts: CreateWorktreeOptions): Promise<Workt
     createdAt: new Date().toISOString(),
     created: true,
     token,
+    adminDirectory,
   };
 }
 
@@ -814,12 +1009,25 @@ export async function cleanupSessionWorktree(
   // durable record for a worktree that still exists. Absence only means the
   // removal happened once nothing live still carries this session's token.
   const recordedToken = typeof meta.worktreeToken === "string" ? meta.worktreeToken : null;
-  if (!existsSync(worktreePath) && recordedToken !== null) {
-    const relocated = await findLiveWorktreeByToken(repoRoot, recordedToken, logger);
-    if (relocated) {
+  const recordedAdminDirectory =
+    typeof meta.worktreeAdminDirectory === "string" ? meta.worktreeAdminDirectory : null;
+  if (!existsSync(worktreePath) && (recordedToken !== null || recordedAdminDirectory !== null)) {
+    const located = await locateLiveWorktree(
+      repoRoot,
+      { token: recordedToken, adminDirectory: recordedAdminDirectory },
+      logger
+    );
+    if (located.kind === "live") {
       logWarn(
         logger,
-        `worktree for session ${session.id} is no longer at its recorded path but is still registered at ${relocated}; not reporting a removal that did not happen`
+        `worktree for session ${session.id} is no longer at its recorded path but is still registered at ${located.path}; not reporting a removal that did not happen`
+      );
+      return false;
+    }
+    if (located.kind === "indeterminate") {
+      logWarn(
+        logger,
+        `cannot establish whether the worktree for session ${session.id} still exists (${located.reason}); refusing to report a removal that has not been verified`
       );
       return false;
     }
@@ -866,6 +1074,41 @@ export async function cleanupSessionWorktree(
 
 export async function removeWorktree(opts: RemoveWorktreeOptions): Promise<void> {
   await removeWorktreeWithResult(opts);
+}
+
+/**
+ * Prune the stale administrative entry for a checkout that is no longer there,
+ * and report whether git has genuinely stopped registering that path.
+ *
+ * `git worktree prune` is the operation for exactly this state: an entry whose
+ * `gitdir` names a path that no longer exists. Reading the registration list
+ * back afterwards is what turns "we ran a command" into evidence; a prune whose
+ * result is never read establishes nothing, and failing to look is reported as
+ * failure rather than as an empty result.
+ */
+async function registrationCleared(
+  repoRoot: string,
+  path: string,
+  logger: Logger
+): Promise<boolean> {
+  try {
+    await execGit(repoRoot, ["worktree", "prune"], logger);
+    const canonical = canonicalPath(path);
+    const stillRegistered = (await listRegisteredWorktrees(repoRoot, logger)).some(
+      registration => canonicalPath(registration.path) === canonical
+    );
+    if (stillRegistered) {
+      logWarn(logger, `git still registers a worktree at ${path} after pruning; not a removal`);
+      return false;
+    }
+    return true;
+  } catch (error) {
+    logWarn(
+      logger,
+      `could not confirm that git no longer registers ${path}: ${describeError(error)}`
+    );
+    return false;
+  }
 }
 
 /**
@@ -931,6 +1174,14 @@ export async function removeWorktreeWithResult(opts: RemoveWorktreeOptions): Pro
         `git worktree remove --force failed (code ${remove.code}): ${remove.stderr.trim()}`
       );
       if (managed.exists && existsSync(managed.path)) return false;
+      // The checkout is not at this path and git refused anyway, which is what
+      // a stale registration looks like ("is not a working tree"). An absent
+      // directory was previously read as success on its own, and that is the
+      // hole every false-removal defect in this module has come through: the
+      // administrative entry survives, git still lists the worktree, and the
+      // durable record that would have driven a retry gets finalized. Clear the
+      // entry and CONFIRM it is gone before calling this a removal.
+      if (!(await registrationCleared(managed.repoRoot, managed.path, logger))) return false;
     }
     if (managed.name) {
       const branch = `gateway/${managed.name}`;

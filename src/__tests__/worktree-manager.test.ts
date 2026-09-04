@@ -18,6 +18,7 @@ import {
   mkdtempSync,
   readFileSync,
   realpathSync,
+  renameSync,
   rmSync,
   symlinkSync,
   writeFileSync,
@@ -83,6 +84,25 @@ function forceGitWorktreeListFailure(): () => void {
   writeFileSync(
     fakeGit,
     `#!/bin/sh\ncase " $* " in\n  *" worktree list "*) exit 43 ;;\nesac\nexec "${gitBinary}" "$@"\n`
+  );
+  chmodSync(fakeGit, 0o755);
+  process.env.PATH = `${fakeBin}:${originalPath ?? ""}`;
+  return () => {
+    if (originalPath === undefined) delete process.env.PATH;
+    else process.env.PATH = originalPath;
+    rmSync(fakeBin, { recursive: true, force: true });
+  };
+}
+
+/** Make `git rev-parse` fail, so the repository cannot be resolved at all. */
+function forceGitRevParseFailure(): () => void {
+  const originalPath = process.env.PATH;
+  const gitBinary = execFileSync("which", ["git"], { encoding: "utf8" }).trim();
+  const fakeBin = mkdtempSync(join(tmpdir(), "wt-revparse-failure-"));
+  const fakeGit = join(fakeBin, "git");
+  writeFileSync(
+    fakeGit,
+    `#!/bin/sh\ncase " $* " in\n  *" rev-parse "*) exit 43 ;;\nesac\nexec "${gitBinary}" "$@"\n`
   );
   chmodSync(fakeGit, 0o755);
   process.env.PATH = `${fakeBin}:${originalPath ?? ""}`;
@@ -871,6 +891,29 @@ describe("worktree creation token (issue #305 ABA window)", () => {
     },
   });
 
+  /**
+   * A session recorded since the administrative directory joined the durable
+   * identity. `sessionFor` deliberately stays token-only so the legacy scan is
+   * still the thing under test everywhere else.
+   */
+  const sessionWithAdminDirFor = (
+    handle: Awaited<ReturnType<typeof createWorktree>>,
+    id: string
+  ) => ({
+    ...sessionFor(handle, id),
+    metadata: {
+      ...sessionFor(handle, id).metadata,
+      worktreeAdminDirectory: handle.adminDirectory,
+    },
+  });
+
+  /** What git itself says it registers, canonicalised. */
+  const registeredPaths = (): string[] =>
+    execFileSync("git", ["worktree", "list", "--porcelain"], { cwd: repoRoot, encoding: "utf8" })
+      .split("\n")
+      .filter(line => line.startsWith("worktree "))
+      .map(line => realpathSync(line.slice("worktree ".length)));
+
   const cleanup = (session: { id: string; metadata?: Record<string, unknown> }) =>
     cleanupSessionWorktree(session, logger, {
       expectedOwnerHostname: hostname(),
@@ -1187,25 +1230,131 @@ describe("worktree creation token (issue #305 ABA window)", () => {
     expect(warnings.some(w => w.includes("still registered at"))).toBe(false);
   });
 
-  it("refuses rather than concluding a removal when it cannot enumerate worktrees", async () => {
-    // Failing open here would restore the false success by another route: an
-    // enumeration that errors would read as "nothing live carries this token".
-    const handle = await createWorktree({ repoRoot, name: "unlistable", logger: noopLogger });
-    const session = sessionFor(handle, "session-unlistable");
-    const moved = join(repoRoot, ".worktrees", "unlistable-elsewhere");
+  it("refuses rather than concluding a removal when it cannot resolve the repository", async () => {
+    // Failing open on a failure to LOOK is the defect class this whole block
+    // exists for: every version of this search that answered "found" or "not
+    // found" let an error spell itself the same way as "not found". The search
+    // no longer needs `git worktree list`, but it still has to ask git where
+    // the repository keeps its administrative directories, and that can fail.
+    const handle = await createWorktree({ repoRoot, name: "unresolvable", logger: noopLogger });
+    const session = sessionFor(handle, "session-unresolvable");
+    const moved = join(repoRoot, ".worktrees", "unresolvable-elsewhere");
     execFileSync("git", ["worktree", "move", handle.path, moved], {
       cwd: repoRoot,
       stdio: "ignore",
     });
 
-    const restoreGit = forceGitWorktreeListFailure();
+    const restoreGit = forceGitRevParseFailure();
     try {
       expect(await cleanup(session)).toBe(false);
-      expect(warnings.some(w => w.includes("git worktree list failed"))).toBe(true);
+      expect(warnings.some(w => w.includes("could not resolve the common directory"))).toBe(true);
     } finally {
       restoreGit();
     }
     expect(existsSync(moved)).toBe(true);
+  });
+
+  it("refuses a moved worktree whose owner marker cannot be read", async () => {
+    // Round-4 blocker, both seats, reproduced independently. The enumeration
+    // failed closed while the per-worktree marker read failed OPEN one level
+    // in: an unreadable marker answered "this worktree does not carry the
+    // token", the search reported nothing found, and cleanup finalized a
+    // durable record for a worktree that is registered and on disk.
+    const handle = await createWorktree({ repoRoot, name: "unreadable", logger: noopLogger });
+    const session = sessionFor(handle, "session-unreadable");
+    const moved = join(repoRoot, ".worktrees", "unreadable-elsewhere");
+    execFileSync("git", ["worktree", "move", handle.path, moved], {
+      cwd: repoRoot,
+      stdio: "ignore",
+    });
+    const marker = join(adminDirOf(moved), "gateway-owner.json");
+    chmodSync(marker, 0o000);
+
+    try {
+      expect(await cleanup(session)).toBe(false);
+      expect(warnings.some(w => w.includes("owner marker could not be read"))).toBe(true);
+    } finally {
+      chmodSync(marker, 0o600);
+    }
+    expect(existsSync(moved)).toBe(true);
+    expect(registeredPaths().includes(realpathSync(moved))).toBe(true);
+  });
+
+  it("refuses a moved worktree whose owner marker was deleted", async () => {
+    // The token cannot answer this one at all: the marker is genuinely gone, so
+    // no scan over markers can find it. The recorded administrative directory
+    // can, because `git worktree move` leaves that directory exactly where it
+    // was and only rewrites the `gitdir` file inside it.
+    const handle = await createWorktree({ repoRoot, name: "markerless", logger: noopLogger });
+    const session = sessionWithAdminDirFor(handle, "session-markerless");
+    const moved = join(repoRoot, ".worktrees", "markerless-elsewhere");
+    execFileSync("git", ["worktree", "move", handle.path, moved], {
+      cwd: repoRoot,
+      stdio: "ignore",
+    });
+    rmSync(join(adminDirOf(moved), "gateway-owner.json"), { force: true });
+
+    expect(await cleanup(session)).toBe(false);
+    expect(warnings.some(w => w.includes("still registered at"))).toBe(true);
+    expect(existsSync(moved)).toBe(true);
+  });
+
+  it("reports a removal only once git has stopped registering the worktree", async () => {
+    // The other half of the same blocker. A checkout that is not where git
+    // expects it makes `git worktree remove` fail, and an absent recorded path
+    // was read as success on its own, leaving the registration behind while the
+    // durable record was finalized. Success now means the entry is gone, and
+    // the assertion is on git's own listing rather than on the return value.
+    const handle = await createWorktree({ repoRoot, name: "renamed", logger: noopLogger });
+    const session = sessionWithAdminDirFor(handle, "session-renamed");
+    const moved = join(repoRoot, ".worktrees", "renamed-elsewhere");
+    execFileSync("git", ["worktree", "move", handle.path, moved], {
+      cwd: repoRoot,
+      stdio: "ignore",
+    });
+    const admin = adminDirOf(moved);
+    // Rename outside git, which is what an unavailable volume looks like too:
+    // the registration survives and points at a path that is not there.
+    const renamed = join(repoRoot, ".worktrees", "renamed-outside-git");
+    renameSync(moved, renamed);
+    expect(existsSync(admin)).toBe(true);
+
+    expect(await cleanup(session)).toBe(true);
+    expect(
+      registeredPaths().includes(
+        realpathSync(repoRoot) + sep + join(".worktrees", "renamed-elsewhere")
+      )
+    ).toBe(false);
+    expect(existsSync(admin)).toBe(false);
+    // Disclosed residual: the directory tree renamed out from under git is not
+    // removed, because nothing left in the repository names it.
+    expect(existsSync(renamed)).toBe(true);
+  });
+
+  it("does not report a removal it could not confirm", async () => {
+    // Pruning is only evidence once its result is read back. If the listing
+    // that would confirm the entry is gone cannot be run, that is a failure to
+    // look, and the durable record is retained for a retry that can look.
+    // `git worktree remove` succeeds outright when the checkout is simply gone
+    // and the entry still names it, so reaching the confirmation needs the
+    // shape where it does NOT: the registration points somewhere else, and the
+    // recorded path git is asked about is not a working tree.
+    const handle = await createWorktree({ repoRoot, name: "unconfirmable", logger: noopLogger });
+    const session = sessionFor(handle, "session-unconfirmable");
+    const moved = join(repoRoot, ".worktrees", "unconfirmable-elsewhere");
+    execFileSync("git", ["worktree", "move", handle.path, moved], {
+      cwd: repoRoot,
+      stdio: "ignore",
+    });
+    renameSync(moved, join(repoRoot, ".worktrees", "unconfirmable-outside-git"));
+
+    const restoreGit = forceGitWorktreeListFailure();
+    try {
+      expect(await cleanup(session)).toBe(false);
+      expect(warnings.some(w => w.includes("could not confirm"))).toBe(true);
+    } finally {
+      restoreGit();
+    }
   });
 
   it("keeps the token across a git worktree move, which renames nothing", async () => {

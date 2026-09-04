@@ -318,23 +318,33 @@ export function isWorktreeCleanupTombstone(session: Session | undefined | null):
  * caller-facing session projection. Durable storage retains them for CAS,
  * same-host reuse validation, and cleanup authorization.
  */
+/**
+ * Session metadata the gateway keeps for its own worktree bookkeeping and never
+ * hands to a caller.
+ *
+ * One list, used both to detect the keys and to remove them, because these were
+ * two hand-maintained lists and adding a sixth key meant remembering to edit
+ * both. A key present in the detector but missing from the deleter is a leak
+ * that the obvious test ("the projection has no owner hostname") does not see.
+ */
+export const INTERNAL_WORKTREE_METADATA_KEYS = [
+  "worktreeOwnerHostname",
+  "worktreeOwnerInstanceId",
+  "worktreeToken",
+  "worktreeAdminDirectory",
+  "worktreeCleanupPending",
+  "worktreeCleanupPendingDeletion",
+] as const;
+
 export function publicSafeSession(session: Session): Session {
   const hasInternalWorktreeOwnership =
     session.metadata !== undefined &&
-    ("worktreeOwnerHostname" in session.metadata ||
-      "worktreeOwnerInstanceId" in session.metadata ||
-      "worktreeToken" in session.metadata ||
-      "worktreeCleanupPending" in session.metadata ||
-      "worktreeCleanupPendingDeletion" in session.metadata);
+    INTERNAL_WORKTREE_METADATA_KEYS.some(key => key in session.metadata!);
   if (session.generation === undefined && !hasInternalWorktreeOwnership) return session;
   const { generation: _generation, ...publicSession } = session;
   if (!hasInternalWorktreeOwnership) return publicSession;
   const metadata: Record<string, any> = { ...publicSession.metadata };
-  delete metadata.worktreeOwnerHostname;
-  delete metadata.worktreeOwnerInstanceId;
-  delete metadata.worktreeToken;
-  delete metadata.worktreeCleanupPending;
-  delete metadata.worktreeCleanupPendingDeletion;
+  for (const key of INTERNAL_WORKTREE_METADATA_KEYS) delete metadata[key];
   return { ...publicSession, metadata };
 }
 
@@ -1174,6 +1184,9 @@ export class FileSessionManager
       const active = this.storage.sessions[activeSessionId];
       if (
         active &&
+        // Defence in depth, and unreachable while `removeOrStageSession` clears
+        // the Kit pointers before it stages a tombstone: no behavioural test can
+        // kill this line, and it is marked so it does not read as covered.
         !this.isPendingWorktreeDeletion(active) &&
         !this.isExpired(active) &&
         sessionMatchesKitBinding(active, cli, requestedBinding, ownerPrincipal)
@@ -1235,6 +1248,10 @@ export class FileSessionManager
     const activeSessionId = this.getActiveKitSessionId(cli, scopeRoot, execution, ownerPrincipal);
     if (activeSessionId !== sessionId) return false;
     const session = this.storage.sessions[sessionId];
+    // Defence in depth, same reason as the reuse branch above: the pointer this
+    // matched on is cleared before a tombstone is staged, so this cannot be
+    // driven. The invariant it stands behind is pinned by
+    // "clears the active Kit pointer when deletion stages a tombstone".
     if (session && this.isPendingWorktreeDeletion(session)) return false;
     const binding = session ? getKitSessionBinding(session) : null;
     if (

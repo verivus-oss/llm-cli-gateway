@@ -77,7 +77,7 @@ const BARE_TABLE_READ =
 const OTHER_ROW_STATEMENTS = String.raw`\b(COPY|TRUNCATE|MERGE INTO) ` + TABLE_REFERENCE;
 
 const SESSION_TABLE = new RegExp(
-  String.raw`\b(FROM|UPDATE|INTO|JOIN) ` +
+  String.raw`\b(FROM|UPDATE|INTO|JOIN|USING) ` +
     TABLE_REFERENCE +
     "|" +
     BARE_TABLE_READ +
@@ -86,7 +86,7 @@ const SESSION_TABLE = new RegExp(
   "i"
 );
 const SESSION_ROW_READ = new RegExp(
-  String.raw`\b(FROM|UPDATE|JOIN) ` +
+  String.raw`\b(FROM|UPDATE|JOIN|USING) ` +
     TABLE_REFERENCE +
     "|" +
     BARE_TABLE_READ +
@@ -96,11 +96,23 @@ const SESSION_ROW_READ = new RegExp(
 );
 
 /**
+ * An upsert is not an insert.
+ *
+ * `INSERT INTO sessions ... ON CONFLICT (id) DO UPDATE SET ...` writes rows
+ * that are ALREADY THERE, tombstones included, and the insert exemption exists
+ * only because a statement that can only ever add a new row cannot read or
+ * change one. A reviewer changed a tombstone's description through this form
+ * while the gate classified it `insertOnly` and printed a clean census.
+ * `DO NOTHING` stays an insert, because it writes nothing it did not create.
+ */
+const UPSERT = /\bON CONFLICT\b[\s\S]*?\bDO UPDATE\b/i;
+
+/**
  * A table name assembled at runtime. `FROM ${table}` is unreadable to any
  * static gate, so it is refused outright rather than analysed: this module has
  * no legitimate reason to compute a table name.
  */
-const INTERPOLATED_TABLE = /\b(FROM|UPDATE|INTO|JOIN|TABLE) (?:ONLY )?\$\{/i;
+const INTERPOLATED_TABLE = /\b(FROM|UPDATE|INTO|JOIN|USING|TABLE) (?:ONLY )?\$\{/i;
 
 /**
  * Is this literal SQL at all? Ordinary prose and non-SQL templates say "from
@@ -118,7 +130,7 @@ const SQL_SHAPE =
  * `"SELECT id FROM " + "sessions WHERE id = $1"` while this gate printed a
  * clean census.
  */
-const SPLIT_TABLE_REFERENCE = /(?<!\bFOR )\b(FROM|UPDATE|INTO|JOIN|TABLE) *$/i;
+const SPLIT_TABLE_REFERENCE = /(?<!\bFOR )\b(FROM|UPDATE|INTO|JOIN|USING|TABLE) *$/i;
 
 /**
  * SQL assembled by concatenation, in any shape.
@@ -205,12 +217,18 @@ export function sessionStatements(source) {
       .replace(/\/\*[\s\S]*?\*\//g, " ")
       .replace(/--[^\n]*/g, " ")
       .replace(/\s+/g, " ");
-    if (!SQL_SHAPE.test(sql)) continue;
-    const interpolatedTable = INTERPOLATED_TABLE.test(sql);
     const literalEnd = match.index + match[0].length;
+    const concatenated = isConcatenated(blanked, match.index, literalEnd);
+    // SQL_SHAPE keeps prose out by asking for a VERB, and a statement whose
+    // verb was split across the `+` has no verb in either half: a reviewer read
+    // a tombstone through `"SELEC" + "T id, cli FROM sessions WHERE id = $1"`
+    // while this test threw both literals away before any concatenation rule
+    // could see them. A concatenated literal that names the session table is
+    // examined whatever shape the fragment is in.
+    if (!SQL_SHAPE.test(sql) && !(concatenated && SESSION_TABLE.test(sql))) continue;
+    const interpolatedTable = INTERPOLATED_TABLE.test(sql);
     const splitTable =
-      (SPLIT_TABLE_REFERENCE.test(sql.slice(0, -1)) ||
-        isConcatenated(blanked, match.index, literalEnd)) &&
+      (SPLIT_TABLE_REFERENCE.test(sql.slice(0, -1)) || concatenated) &&
       assemblesSessionsStatement(blanked, match.index, literalEnd);
     if (!SESSION_TABLE.test(sql) && !interpolatedTable && !splitTable) continue;
     const line = blanked.slice(0, match.index).split("\n").length;
@@ -246,7 +264,8 @@ export function sessionStatements(source) {
       interpolatedTable,
       splitTable,
       scoped: SPLICED_PREDICATE.test(sql),
-      insertOnly: !interpolatedTable && !splitTable && !SESSION_ROW_READ.test(sql),
+      insertOnly:
+        !interpolatedTable && !splitTable && !SESSION_ROW_READ.test(sql) && !UPSERT.test(sql),
       exempted: preceding.includes(EXEMPT_MARKER),
     });
   }
@@ -311,12 +330,27 @@ export function violations(statements, file = GOVERNED_FILE) {
   });
 }
 
-function main() {
+/**
+ * Scan the tree and return what was actually read.
+ *
+ * `main` used to discover the files and print the count itself, so narrowing
+ * the scan while still printing the discovered total left the census looking
+ * complete and the unit suite green: a reviewer scanned ONE file and the gate
+ * reported 158. The scan is a value now, and the suite asserts the files in it
+ * against `productionSources()` directly, so there is no number left to print
+ * that the scan did not produce.
+ */
+export function scan() {
   const files = productionSources();
   const perFile = files.map(file => ({
     file: relative(ROOT, file),
     statements: sessionStatements(readFileSync(file, "utf8")),
   }));
+  return { files: perFile.map(entry => entry.file), perFile };
+}
+
+function main() {
+  const { files, perFile } = scan();
   const statements = perFile.flatMap(entry => entry.statements);
   const failures = perFile.flatMap(entry => violations(entry.statements, entry.file));
   if (failures.length > 0) {

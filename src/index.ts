@@ -1209,7 +1209,10 @@ export const WORKTREE_SCHEMA = z
       "managers hide a durably owned worktree session while cleanup runs. Failed " +
       "Git removal retains a cleanup-pending tombstone, blocks reuse, and is " +
       "retried when a manager is registered on the owning host; the record is " +
-      "finalized only after verified Git removal. Deletion processed by another " +
+      "finalized only once Git no longer registers the worktree, which is read " +
+      "back rather than inferred from the recorded path being absent. A worktree " +
+      "that moved, or whose owner marker cannot be read, is not a removal. " +
+      "Deletion processed by another " +
       "host removes no worktree and leaves the owning host's record intact. The " +
       "database-side cleanup_expired_sessions function stages the same tombstone " +
       "instead of deleting a worktree-bearing session; it invokes no gateway " +
@@ -2279,6 +2282,8 @@ export interface ResolvedWorktree {
     name: string;
     /** Creation token, so the durable binding can record which object this is. */
     token: string;
+    /** Git admin directory, so the durable binding can record where it lives. */
+    adminDirectory: string;
   };
   /** Internal CAS snapshot after a successful worktree metadata binding. */
   boundSession?: Session;
@@ -3204,6 +3209,7 @@ function resolvedSessionScopeMetadata(
                 worktreeOwnerHostname: hostname(),
                 worktreeOwnerInstanceId: runtime.asyncJobManager.getInstanceId(),
                 worktreeToken: resolution.requestOwnedWorktree.token,
+                worktreeAdminDirectory: resolution.requestOwnedWorktree.adminDirectory,
               }
             : {}),
         }
@@ -3375,6 +3381,7 @@ export async function resolveWorktreeForRequest(
               worktreeOwnerHostname: hostname(),
               worktreeOwnerInstanceId: runtime.asyncJobManager.getInstanceId(),
               worktreeToken: handle.token,
+              worktreeAdminDirectory: handle.adminDirectory,
             }
           : {}),
         ...(options.workspaceAlias ? { workspaceAlias: options.workspaceAlias } : {}),
@@ -3404,6 +3411,7 @@ export async function resolveWorktreeForRequest(
                 path: handle.path,
                 name: handle.name,
                 token: handle.token,
+                adminDirectory: handle.adminDirectory,
               },
             }
           : {}),
@@ -3432,6 +3440,7 @@ export async function resolveWorktreeForRequest(
             path: handle.path,
             name: handle.name,
             token: handle.token,
+            adminDirectory: handle.adminDirectory,
           },
         }
       : {}),
@@ -24076,7 +24085,7 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
 
   server.tool(
     "session_delete",
-    "Delete a gateway session record by ID. The tool result confirms record deletion; worktree cleanup observers run asynchronously and may still be in progress. Worktree cleanup runs on the processing host for file-backed and PostgreSQL session managers. Both managers stage a caller-hidden cleanup tombstone before cleanup runs and retain a failed removal for retry by the host that owns the worktree, finalizing the record only after verified Git removal. File-backed TTL eviction uses the same tombstone retry path. Deletion processed by a different host removes no worktree and leaves the owning host's record intact. The database-side cleanup_expired_sessions function stages the same tombstone instead of deleting a worktree-bearing session; it invokes no gateway observer and so attempts no removal itself. A tombstone is not bounded by retention.",
+    "Delete a gateway session record by ID. The tool result confirms record deletion; worktree cleanup observers run asynchronously and may still be in progress. Worktree cleanup runs on the processing host for file-backed and PostgreSQL session managers. Both managers stage a caller-hidden cleanup tombstone before cleanup runs and retain a failed removal for retry by the host that owns the worktree, finalizing the record only once Git no longer registers the worktree, read back rather than inferred from the recorded path being absent. File-backed TTL eviction uses the same tombstone retry path. Deletion processed by a different host removes no worktree and leaves the owning host's record intact. The database-side cleanup_expired_sessions function stages the same tombstone instead of deleting a worktree-bearing session; it invokes no gateway observer and so attempts no removal itself. A tombstone is not bounded by retention.",
     {
       sessionId: z.string().describe("Session ID"),
     },
@@ -24252,7 +24261,7 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
 
   server.tool(
     "session_clear_all",
-    "Delete all gateway session records, optionally scoped to one provider. The tool result confirms record deletion; worktree cleanup observers run asynchronously and may still be in progress. Worktree cleanup runs per session on the processing host for file-backed and PostgreSQL session managers. Both managers stage a caller-hidden cleanup tombstone before cleanup runs and retain a failed removal for retry by the host that owns the worktree, finalizing the record only after verified Git removal. File-backed TTL eviction uses the same tombstone retry path. Deletion processed by a different host removes no worktree and leaves the owning host's record intact. The database-side cleanup_expired_sessions function stages the same tombstone instead of deleting a worktree-bearing session; it invokes no gateway observer and so attempts no removal itself. A tombstone is not bounded by retention.",
+    "Delete all gateway session records, optionally scoped to one provider. The tool result confirms record deletion; worktree cleanup observers run asynchronously and may still be in progress. Worktree cleanup runs per session on the processing host for file-backed and PostgreSQL session managers. Both managers stage a caller-hidden cleanup tombstone before cleanup runs and retain a failed removal for retry by the host that owns the worktree, finalizing the record only once Git no longer registers the worktree, read back rather than inferred from the recorded path being absent. File-backed TTL eviction uses the same tombstone retry path. Deletion processed by a different host removes no worktree and leaves the owning host's record intact. The database-side cleanup_expired_sessions function stages the same tombstone instead of deleting a worktree-bearing session; it invokes no gateway observer and so attempts no removal itself. A tombstone is not bounded by retention.",
     {
       cli: sessionProviderEnum.optional().describe(`Provider filter (${sessionProviderLabel})`),
     },

@@ -1671,4 +1671,124 @@ describe("Personal Agent Config Kit persistence", () => {
       rmSync(testDir, { recursive: true, force: true });
     }
   });
+
+  it("clears the active Kit pointer when deletion stages a tombstone", async () => {
+    // Both reviewers deleted the tombstone guards on the active-pointer reuse
+    // and pointer-clear paths and the suite stayed green. Establishing the
+    // pointer first does not kill them either, and this is why: deletion clears
+    // the Kit pointers BEFORE it stages the row, so a tombstone with a live
+    // pointer cannot exist and those two guards are unreachable by
+    // construction. What is testable is the invariant they stand behind, so
+    // that is what this asserts. The guards themselves are marked in the source
+    // as defence in depth rather than left looking like covered behaviour.
+    testDir = join(
+      tmpdir(),
+      `kit-pointer-tombstone-${Date.now()}-${Math.random().toString(16).slice(2)}`
+    );
+    mkdirSync(testDir, { recursive: true });
+    const manager = new FileSessionManager(join(testDir, "sessions.json"));
+    try {
+      const kitBinding = binding();
+      const scopeRoot = kitBinding.execution.scopeRoot;
+      const session = manager.createKitSession("claude", kitBinding);
+      // The pointer is live and pointing at this session.
+      expect(
+        manager.setActiveKitSession("claude", scopeRoot, session.id, kitBinding.execution)
+      ).toBe(true);
+      expect(manager.getActiveKitSession("claude", scopeRoot, kitBinding.execution)?.id).toBe(
+        session.id
+      );
+
+      manager.updateSessionMetadata(session.id, {
+        worktreePath: join(testDir, "worktree"),
+        worktreeName: "wt-pointer-tombstone",
+        worktreeOwnerHostname: hostname(),
+        worktreeOwnerInstanceId: "instance-pointer",
+      });
+      expect(manager.deleteSession(session.id)).toBe(true);
+
+      // Asserted on the RAW stored pointer. `getActiveKitSession` applies its
+      // own tombstone check, so asserting through it returns null whether or
+      // not the pointer was cleared: that reads as coverage and measures
+      // nothing. The persisted map is the only place the invariant is visible.
+      const stored = JSON.parse(readFileSync(join(testDir, "sessions.json"), "utf8")) as {
+        activeKitSession?: Record<string, Record<string, string>>;
+      };
+      expect(
+        Object.values(stored.activeKitSession?.claude ?? {}),
+        "deletion must clear the Kit pointer, not rely on a later read filtering it"
+      ).not.toContain(session.id);
+      expect(manager.getActiveKitSession("claude", scopeRoot, kitBinding.execution)).toBeNull();
+      // And reuse through the pointer does not hand back the tombstoned row.
+      const reused = manager.getOrCreateKitSession("claude", kitBinding);
+      expect(reused.id).not.toBe(session.id);
+
+      // Same invariant reached through the pointer-scoped clear.
+      const stillTombstoned = manager.createKitSession("claude", kitBinding);
+      expect(
+        manager.setActiveKitSession("claude", scopeRoot, stillTombstoned.id, kitBinding.execution)
+      ).toBe(true);
+      manager.updateSessionMetadata(stillTombstoned.id, {
+        worktreePath: join(testDir, "worktree-2"),
+        worktreeName: "wt-pointer-tombstone-2",
+        worktreeOwnerHostname: hostname(),
+        worktreeOwnerInstanceId: "instance-pointer",
+      });
+      expect(manager.deleteSession(stillTombstoned.id)).toBe(true);
+      expect(
+        manager.clearActiveKitSessionIfCurrent(
+          "claude",
+          scopeRoot,
+          kitBinding.execution,
+          stillTombstoned.id
+        )
+      ).toBe(false);
+    } finally {
+      rmSync(testDir, { recursive: true, force: true });
+    }
+  });
+
+  it("refuses to delete a Kit session whose provider attempt is still live", async () => {
+    // Deleting a binding while its provider child owns the attempt would let a
+    // later request allocate a competing native turn. Both reviewers removed
+    // this guard and 151 tests stayed green.
+    testDir = join(
+      tmpdir(),
+      `kit-live-attempt-${Date.now()}-${Math.random().toString(16).slice(2)}`
+    );
+    mkdirSync(testDir, { recursive: true });
+    const manager = new FileSessionManager(join(testDir, "sessions.json"));
+    try {
+      const kitBinding = binding();
+      const scopeRoot = kitBinding.execution.scopeRoot;
+      const session = manager.createKitSession("claude", kitBinding);
+      expect(
+        manager.claimKitSessionAttempt(
+          "claude",
+          scopeRoot,
+          kitBinding.execution,
+          session.id,
+          attempt()
+        )
+      ).toBe(true);
+
+      expect(manager.deleteSession(session.id)).toBe(false);
+      expect(manager.getSession(session.id)?.id).toBe(session.id);
+
+      // Released, the same deletion succeeds, so the refusal above is the
+      // attempt and not some other property of the row.
+      expect(
+        manager.releaseKitSessionAttempt(
+          "claude",
+          scopeRoot,
+          kitBinding.execution,
+          session.id,
+          "attempt-a"
+        )
+      ).toBe(true);
+      expect(manager.deleteSession(session.id)).toBe(true);
+    } finally {
+      rmSync(testDir, { recursive: true, force: true });
+    }
+  });
 });
