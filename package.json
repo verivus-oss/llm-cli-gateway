@@ -134,6 +134,7 @@
     "interface:floor:check": "node scripts/check-interface-floor.mjs",
     "interface:floor:update": "node scripts/check-interface-floor.mjs --update",
     "storage:port:check": "node scripts/check-storage-port.mjs",
+    "session:tombstone:scope:check": "node scripts/check-session-tombstone-scope.mjs",
     "test:collection:check": "node scripts/check-test-collection.mjs",
     "test:assertion-parity": "node scripts/check-test-assertion-parity.mjs",
     "promise:conditions:check": "node scripts/check-promise-in-condition.mjs",

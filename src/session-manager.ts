@@ -302,6 +302,40 @@ export function sessionMatchesKitBinding(
   );
 }
 
+/**
+ * Metadata key marking a session as a worktree-cleanup tombstone: the caller's
+ * delete has already happened, and the row survives only so the host that owns
+ * the worktree can retry the filesystem removal.
+ */
+export const WORKTREE_CLEANUP_TOMBSTONE_KEY = "worktreeCleanupPendingDeletion";
+
+/** Is this row a deleted session kept only for worktree-cleanup retry? */
+export function isWorktreeCleanupTombstone(session: Session | undefined | null): boolean {
+  return session?.metadata?.[WORKTREE_CLEANUP_TOMBSTONE_KEY] === true;
+}
+
+/**
+ * The same rule as `isWorktreeCleanupTombstone`, as a SQL fragment for the
+ * PostgreSQL store.
+ *
+ * It lives beside the in-memory predicate for the reason `principalScopeSql`
+ * lives beside `principalCanAccess`: a tombstone is a DELETED session, and the
+ * rule deciding whether a caller may see a deleted row must not have one
+ * spelling per engine. The file store applies the predicate at each read; the
+ * PostgreSQL store splices this fragment into every statement that reads or
+ * mutates a session row, and `scripts/check-session-tombstone-scope.mjs` fails
+ * the build on a statement that carries neither the fragment nor a declared
+ * exemption.
+ *
+ * `alias` qualifies the column for statements that alias or join `sessions`; it
+ * is caller-supplied SQL, never user input. A NULL `metadata` is not a
+ * tombstone, which `COALESCE` states rather than leaving it to three-valued
+ * logic inside a `WHERE`.
+ */
+export function sessionNotTombstonedSql(alias = "sessions"): string {
+  return `COALESCE(${alias}.metadata->>'${WORKTREE_CLEANUP_TOMBSTONE_KEY}', 'false') <> 'true'`;
+}
+
 /** Strip internal concurrency and worktree ownership fields from every
  * caller-facing session projection. Durable storage retains them for CAS,
  * same-host reuse validation, and cleanup authorization.
@@ -502,7 +536,7 @@ export class FileSessionManager
   }
 
   private isPendingWorktreeDeletion(session: Session): boolean {
-    return session.metadata?.worktreeCleanupPendingDeletion === true;
+    return isWorktreeCleanupTombstone(session);
   }
 
   private hasDurablyOwnedWorktree(session: Session): boolean {

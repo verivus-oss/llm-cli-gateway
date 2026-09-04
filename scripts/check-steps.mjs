@@ -34,6 +34,7 @@ export const STEPS = [
   { name: "format:check", script: "format:check" },
   { name: "provider:surfaces:check", script: "provider:surfaces:check" },
   { name: "storage:port:check", script: "storage:port:check" },
+  { name: "session:tombstone:scope:check", script: "session:tombstone:scope:check" },
   { name: "transcript:schema:parity:check", script: "transcript:schema:parity:check" },
   { name: "promise:conditions:check", script: "promise:conditions:check" },
   { name: "capability:floor:check", script: "capability:floor:check" },

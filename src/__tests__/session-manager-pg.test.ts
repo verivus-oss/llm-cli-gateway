@@ -736,7 +736,12 @@ describe("PostgreSQLSessionManager", () => {
       worktreeCleanupPendingDeletion: true,
       worktreeOwnerHostname: "host-b.invalid",
     });
-    const current = (await manager.getSession(session.id))!;
+    // Read back through the tombstone surface, not `getSession`: a tombstone is
+    // a DELETED session and every caller-facing read now reports it absent.
+    const owner = "host-b.invalid";
+    const current = (await manager.listPendingWorktreeCleanupSessions(owner))[0]!;
+    expect(current.id).toBe(session.id);
+    expect(await manager.getSession(session.id)).toBeNull();
 
     // Same row, but presented as if this host owned it: the DELETE is fenced on
     // the stored hostname, so it must not match.
@@ -745,11 +750,11 @@ describe("PostgreSQLSessionManager", () => {
       metadata: { ...current.metadata, worktreeOwnerHostname: "host-a.invalid" },
     };
     expect(await manager.finalizePendingWorktreeCleanup(spoofed)).toBe(false);
-    expect(await manager.getSession(session.id)).not.toBeNull();
+    expect(await manager.listPendingWorktreeCleanupSessions(owner)).toHaveLength(1);
 
     // The true owner can finalize it.
     expect(await manager.finalizePendingWorktreeCleanup(current)).toBe(true);
-    expect(await manager.getSession(session.id)).toBeNull();
+    expect(await manager.listPendingWorktreeCleanupSessions(owner)).toEqual([]);
   });
 
   //──────────────────────────────────────────────────────────────────────────

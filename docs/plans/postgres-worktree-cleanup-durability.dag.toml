@@ -1,0 +1,156 @@
+# Implementation plan: give PostgreSQL session deletion the same durable
+# worktree-cleanup guarantee the file-backed manager already has. Issue #305.
+#
+# `worktrees-on-postgres-sessions.dag.toml` restored creation and same-host reuse
+# and shipped the host-filtered tombstone READ side. No production PostgreSQL
+# deletion path writes the tombstone, so those two methods are reachable only
+# from tests that seed the metadata. #302 documented that boundary rather than
+# claiming parity; the docs reverse only once the runtime earns it.
+
+[meta]
+name = "durable worktree cleanup under Postgres sessions"
+schema_version = "1.1"
+owner = "verivus-oss"
+issue = 305
+measured_against = "44ccb34"
+extends = "docs/plans/worktrees-on-postgres-sessions.dag.toml"
+acceptance_resource = """
+A PostgreSQL session with a durably owned worktree survives deletion as a
+caller-invisible tombstone until verified Git removal finalizes it; a failed
+removal is still listed for the owning host after a restart; neither a foreign
+host's deletion nor database-side expiry destroys that retry record."""
+invariant_sources = ["src/session-manager-pg.ts", "src/session-manager.ts", "src/index.ts", "migrations/009_personal_config_kit_session_cleanup.sql"]
+
+[decision]
+one_spelling = """
+The file-backed manager expresses this rule twice: `removeOrStageSession` for
+the write, fourteen `isPendingWorktreeDeletion` guards for the reads. Hand
+reproducing fourteen guards in SQL is the shape that produced the four drifted
+`CHECK (cli IN ...)` lists s8 found. Both halves become ONE declared predicate
+each, in the manner of `principalScopeSql`: a staging expression for every
+deletion path, a not-tombstoned predicate spliced into every statement that
+reads or mutates a session row. Staging is one statement, two data-modifying
+CTEs over one snapshot selected on whether the row carries a durably owned
+worktree, unioning their RETURNING rows; a SELECT then a later UPDATE would be
+a second place the classification is taken, and a CTE cannot disagree with
+itself.
+"""
+
+staging_is_not_retention = """
+Staging changes what deletion MEANS for a worktree-bearing row, so the arm is
+entered only on the same four fields `hasDurablyOwnedWorktree` requires. An
+already-tombstoned row is excluded from every deletion path rather than
+re-staged: a second staging UPDATE would notify the observer again and race the
+first attempt. NOT a blanket sweep, NOT a cross-host retry, NOT a bound on how
+long a tombstone lives; that last one is a durable-state question
+`durable-state-lifecycle.dag.toml` owns, and this adds one.
+"""
+
+expiry_is_the_hard_one = """
+`cleanup_expired_sessions` is plpgsql with no gateway in the loop, so it cannot
+notify an observer and must not be given one. It can only preserve the record:
+stage the tombstone instead of deleting and let the owning host's lazy
+enumeration find it. `POSTGRES_IMMUTABLE_MIGRATION_SHA256` pins every file, so
+this is migration 026 replacing the function body, never an edit to 009.
+"""
+
+[[steps]]
+id = "hide-tombstones-from-reads"
+depends_on = []
+actor = "assistant"
+status = """
+done 2026-09-04. 35 statements name the table: 23 carry the predicate, 6 insert
+a new row and are exempt by SHAPE, 6 carry a reason at the site.
+`session:tombstone:scope:check` derives the set and is in `npm run check`. The
+predicate is NOT uniform, found by doing it: an existence probe before an INSERT
+must stay unfiltered or the INSERT meets a key violation instead of the caller's
+conflict, so `getOrCreateKitSession` refuses a tombstoned id by name instead.
+Suite 5049 to 5060 and pg 201 to 207, 0 removed either side. Controls: all 23
+sites removed reddens 5 behavioural cases and leaves the live-session case
+green; the by-name refusal alone reddens exactly 1. FOUND, not fixed: the FILE
+store guards no Kit path at all, so it can hand back a deleted Kit session.
+Evidence: docs/evidence/postgres-worktree-cleanup-2026-09-04.md.
+"""
+action = """
+Declare the not-tombstoned predicate and splice it into every
+`PostgreSQLSessionManager` statement that reads or mutates a session row, not
+only `getSession` and `listSessions`. Derive the set from the class rather than
+a hand-written list of method names, and record the count. This lands FIRST and
+alone: until reads exclude tombstones, staging turns a deletion into a session
+that is still gettable, listable and resumable, which is worse than the gap.
+"""
+idempotent = true
+validation = "With a tombstone seeded directly, every enumerated read path reports the session absent; only `listPendingWorktreeCleanupSessions` returns it, to its owning host."
+
+[[steps]]
+id = "stage-on-delete"
+depends_on = ["hide-tombstones-from-reads"]
+actor = "assistant"
+status = "planned"
+action = """
+Route `deleteSession`, the delete arm of `compareAndSetSession`, and
+`clearAllSessions` through the staging statement. `session_clear_all` reaches
+this by deleting each session individually and needs no separate change, which
+must be asserted rather than assumed. Principal scoping and the Kit attempt
+fence stay in the predicate, and the staging arm inherits them: same WHERE.
+"""
+idempotent = true
+validation = "All three paths tombstone a worktree-bearing row and still report it gone; a plain session is deleted outright; Kit attempt and foreign principal refuse."
+
+[[steps]]
+id = "expiry-preserves-the-record"
+depends_on = ["stage-on-delete"]
+actor = "assistant"
+status = "planned"
+action = """
+Migration 026 redefines `cleanup_expired_sessions` to stage a tombstone on a
+worktree-bearing expired session and delete the rest, reporting both counts so
+an operator sees a row retained rather than removed. Extend the migration
+contract test's function inventory.
+"""
+idempotent = true
+validation = "The function leaves a tombstone the owning host lists where the pre-026 definition removed the row. Both states run."
+
+[[steps]]
+id = "observer-rejection-is-logged"
+depends_on = []
+actor = "assistant"
+status = "planned"
+action = """
+`PostgreSQLSessionManager.notifySessionRemoved` discards both a throw and a
+rejected promise with no logger to report to. Thread one in and report session
+id and failure as the file manager does, without widening what is logged.
+"""
+idempotent = true
+validation = "A rejecting observer produces one bounded log line naming the session."
+
+[[steps]]
+id = "tests-and-negative-controls"
+depends_on = ["expiry-preserves-the-record", "observer-rejection-is-logged"]
+actor = "assistant"
+status = "planned"
+action = """
+`*-pg` coverage for: successful cleanup finalizes; failed cleanup persists and
+retries under a fresh manager; foreign-host deletion keeps the record and
+touches no filesystem; database-side expiry preserves it; observer rejection is
+reported; the same session id is recreated while a tombstone exists. Each test
+is shown red against a mutant removing exactly the scoping it claims, run in
+both states, both numbers recorded here.
+"""
+idempotent = true
+validation = "Every added test dies to its own mutation; suite set difference recorded, 0 removed."
+
+[[steps]]
+id = "reverse-the-documented-limitation"
+depends_on = ["tests-and-negative-controls"]
+actor = "assistant"
+status = "planned"
+action = """
+Only now: reverse what #302 wrote. The claim that PostgreSQL retains no failed
+cleanup is true today and false after this, so README, the `session_delete` and
+`session_clear_all` descriptions, the generated discovery artifacts, the tests
+pinning those sentences and the predecessor plan header all move together.
+State the residual: cleanup is still the owning host's, tombstones unbounded.
+"""
+idempotent = true
+validation = "No shipped surface claims a guarantee the runtime does not have, in either direction."
