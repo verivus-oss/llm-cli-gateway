@@ -368,6 +368,16 @@ representation instead of executing host commands. If the provider needs
 materialized filter output, prepare it through a separately trusted workflow
 rather than relying on gateway worktree creation to execute host configuration.
 
+Gateway worktrees work with file-backed and PostgreSQL session managers, but
+their filesystem ownership remains host-local. For session deletion and
+file-backed TTL eviction, the file-backed manager retains failed cleanup for
+retry when that manager is registered on the owning host.
+Explicit PostgreSQL deletion, including `session_clear_all`, deletes the session
+row before its cleanup observer runs, so a failed removal is not retained for
+automatic retry, and deletion from another host cannot remove the owning host's
+worktree. The database-side `cleanup_expired_sessions` function invokes no
+gateway observer and performs no worktree cleanup.
+
 Codex new and resume prompts use stdin. `codex_fork_session` remains argv-bound
 and rejects oversized UTF-8 prompts as non-retryable `input_too_large`. Other
 current argv-only provider contracts use the same exact UTF-8 byte admission.

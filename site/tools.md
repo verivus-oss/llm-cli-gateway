@@ -42,9 +42,9 @@ npm run site:generate
 
 ## Sessions
 
-- `session_clear_all` - Delete all gateway session records, optionally scoped to one provider.
+- `session_clear_all` - Delete all gateway session records, optionally scoped to one provider. The tool result confirms record deletion; worktree cleanup observers run asynchronously and may still be in progress. Worktree cleanup runs per session on the processing host for file-backed and PostgreSQL session managers. The file-backed manager retains failed cleanup for retry when the manager is registered on the owning host. File-backed TTL eviction uses the same tombstone retry path. PostgreSQL deletes each session row before its cleanup observer runs, so a failed removal is not retained for automatic retry and a different host cannot remove the owning host's worktree. The database-side cleanup_expired_sessions function invokes no gateway observer and performs no worktree cleanup.
 - `session_create` - Create a gateway session record for a provider. NOTE: this is gateway bookkeeping (a plain UUID), not a provider-native session; Codex resume needs a real Codex UUID.
-- `session_delete` - Delete a gateway session record by ID (also removes any gateway-owned worktree attached to it).
+- `session_delete` - Delete a gateway session record by ID. The tool result confirms record deletion; worktree cleanup observers run asynchronously and may still be in progress. Worktree cleanup runs on the processing host for file-backed and PostgreSQL session managers. The file-backed manager retains failed cleanup for retry when the manager is registered on the owning host. File-backed TTL eviction uses the same tombstone retry path. PostgreSQL deletes the session row before its cleanup observer runs, so a failed removal is not retained for automatic retry and a different host cannot remove the owning host's worktree. The database-side cleanup_expired_sessions function invokes no gateway observer and performs no worktree cleanup.
 - `session_get` - Get one gateway session record by session ID, including recent request history when available.
 - `session_list` - List gateway session records and the active session per provider, optionally filtered by provider.
 - `session_set_active` - Set or clear the active session for a provider; the active session is used when a request omits sessionId.

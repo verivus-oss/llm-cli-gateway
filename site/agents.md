@@ -82,6 +82,15 @@ temporary cwd, not the gateway process repository. Select `workingDir` or a
 registered `workspace` for repository-dependent work. A gateway worktree also
 requires a selected registered workspace and never falls back to process cwd.
 Cwd-scoped `resumeLatest` requests fail closed without a stable target.
+Gateway worktrees work with file-backed and PostgreSQL session managers, but
+their filesystem ownership remains host-local. For session deletion and
+file-backed TTL eviction, the file-backed manager retains failed cleanup for
+retry when that manager is registered on the owning host.
+Explicit PostgreSQL deletion, including `session_clear_all`, deletes the session
+row before its cleanup observer runs, so a failed removal is not retained for
+automatic retry, and deletion from another host cannot remove the owning host's
+worktree. The database-side `cleanup_expired_sessions` function invokes no
+gateway observer and performs no worktree cleanup.
 
 ## Security model
 

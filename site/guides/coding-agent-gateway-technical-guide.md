@@ -299,14 +299,20 @@ Important families:
    workspace selected explicitly, through caller-owned session metadata, or by
    the configured default; it never falls back to process cwd or combines with
    local `workingDir`, `addDir`, or `includeDirs`. An unscoped child uses a fresh
-   neutral cwd. Gateway worktrees require the local file-backed session manager;
-   PostgreSQL-backed sessions reject them before filesystem mutation. Grok,
-   Devin, and Mistral worktrees also require an explicit provider-native
+   neutral cwd. Gateway worktrees work with either the local file-backed or
+   PostgreSQL session manager. Reuse and cleanup remain limited to the host that
+   owns the filesystem artifact, even when PostgreSQL shares the session row.
+   Grok, Devin, and Mistral worktrees also require an explicit provider-native
    `sessionId`; fresh, `createNewSession`, and `resumeLatest`-only requests fail
-   closed. Session deletion and TTL eviction keep a failed Git removal as a
-   hidden cleanup-pending tombstone, block reuse, and retry when that file store
-   is registered on the owning host. The tombstone is finalized only after
-   verified Git removal.
+   closed. For the file-backed manager, session deletion and TTL eviction keep a
+   failed Git removal as a hidden cleanup-pending tombstone, block reuse, and
+   retry when that manager is registered on the owning host. Explicit PostgreSQL
+   deletion, including `session_clear_all`, deletes the session row before its
+   cleanup observer runs, so cleanup is a single attempt on the host processing
+   deletion. A failed removal is not retained for automatic retry, and deletion
+   from another host cannot remove the owning host's worktree. The database-side
+   `cleanup_expired_sessions` function invokes no gateway observer and performs
+   no worktree cleanup.
 5. Use async tools for long reviews, large refactors, and slow provider runs.
 6. Keep provider credentials in provider CLIs or named environment variables.
 7. Use `review_changes` for complete Git evidence. Treat `consensus_check` and

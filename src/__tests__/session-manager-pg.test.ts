@@ -1,15 +1,39 @@
-import { describe, it, expect, beforeEach } from "vitest";
+import { describe, it, expect, beforeEach, vi } from "vitest";
+import { execFileSync } from "node:child_process";
+import { existsSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { hostname, tmpdir } from "node:os";
+import { join } from "node:path";
 import { PROVIDER_TYPES, sessionGenerationIdentity } from "../session-manager.js";
 import { PostgreSQLSessionManager } from "../session-manager-pg.js";
-import { resolveGatewayServerRuntime, resolveWorktreeForRequest } from "../index.js";
+import {
+  createGatewayServer,
+  resolveGatewayServerRuntime,
+  resolveWorktreeForRequest,
+} from "../index.js";
 import { runWithRequestContext } from "../request-context.js";
 import { cleanTestDatabase, setupTestDatabase, setupTestStorageDriver } from "./setup.js";
 
+function initGitRepository(): string {
+  const repoRoot = mkdtempSync(join(tmpdir(), "pg-session-worktree-"));
+  execFileSync("git", ["init", "-b", "main"], { cwd: repoRoot, stdio: "ignore" });
+  execFileSync("git", ["config", "user.email", "test@example.com"], {
+    cwd: repoRoot,
+    stdio: "ignore",
+  });
+  execFileSync("git", ["config", "user.name", "Test"], { cwd: repoRoot, stdio: "ignore" });
+  writeFileSync(join(repoRoot, "README.md"), "seed\n");
+  execFileSync("git", ["add", "README.md"], { cwd: repoRoot, stdio: "ignore" });
+  execFileSync("git", ["commit", "-m", "seed"], { cwd: repoRoot, stdio: "ignore" });
+  return repoRoot;
+}
+
 describe("PostgreSQLSessionManager", () => {
   let manager: PostgreSQLSessionManager;
+  let pool: Awaited<ReturnType<typeof setupTestDatabase>>["pool"];
 
   beforeEach(async () => {
     await cleanTestDatabase();
+    ({ pool } = await setupTestDatabase());
     manager = new PostgreSQLSessionManager(await setupTestStorageDriver());
   });
 
@@ -185,21 +209,48 @@ describe("PostgreSQLSessionManager", () => {
   //──────────────────────────────────────────────────────────────────────────
 
   describe("deleteSession", () => {
-    it("notifies cleanup observers only after successful removals", async () => {
-      const observed: string[] = [];
-      const unsubscribe = manager.addSessionRemovalObserver(
-        async session => await observed.push(session.id)
-      );
+    it("deletes rows before observers and cannot retain observer-side cleanup state", async () => {
+      const observed: Array<{
+        id: string;
+        rowAfterDelete: Promise<Awaited<ReturnType<typeof manager.getSession>>>;
+        retentionAfterDelete: Promise<boolean>;
+      }> = [];
+      const unsubscribe = manager.addSessionRemovalObserver(session => {
+        const rowAfterDelete = manager.getSession(session.id);
+        const retentionAfterDelete = rowAfterDelete.then(() =>
+          manager.updateSessionMetadata(session.id, {
+            worktreeCleanupPending: true,
+            worktreeCleanupPendingDeletion: true,
+          })
+        );
+        observed.push({ id: session.id, rowAfterDelete, retentionAfterDelete });
+        return retentionAfterDelete.then(() => undefined);
+      });
       const deleted = await manager.createSession("claude", "Observer delete");
       const cleared = await manager.createSession("codex", "Observer clear");
+      for (const session of [deleted, cleared]) {
+        await manager.updateSessionMetadata(session.id, {
+          worktreePath: `/tmp/${session.id}`,
+          worktreeName: session.id,
+          worktreeOwnerHostname: hostname(),
+          worktreeOwnerInstanceId: "pg-test-owner",
+        });
+      }
 
       expect(await manager.deleteSession("missing-session")).toBe(false);
       expect(observed).toEqual([]);
       expect(await manager.deleteSession(deleted.id)).toBe(true);
-      expect(observed).toEqual([deleted.id]);
+      expect(observed.map(item => item.id)).toEqual([deleted.id]);
+      expect(await observed[0]!.rowAfterDelete).toBeNull();
+      expect(await observed[0]!.retentionAfterDelete).toBe(false);
+      expect(await manager.getSession(deleted.id)).toBeNull();
 
       expect(await manager.clearAllSessions("codex")).toBe(1);
-      expect(observed).toEqual([deleted.id, cleared.id]);
+      expect(observed.map(item => item.id)).toEqual([deleted.id, cleared.id]);
+      expect(await observed[1]!.rowAfterDelete).toBeNull();
+      expect(await observed[1]!.retentionAfterDelete).toBe(false);
+      expect(await manager.getSession(cleared.id)).toBeNull();
+      expect(await manager.listPendingWorktreeCleanupSessions(hostname())).toEqual([]);
       unsubscribe();
     });
 
@@ -405,6 +456,212 @@ describe("PostgreSQLSessionManager", () => {
   // removed the capability from every Postgres host in 3.1.0-rc.5. The property
   // that actually matters is enforced below: a worktree recorded as belonging
   // to a different host is refused, whatever the storage engine.
+  it("creates and reuses a same-host worktree with PostgreSQL sessions", async () => {
+    const repoRoot = initGitRepository();
+    try {
+      const session = await manager.createSession("claude", "same-host worktree");
+      const runtime = resolveGatewayServerRuntime({ sessionManager: manager });
+      const directive = { name: "pg-same-host" };
+
+      const first = await resolveWorktreeForRequest(directive, session.id, runtime, { repoRoot });
+      expect(first.worktreePath).toBeDefined();
+      expect(existsSync(first.worktreePath!)).toBe(true);
+      expect((await manager.getSession(session.id))?.metadata).toMatchObject({
+        worktreePath: first.worktreePath,
+        worktreeName: "pg-same-host",
+        worktreeOwnerHostname: hostname(),
+      });
+      const beforeReuse = execFileSync("git", ["worktree", "list", "--porcelain"], {
+        cwd: repoRoot,
+        encoding: "utf8",
+      });
+
+      const second = await resolveWorktreeForRequest(directive, session.id, runtime, { repoRoot });
+      const afterReuse = execFileSync("git", ["worktree", "list", "--porcelain"], {
+        cwd: repoRoot,
+        encoding: "utf8",
+      });
+      expect(second.worktreePath).toBe(first.worktreePath);
+      expect(second.cwd).toBe(first.cwd);
+      expect(afterReuse).toBe(beforeReuse);
+    } finally {
+      rmSync(repoRoot, { recursive: true, force: true });
+    }
+  });
+
+  it("removes an owning-host worktree when a PostgreSQL session is deleted", async () => {
+    const repoRoot = initGitRepository();
+    const server = createGatewayServer({ sessionManager: manager });
+    try {
+      const session = await manager.createSession("claude", "owning-host deletion");
+      const runtime = resolveGatewayServerRuntime({ sessionManager: manager });
+      const resolution = await resolveWorktreeForRequest(
+        { name: "pg-owning-host-deletion" },
+        session.id,
+        runtime,
+        { repoRoot }
+      );
+      expect(existsSync(resolution.worktreePath!)).toBe(true);
+
+      expect(await manager.deleteSession(session.id)).toBe(true);
+      for (let attempt = 0; attempt < 200 && existsSync(resolution.worktreePath!); attempt += 1) {
+        await new Promise(resolve => setTimeout(resolve, 10));
+      }
+
+      expect(existsSync(resolution.worktreePath!)).toBe(false);
+      expect(await manager.getSession(session.id)).toBeNull();
+    } finally {
+      await server.close();
+      rmSync(repoRoot, { recursive: true, force: true });
+    }
+  });
+
+  it("cleans worktree metadata bound between the deletion read and DELETE", async () => {
+    const repoRoot = initGitRepository();
+    const server = createGatewayServer({ sessionManager: manager });
+    let releaseDelete = (): void => undefined;
+    try {
+      const session = await manager.createSession("claude", "concurrent worktree binding");
+      const runtime = resolveGatewayServerRuntime({ sessionManager: manager });
+      const originalGetSession = manager.getSession.bind(manager);
+      let signalInitialRead = (): void => undefined;
+      const initialRead = new Promise<void>(resolve => {
+        signalInitialRead = resolve;
+      });
+      const continueDelete = new Promise<void>(resolve => {
+        releaseDelete = resolve;
+      });
+      vi.spyOn(manager, "getSession").mockImplementationOnce(async sessionId => {
+        const snapshot = await originalGetSession(sessionId);
+        signalInitialRead();
+        await continueDelete;
+        return snapshot;
+      });
+
+      const deletion = manager.deleteSession(session.id);
+      await initialRead;
+      const resolution = await resolveWorktreeForRequest(
+        { name: "pg-concurrent-deletion" },
+        session.id,
+        runtime,
+        { repoRoot }
+      );
+      expect(existsSync(resolution.worktreePath!)).toBe(true);
+      releaseDelete();
+
+      expect(await deletion).toBe(true);
+      for (let attempt = 0; attempt < 200 && existsSync(resolution.worktreePath!); attempt += 1) {
+        await new Promise(resolve => setTimeout(resolve, 10));
+      }
+
+      expect(existsSync(resolution.worktreePath!)).toBe(false);
+      expect(await manager.getSession(session.id)).toBeNull();
+    } finally {
+      releaseDelete();
+      vi.restoreAllMocks();
+      await server.close();
+      rmSync(repoRoot, { recursive: true, force: true });
+    }
+  });
+
+  it("does not retain failed PostgreSQL worktree cleanup for retry", async () => {
+    const repoRoot = initGitRepository();
+    const logger = {
+      info: vi.fn(),
+      warn: vi.fn(),
+      error: vi.fn(),
+      debug: vi.fn(),
+    };
+    const server = createGatewayServer({ sessionManager: manager, logger });
+    try {
+      const session = await manager.createSession("claude", "failed cleanup");
+      const runtime = resolveGatewayServerRuntime({ sessionManager: manager });
+      const resolution = await resolveWorktreeForRequest(
+        { name: "pg-failed-cleanup" },
+        session.id,
+        runtime,
+        { repoRoot }
+      );
+      const persisted = (await manager.getSession(session.id))!;
+      await manager.updateSessionMetadata(session.id, {
+        ...persisted.metadata,
+        worktreeName: "mismatched-worktree-name",
+      });
+
+      expect(await manager.deleteSession(session.id)).toBe(true);
+      for (
+        let attempt = 0;
+        attempt < 200 &&
+        !logger.warn.mock.calls.some(([message]) =>
+          String(message).includes("Skipping cleanup for a non-managed worktree path")
+        );
+        attempt += 1
+      ) {
+        await new Promise(resolve => setTimeout(resolve, 10));
+      }
+
+      expect(logger.warn).toHaveBeenCalledWith(
+        "Skipping cleanup for a non-managed worktree path",
+        undefined
+      );
+      expect(existsSync(resolution.worktreePath!)).toBe(true);
+      expect(await manager.getSession(session.id)).toBeNull();
+      expect(await manager.listPendingWorktreeCleanupSessions(hostname())).toEqual([]);
+    } finally {
+      await server.close();
+      rmSync(repoRoot, { recursive: true, force: true });
+    }
+  });
+
+  it("leaves an owning host's worktree in place when another host deletes the session", async () => {
+    const repoRoot = initGitRepository();
+    const logger = {
+      info: vi.fn(),
+      warn: vi.fn(),
+      error: vi.fn(),
+      debug: vi.fn(),
+    };
+    const server = createGatewayServer({ sessionManager: manager, logger });
+    try {
+      const session = await manager.createSession("claude", "foreign-host deletion");
+      const runtime = resolveGatewayServerRuntime({ sessionManager: manager });
+      const resolution = await resolveWorktreeForRequest(
+        { name: "pg-foreign-host-deletion" },
+        session.id,
+        runtime,
+        { repoRoot }
+      );
+      const persisted = (await manager.getSession(session.id))!;
+      await manager.updateSessionMetadata(session.id, {
+        ...persisted.metadata,
+        worktreeOwnerHostname: "some-other-host.invalid",
+      });
+
+      expect(await manager.deleteSession(session.id)).toBe(true);
+      for (
+        let attempt = 0;
+        attempt < 200 &&
+        !logger.warn.mock.calls.some(([message]) =>
+          String(message).includes("is not owned by this host; skipping cleanup")
+        );
+        attempt += 1
+      ) {
+        await new Promise(resolve => setTimeout(resolve, 10));
+      }
+
+      expect(logger.warn).toHaveBeenCalledWith(
+        expect.stringContaining("is not owned by this host; skipping cleanup"),
+        undefined
+      );
+      expect(existsSync(resolution.worktreePath!)).toBe(true);
+      expect(await manager.getSession(session.id)).toBeNull();
+      expect(await manager.listPendingWorktreeCleanupSessions(hostname())).toEqual([]);
+    } finally {
+      await server.close();
+      rmSync(repoRoot, { recursive: true, force: true });
+    }
+  });
+
   it("refuses to reuse a worktree recorded as owned by another host", async () => {
     const session = await manager.createSession("claude", "foreign worktree");
     await manager.updateSessionMetadata(session.id, {
@@ -418,6 +675,39 @@ describe("PostgreSQLSessionManager", () => {
     await expect(
       resolveWorktreeForRequest(true, session.id, runtime, { repoRoot: process.cwd() })
     ).rejects.toThrow(/same-host gateway-owned Git worktree/);
+  });
+
+  it("database-side expiry removes no worktree and invokes no observer", async () => {
+    const repoRoot = initGitRepository();
+    try {
+      const session = await manager.createSession("claude", "database expiry");
+      const runtime = resolveGatewayServerRuntime({ sessionManager: manager });
+      const resolution = await resolveWorktreeForRequest(
+        { name: "pg-database-expiry" },
+        session.id,
+        runtime,
+        { repoRoot }
+      );
+      const observed: string[] = [];
+      manager.addSessionRemovalObserver(removed => {
+        observed.push(removed.id);
+      });
+      await manager.setActiveSession("claude", null);
+      await pool.query(
+        "UPDATE sessions SET last_used_at = NOW() - INTERVAL '40 days' WHERE id = $1",
+        [session.id]
+      );
+
+      const cleanup = await pool.query<{ deleted: number }>(
+        "SELECT cleanup_expired_sessions(30) AS deleted"
+      );
+      expect(cleanup.rows[0]?.deleted).toBe(1);
+      expect(await manager.getSession(session.id)).toBeNull();
+      expect(observed).toEqual([]);
+      expect(existsSync(resolution.worktreePath!)).toBe(true);
+    } finally {
+      rmSync(repoRoot, { recursive: true, force: true });
+    }
   });
 
   it("scopes pending worktree tombstones to this host, in the query", async () => {

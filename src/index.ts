@@ -1130,11 +1130,12 @@ export const CLI_OPTION_VALUE_SCHEMA = z.string().refine(value => !value.startsW
  * `<repoRoot>/.worktrees/<uuid>`
  * branched from HEAD. `{ name?, ref? }` lets the caller supply a sanitized
  * name and/or git ref (default ref: HEAD).
- * Creating or reusing a worktree requires file-backed session persistence and
- * a selected registered workspace,
+ * Creating or reusing a worktree works with either the file-backed or
+ * PostgreSQL session manager and requires a selected registered workspace,
  * resolved from the request, caller-owned session metadata, or configured
- * default. It never falls back to the gateway process cwd and cannot be
- * combined with local workingDir, addDir, or includeDirs paths.
+ * default. Session-bound reuse stays limited to the host that owns the
+ * filesystem artifact. It never falls back to the gateway process cwd and
+ * cannot be combined with local workingDir, addDir, or includeDirs paths.
  *
  * Lifecycle is gateway-owned: the gateway pre-creates the worktree via
  * `git worktree add`, then spawns the child CLI with `cwd: <worktree-path>`.
@@ -1144,12 +1145,16 @@ export const CLI_OPTION_VALUE_SCHEMA = z.string().refine(value => !value.startsW
  * registration on its expected gateway branch. Named path collisions never
  * reuse manager state. Grok, Devin, and Mistral require an explicit
  * provider-native sessionId; fresh, createNewSession, and resumeLatest-only
- * worktree requests fail closed. On session_delete or TTL eviction the gateway
- * hides the session and runs `git worktree remove --force`. A failed removal
- * retains a durable cleanup-pending tombstone which blocks reuse and is retried
- * when the file store is registered on the owning host. The tombstone is
- * finalized only after verified Git removal. Request-scoped worktrees are
- * removed after terminal completion or failed admission.
+ * worktree requests fail closed. The file-backed manager hides a durably owned
+ * worktree session during session_delete or TTL eviction, then retains a
+ * cleanup-pending tombstone after failed Git removal. Explicit PostgreSQL
+ * deletion, including session_clear_all, deletes the session row before its
+ * cleanup observer runs, so cleanup is a single attempt on the host processing
+ * deletion. A failed removal is not retained for automatic retry, and deletion
+ * from another host cannot remove the owning host's worktree. The database-side
+ * cleanup_expired_sessions function invokes no gateway observer and performs no
+ * worktree cleanup. Request-scoped worktrees are removed after terminal
+ * completion or failed admission.
  * Worktree materialization suppresses repository, system, and global Git
  * hooks and configured clean, smudge, and process checkout filters. It also
  * disables sparse checkout and lazy object fetching. Content that depends on
@@ -1181,8 +1186,9 @@ export const WORKTREE_SCHEMA = z
       "git ref (default: HEAD). When the request carries a sessionId and " +
       "the session already has a worktree, reuse requires same-host ownership " +
       "metadata and a matching live Git registration. Named path collisions " +
-      "never reuse manager state. Gateway-managed worktrees require the local " +
-      "file-backed session manager and fail closed with PostgreSQL sessions. The " +
+      "never reuse manager state. Gateway-managed worktrees work with file-backed " +
+      "and PostgreSQL session managers. Shared PostgreSQL rows do not transfer " +
+      "filesystem ownership; reuse and cleanup remain limited to the owning host. The " +
       "Grok, Devin, and Mistral adapters require an explicit provider-native " +
       "sessionId; fresh, createNewSession, and resumeLatest-only worktree " +
       "requests fail closed because they cannot durably reselect the worktree. The " +
@@ -1197,11 +1203,17 @@ export const WORKTREE_SCHEMA = z
       "filters, sparse checkout, and lazy object fetching. Filter-dependent " +
       "content such as Git LFS remains in its " +
       "repository representation instead of executing host commands. On " +
-      "session_delete or TTL eviction the gateway hides the session and runs " +
-      "`git worktree remove --force`. Failed removal retains a durable " +
-      "cleanup-pending tombstone which blocks reuse and is retried when the " +
-      "file store is registered on the owning host. The tombstone is finalized " +
-      "only after verified Git removal. Successful responses are prefixed with " +
+      "session_delete or file-backed TTL eviction, the file-backed manager hides " +
+      "a durably owned worktree session while cleanup runs. Failed Git removal " +
+      "retains a cleanup-pending tombstone, blocks reuse, and is retried when the " +
+      "file-backed manager is registered on the owning host. Explicit PostgreSQL " +
+      "deletion, including session_clear_all, " +
+      "deletes the session row before its cleanup observer runs, so cleanup is a " +
+      "single attempt on the host processing deletion. A failed removal is not " +
+      "retained for automatic retry, and deletion from another host cannot remove " +
+      "the owning host's worktree. The database-side cleanup_expired_sessions " +
+      "function invokes no gateway observer and performs no worktree cleanup. " +
+      "Successful responses are prefixed with " +
       "`[gateway] worktree=<absolute-path>\\n` so callers can use the " +
       "path. For Claude approvalStrategy:mcp_managed, requesting or reusing a " +
       "worktree requires approval and LLM_GATEWAY_APPROVAL_ALLOW_BYPASS=1. " +
@@ -8650,8 +8662,7 @@ function ensureLiveKitSessionCleanup(runtime: GatewayServerRuntime): void {
 }
 
 /**
- * Remove a durable session's gateway-created worktree after the manager has
- * hidden it behind a durable deletion tombstone.
+ * Remove a session's gateway-created worktree when its removal observer runs.
  *
  * Registered for BOTH session managers. The earlier restriction to the file
  * manager was a proxy for the property that actually matters, which is that a
@@ -8661,11 +8672,15 @@ function ensureLiveKitSessionCleanup(runtime: GatewayServerRuntime): void {
  * than removed, and the Postgres tombstone query filters by hostname in SQL so
  * a foreign row is never even returned here.
  *
- * Expressing it as an engine check instead silently disabled worktrees for
- * every Postgres-backed host in 3.1.0-rc.5.
+ * The file-backed manager notifies after hiding a durably owned session behind
+ * a cleanup-pending tombstone. Verified Git removal then acknowledges and
+ * deletes that tombstone. Explicit PostgreSQL deletion notifies after deleting
+ * the row, so cleanup is one host-fenced attempt with no tombstone to retain for
+ * acknowledgement or retry. Database-side PostgreSQL expiry invokes no
+ * observer.
  *
- * The manager acknowledges and deletes the tombstone only after verified Git
- * removal.
+ * Expressing this boundary as an engine check instead silently disabled
+ * worktrees for every Postgres-backed host in 3.1.0-rc.5.
  */
 function ensureWorktreeSessionCleanup(runtime: GatewayServerRuntime): void {
   const sessionManager = runtime.sessionManager;
@@ -24045,7 +24060,7 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
 
   server.tool(
     "session_delete",
-    "Delete a gateway session record by ID (also removes any gateway-owned worktree attached to it).",
+    "Delete a gateway session record by ID. The tool result confirms record deletion; worktree cleanup observers run asynchronously and may still be in progress. Worktree cleanup runs on the processing host for file-backed and PostgreSQL session managers. The file-backed manager retains failed cleanup for retry when the manager is registered on the owning host. File-backed TTL eviction uses the same tombstone retry path. PostgreSQL deletes the session row before its cleanup observer runs, so a failed removal is not retained for automatic retry and a different host cannot remove the owning host's worktree. The database-side cleanup_expired_sessions function invokes no gateway observer and performs no worktree cleanup.",
     {
       sessionId: z.string().describe("Session ID"),
     },
@@ -24221,7 +24236,7 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
 
   server.tool(
     "session_clear_all",
-    "Delete all gateway session records, optionally scoped to one provider.",
+    "Delete all gateway session records, optionally scoped to one provider. The tool result confirms record deletion; worktree cleanup observers run asynchronously and may still be in progress. Worktree cleanup runs per session on the processing host for file-backed and PostgreSQL session managers. The file-backed manager retains failed cleanup for retry when the manager is registered on the owning host. File-backed TTL eviction uses the same tombstone retry path. PostgreSQL deletes each session row before its cleanup observer runs, so a failed removal is not retained for automatic retry and a different host cannot remove the owning host's worktree. The database-side cleanup_expired_sessions function invokes no gateway observer and performs no worktree cleanup.",
     {
       cli: sessionProviderEnum.optional().describe(`Provider filter (${sessionProviderLabel})`),
     },

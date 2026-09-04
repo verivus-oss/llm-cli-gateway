@@ -42,7 +42,13 @@ describe("release to public Pages contract", () => {
   const guardedWorktreeProviderSkills = ["devin", "grok", "mistral"].map(provider =>
     readRepositoryFile(`.agents/skills/provider-${provider}/SKILL.md`)
   );
+  const changelog = readRepositoryFile("CHANGELOG.md");
   const bestPractices = readRepositoryFile("docs/guides/BEST_PRACTICES.md");
+  const readme = readRepositoryFile("README.md");
+  const agentGuide = readRepositoryFile("site/agents.md");
+  const technicalGuide = readRepositoryFile("site/guides/coding-agent-gateway-technical-guide.md");
+  const toolCatalog = readRepositoryFile("site/tools.md");
+  const releaseArticle = readRepositoryFile("docs/articles/3.1.0-release.md");
 
   it("marks GitHub prereleases from the checked-out package version", () => {
     expect(releaseWorkflow).toContain(
@@ -328,6 +334,59 @@ describe("release to public Pages contract", () => {
       expect(normalizedProviderSkill).toContain(explicitSessionRule);
       expect(normalizedProviderSkill).toContain(rejectedSessionModes);
     }
+  });
+
+  it("keeps current public guidance aligned with PostgreSQL worktree support", () => {
+    for (const [name, document] of [
+      ["README", readme],
+      ["best practices", bestPractices],
+      ["agent guide", agentGuide],
+      ["technical guide", technicalGuide],
+      ["tool catalog", toolCatalog],
+    ]) {
+      expect(document, `${name} must name both supported session managers`).toMatch(
+        /file-backed\s+(?:or|and)\s+PostgreSQL session manager/i
+      );
+      expect(document, `${name} must explain host-local ownership`).toMatch(
+        /owning host|host that owns the filesystem artifact/i
+      );
+      expect(document, `${name} must couple bulk deletion to PostgreSQL cleanup limits`).toMatch(
+        /(?:(?:Explicit\s+)?PostgreSQL\s+deletion,\s+including\s+`?session_clear_all`?,\s+deletes\s+(?:the|a)\s+session\s+row\s+before\s+(?:its|the)\s+cleanup\s+observer\s+runs|`?session_clear_all`?[^\n]{0,800}PostgreSQL\s+deletes\s+each\s+session\s+row\s+before\s+(?:its|the)\s+cleanup\s+observer\s+runs)/i
+      );
+      expect(document, `${name} must disclose the missing retry`).toMatch(
+        /failed\s+(?:worktree\s+)?removal\s+is\s+not\s+retained\s+for\s+automatic\s+retry/i
+      );
+      expect(document, `${name} must cover database-side expiry`).toMatch(
+        /cleanup_expired_sessions[^.]*no\s+gateway\s+observer[^.]*no\s+worktree\s+cleanup/i
+      );
+      expect(document, `${name} must not restore the obsolete engine gate`).not.toMatch(
+        /PostgreSQL-backed sessions reject|fail closed with PostgreSQL session storage/i
+      );
+    }
+
+    for (const [name, document] of [
+      ["changelog", changelog],
+      ["README", readme],
+      ["best practices", bestPractices],
+      ["agent guide", agentGuide],
+      ["technical guide", technicalGuide],
+    ]) {
+      expect(document, `${name} must scope TTL eviction to the file store`).toMatch(
+        /file-backed manager[^.]*TTL eviction|file-backed TTL eviction|TTL eviction in the file-backed manager/i
+      );
+      expect(document, `${name} must scope file-backed retry to deletion or TTL eviction`).toMatch(
+        /session deletion[^.]*file-backed TTL eviction[^.]*failed (?:Git )?(?:worktree )?(?:removal|cleanup)[^.]*retr(?:y|ies)|file-backed manager[^.]*session deletion[^.]*TTL eviction[^.]*failed (?:Git )?(?:worktree )?(?:removal|cleanup)[^.]*retr(?:y|ies)/i
+      );
+    }
+
+    expect(releaseArticle).not.toContain("implements the cleanup-tombstone surface for real");
+    expect(changelog).not.toContain("implements the cleanup-tombstone surface for real");
+    expect(changelog).not.toContain("Recovery stays lazy");
+    expect(releaseArticle.replace(/\s+/g, " ")).toContain(
+      "That compatibility surface does not make ordinary PostgreSQL deletion durable. " +
+        "Explicit deletion removes the session row before its cleanup observer runs, so " +
+        "a failed worktree removal leaves no tombstone for automatic retry."
+    );
   });
 
   it("documents the API adapter enum and every reserved CLI provider name", () => {

@@ -1100,16 +1100,21 @@ export class PostgreSQLSessionManager
     // `?` placeholders (not `$n`) because the driver numbers them; the Kit arm
     // uses jsonb_exists rather than the `?` operator, so nothing collides.
     const scope = principalScopeSql("owner_principal", caller);
-    const rowsAffected = await this.execute(
+    const removed = await this.query<Session>(
       `DELETE FROM sessions
        WHERE id = ?
          AND ${scope.sql}
          AND (NOT jsonb_exists(COALESCE(metadata, '{}'::jsonb), 'kit')
-              OR NOT jsonb_exists(COALESCE(metadata, '{}'::jsonb)->'kit', 'attempt'))`,
+              OR NOT jsonb_exists(COALESCE(metadata, '{}'::jsonb)->'kit', 'attempt'))
+       RETURNING id, cli, description, metadata, created_at AS "createdAt", last_used_at AS "lastUsedAt", owner_principal AS "ownerPrincipal", session_generation AS generation`,
       [sessionId, ...scope.params]
     );
-    if (rowsAffected === 0) return false;
-    this.notifySessionRemoved(session);
+    const removedSession = removed[0];
+    if (!removedSession) return false;
+    // Notify with the row actually deleted, not the earlier access-check
+    // snapshot. A concurrent worktree binding can update metadata between the
+    // read and DELETE, and cleanup must see that exact ownership state.
+    this.notifySessionRemoved(removedSession);
     return true;
   }
 

@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { buildServerInstructions, createGatewayServer } from "../index.js";
 import type { PersistenceConfig } from "../config.js";
+import { CLI_TYPES } from "../provider-types.js";
 
 async function makeServer(asyncJobsEnabled: boolean) {
   const { AsyncJobManager } = await import("../async-job-manager.js");
@@ -55,6 +56,52 @@ describe("MCP tool-surface usability (post-usability-review regressions)", () =>
     expect(registry["job_result"].description).toMatch(/VALIDATION/);
     expect(registry["job_result"].description).toMatch(/llm_job_result/);
     expect(registry["compare_answers"].description).toMatch(/does not call any provider/i);
+  });
+
+  it("session_delete describes the different worktree cleanup guarantees", async () => {
+    const server = await makeServer(true);
+    const registry = (server as unknown as Record<string, Record<string, { description?: string }>>)
+      ._registeredTools;
+    const description = registry["session_delete"].description ?? "";
+
+    expect(description).toMatch(/tool result confirms record deletion/i);
+    expect(description).toMatch(/cleanup observers run asynchronously/i);
+    expect(description).toMatch(/file-backed and PostgreSQL session managers/i);
+    expect(description).toMatch(
+      /file-backed manager retains failed cleanup for retry when the manager is registered on the owning host/i
+    );
+    expect(description).toMatch(/file-backed TTL eviction uses the same tombstone retry path/i);
+    expect(description).toMatch(
+      /PostgreSQL deletes the session row before its cleanup observer runs/i
+    );
+    expect(description).toMatch(/failed removal is not retained for automatic retry/i);
+    expect(description).toMatch(/different host cannot remove the owning host's worktree/i);
+    expect(description).toMatch(
+      /cleanup_expired_sessions function invokes no gateway observer and performs no worktree cleanup/i
+    );
+  });
+
+  it("session_clear_all describes its per-session worktree cleanup guarantees", async () => {
+    const server = await makeServer(true);
+    const registry = (server as unknown as Record<string, Record<string, { description?: string }>>)
+      ._registeredTools;
+    const description = registry["session_clear_all"].description ?? "";
+
+    expect(description).toMatch(/tool result confirms record deletion/i);
+    expect(description).toMatch(/cleanup observers run asynchronously/i);
+    expect(description).toMatch(/file-backed and PostgreSQL session managers/i);
+    expect(description).toMatch(
+      /file-backed manager retains failed cleanup for retry when the manager is registered on the owning host/i
+    );
+    expect(description).toMatch(/file-backed TTL eviction uses the same tombstone retry path/i);
+    expect(description).toMatch(
+      /PostgreSQL deletes each session row before its cleanup observer runs/i
+    );
+    expect(description).toMatch(/failed removal is not retained for automatic retry/i);
+    expect(description).toMatch(/different host cannot remove the owning host's worktree/i);
+    expect(description).toMatch(
+      /cleanup_expired_sessions function invokes no gateway observer and performs no worktree cleanup/i
+    );
   });
 
   it("workspace tools are described as remote-only and not a stdio path-access fallback", async () => {
@@ -231,29 +278,23 @@ describe("MCP tool-surface usability (post-usability-review regressions)", () =>
       server as unknown as Record<string, Record<string, { inputSchema?: unknown }>>
     )._registeredTools;
 
-    for (const toolName of [
-      "claude_request",
-      "claude_request_async",
-      "codex_request",
-      "codex_request_async",
-      "gemini_request",
-      "gemini_request_async",
-      "grok_request",
-      "grok_request_async",
-      "mistral_request",
-      "mistral_request_async",
-      "devin_request",
-      "devin_request_async",
-    ]) {
-      const schema = registry[toolName].inputSchema as {
-        _def?: { shape?: () => Record<string, unknown> };
-      };
-      const shape = (schema._def?.shape?.() ?? {}) as Record<
+    const worktreeTools = Object.entries(registry).flatMap(([toolName, registered]) => {
+      const schema = registered.inputSchema as
+        { _def?: { shape?: () => Record<string, unknown> } } | undefined;
+      const shape = (schema?._def?.shape?.() ?? {}) as Record<
         string,
         { _def?: { description?: string } }
       >;
-      const description = shape.worktree?._def?.description ?? "";
+      return shape.worktree
+        ? [{ toolName, description: shape.worktree._def?.description ?? "" }]
+        : [];
+    });
+    const expectedWorktreeTools = CLI_TYPES.filter(provider => provider !== "cursor")
+      .flatMap(provider => [`${provider}_request`, `${provider}_request_async`])
+      .sort();
+    expect(worktreeTools.map(({ toolName }) => toolName).sort()).toEqual(expectedWorktreeTools);
 
+    for (const { toolName, description } of worktreeTools) {
       expect(description, `${toolName}.worktree must pin hook suppression`).toMatch(
         /repository, system, and global Git hooks/i
       );
@@ -265,6 +306,36 @@ describe("MCP tool-surface usability (post-usability-review regressions)", () =>
       );
       expect(description, `${toolName}.worktree must reject host-command execution claims`).toMatch(
         /instead of executing host commands/i
+      );
+      expect(description, `${toolName}.worktree must support both session managers`).toMatch(
+        /file-backed and PostgreSQL session managers/i
+      );
+      expect(description, `${toolName}.worktree must keep filesystem ownership host-local`).toMatch(
+        /limited to the owning host/i
+      );
+      expect(description, `${toolName}.worktree must scope TTL eviction to the file store`).toMatch(
+        /file-backed manager[^.]*TTL eviction|file-backed TTL eviction/i
+      );
+      expect(description, `${toolName}.worktree must qualify cleanup retry timing`).toMatch(
+        /retried when the file-backed manager is registered on the owning host/i
+      );
+      expect(description, `${toolName}.worktree must disclose PostgreSQL cleanup limits`).toMatch(
+        /PostgreSQL[^.]*deletes the session row before its cleanup observer runs/i
+      );
+      expect(description, `${toolName}.worktree must disclose the missing retry`).toMatch(
+        /failed removal is not retained for automatic retry/i
+      );
+      expect(description, `${toolName}.worktree must cover bulk deletion`).toMatch(
+        /session_clear_all/i
+      );
+      expect(description, `${toolName}.worktree must cover database-side expiry`).toMatch(
+        /cleanup_expired_sessions function invokes no gateway observer and performs no worktree cleanup/i
+      );
+      expect(
+        description,
+        `${toolName}.worktree must not restore the obsolete engine gate`
+      ).not.toMatch(
+        /require the local file-backed session manager|fail closed with PostgreSQL sessions/i
       );
     }
   });

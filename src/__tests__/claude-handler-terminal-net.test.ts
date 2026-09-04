@@ -738,9 +738,8 @@ describe("handleClaudeRequest terminal net: H-DoubleComplete (fenced by T3 Fligh
       handleClaudeRequest: handleClaudeRequestDyn,
       resolveGatewayServerRuntime: resolveRuntimeDyn,
     } = await import("../index.js");
-    // The worktree gate is `sessionManager instanceof FileSessionManager`, so use
-    // the dynamically re-imported class the fresh index module sees; a statically
-    // imported instance fails the check.
+    // Use the dynamically re-imported session manager so this runtime shares the
+    // fresh module graph loaded after vi.resetModules().
     const { FileSessionManager: FileSessionManagerDyn } = await import("../session-manager.js");
     const sessions = new FileSessionManagerDyn(join(tmp, "sessions.json"));
     // The post-handoff worktree cleanup rejects.

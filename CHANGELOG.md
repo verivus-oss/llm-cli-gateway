@@ -4,6 +4,17 @@ All notable changes to the llm-cli-gateway project.
 
 ## [Unreleased]
 
+### Fixed
+
+- Public worktree guidance and MCP tool descriptions now distinguish the
+  session-manager capabilities precisely. PostgreSQL supports worktree creation
+  and same-host reuse, but explicit deletion, including `session_clear_all`,
+  removes its row before cleanup runs, so a failed removal is not retained for
+  automatic retry. The database-side `cleanup_expired_sessions` function runs
+  no gateway cleanup. After session deletion or file-backed TTL eviction, the
+  file-backed manager retains failed cleanup as a hidden tombstone and retries
+  it when that manager is registered on the owning host.
+
 ## [3.2.0] - 2026-09-03
 
 ### Added
@@ -950,13 +961,15 @@ terminal`. Codex exposes no non-interactive equivalent. The tool now names the
   live Git validation of the on-disk worktree, and cleanup runs with
   `expectedOwnerHostname` and `requireOwnerMetadata`, so a foreign-owned
   worktree is skipped rather than removed. `PostgreSQLSessionManager` now
-  implements the cleanup-tombstone surface for real rather than returning `[]`
-  and `false`, with the hostname filter applied in the SQL so another host's
-  rows never enter this process. Recovery stays lazy and instance-scoped; there
-  is no blanket startup sweep. Scoping is by host and not by process instance
-  deliberately, because the instance id is a fresh UUID per process and
-  requiring instance equality would break worktree reuse across an ordinary
-  restart.
+  implements the cleanup-tombstone query and finalization surface rather than
+  returning `[]` and `false`, with the hostname filter applied in the SQL so
+  another host's rows never enter this process. Recovery of a compatible row
+  already marked for deletion stays lazy and instance-scoped; there is no
+  blanket startup sweep. Ordinary explicit PostgreSQL deletion removes the row
+  before cleanup and retains no tombstone for automatic retry, which issue #305
+  tracks. Scoping is by host and not by process instance deliberately, because
+  the instance id is a fresh UUID per process and requiring instance equality
+  would break worktree reuse across an ordinary restart.
 
 - **`migrate-sessions` discarded every source timestamp.**
   `FileSessionMigrationRecord` carried no `createdAt` or `lastUsedAt`, so the
@@ -1484,12 +1497,14 @@ Also in this release, and worth one line each rather than a section:
   removed.
 
   Worktrees now work under both session managers, scoped by host ownership.
-  `PostgreSQLSessionManager` implements the cleanup-tombstone surface for real
-  rather than returning `[]` / `false`, with the hostname filter applied **in
-  the SQL** so another host's rows are never returned into this process at all.
-  Recovery stays lazy and instance-scoped; no blanket startup sweep, which on a
-  shared store would attack other live instances (the defect already fixed for
-  jobs in issue #139).
+  `PostgreSQLSessionManager` implements the cleanup-tombstone query and
+  finalization surface rather than returning `[]` / `false`, with the hostname
+  filter applied **in the SQL** so another host's rows are never returned into
+  this process at all. Recovery of a compatible row already marked for deletion
+  stays lazy and instance-scoped; no blanket startup sweep, which on a shared
+  store would attack other live instances (the defect already fixed for jobs in
+  issue #139). Ordinary explicit PostgreSQL deletion removes the row before
+  cleanup and retains no tombstone for automatic retry, which issue #305 tracks.
 
   Scoping is by host and not by process instance, deliberately:
   `AsyncJobManager.instanceId` is a fresh UUID per process, so requiring
