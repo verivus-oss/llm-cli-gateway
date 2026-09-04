@@ -304,15 +304,15 @@ Important families:
    owns the filesystem artifact, even when PostgreSQL shares the session row.
    Grok, Devin, and Mistral worktrees also require an explicit provider-native
    `sessionId`; fresh, `createNewSession`, and `resumeLatest`-only requests fail
-   closed. For the file-backed manager, session deletion and TTL eviction keep a
-   failed Git removal as a hidden cleanup-pending tombstone, block reuse, and
-   retry when that manager is registered on the owning host. Explicit PostgreSQL
-   deletion, including `session_clear_all`, deletes the session row before its
-   cleanup observer runs, so cleanup is a single attempt on the host processing
-   deletion. A failed removal is not retained for automatic retry, and deletion
-   from another host cannot remove the owning host's worktree. The database-side
-   `cleanup_expired_sessions` function invokes no gateway observer and performs
-   no worktree cleanup.
+   closed. Under either manager, session deletion, `session_clear_all`, and
+   file-backed TTL eviction keep a failed Git removal as a hidden
+   cleanup-pending tombstone, block reuse, and retry cleanup when a manager is
+   registered on the owning host; the record is finalized only after verified
+   Git removal. Deletion processed by a different host removes no worktree and
+   leaves the owning host's record intact. The database-side
+   `cleanup_expired_sessions` function stages the same tombstone instead of
+   deleting a worktree-bearing session; it invokes no gateway observer and so
+   attempts no removal itself. A tombstone is not bounded by retention.
 5. Use async tools for long reviews, large refactors, and slow provider runs.
 6. Keep provider credentials in provider CLIs or named environment variables.
 7. Use `review_changes` for complete Git evidence. Treat `consensus_check` and

@@ -68,17 +68,20 @@ describe("MCP tool-surface usability (post-usability-review regressions)", () =>
     expect(description).toMatch(/cleanup observers run asynchronously/i);
     expect(description).toMatch(/file-backed and PostgreSQL session managers/i);
     expect(description).toMatch(
-      /file-backed manager retains failed cleanup for retry when the manager is registered on the owning host/i
+      /[Bb]oth managers stage a caller-hidden cleanup tombstone before cleanup runs and retain a failed removal for retry by the host that owns the worktree/i
     );
+    expect(description).toMatch(/finalizing the record only after verified Git removal/i);
     expect(description).toMatch(/file-backed TTL eviction uses the same tombstone retry path/i);
     expect(description).toMatch(
-      /PostgreSQL deletes the session row before its cleanup observer runs/i
+      /[Dd]eletion processed by a different host removes no worktree and leaves the owning host's record intact/i
     );
-    expect(description).toMatch(/failed removal is not retained for automatic retry/i);
-    expect(description).toMatch(/different host cannot remove the owning host's worktree/i);
     expect(description).toMatch(
-      /cleanup_expired_sessions function invokes no gateway observer and performs no worktree cleanup/i
+      /cleanup_expired_sessions function stages the same tombstone instead of deleting a worktree-bearing session/i
     );
+    expect(description).toMatch(/tombstone is not bounded by retention/i);
+    // The corrected claim must not survive alongside the one it replaced.
+    expect(description).not.toMatch(/not retained for automatic retry/i);
+    expect(description).not.toMatch(/performs no worktree cleanup/i);
   });
 
   it("session_clear_all describes its per-session worktree cleanup guarantees", async () => {
@@ -91,17 +94,19 @@ describe("MCP tool-surface usability (post-usability-review regressions)", () =>
     expect(description).toMatch(/cleanup observers run asynchronously/i);
     expect(description).toMatch(/file-backed and PostgreSQL session managers/i);
     expect(description).toMatch(
-      /file-backed manager retains failed cleanup for retry when the manager is registered on the owning host/i
+      /[Bb]oth managers stage a caller-hidden cleanup tombstone before cleanup runs and retain a failed removal for retry by the host that owns the worktree/i
     );
+    expect(description).toMatch(/finalizing the record only after verified Git removal/i);
     expect(description).toMatch(/file-backed TTL eviction uses the same tombstone retry path/i);
     expect(description).toMatch(
-      /PostgreSQL deletes each session row before its cleanup observer runs/i
+      /[Dd]eletion processed by a different host removes no worktree and leaves the owning host's record intact/i
     );
-    expect(description).toMatch(/failed removal is not retained for automatic retry/i);
-    expect(description).toMatch(/different host cannot remove the owning host's worktree/i);
     expect(description).toMatch(
-      /cleanup_expired_sessions function invokes no gateway observer and performs no worktree cleanup/i
+      /cleanup_expired_sessions function stages the same tombstone instead of deleting a worktree-bearing session/i
     );
+    expect(description).toMatch(/tombstone is not bounded by retention/i);
+    expect(description).not.toMatch(/not retained for automatic retry/i);
+    expect(description).not.toMatch(/performs no worktree cleanup/i);
   });
 
   it("workspace tools are described as remote-only and not a stdio path-access fallback", async () => {
@@ -317,20 +322,27 @@ describe("MCP tool-surface usability (post-usability-review regressions)", () =>
         /file-backed manager[^.]*TTL eviction|file-backed TTL eviction/i
       );
       expect(description, `${toolName}.worktree must qualify cleanup retry timing`).toMatch(
-        /retried when the file-backed manager is registered on the owning host/i
+        /retried when a manager is registered on the owning host/i
       );
-      expect(description, `${toolName}.worktree must disclose PostgreSQL cleanup limits`).toMatch(
-        /PostgreSQL[^.]*deletes the session row before its cleanup observer runs/i
+      expect(description, `${toolName}.worktree must say the record outlives a failure`).toMatch(
+        /finalized only after verified Git removal/i
       );
-      expect(description, `${toolName}.worktree must disclose the missing retry`).toMatch(
-        /failed removal is not retained for automatic retry/i
+      expect(description, `${toolName}.worktree must scope retry to the owning host`).toMatch(
+        /[Dd]eletion processed by another host removes no worktree and leaves the owning host's record intact/i
       );
       expect(description, `${toolName}.worktree must cover bulk deletion`).toMatch(
         /session_clear_all/i
       );
       expect(description, `${toolName}.worktree must cover database-side expiry`).toMatch(
-        /cleanup_expired_sessions function invokes no gateway observer and performs no worktree cleanup/i
+        /cleanup_expired_sessions function stages the same tombstone/i
       );
+      expect(description, `${toolName}.worktree must state the tombstone is unbounded`).toMatch(
+        /tombstone is not bounded by retention/i
+      );
+      expect(
+        description,
+        `${toolName}.worktree must not keep the claim #305 falsified`
+      ).not.toMatch(/not retained for automatic retry|performs no worktree cleanup/i);
       expect(
         description,
         `${toolName}.worktree must not restore the obsolete engine gate`

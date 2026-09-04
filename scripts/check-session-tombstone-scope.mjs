@@ -33,7 +33,12 @@ export const GOVERNED_FILE = "src/session-manager-pg.ts";
 const SESSION_TABLE = /\b(FROM|UPDATE|INTO|JOIN)\s+sessions\b/i;
 const SESSION_ROW_READ = /\b(FROM|UPDATE|JOIN)\s+sessions\b/i;
 const PREDICATE = "sessionNotTombstonedSql(";
+/** The shared statement builder the deletion paths go through. */
+const DELETE_OR_STAGE = "deleteOrStageSessionsSql";
 const EXEMPT_MARKER = "tombstone-scope: exempt";
+/** `  if (` and friends match the member shape; they are not method names. */
+const CONTROL_KEYWORDS = new Set(["if", "for", "while", "switch", "catch", "return", "function"]);
+
 /** How far above a statement its exemption may be written. */
 const MARKER_LOOKBACK = 16;
 
@@ -63,7 +68,7 @@ export function sessionStatements(source) {
       const declaration = /^ {2}(?:private |readonly )?(?:async )?([a-zA-Z_]\w*)\s*[(<]/.exec(
         lines[i]
       );
-      if (declaration) {
+      if (declaration && !CONTROL_KEYWORDS.has(declaration[1])) {
         method = declaration[1];
         break;
       }
@@ -79,6 +84,39 @@ export function sessionStatements(source) {
     });
   }
   return statements;
+}
+
+/**
+ * Every method whose session-row access is fenced, by either mechanism: the
+ * spliced predicate, or the shared delete-or-stage builder whose callers are
+ * checked at runtime. Exported so the behaviour suite derives its coverage set
+ * from the same read of the module that this gate does, rather than from a
+ * second hand-written list that can disagree with it.
+ */
+export function guardedMethods(source) {
+  const methods = new Set(
+    sessionStatements(source)
+      .filter(statement => statement.scoped)
+      .map(statement => statement.method)
+  );
+  const lines = stripComments(source).split("\n");
+  lines.forEach((line, index) => {
+    // Calls only. The declaration line names the builder too, and scanning up
+    // from it lands on whatever member happens to precede the function.
+    if (!line.includes(`${DELETE_OR_STAGE}(`) || line.includes(`function ${DELETE_OR_STAGE}`)) {
+      return;
+    }
+    for (let i = index; i >= 0; i--) {
+      const declaration = /^ {2}(?:private |readonly )?(?:async )?([a-zA-Z_]\w*)\s*[(<]/.exec(
+        lines[i]
+      );
+      if (declaration && !CONTROL_KEYWORDS.has(declaration[1])) {
+        methods.add(declaration[1]);
+        break;
+      }
+    }
+  });
+  return [...methods].sort();
 }
 
 export function violations(statements) {

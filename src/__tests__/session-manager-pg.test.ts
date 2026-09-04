@@ -209,21 +209,23 @@ describe("PostgreSQLSessionManager", () => {
   //──────────────────────────────────────────────────────────────────────────
 
   describe("deleteSession", () => {
-    it("deletes rows before observers and cannot retain observer-side cleanup state", async () => {
+    it("stages a tombstone before notifying, and hands the observer that exact row", async () => {
+      // The observer used to be the only place a failed removal could have been
+      // recorded, and it could not: the row was already gone, so its own
+      // retention write returned false. The store retains it now, and the two
+      // assertions on the observer's view are kept to show that has NOT been
+      // achieved by making a deleted session visible again.
       const observed: Array<{
-        id: string;
+        session: Awaited<ReturnType<typeof manager.createSession>>;
         rowAfterDelete: Promise<Awaited<ReturnType<typeof manager.getSession>>>;
         retentionAfterDelete: Promise<boolean>;
       }> = [];
       const unsubscribe = manager.addSessionRemovalObserver(session => {
         const rowAfterDelete = manager.getSession(session.id);
         const retentionAfterDelete = rowAfterDelete.then(() =>
-          manager.updateSessionMetadata(session.id, {
-            worktreeCleanupPending: true,
-            worktreeCleanupPendingDeletion: true,
-          })
+          manager.updateSessionMetadata(session.id, { workspaceAlias: "observer" })
         );
-        observed.push({ id: session.id, rowAfterDelete, retentionAfterDelete });
+        observed.push({ session, rowAfterDelete, retentionAfterDelete });
         return retentionAfterDelete.then(() => undefined);
       });
       const deleted = await manager.createSession("claude", "Observer delete");
@@ -240,16 +242,29 @@ describe("PostgreSQLSessionManager", () => {
       expect(await manager.deleteSession("missing-session")).toBe(false);
       expect(observed).toEqual([]);
       expect(await manager.deleteSession(deleted.id)).toBe(true);
-      expect(observed.map(item => item.id)).toEqual([deleted.id]);
+      expect(observed.map(item => item.session.id)).toEqual([deleted.id]);
+      // The row handed to the observer already carries the tombstone, which is
+      // what tells it to acknowledge the removal rather than assume it.
+      expect(observed[0]!.session.metadata?.worktreeCleanupPendingDeletion).toBe(true);
+      expect(observed[0]!.session.metadata?.worktreeOwnerHostname).toBe(hostname());
       expect(await observed[0]!.rowAfterDelete).toBeNull();
       expect(await observed[0]!.retentionAfterDelete).toBe(false);
       expect(await manager.getSession(deleted.id)).toBeNull();
 
       expect(await manager.clearAllSessions("codex")).toBe(1);
-      expect(observed.map(item => item.id)).toEqual([deleted.id, cleared.id]);
+      expect(observed.map(item => item.session.id)).toEqual([deleted.id, cleared.id]);
+      expect(observed[1]!.session.metadata?.worktreeCleanupPendingDeletion).toBe(true);
       expect(await observed[1]!.rowAfterDelete).toBeNull();
       expect(await observed[1]!.retentionAfterDelete).toBe(false);
       expect(await manager.getSession(cleared.id)).toBeNull();
+
+      // Both survive as owning-host retry records, and finalizing is what ends
+      // them: no deletion path may drop the row on its own.
+      const pending = await manager.listPendingWorktreeCleanupSessions(hostname());
+      expect(pending.map(row => row.id).sort()).toEqual([cleared.id, deleted.id].sort());
+      for (const row of pending) {
+        expect(await manager.finalizePendingWorktreeCleanup(row)).toBe(true);
+      }
       expect(await manager.listPendingWorktreeCleanupSessions(hostname())).toEqual([]);
       unsubscribe();
     });
@@ -564,7 +579,7 @@ describe("PostgreSQLSessionManager", () => {
     }
   });
 
-  it("does not retain failed PostgreSQL worktree cleanup for retry", async () => {
+  it("retains failed PostgreSQL worktree cleanup for owning-host retry", async () => {
     const repoRoot = initGitRepository();
     const logger = {
       info: vi.fn(),
@@ -606,7 +621,13 @@ describe("PostgreSQLSessionManager", () => {
       );
       expect(existsSync(resolution.worktreePath!)).toBe(true);
       expect(await manager.getSession(session.id)).toBeNull();
-      expect(await manager.listPendingWorktreeCleanupSessions(hostname())).toEqual([]);
+
+      // The removal was refused, so the record MUST survive for the owning host
+      // to try again. This is the guarantee #305 adds and #302 recorded the
+      // absence of.
+      const pending = await manager.listPendingWorktreeCleanupSessions(hostname());
+      expect(pending.map(row => row.id)).toEqual([session.id]);
+      expect(pending[0]!.metadata?.worktreeOwnerHostname).toBe(hostname());
     } finally {
       await server.close();
       rmSync(repoRoot, { recursive: true, force: true });
@@ -655,7 +676,12 @@ describe("PostgreSQLSessionManager", () => {
       );
       expect(existsSync(resolution.worktreePath!)).toBe(true);
       expect(await manager.getSession(session.id)).toBeNull();
+
+      // Deletion processed HERE must not destroy the owning host's retry
+      // record, and must not offer that record to this host either.
       expect(await manager.listPendingWorktreeCleanupSessions(hostname())).toEqual([]);
+      const theirs = await manager.listPendingWorktreeCleanupSessions("some-other-host.invalid");
+      expect(theirs.map(row => row.id)).toEqual([session.id]);
     } finally {
       await server.close();
       rmSync(repoRoot, { recursive: true, force: true });

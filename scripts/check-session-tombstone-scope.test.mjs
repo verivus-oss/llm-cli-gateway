@@ -4,6 +4,7 @@ import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
 import {
   GOVERNED_FILE,
+  guardedMethods,
   sessionStatements,
   stripComments,
   violations,
@@ -31,12 +32,23 @@ describe("the governed file", () => {
   // bucket to the third is exactly the drift this gate exists to catch.
   it("has every session-row statement scoped, inserting, or exempt with a reason", () => {
     expect(tally(SOURCE)).toEqual({
-      total: 35,
-      scoped: 23,
+      total: 32,
+      scoped: 19,
       insertOnly: 6,
-      exempt: 6,
+      exempt: 7,
       failures: 0,
     });
+  });
+
+  it("reports every method fenced by either mechanism", () => {
+    // Four of the predicate calls sit in predicates handed to the shared
+    // delete-or-stage builder rather than in a statement of their own, so a
+    // derivation that only read statements would drop the three deletion paths
+    // from the covered set and the behaviour suite would stop requiring them.
+    const methods = guardedMethods(SOURCE);
+    expect(methods).toHaveLength(15);
+    expect(methods).toEqual(expect.arrayContaining(["deleteSession", "clearAllSessions"]));
+    expect(methods).not.toContain("constructor");
   });
 });
 
@@ -51,23 +63,29 @@ describe("negative controls", () => {
     const mutated = SOURCE.replaceAll(/\$\{sessionNotTombstonedSql\([^)]*\)\}/g, "");
     expect(SOURCE.split(PREDICATE_CALL).length - 1).toBe(21);
     expect(SOURCE.split('sessionNotTombstonedSql("s")').length - 1).toBe(2);
-    expect(tally(mutated).failures).toBe(23);
+    // 19, not 23: four of the calls are in predicates the builder receives, and
+    // those are fenced by its runtime throw rather than by this gate.
+    expect(tally(mutated).failures).toBe(19);
   });
 
   it("fires when one statement loses the predicate", () => {
-    const mutated = SOURCE.replace(PREDICATE_CALL, "");
-    expect(mutated).not.toBe(SOURCE);
+    // A named statement, not "the first occurrence": some occurrences are in
+    // builder predicates this gate does not govern, so an ordinal control here
+    // would pass or fail on the order of the file.
+    const target = `WHERE id = $1 AND ${PREDICATE_CALL}\``;
+    expect(SOURCE).toContain(target);
+    const mutated = SOURCE.replace(target, "WHERE id = $1`");
     expect(tally(mutated).failures).toBe(1);
   });
 
   it("fires when an exemption marker is deleted", () => {
     const mutated = SOURCE.replace("tombstone-scope: exempt", "");
-    expect(tally(mutated)).toMatchObject({ exempt: 5, failures: 1 });
+    expect(tally(mutated)).toMatchObject({ exempt: 6, failures: 1 });
   });
 
   it("fires on a new unscoped read added to the file", () => {
     const added = `${SOURCE}\nconst leak = \`SELECT id FROM sessions WHERE cli = $1\`;\n`;
-    expect(tally(added)).toMatchObject({ total: 36, failures: 1 });
+    expect(tally(added)).toMatchObject({ total: 33, failures: 1 });
   });
 });
 

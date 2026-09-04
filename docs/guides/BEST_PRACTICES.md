@@ -369,14 +369,14 @@ materialized filter output, prepare it through a separately trusted workflow
 rather than relying on gateway worktree creation to execute host configuration.
 
 Gateway worktrees work with file-backed and PostgreSQL session managers, but
-their filesystem ownership remains host-local. For session deletion and
-file-backed TTL eviction, the file-backed manager retains failed cleanup for
-retry when that manager is registered on the owning host.
-Explicit PostgreSQL deletion, including `session_clear_all`, deletes the session
-row before its cleanup observer runs, so a failed removal is not retained for
-automatic retry, and deletion from another host cannot remove the owning host's
-worktree. The database-side `cleanup_expired_sessions` function invokes no
-gateway observer and performs no worktree cleanup.
+their filesystem ownership remains host-local. For session deletion,
+`session_clear_all`, and file-backed TTL eviction, both managers retain a failed
+cleanup for retry when a manager is registered on the owning host, and finalize
+the record only after verified Git removal. Deletion processed by another host
+removes no worktree and leaves that record intact. The database-side
+`cleanup_expired_sessions` function stages the same record instead of deleting a
+worktree-bearing session; it invokes no gateway observer and so attempts no
+removal itself. A tombstone is not bounded by retention.
 
 Codex new and resume prompts use stdin. `codex_fork_session` remains argv-bound
 and rejects oversized UTF-8 prompts as non-retryable `input_too_large`. Other

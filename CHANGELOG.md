@@ -6,14 +6,25 @@ All notable changes to the llm-cli-gateway project.
 
 ### Fixed
 
-- Public worktree guidance and MCP tool descriptions now distinguish the
-  session-manager capabilities precisely. PostgreSQL supports worktree creation
-  and same-host reuse, but explicit deletion, including `session_clear_all`,
-  removes its row before cleanup runs, so a failed removal is not retained for
-  automatic retry. The database-side `cleanup_expired_sessions` function runs
-  no gateway cleanup. After session deletion or file-backed TTL eviction, the
-  file-backed manager retains failed cleanup as a hidden tombstone and retries
-  it when that manager is registered on the owning host.
+- **PostgreSQL worktree cleanup is durable.** Session deletion,
+  `session_clear_all`, and compare-and-set deletion now stage a caller-hidden
+  cleanup tombstone for a session that owns a gateway worktree, instead of
+  deleting its row and making one unrecorded removal attempt. A failed removal
+  is retained for retry by the host that owns the worktree, and the record is
+  finalized only after verified Git removal. Deletion processed by a different
+  host removes no worktree and leaves that record intact. The database-side
+  `cleanup_expired_sessions` function stages the same tombstone rather than
+  deleting a worktree-bearing session; it invokes no gateway observer and so
+  attempts no removal itself. Session deletion, `session_clear_all`, and
+  file-backed TTL eviction now all keep a failed Git removal as a hidden
+  cleanup-pending tombstone and retry it on the owning host. Every
+  caller-facing PostgreSQL session read and
+  mutation excludes tombstones, enforced by a structural gate over the module.
+  A rejected removal observer is now logged instead of discarded. Both session
+  managers therefore give the same cleanup guarantee, and the public guidance
+  and MCP tool descriptions state it. A tombstone is not bounded by retention.
+  This supersedes the guidance correction that recorded the gap
+  (issues #302 and #305).
 
 ## [3.2.0] - 2026-09-03
 

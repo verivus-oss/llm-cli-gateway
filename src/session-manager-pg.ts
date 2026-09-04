@@ -6,6 +6,7 @@ import {
   sessionMatchesKitBinding,
   isWorktreeCleanupTombstone,
   sessionNotTombstonedSql,
+  WORKTREE_CLEANUP_TOMBSTONE_KEY,
   type IKitSessionManager,
   type SessionCleanupHook,
   type SessionRemovalObserverRegistrar,
@@ -31,6 +32,8 @@ import {
   type KitSessionAttempt,
 } from "./personal-config-types.js";
 import type { StorageConnection, StorageDriver } from "./storage/store.js";
+
+import type { Logger } from "./logger.js";
 
 export type { Logger } from "./logger.js";
 
@@ -119,6 +122,83 @@ class TransactionAbort<T> extends Error {
   }
 }
 
+/** The projection every session read in this module returns. */
+const SESSION_COLUMNS = `id, cli, description, metadata, created_at AS "createdAt",
+          last_used_at AS "lastUsedAt", owner_principal AS "ownerPrincipal",
+          session_generation AS generation`;
+
+/**
+ * The same four fields `hasDurablyOwnedWorktree` requires in the file store,
+ * and `jsonb_typeof(...) = 'string'` rather than `->> IS NOT NULL` because the
+ * file store tests `typeof === "string"`: a JSON number would satisfy the
+ * looser form and stage a row that owns no worktree.
+ *
+ * COALESCE is load-bearing, found by running it. An absent key makes
+ * `jsonb_typeof` return NULL, so the whole conjunction is NULL rather than
+ * false, and `WHERE NOT owned` then matches NOTHING: every ordinary session
+ * stopped being deleted at all while the tombstone arm looked correct.
+ */
+const DURABLY_OWNED_WORKTREE_SQL = `COALESCE(
+          jsonb_typeof(metadata->'worktreePath') = 'string'
+      AND jsonb_typeof(metadata->'worktreeName') = 'string'
+      AND jsonb_typeof(metadata->'worktreeOwnerHostname') = 'string'
+      AND jsonb_typeof(metadata->'worktreeOwnerInstanceId') = 'string', false)`;
+
+const TOMBSTONE_PATCH_SQL = `'{"worktreeCleanupPending": true, "${WORKTREE_CLEANUP_TOMBSTONE_KEY}": true}'::jsonb`;
+
+/**
+ * Delete the matching sessions, except those carrying a durably owned worktree,
+ * which are staged as caller-invisible cleanup tombstones instead. Returns the
+ * rows either way, staged ones carrying their new tombstone metadata, so a
+ * removal observer sees the exact ownership state it must act on.
+ *
+ * ONE statement, not a SELECT followed by an UPDATE. Both arms are
+ * data-modifying CTEs over a single snapshot, selected by `owned`, so the
+ * classification is taken once and the two halves cannot disagree about a row.
+ * `FOR UPDATE` on the target CTE is what lets the arms address rows by id
+ * without re-evaluating the caller's predicate a second time, which is the
+ * other way this could have been written and the way it could have drifted.
+ *
+ * The pointer tables are cleared explicitly for the staged rows. They cascade
+ * on DELETE, and a staged row is not deleted, so without this a tombstone would
+ * stay the active session for its provider and the active Kit pointer for its
+ * scope, both naming a row every caller-facing read now reports absent.
+ *
+ * `predicate` is caller-supplied SQL. It MUST already exclude existing
+ * tombstones: re-staging one notifies the observer a second time and races the
+ * first attempt's acknowledgement. That is checked here, on the production
+ * path, rather than left to the structural gate, because this function is the
+ * single place all three deletion paths pass through.
+ */
+// tombstone-scope: exempt. This statement's own predicate comes from its
+// callers, and the rule is enforced on them at RUNTIME by the throw above,
+// which runs on the production path rather than only in a gate.
+export function deleteOrStageSessionsSql(predicate: string): string {
+  if (!predicate.includes(WORKTREE_CLEANUP_TOMBSTONE_KEY)) {
+    throw new Error("A session deletion predicate must exclude worktree-cleanup tombstones");
+  }
+  return `WITH target AS (
+            SELECT id, ${DURABLY_OWNED_WORKTREE_SQL} AS owned
+              FROM sessions
+             WHERE ${predicate}
+               FOR UPDATE
+          ), staged AS (
+            UPDATE sessions
+               SET metadata = COALESCE(metadata, '{}'::jsonb) || ${TOMBSTONE_PATCH_SQL}
+             WHERE id IN (SELECT id FROM target WHERE owned)
+            RETURNING ${SESSION_COLUMNS}
+          ), removed AS (
+            DELETE FROM sessions
+             WHERE id IN (SELECT id FROM target WHERE NOT owned)
+            RETURNING ${SESSION_COLUMNS}
+          ), cleared_active AS (
+            DELETE FROM active_sessions WHERE session_id IN (SELECT id FROM staged)
+          ), cleared_kit AS (
+            DELETE FROM kit_active_sessions WHERE session_id IN (SELECT id FROM staged)
+          )
+          SELECT * FROM staged UNION ALL SELECT * FROM removed`;
+}
+
 function abortWith<T>(value: T): never {
   throw new TransactionAbort(value);
 }
@@ -166,7 +246,16 @@ export class PostgreSQLSessionManager
   private sessionSchemaReady: Promise<void> | null = null;
   private readonly removalObservers = new Set<SessionCleanupHook>();
 
-  constructor(private driver: StorageDriver) {}
+  /**
+   * `logger` is optional so every existing caller and test keeps compiling, but
+   * a manager built without one cannot report a failed removal observer, which
+   * is the loss this parameter exists to stop. Production builds it through
+   * `createSessionManager`, which always has one.
+   */
+  constructor(
+    private driver: StorageDriver,
+    private readonly logger?: Logger
+  ) {}
 
   /**
    * One statement outside a transaction.
@@ -199,15 +288,27 @@ export class PostgreSQLSessionManager
     return () => this.removalObservers.delete(observer);
   }
 
+  /**
+   * Session deletion stays best-effort when an observer fails, but it is no
+   * longer SILENT. A rejected worktree cleanup is exactly the case a tombstone
+   * is retained for, and discarding the rejection here left an operator with a
+   * retry record and nothing saying why the first attempt failed.
+   *
+   * The session ID and the error only: session metadata carries worktree paths
+   * and Kit identities, and this line is not the place to widen what is logged
+   * about either.
+   */
   private notifySessionRemoved(session: Session): void {
     for (const observer of this.removalObservers) {
       try {
         const result = observer(session);
         if (result && typeof (result as Promise<void>).catch === "function") {
-          void (result as Promise<void>).catch(() => undefined);
+          void (result as Promise<void>).catch(error => {
+            this.logger?.error(`session removal observer rejected for ${session.id}`, error);
+          });
         }
-      } catch {
-        // Session deletion remains best-effort when an in-memory observer fails.
+      } catch (error) {
+        this.logger?.error(`session removal observer threw for ${session.id}`, error);
       }
     }
   }
@@ -1128,13 +1229,11 @@ export class PostgreSQLSessionManager
     // uses jsonb_exists rather than the `?` operator, so nothing collides.
     const scope = principalScopeSql("owner_principal", caller);
     const removed = await this.query<Session>(
-      `DELETE FROM sessions
-       WHERE id = ?
+      deleteOrStageSessionsSql(`id = ?
          AND ${scope.sql}
          AND ${sessionNotTombstonedSql()}
          AND (NOT jsonb_exists(COALESCE(metadata, '{}'::jsonb), 'kit')
-              OR NOT jsonb_exists(COALESCE(metadata, '{}'::jsonb)->'kit', 'attempt'))
-       RETURNING id, cli, description, metadata, created_at AS "createdAt", last_used_at AS "lastUsedAt", owner_principal AS "ownerPrincipal", session_generation AS generation`,
+              OR NOT jsonb_exists(COALESCE(metadata, '{}'::jsonb)->'kit', 'attempt'))`),
       [sessionId, ...scope.params]
     );
     const removedSession = removed[0];
@@ -1407,14 +1506,10 @@ export class PostgreSQLSessionManager
        AND session_generation = $5::uuid
        AND COALESCE(metadata, '{}'::jsonb) = $6::jsonb`;
     const rows = await this.query<Session>(
-      `DELETE FROM sessions
-       WHERE ${deleteIdentityPredicate}
+      deleteOrStageSessionsSql(`${deleteIdentityPredicate}
          AND ${sessionNotTombstonedSql()}
          AND (NOT jsonb_exists(COALESCE(metadata, '{}'::jsonb), 'kit')
-              OR NOT jsonb_exists(COALESCE(metadata, '{}'::jsonb)->'kit', 'attempt'))
-       RETURNING id, cli, description, metadata, created_at AS "createdAt",
-                 last_used_at AS "lastUsedAt", owner_principal AS "ownerPrincipal",
-                 session_generation AS generation`,
+              OR NOT jsonb_exists(COALESCE(metadata, '{}'::jsonb)->'kit', 'attempt'))`),
       parameters.slice(1)
     );
     const removed = rows[0];
@@ -1517,10 +1612,10 @@ export class PostgreSQLSessionManager
     const protectedAttempt = `(NOT jsonb_exists(COALESCE(metadata, '{}'::jsonb), 'kit')
       OR NOT jsonb_exists(COALESCE(metadata, '{}'::jsonb)->'kit', 'attempt'))`;
     const query = cli
-      ? `DELETE FROM sessions WHERE cli = $1 AND ${protectedAttempt} AND ${sessionNotTombstonedSql()}
-         RETURNING id, cli, description, metadata, created_at AS "createdAt", last_used_at AS "lastUsedAt", owner_principal AS "ownerPrincipal", session_generation AS generation`
-      : `DELETE FROM sessions WHERE ${protectedAttempt} AND ${sessionNotTombstonedSql()}
-         RETURNING id, cli, description, metadata, created_at AS "createdAt", last_used_at AS "lastUsedAt", owner_principal AS "ownerPrincipal", session_generation AS generation`;
+      ? deleteOrStageSessionsSql(
+          `cli = $1 AND ${protectedAttempt} AND ${sessionNotTombstonedSql()}`
+        )
+      : deleteOrStageSessionsSql(`${protectedAttempt} AND ${sessionNotTombstonedSql()}`);
     const removed = cli
       ? await this.query<Session>(query, [cli])
       : await this.query<Session>(query);

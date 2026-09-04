@@ -50,6 +50,12 @@ export const POSTGRES_IMMUTABLE_MIGRATION_SHA256 = {
   // applied database can never disagree with a later copy of this release.
   "025_complete_job_capture.sql":
     "fd90f44fd55d8e75e7eee0aa815a2c91c0e27ddf981f25fa446168c24222194a",
+  // 026 redefines `cleanup_expired_sessions`, which every applied database
+  // already records a checksum for. Pinned at authorship for the same reason as
+  // 022, 024 and 025: an edit after a host applies it breaks `npm run migrate`
+  // there rather than the build here.
+  "026_worktree_cleanup_on_session_expiry.sql":
+    "17ca3438cac0ee08b2279206e72973f18ae4c7f51b80647decf091625866836d",
 } as const;
 
 /**

@@ -86,7 +86,18 @@ validation = "With a tombstone seeded directly, every enumerated read path repor
 id = "stage-on-delete"
 depends_on = ["hide-tombstones-from-reads"]
 actor = "assistant"
-status = "planned"
+status = """
+done 2026-09-04. `deleteOrStageSessionsSql` is the one statement, and its
+callers' predicates are checked by a throw on the production path rather than
+only by the gate. FOUND BY READING THE SCHEMA: both pointer tables cascade on
+DELETE, and a staged row is not deleted, so a tombstone stayed the active
+session and the active Kit pointer until two more CTEs cleared them. FOUND BY
+RUNNING IT: without COALESCE an absent key makes the ownership test NULL, so
+`WHERE NOT owned` matched nothing and every ordinary session stopped being
+deleted; 13 tests catch it, 10 of them pre-existing. Controls: staging arm
+disabled reddens 5, pointer clearing removed reddens exactly 1, a one-field
+ownership test reddens exactly 1.
+"""
 action = """
 Route `deleteSession`, the delete arm of `compareAndSetSession`, and
 `clearAllSessions` through the staging statement. `session_clear_all` reaches
@@ -101,7 +112,15 @@ validation = "All three paths tombstone a worktree-bearing row and still report 
 id = "expiry-preserves-the-record"
 depends_on = ["stage-on-delete"]
 actor = "assistant"
-status = "planned"
+status = """
+done 2026-09-04, migration 026, pinned at authorship. AMENDED: the signature is
+KEPT. Returning both counts needs a DROP FUNCTION and a new return type, which
+breaks an operator's scheduled call for no runtime gain; the integer keeps its
+meaning, sessions that stopped being live, and the split is visible in the data.
+No pointer clearing here, because expiry already excludes a session either
+pointer table references. The control runs the pre-026 definition from
+migrations/009 and restores 026 from the file, so it cannot drift.
+"""
 action = """
 Migration 026 redefines `cleanup_expired_sessions` to stage a tombstone on a
 worktree-bearing expired session and delete the rest, reporting both counts so
@@ -115,7 +134,7 @@ validation = "The function leaves a tombstone the owning host lists where the pr
 id = "observer-rejection-is-logged"
 depends_on = []
 actor = "assistant"
-status = "planned"
+status = "done 2026-09-04. Optional logger on the constructor, supplied by createSessionManager; id and error only. Restoring the silent catch reddens exactly 1."
 action = """
 `PostgreSQLSessionManager.notifySessionRemoved` discards both a throw and a
 rejected promise with no logger to report to. Thread one in and report session
@@ -128,7 +147,13 @@ validation = "A rejecting observer produces one bounded log line naming the sess
 id = "tests-and-negative-controls"
 depends_on = ["expiry-preserves-the-record", "observer-rejection-is-logged"]
 actor = "assistant"
-status = "planned"
+status = """
+done 2026-09-04. Suite 5049 to 5061 and pg 201 to 216, 0 removed either side;
+check 25 of 25. Every control above ran in both states. METHOD FINDING: the
+first expiry control measured the FIXTURE, because `createSession` claims the
+per-provider active pointer and expiry skips a pinned session, so it reported 1
+expiry where 2 were due.
+"""
 action = """
 `*-pg` coverage for: successful cleanup finalizes; failed cleanup persists and
 retries under a fresh manager; foreign-host deletion keeps the record and
@@ -144,7 +169,14 @@ validation = "Every added test dies to its own mutation; suite set difference re
 id = "reverse-the-documented-limitation"
 depends_on = ["tests-and-negative-controls"]
 actor = "assistant"
-status = "planned"
+status = """
+done 2026-09-04. Nine current surfaces carried the falsified claim; the release
+article and historical CHANGELOG entries are left in their historical context.
+Both consistency gates now assert the new claim AND the absence of the old one,
+because asserting only the new sentence passes with both present. METHOD
+FINDING: those gates spelled inner spaces as literal " ", so two assertions were
+passing on fill width rather than content; every space is a whitespace class now.
+"""
 action = """
 Only now: reverse what #302 wrote. The claim that PostgreSQL retains no failed
 cleanup is true today and false after this, so README, the `session_delete` and
