@@ -345,6 +345,7 @@ export function publicSafeSession(session: Session): Session {
     session.metadata !== undefined &&
     ("worktreeOwnerHostname" in session.metadata ||
       "worktreeOwnerInstanceId" in session.metadata ||
+      "worktreeToken" in session.metadata ||
       "worktreeCleanupPending" in session.metadata ||
       "worktreeCleanupPendingDeletion" in session.metadata);
   if (session.generation === undefined && !hasInternalWorktreeOwnership) return session;
@@ -353,6 +354,7 @@ export function publicSafeSession(session: Session): Session {
   const metadata: Record<string, any> = { ...publicSession.metadata };
   delete metadata.worktreeOwnerHostname;
   delete metadata.worktreeOwnerInstanceId;
+  delete metadata.worktreeToken;
   delete metadata.worktreeCleanupPending;
   delete metadata.worktreeCleanupPendingDeletion;
   return { ...publicSession, metadata };
@@ -1022,7 +1024,11 @@ export class FileSessionManager
   ): { session: Session; binding: KitSessionBinding } | null {
     if (execution.scopeRoot !== scopeRoot) return null;
     const session = this.storage.sessions[sessionId];
-    if (!session) return null;
+    // A tombstone is a DELETED session. Every Kit path here read the row
+    // directly and none of them checked, so a deleted Kit session could still
+    // be claimed, renewed, released, rebound and handed back as live, which is
+    // what made the PostgreSQL store stricter than this one.
+    if (!session || this.isPendingWorktreeDeletion(session)) return null;
     if (this.isExpired(session)) {
       this.evictSessionRow(sessionId);
       return null;
@@ -1190,6 +1196,7 @@ export class FileSessionManager
       const active = this.storage.sessions[activeSessionId];
       if (
         active &&
+        !this.isPendingWorktreeDeletion(active) &&
         !this.isExpired(active) &&
         sessionMatchesKitBinding(active, cli, requestedBinding, ownerPrincipal)
       ) {
@@ -1203,6 +1210,11 @@ export class FileSessionManager
 
     if (sessionId) {
       const identified = this.storage.sessions[sessionId];
+      if (identified && this.isPendingWorktreeDeletion(identified)) {
+        throw new Error(
+          `Kit session id ${sessionId} is awaiting worktree cleanup and cannot be reused`
+        );
+      }
       if (identified) {
         if (!sessionMatchesKitBinding(identified, cli, requestedBinding, ownerPrincipal)) {
           throw new Error(`Kit session id ${sessionId} is already bound to a different execution`);
@@ -1245,6 +1257,7 @@ export class FileSessionManager
     const activeSessionId = this.getActiveKitSessionId(cli, scopeRoot, execution, ownerPrincipal);
     if (activeSessionId !== sessionId) return false;
     const session = this.storage.sessions[sessionId];
+    if (session && this.isPendingWorktreeDeletion(session)) return false;
     const binding = session ? getKitSessionBinding(session) : null;
     if (
       !session ||
@@ -1495,7 +1508,7 @@ export class FileSessionManager
     let ownerPrincipal = resolveOwnerPrincipal(getRequestContext());
     if (sessionId !== null) {
       const session = this.storage.sessions[sessionId];
-      if (!session) return false;
+      if (!session || this.isPendingWorktreeDeletion(session)) return false;
       if (this.isExpired(session)) {
         this.evictSessionRow(sessionId);
         return false;
@@ -1674,7 +1687,7 @@ export class FileSessionManager
     }
     this.assertKitStorageHealthy();
     const session = this.storage.sessions[sessionId];
-    if (!session) return false;
+    if (!session || this.isPendingWorktreeDeletion(session)) return false;
     if (this.isExpired(session)) {
       this.evictSessionRow(sessionId);
       return false;

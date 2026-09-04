@@ -608,15 +608,18 @@ describe("PostgreSQLSessionManager", () => {
         let attempt = 0;
         attempt < 200 &&
         !logger.warn.mock.calls.some(([message]) =>
-          String(message).includes("Skipping cleanup for a non-managed worktree path")
+          String(message).includes("no longer carries this session's creation token")
         );
         attempt += 1
       ) {
         await new Promise(resolve => setTimeout(resolve, 10));
       }
 
+      // The recorded name no longer names a worktree carrying this session's
+      // creation token, so cleanup refuses before it can remove anything. That
+      // refusal is the point: the record must survive a failed removal.
       expect(logger.warn).toHaveBeenCalledWith(
-        "Skipping cleanup for a non-managed worktree path",
+        expect.stringContaining("no longer carries this session's creation token"),
         undefined
       );
       expect(existsSync(resolution.worktreePath!)).toBe(true);

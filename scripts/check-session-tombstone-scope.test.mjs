@@ -18,9 +18,9 @@ const tally = source => {
   const statements = sessionStatements(source);
   return {
     total: statements.length,
-    scoped: statements.filter(s => !s.insertOnly && s.scoped).length,
+    scoped: statements.filter(s => !s.insertOnly && !s.ddl && s.scoped).length,
     insertOnly: statements.filter(s => s.insertOnly).length,
-    exempt: statements.filter(s => !s.insertOnly && s.exempted).length,
+    exempt: statements.filter(s => !s.insertOnly && !s.ddl && s.exempted).length,
     failures: violations(statements).length,
   };
 };
@@ -33,18 +33,17 @@ describe("the governed file", () => {
   it("has every session-row statement scoped, inserting, or exempt with a reason", () => {
     expect(tally(SOURCE)).toEqual({
       total: 32,
-      scoped: 19,
+      scoped: 20,
       insertOnly: 6,
-      exempt: 7,
+      exempt: 6,
       failures: 0,
     });
   });
 
   it("reports every method fenced by either mechanism", () => {
-    // Four of the predicate calls sit in predicates handed to the shared
-    // delete-or-stage builder rather than in a statement of their own, so a
-    // derivation that only read statements would drop the three deletion paths
-    // from the covered set and the behaviour suite would stop requiring them.
+    // The builder now splices the exclusion itself, so its statement carries
+    // the predicate; its three callers are still fenced through it and must
+    // stay in the covered set the behaviour suite derives.
     const methods = guardedMethods(SOURCE);
     expect(methods).toHaveLength(15);
     expect(methods).toEqual(expect.arrayContaining(["deleteSession", "clearAllSessions"]));
@@ -61,11 +60,9 @@ describe("negative controls", () => {
     // table and pass `"s"`, and a control that removed only the default form
     // reported 21 of 23 while looking like a clean sweep.
     const mutated = SOURCE.replaceAll(/\$\{sessionNotTombstonedSql\([^)]*\)\}/g, "");
-    expect(SOURCE.split(PREDICATE_CALL).length - 1).toBe(21);
+    expect(SOURCE.split(PREDICATE_CALL).length - 1).toBe(18);
     expect(SOURCE.split('sessionNotTombstonedSql("s")').length - 1).toBe(2);
-    // 19, not 23: four of the calls are in predicates the builder receives, and
-    // those are fenced by its runtime throw rather than by this gate.
-    expect(tally(mutated).failures).toBe(19);
+    expect(tally(mutated).failures).toBe(20);
   });
 
   it("fires when one statement loses the predicate", () => {
@@ -80,12 +77,57 @@ describe("negative controls", () => {
 
   it("fires when an exemption marker is deleted", () => {
     const mutated = SOURCE.replace("tombstone-scope: exempt", "");
-    expect(tally(mutated)).toMatchObject({ exempt: 6, failures: 1 });
+    expect(tally(mutated)).toMatchObject({ exempt: 5, failures: 1 });
   });
 
   it("fires on a new unscoped read added to the file", () => {
     const added = `${SOURCE}\nconst leak = \`SELECT id FROM sessions WHERE cli = $1\`;\n`;
     expect(tally(added)).toMatchObject({ total: 33, failures: 1 });
+  });
+});
+
+describe("the bypasses two reviewers walked through", () => {
+  // Every case here defeated an earlier version of this gate. They are kept as
+  // the gate's own regression suite: the census it prints is only worth
+  // something if these stay red.
+  const wrap = body => `  meth() {\n    q(\`${body}\`);\n  }\n`;
+  const fires = body => violations(sessionStatements(wrap(body)));
+
+  it("sees a quoted, schema-qualified or ONLY table reference", () => {
+    expect(fires('SELECT id FROM "sessions" WHERE id = $1')).toHaveLength(1);
+    expect(fires("SELECT id FROM public.sessions WHERE id = $1")).toHaveLength(1);
+    expect(fires('SELECT id FROM "public"."sessions" WHERE id = $1')).toHaveLength(1);
+    expect(fires("SELECT id FROM ONLY sessions WHERE id = $1")).toHaveLength(1);
+    expect(fires("UPDATE ONLY sessions SET x = 1 WHERE id = $1")).toHaveLength(1);
+  });
+
+  it("refuses a table name assembled at runtime rather than trying to read it", () => {
+    const body =
+      '  meth() {\n    const t = "sessions";\n    q(`SELECT id FROM ${t} WHERE id = $1`);\n  }\n';
+    const failures = violations(sessionStatements(body));
+    expect(failures).toHaveLength(1);
+    expect(failures[0]).toContain("builds a table name at runtime");
+  });
+
+  it("does not accept a predicate that cannot execute", () => {
+    // A substring test cannot tell a live splice from a dead branch.
+    expect(
+      fires('SELECT id FROM sessions WHERE id = $1 ${false ? sessionNotTombstonedSql() : ""}')
+    ).toHaveLength(1);
+    expect(fires("SELECT id FROM sessions WHERE id = $1 AND ${sessionNotTombstonedSql()}")).toEqual(
+      []
+    );
+  });
+
+  it("does not fire on prose or on a non-SQL template", () => {
+    const body = "  meth() {\n    log(`copied from ${source} to ${dest}`);\n  }\n";
+    expect(sessionStatements(body)).toEqual([]);
+  });
+
+  it("treats a view definition as DDL rather than a caller-facing read", () => {
+    expect(fires("CREATE OR REPLACE VIEW session_summary AS SELECT s.id FROM sessions s")).toEqual(
+      []
+    );
   });
 });
 

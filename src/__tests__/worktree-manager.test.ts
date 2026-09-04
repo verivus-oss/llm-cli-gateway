@@ -27,8 +27,10 @@ import {
   createWorktree,
   createWorktreeSessionCleanupHook,
   cleanupSessionWorktree,
+  readWorktreeOwnerToken,
   removeWorktree,
   sanitizeWorktreeName,
+  validateManagedWorktreeIdentity,
   WorktreeCollisionError,
   WorktreeError,
 } from "../worktree-manager.js";
@@ -735,6 +737,7 @@ describe("durable session worktree deletion cleanup", () => {
       worktreeName: handle.name,
       worktreeOwnerHostname: hostname(),
       worktreeOwnerInstanceId: "worktree-delete-test-instance",
+      worktreeToken: handle.token,
     });
     return { session, path: handle.path };
   }
@@ -821,6 +824,168 @@ describe("durable session worktree deletion cleanup", () => {
 // and without slicing) → the cleanup is invoked against the wrong cwd
 // and the test below catches it.
 
+describe("worktree creation token (issue #305 ABA window)", () => {
+  let repoRoot: string;
+  const warnings: string[] = [];
+  const logger = {
+    ...noopLogger,
+    warn: (message: string) => {
+      warnings.push(message);
+    },
+  };
+
+  beforeEach(() => {
+    repoRoot = initRepo();
+    warnings.length = 0;
+  });
+  afterEach(() => rmSync(repoRoot, { recursive: true, force: true }));
+
+  const sessionFor = (handle: Awaited<ReturnType<typeof createWorktree>>, id: string) => ({
+    id,
+    metadata: {
+      worktreePath: handle.path,
+      worktreeName: handle.name,
+      worktreeOwnerHostname: hostname(),
+      worktreeOwnerInstanceId: "instance-a",
+      worktreeToken: handle.token,
+    },
+  });
+
+  it("stamps a distinct token per creation, outside the checkout", async () => {
+    const first = await createWorktree({ repoRoot, name: "aba", logger: noopLogger });
+    expect(first.token).toMatch(/^[0-9a-f-]{36}$/);
+    // The marker must not be inside the working tree, or an agent would commit
+    // it and `git status` would report the worktree as dirty on creation.
+    expect(existsSync(join(first.path, "gateway-owner.json"))).toBe(false);
+    expect(await readWorktreeOwnerToken(repoRoot, "aba", noopLogger)).toBe(first.token);
+
+    await removeWorktree({ repoRoot, path: first.path, name: first.name, logger: noopLogger });
+    const second = await createWorktree({ repoRoot, name: "aba", logger: noopLogger });
+    expect(second.token).not.toBe(first.token);
+  });
+
+  it("refuses to remove a replacement worktree that took the same name", async () => {
+    // The window this closes: cleanup removes the worktree BEFORE it finalizes
+    // the durable tombstone, so a crash in between leaves a tombstone naming a
+    // path that a later session can legitimately recreate. Path and branch both
+    // derive from the name, so nothing else distinguishes the two.
+    const original = await createWorktree({ repoRoot, name: "reused", logger: noopLogger });
+    const staleSession = sessionFor(original, "session-a");
+    await removeWorktree({
+      repoRoot,
+      path: original.path,
+      name: original.name,
+      logger: noopLogger,
+    });
+
+    const replacement = await createWorktree({ repoRoot, name: "reused", logger: noopLogger });
+    expect(replacement.path).toBe(original.path);
+    expect(existsSync(replacement.path)).toBe(true);
+
+    const removed = await cleanupSessionWorktree(staleSession, logger, {
+      expectedOwnerHostname: hostname(),
+      requireOwnerMetadata: true,
+    });
+
+    expect(removed).toBe(false);
+    expect(warnings.some(w => w.includes("no longer carries this session's creation token"))).toBe(
+      true
+    );
+    // The replacement is still there. Without the token check this assertion is
+    // the one that fails, and it fails by deleting a live session's checkout.
+    expect(existsSync(replacement.path)).toBe(true);
+    expect(await readWorktreeOwnerToken(repoRoot, "reused", noopLogger)).toBe(replacement.token);
+  });
+
+  it("still removes the worktree the session actually created", async () => {
+    // The other half: the refusal must come from the token, not from the check
+    // being unable to accept anything.
+    const handle = await createWorktree({ repoRoot, name: "owned", logger: noopLogger });
+    const removed = await cleanupSessionWorktree(sessionFor(handle, "session-b"), logger, {
+      expectedOwnerHostname: hostname(),
+      requireOwnerMetadata: true,
+    });
+    expect(removed).toBe(true);
+    expect(existsSync(handle.path)).toBe(false);
+    expect(warnings).toEqual([]);
+  });
+
+  it("refuses reuse of a replacement worktree at the same name", async () => {
+    // Reuse has the same hazard as cleanup: Git identity proves a gateway
+    // worktree lives here, not that it is this session's.
+    const original = await createWorktree({ repoRoot, name: "resumed", logger: noopLogger });
+    await removeWorktree({
+      repoRoot,
+      path: original.path,
+      name: original.name,
+      logger: noopLogger,
+    });
+    const replacement = await createWorktree({ repoRoot, name: "resumed", logger: noopLogger });
+
+    // Git identity alone still passes, which is exactly why it is not enough.
+    expect(
+      await validateManagedWorktreeIdentity({
+        repoRoot,
+        path: replacement.path,
+        name: "resumed",
+        logger: noopLogger,
+      })
+    ).toBe(true);
+    expect(await readWorktreeOwnerToken(repoRoot, "resumed", noopLogger)).not.toBe(original.token);
+  });
+
+  it("removes a legacy worktree that predates the marker", async () => {
+    // A session created before the token existed has neither side, and must
+    // still be cleanable rather than stranded forever.
+    const handle = await createWorktree({ repoRoot, name: "legacy", logger: noopLogger });
+    const admin = execFileSync("git", ["rev-parse", "--git-common-dir"], {
+      cwd: repoRoot,
+      encoding: "utf8",
+    }).trim();
+    rmSync(join(repoRoot, admin, "worktrees", "legacy", "gateway-owner.json"), { force: true });
+    expect(await readWorktreeOwnerToken(repoRoot, "legacy", noopLogger)).toBeNull();
+
+    const legacySession = {
+      id: "session-legacy",
+      metadata: {
+        worktreePath: handle.path,
+        worktreeName: handle.name,
+        worktreeOwnerHostname: hostname(),
+        worktreeOwnerInstanceId: "instance-legacy",
+      },
+    };
+    expect(
+      await cleanupSessionWorktree(legacySession, logger, {
+        expectedOwnerHostname: hostname(),
+        requireOwnerMetadata: true,
+      })
+    ).toBe(true);
+    expect(existsSync(handle.path)).toBe(false);
+  });
+
+  it("refuses a legacy session against a worktree that does carry a marker", async () => {
+    // The asymmetric case: no token recorded, but the live worktree has one.
+    // That is a replacement, and adopting it is the same defect.
+    const handle = await createWorktree({ repoRoot, name: "mixed", logger: noopLogger });
+    const legacySession = {
+      id: "session-mixed",
+      metadata: {
+        worktreePath: handle.path,
+        worktreeName: handle.name,
+        worktreeOwnerHostname: hostname(),
+        worktreeOwnerInstanceId: "instance-mixed",
+      },
+    };
+    expect(
+      await cleanupSessionWorktree(legacySession, logger, {
+        expectedOwnerHostname: hostname(),
+        requireOwnerMetadata: true,
+      })
+    ).toBe(false);
+    expect(existsSync(handle.path)).toBe(true);
+  });
+});
+
 describe("createWorktreeSessionCleanupHook (slice λ)", () => {
   let repoRoot: string;
 
@@ -843,7 +1008,11 @@ describe("createWorktreeSessionCleanupHook (slice λ)", () => {
     const hook = createWorktreeSessionCleanupHook(noopLogger);
     await hook({
       id: "sess-1",
-      metadata: { worktreePath: handle.path, worktreeName: handle.name },
+      metadata: {
+        worktreePath: handle.path,
+        worktreeName: handle.name,
+        worktreeToken: handle.token,
+      },
     });
     expect(existsSync(handle.path)).toBe(false);
   });
@@ -878,6 +1047,7 @@ describe("createWorktreeSessionCleanupHook (slice λ)", () => {
         worktreeName: matching.name,
         worktreeOwnerHostname: "gateway-host-a",
         worktreeOwnerInstanceId: "instance-a",
+        worktreeToken: matching.token,
       },
     });
     await hook({
@@ -887,6 +1057,7 @@ describe("createWorktreeSessionCleanupHook (slice λ)", () => {
         worktreeName: foreign.name,
         worktreeOwnerHostname: "gateway-host-b",
         worktreeOwnerInstanceId: "instance-b",
+        worktreeToken: foreign.token,
       },
     });
 

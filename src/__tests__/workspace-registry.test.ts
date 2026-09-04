@@ -778,6 +778,10 @@ describe("workspace registry", () => {
           worktreeName: worktree.name,
           worktreeOwnerHostname: hostname(),
           worktreeOwnerInstanceId: "workspace-registry-test-instance",
+          // The creation token the gateway stamps alongside the owner fields.
+          // Without it this session is claiming a worktree it did not create,
+          // which is exactly what reuse now refuses.
+          worktreeToken: worktree.token,
         })
       )
     );

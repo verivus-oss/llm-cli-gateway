@@ -70,6 +70,7 @@ import {
 import {
   createWorktree,
   cleanupSessionWorktree,
+  readWorktreeOwnerToken,
   removeWorktree,
   removeWorktreeWithResult,
   validateManagedWorktreeIdentity,
@@ -2276,6 +2277,8 @@ export interface ResolvedWorktree {
     repoRoot: string;
     path: string;
     name: string;
+    /** Creation token, so the durable binding can record which object this is. */
+    token: string;
   };
   /** Internal CAS snapshot after a successful worktree metadata binding. */
   boundSession?: Session;
@@ -3200,6 +3203,7 @@ function resolvedSessionScopeMetadata(
             ? {
                 worktreeOwnerHostname: hostname(),
                 worktreeOwnerInstanceId: runtime.asyncJobManager.getInstanceId(),
+                worktreeToken: resolution.requestOwnedWorktree.token,
               }
             : {}),
         }
@@ -3320,7 +3324,15 @@ export async function resolveWorktreeForRequest(
           path: existingPath,
           name: existingName,
           logger: runtime.logger,
-        }));
+        })) &&
+        // Git identity proves a gateway worktree lives here, not that it is
+        // THIS session's. Path and branch both derive from the name, so only
+        // the creation token separates a reused worktree from a later one that
+        // took the same name after this one was removed.
+        (await readWorktreeOwnerToken(repoRoot, existingName, runtime.logger)) ===
+          (typeof session?.metadata?.worktreeToken === "string"
+            ? session.metadata.worktreeToken
+            : null);
       if (!validIdentity) {
         throw new Error(
           "Durable session worktree metadata no longer matches a same-host gateway-owned Git worktree. Start a new session or restore the original worktree."
@@ -3362,6 +3374,7 @@ export async function resolveWorktreeForRequest(
           ? {
               worktreeOwnerHostname: hostname(),
               worktreeOwnerInstanceId: runtime.asyncJobManager.getInstanceId(),
+              worktreeToken: handle.token,
             }
           : {}),
         ...(options.workspaceAlias ? { workspaceAlias: options.workspaceAlias } : {}),
@@ -3390,6 +3403,7 @@ export async function resolveWorktreeForRequest(
                 repoRoot,
                 path: handle.path,
                 name: handle.name,
+                token: handle.token,
               },
             }
           : {}),
@@ -3417,6 +3431,7 @@ export async function resolveWorktreeForRequest(
             repoRoot,
             path: handle.path,
             name: handle.name,
+            token: handle.token,
           },
         }
       : {}),

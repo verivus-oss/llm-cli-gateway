@@ -1,7 +1,11 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { readFileSync } from "node:fs";
 import { PostgreSQLSessionManager, deleteOrStageSessionsSql } from "../session-manager-pg.js";
-import { sessionGenerationIdentity, type Session } from "../session-manager.js";
+import {
+  sessionGenerationIdentity,
+  sessionNotTombstonedSql,
+  type Session,
+} from "../session-manager.js";
 import type { KitExecutionRef, KitSessionBinding } from "../personal-config-types.js";
 // eslint-disable-next-line @typescript-eslint/ban-ts-comment
 // @ts-expect-error - the structural gate is a plain script, deliberately untyped
@@ -273,27 +277,71 @@ describe("PostgreSQL sessions hide worktree-cleanup tombstones", () => {
   });
 
   it("stages only on all four ownership fields, never on a partial record", async () => {
-    // The classification is the whole hazard: stage too eagerly and an ordinary
-    // deletion silently stops deleting.
-    const partial = await manager.createSession("claude", "partial");
-    await manager.updateSessionMetadata(partial.id, {
-      worktreePath: "/tmp/worktree-partial",
-      worktreeName: "wt-partial",
+    // Every field individually, not just the last one. The first version of
+    // this omitted `worktreeOwnerInstanceId` only, so three of the four
+    // conjuncts could be deleted from the classification with the whole suite
+    // still green: it pinned one field and read as if it pinned four.
+    const fields = [
+      "worktreePath",
+      "worktreeName",
+      "worktreeOwnerHostname",
+      "worktreeOwnerInstanceId",
+    ] as const;
+    const complete = (label: string): Record<string, unknown> => ({
+      worktreePath: `/tmp/worktree-${label}`,
+      worktreeName: `wt-${label}`,
       worktreeOwnerHostname: OWNER_HOST,
-      // no worktreeOwnerInstanceId
+      worktreeOwnerInstanceId: `instance-${label}`,
     });
-    expect(await manager.deleteSession(partial.id)).toBe(true);
-    expect(await manager.listPendingWorktreeCleanupSessions(OWNER_HOST)).toEqual([]);
 
-    const wrongType = await manager.createSession("claude", "wrong type");
-    await manager.updateSessionMetadata(wrongType.id, {
-      worktreePath: "/tmp/worktree-typed",
-      worktreeName: "wt-typed",
-      worktreeOwnerHostname: OWNER_HOST,
-      worktreeOwnerInstanceId: 7,
-    });
-    expect(await manager.deleteSession(wrongType.id)).toBe(true);
-    expect(await manager.listPendingWorktreeCleanupSessions(OWNER_HOST)).toEqual([]);
+    // Assert the ROW is gone, not that the tombstone list omits it. The list
+    // filters on `worktreeOwnerHostname`, so a record missing that field is
+    // invisible to it whether or not it was staged, and the first version of
+    // this control passed against a mutant that staged it.
+    const rowExists = async (id: string): Promise<boolean> =>
+      Number(
+        (
+          await pool.query<{ n: number }>("SELECT COUNT(*)::int AS n FROM sessions WHERE id = $1", [
+            id,
+          ])
+        ).rows[0]!.n
+      ) > 0;
+
+    for (const missing of fields) {
+      const session = await manager.createSession("claude", `missing ${missing}`);
+      const metadata = complete(missing);
+      delete metadata[missing];
+      await manager.updateSessionMetadata(session.id, metadata);
+      expect(await manager.deleteSession(session.id)).toBe(true);
+      expect(
+        await rowExists(session.id),
+        `a record missing ${missing} owns no worktree and must be deleted outright`
+      ).toBe(false);
+    }
+
+    // A JSON number is not a JSON string, and the classification says so
+    // rather than accepting anything non-null.
+    for (const wrongTyped of fields) {
+      const session = await manager.createSession("claude", `typed ${wrongTyped}`);
+      await manager.updateSessionMetadata(session.id, {
+        ...complete(wrongTyped),
+        [wrongTyped]: 7,
+      });
+      expect(await manager.deleteSession(session.id)).toBe(true);
+      expect(
+        await rowExists(session.id),
+        `a non-string ${wrongTyped} must not be read as ownership`
+      ).toBe(false);
+    }
+
+    // And the complete record still stages, so the refusals above come from the
+    // missing field rather than from staging having stopped working.
+    const owned = await manager.createSession("claude", "complete");
+    await manager.updateSessionMetadata(owned.id, complete("complete"));
+    expect(await manager.deleteSession(owned.id)).toBe(true);
+    expect(
+      (await manager.listPendingWorktreeCleanupSessions(OWNER_HOST)).map(row => row.id)
+    ).toEqual([owned.id]);
   });
 
   it("clears the pointer tables it would otherwise leave aimed at a tombstone", async () => {
@@ -382,6 +430,16 @@ describe("PostgreSQL sessions hide worktree-cleanup tombstones", () => {
   });
 
   describe("database-side expiry", () => {
+    // Apply the SHIPPED migration file before every case. Without this the
+    // cases exercise whatever definition the fixture already holds, so editing
+    // `migrations/026_*.sql` and running the suite proved nothing: the file was
+    // not the thing under test.
+    beforeEach(async () => {
+      await pool.query(
+        readFileSync("migrations/026_worktree_cleanup_on_session_expiry.sql", "utf8")
+      );
+    });
+
     const age = async (id: string, days: number): Promise<void> => {
       await pool.query(
         `UPDATE sessions SET last_used_at = NOW() - INTERVAL '1 day' * $2 WHERE id = $1`,
@@ -446,6 +504,87 @@ describe("PostgreSQL sessions hide worktree-cleanup tombstones", () => {
       ).toEqual([session.id]);
     });
 
+    it("preserves every exclusion migration 009 already had", async () => {
+      // Each fixture is pinned by exactly ONE exclusion, so a deleted arm
+      // cannot be covered by another. All of these were individually removable
+      // from 026 with the whole suite green, because nothing built a row they
+      // protected.
+      const pinnedActive = await manager.createSession("codex", "pinned by active pointer");
+      await manager.setActiveSession("codex", pinnedActive.id);
+
+      const pointerExecution = execution({ contextIdentity: "kit-pointer" });
+      const kitPinned = await manager.createKitSession(
+        "claude",
+        binding({ execution: pointerExecution, resumeEligible: false })
+      );
+
+      const heldExecution = execution({ contextIdentity: "held" });
+      const held = await manager.createKitSession(
+        "claude",
+        binding({ execution: heldExecution, resumeEligible: false })
+      );
+      expect(
+        await manager.claimKitSessionAttempt(
+          "claude",
+          heldExecution.scopeRoot,
+          heldExecution,
+          held.id,
+          {
+            id: "attempt-expiry",
+            kind: "durable",
+            acquiredAt: new Date(Date.now() - 1_000).toISOString(),
+            expiresAt: new Date(Date.now() + 60_000).toISOString(),
+            expectedNativeSessionId: NATIVE_ID,
+          }
+        )
+      ).toBe(true);
+      await manager.setActiveKitSession("claude", heldExecution.scopeRoot, null, heldExecution);
+
+      const ordinary = await manager.createSession("claude", "ordinary");
+      for (const id of [pinnedActive.id, kitPinned.id, held.id, ordinary.id]) {
+        await age(id, 60);
+      }
+
+      expect(await sweep()).toBe(1);
+      expect(await manager.getSession(ordinary.id)).toBeNull();
+      for (const [label, id] of [
+        ["active pointer", pinnedActive.id],
+        ["kit active pointer", kitPinned.id],
+        ["held attempt", held.id],
+      ] as Array<[string, string]>) {
+        expect(await manager.getSession(id), `${label} must pin the session`).not.toBeNull();
+      }
+      expect(await manager.listPendingWorktreeCleanupSessions(OWNER_HOST)).toEqual([]);
+    });
+
+    it("still honours resumeEligible, which no gateway write path can set", async () => {
+      // NOT reachable through the API, and this test says so rather than
+      // implying coverage it does not have. `cloneKitSessionBinding` pins
+      // `resumeEligible` to false on every durable write, and
+      // `ensureKitPointerSchema`'s privacy repair rewrites any row where it is
+      // not false. The arm is therefore inert against gateway-written rows; it
+      // can only ever protect one an import or an operator produced. The row is
+      // seeded directly because that is the only state in which the predicate
+      // means anything.
+      const session = await manager.createSession("claude", "seeded resumable");
+      await pool.query(
+        `UPDATE sessions
+            SET metadata = jsonb_set(COALESCE(metadata, '{}'::jsonb), '{kit}', $2::jsonb, true)
+          WHERE id = $1`,
+        [
+          session.id,
+          JSON.stringify({
+            execution: execution({ contextIdentity: "seeded" }),
+            nativeSessionId: null,
+            resumeEligible: true,
+          }),
+        ]
+      );
+      await age(session.id, 60);
+      expect(await sweep()).toBe(0);
+      expect(await manager.getSession(session.id)).not.toBeNull();
+    });
+
     it("deleted the row outright before migration 026", async () => {
       // The control, run against the previous definition rather than inferred
       // from it. Restored from the migration file itself so the two cannot
@@ -505,13 +644,152 @@ describe("PostgreSQL sessions hide worktree-cleanup tombstones", () => {
     expect(logger.error.mock.calls).toHaveLength(1);
   });
 
-  it("refuses a deletion predicate that would re-stage an existing tombstone", () => {
-    // Executed on the production path, not only in the structural gate, because
-    // this builder is the single place all three deletion paths pass through.
-    expect(() => deleteOrStageSessionsSql("id = $1")).toThrow(/must exclude worktree-cleanup/);
-    expect(() =>
-      deleteOrStageSessionsSql("id = $1 AND metadata->>'worktreeCleanupPendingDeletion' IS NULL")
-    ).not.toThrow();
+  it("splices the tombstone exclusion whatever the caller passes", () => {
+    // The builder used to REQUIRE the caller's predicate to mention the
+    // tombstone key, which proved a substring rather than a row exclusion. Each
+    // predicate below satisfied that check and excluded nothing; one of them
+    // re-staged the very tombstones it claimed to skip. The exclusion is now
+    // the builder's, so none of them can express a deletion that sees one.
+    const bypasses = [
+      "id = $1",
+      "id = $1 AND 'worktreeCleanupPendingDeletion' <> 'unused'",
+      "id = $1 -- worktreeCleanupPendingDeletion",
+      "id = $1 OR metadata->>'worktreeCleanupPendingDeletion' IS NOT NULL",
+    ];
+    for (const predicate of bypasses) {
+      const sql = deleteOrStageSessionsSql(predicate);
+      // Spliced by the builder, and the caller's predicate is parenthesised so
+      // a trailing OR cannot reach past it.
+      expect(sql).toContain(`WHERE (${predicate})`);
+      expect(sql).toContain(sessionNotTombstonedSql());
+    }
+  });
+
+  it("never lets a caller predicate reach a tombstone, against the real server", async () => {
+    // The behavioural half of the case above: the bypass that used to re-stage
+    // a tombstone now returns nothing, on a real PostgreSQL.
+    const session = await manager.createSession("claude", "or-bypass");
+    const stored = await tombstone(session);
+    const rows = await pool.query(
+      deleteOrStageSessionsSql(
+        `id = $1 OR metadata->>'worktreeCleanupPendingDeletion' IS NOT NULL`
+      ).replace(/\?/g, "$1"),
+      [stored.id]
+    );
+    expect(rows.rows).toEqual([]);
+    await survives(session.id);
+  });
+
+  it("serialises two concurrent deletions of the same session", async () => {
+    // `FOR UPDATE` on the classification CTE is what makes the second deletion
+    // re-read the row after the first commits. Without it both statements
+    // classify the same pre-deletion snapshot and both stage, which is a second
+    // observer notification for a removal that already happened.
+    const session = await manager.createSession("claude", "concurrent delete");
+    await manager.updateSessionMetadata(session.id, {
+      worktreePath: "/tmp/worktree-concurrent",
+      worktreeName: "wt-concurrent",
+      worktreeOwnerHostname: OWNER_HOST,
+      worktreeOwnerInstanceId: "instance-concurrent",
+    });
+    const statement = deleteOrStageSessionsSql("id = $1");
+
+    const first = await pool.connect();
+    const second = await pool.connect();
+    const observer = await pool.connect();
+    try {
+      await first.query("BEGIN");
+      const firstRows = await first.query(statement, [session.id]);
+      expect(firstRows.rows).toHaveLength(1);
+
+      await second.query("BEGIN");
+      const secondPid = Number(
+        (await second.query<{ pid: number }>("SELECT pg_backend_pid() AS pid")).rows[0]!.pid
+      );
+      const blocked = second.query(statement, [session.id]);
+
+      // A BARRIER, not a dispatch order. The first version of this control
+      // committed as soon as the second query had been handed to the driver,
+      // which usually happened before PostgreSQL had even taken the second
+      // statement's snapshot, so it passed with FOR UPDATE removed. Wait for
+      // the server itself to report the second backend blocked on a lock.
+      let waiting = false;
+      for (let attempt = 0; attempt < 400 && !waiting; attempt += 1) {
+        const blockers = await observer.query<{ blocked: boolean }>(
+          "SELECT cardinality(pg_blocking_pids($1)) > 0 AS blocked",
+          [secondPid]
+        );
+        waiting = blockers.rows[0]?.blocked === true;
+        if (!waiting) await new Promise(resolve => setTimeout(resolve, 25));
+      }
+      expect(waiting).toBe(true);
+
+      await first.query("COMMIT");
+      const secondRows = await blocked;
+      await second.query("COMMIT");
+
+      // Re-read after the commit, so the row it classifies is the tombstone the
+      // first deletion produced and the exclusion applies to it.
+      expect(secondRows.rows).toEqual([]);
+    } finally {
+      first.release();
+      second.release();
+      observer.release();
+    }
+
+    const pending = await manager.listPendingWorktreeCleanupSessions(OWNER_HOST);
+    expect(pending.map(row => row.id)).toEqual([session.id]);
+  });
+
+  describe("finalization fences", () => {
+    const seeded = async (label: string): Promise<Session> => {
+      const session = await manager.createSession("claude", label);
+      await manager.updateSessionMetadata(session.id, {
+        worktreePath: `/tmp/worktree-${label}`,
+        worktreeName: `wt-${label}`,
+        worktreeOwnerHostname: OWNER_HOST,
+        worktreeOwnerInstanceId: `instance-${label}`,
+      });
+      expect(await manager.deleteSession(session.id)).toBe(true);
+      return (await manager.listPendingWorktreeCleanupSessions(OWNER_HOST)).find(
+        row => row.id === session.id
+      )!;
+    };
+
+    // Every clause of the DELETE that acknowledges a verified removal. Each is
+    // what stops a late acknowledgement from removing a row that is no longer
+    // the one it verified, and each was individually replaceable by a tautology
+    // with the whole suite still green.
+    it("refuses an acknowledgement carrying a different session id", async () => {
+      const mine = await seeded("fence-id-a");
+      const theirs = await seeded("fence-id-b");
+      expect(await manager.finalizePendingWorktreeCleanup({ ...mine, id: theirs.id })).toBe(false);
+      expect(
+        (await manager.listPendingWorktreeCleanupSessions(OWNER_HOST)).map(row => row.id).sort()
+      ).toEqual([mine.id, theirs.id].sort());
+    });
+
+    it("refuses an acknowledgement carrying a stale generation", async () => {
+      const tomb = await seeded("fence-generation");
+      expect(
+        await manager.finalizePendingWorktreeCleanup({
+          ...tomb,
+          generation: "11111111-1111-4111-8111-111111111111",
+        })
+      ).toBe(false);
+      await survives(tomb.id);
+      expect(await manager.finalizePendingWorktreeCleanup(tomb)).toBe(true);
+    });
+
+    it("refuses to finalize a row that is not a tombstone", async () => {
+      const live = await manager.createSession("claude", "still live");
+      await manager.updateSessionMetadata(live.id, {
+        worktreeOwnerHostname: OWNER_HOST,
+      });
+      const stored = (await manager.getSession(live.id))!;
+      expect(await manager.finalizePendingWorktreeCleanup(stored)).toBe(false);
+      expect(await manager.getSession(live.id)).not.toBeNull();
+    });
   });
 
   it("covers every method the module guards", () => {

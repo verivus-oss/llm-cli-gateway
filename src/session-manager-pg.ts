@@ -164,23 +164,20 @@ const TOMBSTONE_PATCH_SQL = `'{"worktreeCleanupPending": true, "${WORKTREE_CLEAN
  * stay the active session for its provider and the active Kit pointer for its
  * scope, both naming a row every caller-facing read now reports absent.
  *
- * `predicate` is caller-supplied SQL. It MUST already exclude existing
- * tombstones: re-staging one notifies the observer a second time and races the
- * first attempt's acknowledgement. That is checked here, on the production
- * path, rather than left to the structural gate, because this function is the
- * single place all three deletion paths pass through.
+ * The tombstone exclusion is spliced HERE, not required of the caller. An
+ * earlier version took it in `predicate` and checked that the string mentioned
+ * the key, which proved presence of a substring rather than exclusion of a row:
+ * a tautology, an SQL comment, or an `OR ... IS NOT NULL` all satisfied it, and
+ * the last one re-staged the tombstones it was supposed to exclude. A required
+ * argument is vigilance; splicing it is the property. `predicate` now carries
+ * only the caller's own scoping.
  */
-// tombstone-scope: exempt. This statement's own predicate comes from its
-// callers, and the rule is enforced on them at RUNTIME by the throw above,
-// which runs on the production path rather than only in a gate.
 export function deleteOrStageSessionsSql(predicate: string): string {
-  if (!predicate.includes(WORKTREE_CLEANUP_TOMBSTONE_KEY)) {
-    throw new Error("A session deletion predicate must exclude worktree-cleanup tombstones");
-  }
   return `WITH target AS (
             SELECT id, ${DURABLY_OWNED_WORKTREE_SQL} AS owned
               FROM sessions
-             WHERE ${predicate}
+             WHERE (${predicate})
+               AND ${sessionNotTombstonedSql()}
                FOR UPDATE
           ), staged AS (
             UPDATE sessions
@@ -1231,7 +1228,6 @@ export class PostgreSQLSessionManager
     const removed = await this.query<Session>(
       deleteOrStageSessionsSql(`id = ?
          AND ${scope.sql}
-         AND ${sessionNotTombstonedSql()}
          AND (NOT jsonb_exists(COALESCE(metadata, '{}'::jsonb), 'kit')
               OR NOT jsonb_exists(COALESCE(metadata, '{}'::jsonb)->'kit', 'attempt'))`),
       [sessionId, ...scope.params]
@@ -1507,7 +1503,6 @@ export class PostgreSQLSessionManager
        AND COALESCE(metadata, '{}'::jsonb) = $6::jsonb`;
     const rows = await this.query<Session>(
       deleteOrStageSessionsSql(`${deleteIdentityPredicate}
-         AND ${sessionNotTombstonedSql()}
          AND (NOT jsonb_exists(COALESCE(metadata, '{}'::jsonb), 'kit')
               OR NOT jsonb_exists(COALESCE(metadata, '{}'::jsonb)->'kit', 'attempt'))`),
       parameters.slice(1)
@@ -1612,10 +1607,8 @@ export class PostgreSQLSessionManager
     const protectedAttempt = `(NOT jsonb_exists(COALESCE(metadata, '{}'::jsonb), 'kit')
       OR NOT jsonb_exists(COALESCE(metadata, '{}'::jsonb)->'kit', 'attempt'))`;
     const query = cli
-      ? deleteOrStageSessionsSql(
-          `cli = $1 AND ${protectedAttempt} AND ${sessionNotTombstonedSql()}`
-        )
-      : deleteOrStageSessionsSql(`${protectedAttempt} AND ${sessionNotTombstonedSql()}`);
+      ? deleteOrStageSessionsSql(`cli = $1 AND ${protectedAttempt}`)
+      : deleteOrStageSessionsSql(protectedAttempt);
     const removed = cli
       ? await this.query<Session>(query, [cli])
       : await this.query<Session>(query);

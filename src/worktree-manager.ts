@@ -1,6 +1,6 @@
 import { spawn } from "child_process";
 import { randomUUID } from "crypto";
-import { existsSync, lstatSync, mkdirSync, realpathSync } from "fs";
+import { existsSync, lstatSync, mkdirSync, readFileSync, realpathSync, writeFileSync } from "fs";
 import { basename, isAbsolute, join, relative, resolve as resolvePath, sep } from "path";
 import { logWarn, noopLogger, type Logger } from "./logger.js";
 
@@ -69,6 +69,11 @@ export interface WorktreeHandle {
   createdAt: string;
   /** True only when this call created the worktree and branch. */
   created: boolean;
+  /**
+   * Per-CREATION identity, stamped into the worktree's Git admin directory and
+   * mirrored into durable session metadata. See `GATEWAY_WORKTREE_MARKER`.
+   */
+  token: string;
 }
 
 export interface CreateWorktreeOptions {
@@ -444,6 +449,59 @@ async function listRegisteredWorktrees(
   return registrations;
 }
 
+/**
+ * A managed worktree's on-disk identity is its path and its `gateway/<name>`
+ * branch, and BOTH derive from the name. Two worktrees created at the same name
+ * at different times are therefore indistinguishable, which is not a
+ * theoretical problem: cleanup removes the worktree before it finalizes the
+ * durable tombstone that authorized the removal, so a crash in that window
+ * leaves a tombstone naming a path that a later session can legitimately
+ * recreate. The retry then deletes the replacement, and the replacement's
+ * session survives in the store pointing at a directory that is gone.
+ *
+ * This marker is what tells the two apart. It is written once per creation
+ * into the worktree's Git ADMIN directory rather than into the checkout: the
+ * checkout belongs to the caller and an agent working there would commit it,
+ * while the admin directory is created by `git worktree add`, is invisible to
+ * the working tree, and is removed by `git worktree remove`.
+ */
+const GATEWAY_WORKTREE_MARKER = "gateway-owner.json";
+
+/** `<git common dir>/worktrees/<name>`, created by `git worktree add`. */
+async function worktreeAdminDirectory(
+  repoRoot: string,
+  name: string,
+  logger: Logger
+): Promise<string | null> {
+  const commonDirectory = await canonicalGitCommonDirectory(repoRoot, logger);
+  if (!commonDirectory) return null;
+  const admin = join(commonDirectory, "worktrees", name);
+  return existsSync(admin) ? admin : null;
+}
+
+/**
+ * The token this worktree was created with, or null when the marker is absent.
+ *
+ * Absent is NOT an error: worktrees created before this marker existed have
+ * none, and the caller decides what that means. It is only an error for a
+ * marker to be present and disagree.
+ */
+export async function readWorktreeOwnerToken(
+  repoRoot: string,
+  name: string,
+  logger: Logger
+): Promise<string | null> {
+  const admin = await worktreeAdminDirectory(repoRoot, name, logger);
+  if (!admin) return null;
+  try {
+    const parsed: unknown = JSON.parse(readFileSync(join(admin, GATEWAY_WORKTREE_MARKER), "utf8"));
+    const token = (parsed as { token?: unknown }).token;
+    return typeof token === "string" && token.length > 0 ? token : null;
+  } catch {
+    return null;
+  }
+}
+
 async function canonicalGitCommonDirectory(
   repositoryPath: string,
   logger: Logger
@@ -574,12 +632,26 @@ export async function createWorktree(opts: CreateWorktreeOptions): Promise<Workt
     throw error;
   }
 
+  // After the checkout, so a failed creation is torn down above rather than
+  // leaving a marker behind for a worktree that does not exist.
+  const token = randomUUID();
+  const admin = await worktreeAdminDirectory(repoRoot, name, logger);
+  if (!admin) {
+    await execGit(repoRoot, ["worktree", "remove", "--force", finalTarget.path], logger);
+    await execGit(repoRoot, ["branch", "-D", branch], logger);
+    throw new WorktreeError(
+      "Git admin directory for the new worktree could not be resolved; refusing to create a worktree with no owner marker"
+    );
+  }
+  writeFileSync(join(admin, GATEWAY_WORKTREE_MARKER), JSON.stringify({ token }), { mode: 0o600 });
+
   return {
     name,
     path: finalTarget.path,
     ref: resolvedRef,
     createdAt: new Date().toISOString(),
     created: true,
+    token,
   };
 }
 
@@ -628,8 +700,8 @@ export async function cleanupSessionWorktree(
   const worktreeName = typeof meta.worktreeName === "string" ? meta.worktreeName : undefined;
   // Layout invariant from createWorktree: <repoRoot>/.worktrees/<name>.
   // Strip the trailing two segments to recover repoRoot.
-  const marker = `${sep}.worktrees${sep}`;
-  const markerIdx = worktreePath.lastIndexOf(marker);
+  const layoutMarker = `${sep}.worktrees${sep}`;
+  const markerIdx = worktreePath.lastIndexOf(layoutMarker);
   if (markerIdx === -1) {
     logWarn(
       logger,
@@ -638,6 +710,30 @@ export async function cleanupSessionWorktree(
     return false;
   }
   const repoRoot = worktreePath.slice(0, markerIdx);
+
+  // The worktree at this path must be the one this session created, not merely
+  // one with the same name. Path and branch both derive from the name, so they
+  // cannot answer that; the creation token can. A cleanup that is retried after
+  // the removal-then-finalize window would otherwise delete a live worktree a
+  // later session legitimately created at the same name.
+  if (worktreeName !== undefined) {
+    // `null` on both sides, never `undefined` on one: an absent metadata field
+    // and an absent marker are the same statement, and comparing the two
+    // spellings directly stranded every worktree that predates the marker.
+    const recorded = typeof meta.worktreeToken === "string" ? meta.worktreeToken : null;
+    const onDisk = await readWorktreeOwnerToken(repoRoot, worktreeName, logger);
+    // Absent on BOTH sides is a worktree created before the marker existed:
+    // proceed, because refusing would strand it forever. Absent on one side
+    // only, or present and different, means this is not the same object.
+    if (recorded !== onDisk) {
+      logWarn(
+        logger,
+        `worktree on session ${session.id} no longer carries this session's creation token; skipping cleanup`
+      );
+      return false;
+    }
+  }
+
   return removeWorktreeWithResult({
     repoRoot,
     path: worktreePath,

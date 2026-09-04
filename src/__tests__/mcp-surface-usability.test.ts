@@ -34,6 +34,15 @@ async function makeServer(asyncJobsEnabled: boolean) {
   return createGatewayServer({ asyncJobManager: manager, persistence });
 }
 
+/**
+ * Claims that contradict `session-tombstone-scope-pg.test.ts`. Narrow on
+ * purpose: a phrase gate cannot decide whether prose is true, so it polices the
+ * one class where a sentence is false by construction rather than pretending to
+ * more.
+ */
+const TOMBSTONE_VISIBILITY_LIE =
+  /(still\s+returns?\s+tombstones?|tombstones?\s+(are|is)\s+visible|returns?\s+a\s+deleted\s+session)/i;
+
 describe("MCP tool-surface usability (post-usability-review regressions)", () => {
   it("every registered tool carries a clear description (>= 20 chars, per .cursorrules)", async () => {
     const server = await makeServer(true);
@@ -82,6 +91,11 @@ describe("MCP tool-surface usability (post-usability-review regressions)", () =>
     // The corrected claim must not survive alongside the one it replaced.
     expect(description).not.toMatch(/not retained for automatic retry/i);
     expect(description).not.toMatch(/performs no worktree cleanup/i);
+    // These gates check that a phrase is present or absent; they cannot check
+    // that a paragraph is TRUE, and a reviewer proved it by inserting a false
+    // sentence that passed. This is the narrow class that IS checkable: a claim
+    // that a deleted session is still visible contradicts the suite directly.
+    expect(description).not.toMatch(TOMBSTONE_VISIBILITY_LIE);
   });
 
   it("session_clear_all describes its per-session worktree cleanup guarantees", async () => {
@@ -107,6 +121,7 @@ describe("MCP tool-surface usability (post-usability-review regressions)", () =>
     expect(description).toMatch(/tombstone is not bounded by retention/i);
     expect(description).not.toMatch(/not retained for automatic retry/i);
     expect(description).not.toMatch(/performs no worktree cleanup/i);
+    expect(description).not.toMatch(TOMBSTONE_VISIBILITY_LIE);
   });
 
   it("workspace tools are described as remote-only and not a stdio path-access fallback", async () => {

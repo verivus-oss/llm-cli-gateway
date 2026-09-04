@@ -22,17 +22,71 @@
  * deliberate act, so adding one costs a test edit; growing the list silently
  * is the failure this shape exists to prevent.
  */
-import { readFileSync } from "node:fs";
-import { dirname, join, resolve } from "node:path";
+import { readdirSync, readFileSync, statSync } from "node:fs";
+import { dirname, join, relative, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
 export const GOVERNED_FILE = "src/session-manager-pg.ts";
 
-/** The `sessions` table, never `active_sessions` or `kit_active_sessions`. */
-const SESSION_TABLE = /\b(FROM|UPDATE|INTO|JOIN)\s+sessions\b/i;
-const SESSION_ROW_READ = /\b(FROM|UPDATE|JOIN)\s+sessions\b/i;
+/**
+ * Every production module, not just the one that happens to hold the session
+ * SQL today. Confining the scan to `session-manager-pg.ts` made the gate's
+ * census true of that file and silent about the rest of the tree, which is a
+ * different claim from the one it prints.
+ */
+function productionSources(directory = join(ROOT, "src"), out = []) {
+  for (const entry of readdirSync(directory)) {
+    const full = join(directory, entry);
+    if (statSync(full).isDirectory()) {
+      if (entry !== "__tests__") productionSources(full, out);
+    } else if (entry.endsWith(".ts") && !entry.endsWith(".test.ts")) {
+      out.push(full);
+    }
+  }
+  return out;
+}
+
+/**
+ * The `sessions` table, never `active_sessions` or `kit_active_sessions`.
+ *
+ * Every spelling PostgreSQL accepts, because the first version of this matched
+ * only the bare identifier and two reviewers walked straight through it:
+ * `FROM "sessions"`, `FROM public.sessions`, `FROM ONLY sessions` and
+ * `UPDATE ONLY sessions` all read a session row and all scanned as clean while
+ * the gate printed a complete-looking census.
+ */
+const TABLE_REFERENCE = String.raw`(?:ONLY\s+)?(?:(?:"?[A-Za-z_]\w*"?)\.)?"?sessions"?\b`;
+const SESSION_TABLE = new RegExp(String.raw`\b(FROM|UPDATE|INTO|JOIN)\s+` + TABLE_REFERENCE, "i");
+const SESSION_ROW_READ = new RegExp(String.raw`\b(FROM|UPDATE|JOIN)\s+` + TABLE_REFERENCE, "i");
+
+/**
+ * A table name assembled at runtime. `FROM ${table}` is unreadable to any
+ * static gate, so it is refused outright rather than analysed: this module has
+ * no legitimate reason to compute a table name.
+ */
+const INTERPOLATED_TABLE = /\b(FROM|UPDATE|INTO|JOIN)\s+(?:ONLY\s+)?\$\{/i;
+
+/**
+ * Is this literal SQL at all? Ordinary prose and non-SQL templates say "from
+ * ${x}" too, and without this the interpolated-table rule fired on a dozen
+ * template strings in modules that touch no database.
+ */
+const SQL_SHAPE =
+  /\b(SELECT\s|INSERT\s+INTO\s|UPDATE\s|DELETE\s+FROM\s|CREATE\s|ALTER\s+TABLE\s|DROP\s+(TABLE|VIEW)\s|WITH\s+[A-Za-z_]\w*\s+AS\s*\()/i;
+
+/** DDL. A view or table definition is not a caller-facing read of a row. */
+const DDL_STATEMENT = /\b(CREATE|ALTER|DROP)\s+(OR\s+REPLACE\s+)?(VIEW|TABLE|INDEX|FUNCTION)\b/i;
+
 const PREDICATE = "sessionNotTombstonedSql(";
+
+/**
+ * The predicate must be spliced as a BARE interpolation. `${sessionNotTombstonedSql()}`
+ * counts; `${false ? sessionNotTombstonedSql() : ""}` does not, because a
+ * substring test cannot tell a live splice from a dead branch and a reviewer
+ * got an unguarded read past the gate that way.
+ */
+const SPLICED_PREDICATE = /\$\{\s*sessionNotTombstonedSql\([^)]*\)\s*\}/;
 /** The shared statement builder the deletion paths go through. */
 const DELETE_OR_STAGE = "deleteOrStageSessionsSql";
 const EXEMPT_MARKER = "tombstone-scope: exempt";
@@ -61,10 +115,25 @@ export function sessionStatements(source) {
   const blanked = stripComments(source);
   const statements = [];
   for (const match of blanked.matchAll(STRING_LITERAL)) {
-    if (!SESSION_TABLE.test(match[0])) continue;
+    if (!SQL_SHAPE.test(match[0])) continue;
+    const interpolatedTable = INTERPOLATED_TABLE.test(match[0]);
+    if (!SESSION_TABLE.test(match[0]) && !interpolatedTable) continue;
     const line = blanked.slice(0, match.index).split("\n").length;
+    // A module-level helper resolves to its own name. Scanning only for
+    // indented class members walked past the enclosing function and attributed
+    // the statement to whatever member happened to sit above it, which put
+    // `constructor` in the derived set.
     let method = "<module>";
+    let topLevel = false;
     for (let i = line - 1; i >= 0; i--) {
+      const topLevelDeclaration = /^(?:export\s+)?(?:async\s+)?function\s+([a-zA-Z_]\w*)/.exec(
+        lines[i]
+      );
+      if (topLevelDeclaration) {
+        method = topLevelDeclaration[1];
+        topLevel = true;
+        break;
+      }
       const declaration = /^ {2}(?:private |readonly )?(?:async )?([a-zA-Z_]\w*)\s*[(<]/.exec(
         lines[i]
       );
@@ -76,10 +145,13 @@ export function sessionStatements(source) {
     const preceding = lines.slice(Math.max(0, line - 1 - MARKER_LOOKBACK), line - 1).join("\n");
     statements.push({
       method,
+      topLevel,
       line,
       sql: match[0],
-      scoped: match[0].includes(PREDICATE),
-      insertOnly: !SESSION_ROW_READ.test(match[0]),
+      interpolatedTable,
+      ddl: DDL_STATEMENT.test(match[0]),
+      scoped: SPLICED_PREDICATE.test(match[0]),
+      insertOnly: !interpolatedTable && !SESSION_ROW_READ.test(match[0]),
       exempted: preceding.includes(EXEMPT_MARKER),
     });
   }
@@ -94,9 +166,12 @@ export function sessionStatements(source) {
  * second hand-written list that can disagree with it.
  */
 export function guardedMethods(source) {
+  // Manager METHODS only. A module-level helper is exercised through its
+  // callers, which are in this set, so listing it would ask the behaviour suite
+  // to drive something that has no caller-facing surface of its own.
   const methods = new Set(
     sessionStatements(source)
-      .filter(statement => statement.scoped)
+      .filter(statement => statement.scoped && !statement.topLevel)
       .map(statement => statement.method)
   );
   const lines = stripComments(source).split("\n");
@@ -119,20 +194,30 @@ export function guardedMethods(source) {
   return [...methods].sort();
 }
 
-export function violations(statements) {
-  return statements
-    .filter(s => !s.insertOnly && !s.scoped && !s.exempted)
-    .map(
-      s =>
-        `${GOVERNED_FILE}: ${s.method} reads or mutates a session row without ` +
-        `${PREDICATE}) and without a "${EXEMPT_MARKER}" reason`
-    );
+export function violations(statements, file = GOVERNED_FILE) {
+  return statements.flatMap(s => {
+    // Refused unconditionally: no exemption marker and no predicate can make a
+    // computed table name readable to this gate.
+    if (s.interpolatedTable) {
+      return [`${file}: ${s.method} builds a table name at runtime; spell the table literally`];
+    }
+    if (s.ddl || s.insertOnly || s.scoped || s.exempted) return [];
+    return [
+      `${file}: ${s.method} reads or mutates a session row without ` +
+        `${PREDICATE}) spliced as a bare interpolation, and without a ` +
+        `"${EXEMPT_MARKER}" reason`,
+    ];
+  });
 }
 
 function main() {
-  const source = readFileSync(join(ROOT, GOVERNED_FILE), "utf8");
-  const statements = sessionStatements(source);
-  const failures = violations(statements);
+  const files = productionSources();
+  const perFile = files.map(file => ({
+    file: relative(ROOT, file),
+    statements: sessionStatements(readFileSync(file, "utf8")),
+  }));
+  const statements = perFile.flatMap(entry => entry.statements);
+  const failures = perFile.flatMap(entry => violations(entry.statements, entry.file));
   if (failures.length > 0) {
     console.error("session tombstone scope FAILED:\n");
     for (const failure of failures) console.error(`  ${failure}`);
@@ -143,11 +228,14 @@ function main() {
     process.exit(1);
   }
   const inserts = statements.filter(s => s.insertOnly).length;
-  const exempt = statements.filter(s => !s.insertOnly && s.exempted).length;
+  const ddl = statements.filter(s => !s.insertOnly && s.ddl).length;
+  const exempt = statements.filter(s => !s.insertOnly && !s.ddl && s.exempted).length;
+  const scoped = statements.length - inserts - ddl - exempt;
   console.log(
-    `session tombstone scope: ${statements.length} statements name sessions; ` +
-      `${statements.length - inserts - exempt} carry the predicate, ` +
-      `${inserts} insert a new row, ${exempt} are exempt with a stated reason.`
+    `session tombstone scope: ${files.length} production modules scanned; ` +
+      `${statements.length} statements name sessions; ` +
+      `${scoped} carry the predicate, ${inserts} insert a new row, ` +
+      `${ddl} are DDL, ${exempt} are exempt with a stated reason.`
   );
 }
 

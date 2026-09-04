@@ -25,6 +25,20 @@ All notable changes to the llm-cli-gateway project.
   and MCP tool descriptions state it. A tombstone is not bounded by retention.
   This supersedes the guidance correction that recorded the gap
   (issues #302 and #305).
+- **A cleanup retry can no longer delete a live worktree.** Cleanup removes the
+  git worktree before it finalizes the record that authorized the removal, and
+  a managed worktree's path and branch both derive from its name, so a crash in
+  that window left a record naming a path a later session could legitimately
+  recreate; the retry then deleted the replacement. Each worktree now carries a
+  per-creation token in its Git admin directory, mirrored in durable session
+  metadata, and both cleanup and same-session reuse require the two to agree. A
+  worktree created before the token has neither side and is still cleanable.
+- **The file-backed store no longer hands a deleted Kit session back as live.**
+  Every Personal Agent Config Kit path read the session row directly and none
+  checked for a cleanup tombstone, so a deleted session could still be claimed,
+  renewed, released, rebound, pointed at, and returned by
+  `getOrCreateKitSession`. Both stores now refuse, and reuse of a tombstoned id
+  is refused by name rather than silently granted.
 
 ## [3.2.0] - 2026-09-03
 

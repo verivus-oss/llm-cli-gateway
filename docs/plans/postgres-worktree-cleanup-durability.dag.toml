@@ -186,3 +186,28 @@ State the residual: cleanup is still the owning host's, tombstones unbounded.
 """
 idempotent = true
 validation = "No shipped surface claims a guarantee the runtime does not have, in either direction."
+
+[[steps]]
+id = "round-1-review-repairs"
+depends_on = ["reverse-the-documented-limitation"]
+actor = "assistant"
+status = """
+done 2026-09-04. Two BLOCKERS, both real, neither an instrument artefact.
+CODEX: cleanup removes the worktree before finalizing the record authorizing it,
+and path and branch BOTH derive from the name, so a crash in that window let a
+retry delete a live replacement. Fixed by a per-creation token in the worktree's
+Git admin directory, mirrored in session metadata; absent on both sides is a
+pre-marker worktree and still cleans, absent on one side is a replacement and is
+refused. Ordering was rejected: finalizing first discards the record this plan
+exists to keep. GROK: both new instruments over-reported. The builder splices
+the exclusion itself now, so its `includes` check is deleted rather than
+strengthened, and the gate sees every table spelling, refuses a computed table
+name, requires a BARE interpolation, and scans 157 modules not one. ALSO FIXED,
+not documented around: the file store guarded no Kit path, so it handed deleted
+Kit sessions back as live and falsified two shipped sentences. Suite 5049 to
+5073 and pg 201 to 223, 0 removed. Every survivor both seats reported now has a
+killing test. FOUND: 026's resumeEligible arm is unreachable, not just
+untested. Evidence: docs/evidence/postgres-worktree-cleanup-2026-09-04.md.
+"""
+idempotent = true
+validation = "Both blockers have a control that fails without the repair; the review is re-dispatched at the new head."
