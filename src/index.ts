@@ -71,6 +71,7 @@ import {
   createWorktree,
   cleanupSessionWorktree,
   adoptLegacyWorktreeIdentity,
+  discardAdoptedWorktreeMarker,
   readWorktreeOwnerToken,
   removeWorktree,
   removeWorktreeWithResult,
@@ -3273,10 +3274,19 @@ async function adoptWorktreeIdentityForSession(
   worktreePath: string
 ): Promise<void> {
   try {
-    const all = await Promise.resolve(sessionManager.listSessions());
-    const claimantsForPath = all.filter(
-      (candidate: Session) => candidate.metadata?.worktreePath === worktreePath
-    ).length;
+    // Tombstones are counted TOO. `listSessions` hides them on both stores,
+    // which is correct for callers and wrong for this question: a tombstone
+    // sharing the path with a live pre-token session is precisely the
+    // contested-path case adoption exists to refuse, and counting only visible
+    // rows would have reported one claimant and adopted.
+    const visible = await Promise.resolve(sessionManager.listSessions());
+    const tombstoned = await Promise.resolve(
+      sessionManager.listPendingWorktreeCleanupSessions(hostname())
+    );
+    const claimsPath = (candidate: Session): boolean =>
+      candidate.metadata?.worktreePath === worktreePath;
+    const claimantsForPath =
+      visible.filter(claimsPath).length + tombstoned.filter(claimsPath).length;
     const adopted = await adoptLegacyWorktreeIdentity(session, {
       claimantsForPath,
       logger: runtime.logger,
@@ -3287,13 +3297,21 @@ async function adoptWorktreeIdentityForSession(
       worktreeToken: adopted.token,
       worktreeAdminDirectory: adopted.adminDirectory,
     };
-    await Promise.resolve(
+    const persisted = await Promise.resolve(
       sessionManager.compareAndSetSession(sessionGenerationIdentity(session), {
         kind: "replace_metadata",
         expectedMetadata: session.metadata,
         metadata,
       })
     );
+    if (!persisted) {
+      // The marker is on disk and the metadata that names it is not, so the
+      // worktree now carries an identity no session can claim and adoption
+      // would refuse it forever as "already marked". Take the marker back off.
+      // The boolean was previously discarded, which is how that state became
+      // reachable.
+      discardAdoptedWorktreeMarker(adopted.adminDirectory, runtime.logger);
+    }
   } catch (error) {
     runtime.logger.debug?.(
       `worktree identity adoption skipped for session ${session.id}: ${

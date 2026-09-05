@@ -285,3 +285,29 @@ docs/evidence/postgres-worktree-cleanup-2026-09-04.md.
 """
 idempotent = true
 validation = "The three branch constructions and the adopter's four refusals each have a mutant only their own test kills; the surviving mutants are listed in the evidence rather than claimed closed."
+
+[[steps]]
+id = "round-7-review-repairs"
+depends_on = ["round-6-review-repairs"]
+actor = "assistant"
+status = """
+done 2026-09-05. One seat delivered, one died. GROK blocked and the defect was
+reproduced independently before it was accepted: the pre-token licence asked
+`isDirectPathChild`, which means a DIRECT CHILD of the gateway's worktree
+directory, while the prose claimed "inside" it. `git worktree move` relocates a
+checkout anywhere, so a move one directory deeper, or outside the container,
+reported a live registered worktree as removed. Sixth consecutive round where
+the previous repair produced the next blocker, and the mechanism is the same one
+as round 6: location substituted for identity, and location is what `move`
+changes. The test is total now, any linked worktree at all.
+ALSO FIXED from the same seat: adoption counted claimants from `listSessions`,
+which hides tombstones, so the contested-path case it exists to refuse was
+undercounted; and the caller discarded the persistence result, so a marker could
+land without its record and lock the worktree out of adoption forever. Two
+survivors closed with tests.
+CODEX exited 1 at 55 minutes mid-mutation-campaign with no verdict, its second
+failure in three attempts. That seat has not reviewed this change.
+Evidence: docs/evidence/postgres-worktree-cleanup-2026-09-04.md.
+"""
+idempotent = true
+validation = "The nested and outside-container moves each have a mutant only their own test kills; the enumeration-failure and marker-withdrawal guards likewise."

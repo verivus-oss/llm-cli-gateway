@@ -39,12 +39,18 @@ All notable changes to the llm-cli-gateway project.
   behind. A session that predates creation tokens has no such identity, and
   rather than guessing on its behalf from the `gateway/<name>` branch, which is
   derived from the worktree name and so carries the very ambiguity the token
-  closes, it is retained unless the repository registers no managed worktree at
-  all. **Such a session is given identity the first time it is reused**: the
+  closes, it is retained unless the repository registers no linked worktree at
+  all. That test is deliberately total: an earlier form asked only about
+  worktrees sitting directly under the gateway's own directory, and
+  `git worktree move` relocates a checkout anywhere, so a location test cannot
+  stand in for identity. **Such a session is given identity the first time it is reused**: the
   gateway stamps a marker on the live worktree and records it, so ordinary
-  cleanup can decide. Adoption refuses a path more than one session claims, a
-  worktree that already carries another creation's marker, an ordinary directory
-  standing at the path, and a session already awaiting cleanup. The Git
+  cleanup can decide. Adoption refuses a path more than one session claims, counting hidden
+  cleanup tombstones as claimants, a worktree that already carries another
+  creation's marker, an ordinary directory standing at the path, and a session
+  already awaiting cleanup. A marker whose record fails to persist is withdrawn
+  again, so a half-completed adoption cannot leave a worktree carrying an
+  identity no session claims. The Git
   administrative directory is recorded alongside it, because `git worktree
   remove` deletes that directory and `git worktree move` leaves it alone, so it
   answers whether a removal happened without reading anything a move or an

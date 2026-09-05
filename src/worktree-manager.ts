@@ -2,6 +2,7 @@ import { spawn } from "child_process";
 import { randomUUID } from "crypto";
 import {
   existsSync,
+  rmSync,
   lstatSync,
   mkdirSync,
   readdirSync,
@@ -1009,18 +1010,24 @@ export function createWorktreeSessionCleanupHook(
  * and `adoptLegacyWorktreeIdentity` clears it by giving those sessions the
  * identity that lets the ordinary token search answer properly.
  */
-async function noManagedWorktreeRemains(repoRoot: string, logger: Logger): Promise<boolean> {
+async function noLinkedWorktreeRemains(repoRoot: string, logger: Logger): Promise<boolean> {
   const listing = await listWorktreeAdminDirectories(repoRoot, logger);
   if ("failure" in listing) return false;
-  const container = join(canonicalPath(repoRoot), ".worktrees");
-  for (const directory of listing.directories) {
-    const checkout = checkoutForAdminDirectory(directory);
-    // A worktree the user made elsewhere in the repository is not ours and
-    // cannot be the one this session created; an unreadable link could be.
-    if (checkout === null) return false;
-    if (isDirectPathChild(container, canonicalPath(checkout))) return false;
-  }
-  return true;
+  // ANY linked worktree, wherever its checkout now sits.
+  //
+  // An earlier version excluded worktrees outside `<repoRoot>/.worktrees`, on
+  // the theory that a worktree the user made elsewhere cannot be ours. It
+  // asked `isDirectPathChild`, whose last condition is that the relative path
+  // contains no separator, so it meant "a DIRECT CHILD of .worktrees" rather
+  // than "inside" it. `git worktree move` relocates a checkout anywhere,
+  // including one directory deeper, and every such move made this answer true
+  // while the worktree was alive and registered. Location was standing in for
+  // identity, and location is the one thing `move` changes; that is the same
+  // substitution the `gateway/<name>` branch made a round earlier.
+  //
+  // A session with no identity cannot exclude ANY of them, so the only sound
+  // reading is the total one.
+  return listing.directories.length === 0;
 }
 
 /**
@@ -1098,6 +1105,25 @@ export async function adoptLegacyWorktreeIdentity(
     return null;
   }
   return { token, adminDirectory };
+}
+
+/**
+ * Take back a marker written by an adoption whose metadata did not persist.
+ *
+ * Without this the worktree carries an identity that no session records, so
+ * every later adoption attempt refuses it as "already marked" and cleanup can
+ * never prove anything about it either. The write and the record are not atomic
+ * and cannot be; undoing the half that landed is what keeps the pair honest.
+ */
+export function discardAdoptedWorktreeMarker(adminDirectory: string, logger: Logger): void {
+  try {
+    rmSync(join(adminDirectory, GATEWAY_WORKTREE_MARKER), { force: true });
+  } catch (error) {
+    logWarn(
+      logger,
+      `adopted marker in ${adminDirectory} could not be withdrawn after its record failed to persist: ${describeError(error)}`
+    );
+  }
 }
 
 /** Remove the exact worktree authorized by durable session provenance. */
@@ -1181,13 +1207,14 @@ export async function cleanupSessionWorktree(
     removalProven = true;
   }
 
-  // A session with no identity gets one narrow, non-name-derived answer: if the
-  // repository registers no managed worktree at all, this one is gone.
+  // A session with no identity gets one narrow answer, derived from neither a
+  // name nor a location: if the repository registers no linked worktree at all,
+  // there is nothing left that could be this one.
   if (
     !existsSync(worktreePath) &&
     recordedToken === null &&
     recordedAdminDirectory === null &&
-    (await noManagedWorktreeRemains(repoRoot, logger))
+    (await noLinkedWorktreeRemains(repoRoot, logger))
   ) {
     removalProven = true;
   }

@@ -24,10 +24,11 @@ import {
   writeFileSync,
 } from "fs";
 import { hostname, tmpdir } from "os";
-import { basename, join, sep } from "path";
+import { basename, dirname, join, sep } from "path";
 import {
   adoptLegacyWorktreeIdentity,
   createWorktree,
+  discardAdoptedWorktreeMarker,
   createWorktreeSessionCleanupHook,
   cleanupSessionWorktree,
   readWorktreeOwnerToken,
@@ -1407,6 +1408,38 @@ describe("worktree creation token (issue #305 ABA window)", () => {
   });
 
   it.each([
+    ["a nested directory inside .worktrees", ["nested", "subject-moved"]],
+    ["a directory outside .worktrees entirely", ["..", "elsewhere-moved"]],
+    ["a flat sibling inside .worktrees", ["subject-moved"]],
+  ])("refuses a legacy worktree moved to %s", async (_label, segments) => {
+    // Round 7. The predicate asked whether any checkout was a DIRECT CHILD of
+    // `.worktrees`, which is what `isDirectPathChild` means, while the prose
+    // claimed "inside" it. `git worktree move` relocates anywhere, so only the
+    // flat sibling was caught, and the flat sibling is what every earlier test
+    // used. Location was standing in for identity.
+    const handle = await createWorktree({ repoRoot, name: "roaming", logger: noopLogger });
+    const moved = join(repoRoot, ".worktrees", ...segments);
+    mkdirSync(dirname(moved), { recursive: true });
+    execFileSync("git", ["worktree", "move", handle.path, moved], {
+      cwd: repoRoot,
+      stdio: "ignore",
+    });
+
+    const legacySession = {
+      id: "session-roaming",
+      metadata: {
+        worktreePath: handle.path,
+        worktreeName: handle.name,
+        worktreeOwnerHostname: hostname(),
+        worktreeOwnerInstanceId: "instance-roaming",
+      },
+    };
+    expect(await cleanup(legacySession)).toBe(false);
+    expect(existsSync(moved)).toBe(true);
+    expect(registeredPaths().includes(realpathSync(moved))).toBe(true);
+  });
+
+  it.each([
     ["switched to a new branch", ["switch", "-c", "feature"]],
     ["renamed in place", ["branch", "-m", "gateway/branchy", "feature"]],
     ["detached", ["switch", "--detach"]],
@@ -1549,6 +1582,65 @@ describe("worktree creation token (issue #305 ABA window)", () => {
       expect(await cleanup(identified)).toBe(false);
       expect(existsSync(moved)).toBe(true);
     });
+  });
+
+  it("refuses a legacy session when the repository cannot be enumerated", async () => {
+    // Survivor M13 in round 7: making the listing failure answer "nothing
+    // remains" left the suite green. A failure to look is not an absence.
+    const handle = await createWorktree({
+      repoRoot,
+      name: "unlistable-legacy",
+      logger: noopLogger,
+    });
+    const moved = join(repoRoot, ".worktrees", "unlistable-legacy-moved");
+    execFileSync("git", ["worktree", "move", handle.path, moved], {
+      cwd: repoRoot,
+      stdio: "ignore",
+    });
+    const legacySession = {
+      id: "session-unlistable-legacy",
+      metadata: {
+        worktreePath: handle.path,
+        worktreeName: handle.name,
+        worktreeOwnerHostname: hostname(),
+        worktreeOwnerInstanceId: "instance-unlistable",
+      },
+    };
+
+    const restoreGit = forceGitRevParseFailure();
+    try {
+      expect(await cleanup(legacySession)).toBe(false);
+    } finally {
+      restoreGit();
+    }
+    expect(existsSync(moved)).toBe(true);
+  });
+
+  it("withdraws an adopted marker when its record does not persist", async () => {
+    // The write and the record are not atomic. If the marker lands and the
+    // metadata does not, the worktree carries an identity no session claims,
+    // and every later adoption refuses it as already marked. Round 7 found the
+    // caller discarding the persistence result, which made that reachable.
+    const handle = await createWorktree({ repoRoot, name: "withdrawn", logger: noopLogger });
+    const admin = handle.adminDirectory;
+    expect(await readWorktreeOwnerToken(handle.path, noopLogger)).toBe(handle.token);
+
+    discardAdoptedWorktreeMarker(admin, noopLogger);
+    expect(await readWorktreeOwnerToken(handle.path, noopLogger)).toBeNull();
+    // Adoption is possible again, which is the property the withdrawal buys.
+    const readopted = await adoptLegacyWorktreeIdentity(
+      {
+        id: "session-withdrawn",
+        metadata: {
+          worktreePath: handle.path,
+          worktreeName: handle.name,
+          worktreeOwnerHostname: hostname(),
+          worktreeOwnerInstanceId: "instance-withdrawn",
+        },
+      },
+      { claimantsForPath: 1, logger: noopLogger }
+    );
+    expect(readopted).not.toBeNull();
   });
 
   it("keeps the token across a git worktree move, which renames nothing", async () => {
