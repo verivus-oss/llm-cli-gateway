@@ -267,6 +267,37 @@ it("does not sweep in a column that happens to be called sessions", () => {
   expect(sessionStatements(source)).toHaveLength(0);
 });
 
+it("sees a statement assembled by joining an array", () => {
+  // No `+` anywhere, and no verb in the half that names the table, so both the
+  // concatenation rule and the shape test walked past it. Round 6 read a
+  // tombstone through it.
+  const source = `function m() { return pool.query(["SELECT id, cli ", "FROM sessions WHERE id = $1"].join("")); }`;
+  expect(violations(sessionStatements(source)).length).toBeGreaterThan(0);
+});
+
+it("does not mistake an ordinary argument list for an assembled statement", () => {
+  // The array rule must require a bracket closed by `.join(`, or every call
+  // with two string arguments becomes a finding.
+  const source = `function m() { return log("counted", "sessions rows"); }`;
+  expect(sessionStatements(source)).toHaveLength(0);
+});
+
+it("does not fire on a table name inside an SQL string literal", () => {
+  // False positive introduced by the comma rule in round 5 and reported in
+  // round 6: the rule reached across a quoted literal.
+  const source = `function m() { return pool.query(\`SELECT id FROM other WHERE note = 'hello, sessions'\`); }`;
+  expect(sessionStatements(source)).toHaveLength(0);
+});
+
+it("separates USING a table from USING a column list", () => {
+  // `DELETE ... USING sessions` names a table. `JOIN b USING (a, sessions)`
+  // names columns, and flagging it was the other round-6 false positive.
+  const table = `function m() { return pool.query(\`DELETE FROM other USING sessions WHERE other.id = sessions.id\`); }`;
+  const columns = `function m() { return pool.query(\`SELECT a.id FROM a JOIN b USING (sessions)\`); }`;
+  expect(violations(sessionStatements(table))).toHaveLength(1);
+  expect(sessionStatements(columns)).toHaveLength(0);
+});
+
 it("does not treat an upsert as an insert", () => {
   // `ON CONFLICT ... DO UPDATE` writes rows that already exist. A reviewer
   // changed a tombstone's description through one while the gate classified

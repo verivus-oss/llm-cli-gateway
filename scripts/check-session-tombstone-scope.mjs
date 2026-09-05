@@ -83,11 +83,23 @@ const OTHER_ROW_STATEMENTS = String.raw`\b(COPY|TRUNCATE|MERGE INTO) ` + TABLE_R
  * keyword still has to appear somewhere before the comma, so ordinary prose
  * containing ", sessions" is not swept in.
  */
-const COMMA_JOINED_TABLE = String.raw`\b(FROM|UPDATE|JOIN|USING) [^;]*?, *` + TABLE_REFERENCE;
+// Bounded so it cannot reach across an SQL string literal or into a
+// `USING (col, sessions)` join condition, which names columns and no table.
+const COMMA_JOINED_TABLE = String.raw`\b(FROM|UPDATE|JOIN) [^;'\"()]*?, *` + TABLE_REFERENCE;
+
+/**
+ * `DELETE FROM other USING sessions` names a table; `JOIN b USING (a, sessions)`
+ * names COLUMNS. Only the first spelling is a table reference, and it never
+ * parenthesises the name, so USING is matched without the parenthesis
+ * allowance the other keywords carry.
+ */
+const USING_TABLE = String.raw`\bUSING (?:ONLY )?(?:(?:"?[A-Za-z_]\w*"?)\.)?"?sessions"?\b`;
 
 const SESSION_TABLE = new RegExp(
-  String.raw`\b(FROM|UPDATE|INTO|JOIN|USING) ` +
+  String.raw`\b(FROM|UPDATE|INTO|JOIN) ` +
     TABLE_REFERENCE +
+    "|" +
+    USING_TABLE +
     "|" +
     BARE_TABLE_READ +
     "|" +
@@ -97,8 +109,10 @@ const SESSION_TABLE = new RegExp(
   "i"
 );
 const SESSION_ROW_READ = new RegExp(
-  String.raw`\b(FROM|UPDATE|JOIN|USING) ` +
+  String.raw`\b(FROM|UPDATE|JOIN) ` +
     TABLE_REFERENCE +
+    "|" +
+    USING_TABLE +
     "|" +
     BARE_TABLE_READ +
     "|" +
@@ -178,8 +192,25 @@ function assemblesSessionsStatement(body, start, end) {
 function isConcatenated(body, start, end) {
   return (
     /\+\s*$/.test(body.slice(Math.max(0, start - 40), start)) ||
-    /^\s*\+/.test(body.slice(end, end + 40))
+    /^\s*\+/.test(body.slice(end, end + 40)) ||
+    isArrayJoined(body, start, end)
   );
+}
+
+/**
+ * `["SELECT id, cli ", "FROM sessions WHERE id = $1"].join("")` assembles a
+ * statement with no `+` anywhere and no verb in the half that names the table.
+ * A reviewer read a tombstone through it while the gate printed a clean census.
+ * The literal has to sit inside a bracket closed by `.join(`, which an ordinary
+ * comma-separated argument list is not.
+ */
+function isArrayJoined(body, start, end) {
+  const opening = body.lastIndexOf("[", start);
+  if (opening === -1) return false;
+  const closing = body.indexOf("]", end);
+  if (closing === -1) return false;
+  if (body.slice(opening, start).includes("]")) return false;
+  return /^\s*\.\s*join\s*\(/.test(body.slice(closing + 1));
 }
 
 const PREDICATE = "sessionNotTombstonedSql(";

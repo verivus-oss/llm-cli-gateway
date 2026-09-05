@@ -70,6 +70,7 @@ import {
 import {
   createWorktree,
   cleanupSessionWorktree,
+  adoptLegacyWorktreeIdentity,
   readWorktreeOwnerToken,
   removeWorktree,
   removeWorktreeWithResult,
@@ -3254,6 +3255,55 @@ async function createSessionWithResolvedScope(
 }
 
 /**
+ * Backfill creation identity onto one live pre-token session, then persist it.
+ *
+ * Called from the reuse path because that is where a legacy session is both
+ * live and already proved to belong to this caller on this host, which are two
+ * of the conditions adoption needs. The third, that exactly one session claims
+ * the path, is counted here rather than assumed: two pre-token sessions naming
+ * one worktree is the ABA case, and adoption must refuse it rather than pick.
+ *
+ * Best effort by design. A failure leaves the session exactly as it was, and
+ * cleanup keeps refusing it, which is the safe direction.
+ */
+async function adoptWorktreeIdentityForSession(
+  runtime: GatewayServerRuntime,
+  sessionManager: ISessionManager,
+  session: Session,
+  worktreePath: string
+): Promise<void> {
+  try {
+    const all = await Promise.resolve(sessionManager.listSessions());
+    const claimantsForPath = all.filter(
+      (candidate: Session) => candidate.metadata?.worktreePath === worktreePath
+    ).length;
+    const adopted = await adoptLegacyWorktreeIdentity(session, {
+      claimantsForPath,
+      logger: runtime.logger,
+    });
+    if (!adopted) return;
+    const metadata = {
+      ...(session.metadata ?? {}),
+      worktreeToken: adopted.token,
+      worktreeAdminDirectory: adopted.adminDirectory,
+    };
+    await Promise.resolve(
+      sessionManager.compareAndSetSession(sessionGenerationIdentity(session), {
+        kind: "replace_metadata",
+        expectedMetadata: session.metadata,
+        metadata,
+      })
+    );
+  } catch (error) {
+    runtime.logger.debug?.(
+      `worktree identity adoption skipped for session ${session.id}: ${
+        error instanceof Error ? error.message : String(error)
+      }`
+    );
+  }
+}
+
+/**
  * Slice λ: resolve a request's worktree directive into a spawn cwd.
  *
  * - `worktreeOpt` is the Zod-validated input value (boolean |
@@ -3319,6 +3369,22 @@ export async function resolveWorktreeForRequest(
       const ownerHostname = session?.metadata?.worktreeOwnerHostname;
       const ownerInstanceId = session?.metadata?.worktreeOwnerInstanceId;
       const cleanupPending = session?.metadata?.worktreeCleanupPending === true;
+      // Every session that predates creation markers reaches here with no
+      // identity, and so does the worktree it points at. Comparing null to null
+      // would let a legacy record reuse whatever now stands at its path, and
+      // refusing outright would strand it. Stamp identity instead, ONCE, while
+      // the session is live and the caller has just been proved its owner: the
+      // marker is what every later decision about this worktree reads.
+      if (
+        session &&
+        !cleanupPending &&
+        typeof session.metadata?.worktreeToken !== "string" &&
+        ownerHostname === hostname()
+      ) {
+        await adoptWorktreeIdentityForSession(runtime, sessionManager, session, existingPath);
+      }
+      const adopted = session ? await getCallerOwnedSession(sessionManager, session.id) : null;
+      const identitySession = adopted ?? session;
       const validIdentity =
         !cleanupPending &&
         typeof existingName === "string" &&
@@ -3336,8 +3402,8 @@ export async function resolveWorktreeForRequest(
         // the creation token separates a reused worktree from a later one that
         // took the same name after this one was removed.
         (await readWorktreeOwnerToken(existingPath, runtime.logger)) ===
-          (typeof session?.metadata?.worktreeToken === "string"
-            ? session.metadata.worktreeToken
+          (typeof identitySession?.metadata?.worktreeToken === "string"
+            ? identitySession.metadata.worktreeToken
             : null);
       if (!validIdentity) {
         throw new Error(

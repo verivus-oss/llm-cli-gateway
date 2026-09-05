@@ -233,7 +233,7 @@ verb), and the gate now reports the set it read rather than a count computed
 beside it. Evidence: docs/evidence/postgres-worktree-cleanup-2026-09-04.md.
 """
 idempotent = true
-validation = "Each guard has a mutation that only its own test kills; the four move scenarios are exercised end to end against real PostgreSQL."
+validation = "The four move scenarios are exercised end to end against real PostgreSQL. The blanket claim that every guard here has a killing test was FALSE: round 6 ran 97 mutants and 27 survived."
 
 [[steps]]
 id = "round-5-review-repairs"
@@ -258,4 +258,30 @@ join and a parenthesised table. Evidence:
 docs/evidence/postgres-worktree-cleanup-2026-09-04.md.
 """
 idempotent = true
-validation = "Each repair has a mutation only its own test kills; the relative-gitdir and moved-then-missing cases are shipped tests."
+validation = "The relative-gitdir and moved-then-missing cases are shipped tests. Named guards have killing mutants; the tree as a whole does not, see round 6."
+
+[[steps]]
+id = "round-6-review-repairs"
+depends_on = ["round-5-review-repairs"]
+actor = "assistant"
+status = """
+done 2026-09-05. Both seats rejected the same defect independently: the
+confirmation added the round before fell back to `refs/heads/gateway/<name>`,
+which is derived from the worktree NAME, and that is the ABA weakness the
+creation marker exists to close. Renaming or detaching the branch reported a
+live registered worktree as removed and deleted the branch on the way out.
+Replaced by proof rather than a better guess: only a search that came back
+empty over this session's own identity licenses treating a refused removal as a
+completed one, and a session with no identity gets one narrow non-name-derived
+answer, that the repository registers no managed worktree at all.
+ADDED, because every session that predates this release is the identityless
+shape: `adoptLegacyWorktreeIdentity` backfills a marker onto a live pre-token
+worktree from the reuse path, where ownership is already proved. It refuses a
+contested path, a tombstone, an already-marked worktree and an ordinary
+directory. Tombstones are deliberately not adoptable.
+CORRECTED: this plan's claim that every guard has a killing test. Round 6 ran
+97 mutants; 27 survived. Evidence:
+docs/evidence/postgres-worktree-cleanup-2026-09-04.md.
+"""
+idempotent = true
+validation = "The three branch constructions and the adopter's four refusals each have a mutant only their own test kills; the surviving mutants are listed in the evidence rather than claimed closed."

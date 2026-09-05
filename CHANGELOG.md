@@ -34,10 +34,17 @@ All notable changes to the llm-cli-gateway project.
   recreate; the retry then deleted the replacement. Each worktree now carries a
   per-creation token, asked of git rather than guessed from the worktree's name,
   and both cleanup and same-session reuse require it to match. A removal is
-  reported only when git performed one: a refused removal is retained for retry
-  even when the recorded path is absent, checked against both the registered
-  path and the `gateway/<name>` branch, because a worktree that moved is absent
-  from its recorded path while it is perfectly alive somewhere else. The Git
+  reported only when git performed one, or when a search over this session's own
+  creation identity came back empty, which is what a completed removal leaves
+  behind. A session that predates creation tokens has no such identity, and
+  rather than guessing on its behalf from the `gateway/<name>` branch, which is
+  derived from the worktree name and so carries the very ambiguity the token
+  closes, it is retained unless the repository registers no managed worktree at
+  all. **Such a session is given identity the first time it is reused**: the
+  gateway stamps a marker on the live worktree and records it, so ordinary
+  cleanup can decide. Adoption refuses a path more than one session claims, a
+  worktree that already carries another creation's marker, an ordinary directory
+  standing at the path, and a session already awaiting cleanup. The Git
   administrative directory is recorded alongside it, because `git worktree
   remove` deletes that directory and `git worktree move` leaves it alone, so it
   answers whether a removal happened without reading anything a move or an

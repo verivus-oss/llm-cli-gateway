@@ -26,6 +26,7 @@ import {
 import { hostname, tmpdir } from "os";
 import { basename, join, sep } from "path";
 import {
+  adoptLegacyWorktreeIdentity,
   createWorktree,
   createWorktreeSessionCleanupHook,
   cleanupSessionWorktree,
@@ -1403,6 +1404,151 @@ describe("worktree creation token (issue #305 ABA window)", () => {
     expect(warnings.some(w => w.includes("is not a working tree"))).toBe(true);
     expect(existsSync(moved)).toBe(true);
     expect(registeredPaths().length).toBe(2);
+  });
+
+  it.each([
+    ["switched to a new branch", ["switch", "-c", "feature"]],
+    ["renamed in place", ["branch", "-m", "gateway/branchy", "feature"]],
+    ["detached", ["switch", "--detach"]],
+  ])("refuses a legacy worktree that moved and was then %s", async (_label, gitArgs) => {
+    // Round 6, both seats independently. The confirmation fell back to
+    // `refs/heads/gateway/<name>`, which is derived from the worktree NAME, and
+    // that is the ABA weakness the creation marker exists to close. Taking the
+    // branch off that name reported a live, registered worktree as removed and
+    // finalized its durable record, deleting the branch on the way out.
+    const handle = await createWorktree({ repoRoot, name: "branchy", logger: noopLogger });
+    const moved = join(repoRoot, ".worktrees", "branchy-moved");
+    execFileSync("git", ["worktree", "move", handle.path, moved], {
+      cwd: repoRoot,
+      stdio: "ignore",
+    });
+    execFileSync("git", gitArgs, { cwd: moved, stdio: "ignore" });
+
+    const legacySession = {
+      id: "session-branchy",
+      metadata: {
+        worktreePath: handle.path,
+        worktreeName: handle.name,
+        worktreeOwnerHostname: hostname(),
+        worktreeOwnerInstanceId: "instance-branchy",
+      },
+    };
+    expect(await cleanup(legacySession)).toBe(false);
+    expect(existsSync(moved)).toBe(true);
+    expect(registeredPaths().includes(realpathSync(moved))).toBe(true);
+  });
+
+  describe("adopting identity for a pre-token session", () => {
+    const legacyWorktree = async (name: string): Promise<{ path: string; admin: string }> => {
+      const handle = await createWorktree({ repoRoot, name, logger: noopLogger });
+      // Strip the marker to produce the pre-token shape on disk.
+      rmSync(join(handle.adminDirectory, "gateway-owner.json"), { force: true });
+      return { path: handle.path, admin: handle.adminDirectory };
+    };
+    const legacySession = (path: string, id: string) => ({
+      id,
+      metadata: {
+        worktreePath: path,
+        worktreeName: basename(path),
+        worktreeOwnerHostname: hostname(),
+        worktreeOwnerInstanceId: "instance-adopt",
+      },
+    });
+
+    it("stamps a readable marker and reports what it wrote", async () => {
+      const { path, admin } = await legacyWorktree("adoptable");
+      expect(await readWorktreeOwnerToken(path, noopLogger)).toBeNull();
+
+      const adopted = await adoptLegacyWorktreeIdentity(legacySession(path, "s-adopt"), {
+        claimantsForPath: 1,
+        logger: noopLogger,
+      });
+      expect(adopted).not.toBeNull();
+      expect(adopted!.adminDirectory).toBe(admin);
+      // The point of adoption: the ordinary identity read now answers.
+      expect(await readWorktreeOwnerToken(path, noopLogger)).toBe(adopted!.token);
+    });
+
+    it("refuses when more than one session claims the path", async () => {
+      // Two pre-token sessions naming one worktree IS the ABA case. Adoption
+      // cannot resolve it by picking one.
+      const { path } = await legacyWorktree("contested");
+      expect(
+        await adoptLegacyWorktreeIdentity(legacySession(path, "s-contested"), {
+          claimantsForPath: 2,
+          logger: noopLogger,
+        })
+      ).toBeNull();
+      expect(await readWorktreeOwnerToken(path, noopLogger)).toBeNull();
+    });
+
+    it("refuses a tombstone, where a live unmarked worktree may be a replacement", async () => {
+      // A deleted session plus a live unmarked worktree is the shape where the
+      // worktree belongs to a replacement whose own row a pre-release
+      // foreign-host deletion discarded. Adopting would authorise deleting it.
+      const { path } = await legacyWorktree("tombstoned");
+      const tombstone = {
+        ...legacySession(path, "s-tombstoned"),
+        metadata: {
+          ...legacySession(path, "s-tombstoned").metadata,
+          worktreeCleanupPendingDeletion: true,
+        },
+      };
+      expect(
+        await adoptLegacyWorktreeIdentity(tombstone, { claimantsForPath: 1, logger: noopLogger })
+      ).toBeNull();
+      expect(await readWorktreeOwnerToken(path, noopLogger)).toBeNull();
+    });
+
+    it("does not stamp over a worktree that already carries a marker", async () => {
+      const handle = await createWorktree({ repoRoot, name: "already", logger: noopLogger });
+      expect(
+        await adoptLegacyWorktreeIdentity(legacySession(handle.path, "s-already"), {
+          claimantsForPath: 1,
+          logger: noopLogger,
+        })
+      ).toBeNull();
+      // The original creation's identity survives untouched.
+      expect(await readWorktreeOwnerToken(handle.path, noopLogger)).toBe(handle.token);
+    });
+
+    it("refuses an ordinary directory standing at the recorded path", async () => {
+      const { path } = await legacyWorktree("ordinary");
+      execFileSync("git", ["worktree", "remove", "--force", path], {
+        cwd: repoRoot,
+        stdio: "ignore",
+      });
+      mkdirSync(path, { recursive: true });
+      expect(
+        await adoptLegacyWorktreeIdentity(legacySession(path, "s-ordinary"), {
+          claimantsForPath: 1,
+          logger: noopLogger,
+        })
+      ).toBeNull();
+    });
+
+    it("lets cleanup work afterwards, which is the whole point", async () => {
+      const { path } = await legacyWorktree("adopted-then-cleaned");
+      const session = legacySession(path, "s-cycle");
+      const adopted = await adoptLegacyWorktreeIdentity(session, {
+        claimantsForPath: 1,
+        logger: noopLogger,
+      });
+      expect(adopted).not.toBeNull();
+      const identified = {
+        ...session,
+        metadata: {
+          ...session.metadata,
+          worktreeToken: adopted!.token,
+          worktreeAdminDirectory: adopted!.adminDirectory,
+        },
+      };
+      // Moved away: refuses, where before adoption it could not have known.
+      const moved = join(repoRoot, ".worktrees", "adopted-then-cleaned-moved");
+      execFileSync("git", ["worktree", "move", path, moved], { cwd: repoRoot, stdio: "ignore" });
+      expect(await cleanup(identified)).toBe(false);
+      expect(existsSync(moved)).toBe(true);
+    });
   });
 
   it("keeps the token across a git worktree move, which renames nothing", async () => {
