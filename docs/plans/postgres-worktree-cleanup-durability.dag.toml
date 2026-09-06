@@ -311,3 +311,23 @@ Evidence: docs/evidence/postgres-worktree-cleanup-2026-09-04.md.
 """
 idempotent = true
 validation = "The nested and outside-container moves each have a mutant only their own test kills; the enumeration-failure and marker-withdrawal guards likewise."
+
+[[steps]]
+id = "round-8-review-repairs"
+depends_on = ["round-7-review-repairs"]
+actor = "assistant"
+status = """
+done 2026-09-07. Both seats blocked independently on one guard, describing one
+defect class in two halves: a rejected persist skipped the withdrawal entirely
+(the call runs a query, so it throws rather than returning false), and the
+withdrawal itself was scoped to a directory rather than to the token it wrote,
+so it could strip a replacement creation's identity. Seventh consecutive round
+where the previous repair produced the next blocker. Fixed structurally: a
+try/finally leaves no exit path that skips the withdrawal, and the withdrawal
+returns unless the marker carries its own token. The wiring had no test at all;
+both helpers were covered and their caller was not.
+Evidence, including the 32 mutants surviving codex's 107-mutation campaign:
+docs/evidence/postgres-worktree-cleanup-2026-09-04.md.
+"""
+idempotent = true
+validation = "Each adoption-wiring guard has a mutant only its own named test kills, including the pre-fix `if (!persisted)` shape and the unscoped withdrawal; surviving mutants are enumerated in the evidence, not closed."

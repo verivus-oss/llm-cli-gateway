@@ -1102,6 +1102,10 @@ export async function adoptLegacyWorktreeIdentity(
       logger,
       `could not adopt the worktree at ${worktreePath} for session ${session.id}: ${describeError(error)}`
     );
+    // The write may have landed even though the read-back did not, so the same
+    // withdrawal the caller performs is owed here: a marker nobody records is
+    // the state this whole mechanism exists to prevent.
+    discardAdoptedWorktreeMarker(adminDirectory, token, logger);
     return null;
   }
   return { token, adminDirectory };
@@ -1115,7 +1119,16 @@ export async function adoptLegacyWorktreeIdentity(
  * never prove anything about it either. The write and the record are not atomic
  * and cannot be; undoing the half that landed is what keeps the pair honest.
  */
-export function discardAdoptedWorktreeMarker(adminDirectory: string, logger: Logger): void {
+export function discardAdoptedWorktreeMarker(
+  adminDirectory: string,
+  token: string,
+  logger: Logger
+): void {
+  // Only OUR marker. `rmSync` on the path alone deletes whatever sits there,
+  // and by the time a withdrawal runs another creation may already own the
+  // directory; taking its identity away would strand IT instead.
+  const present = readAdminMarker(adminDirectory);
+  if (present.kind !== "token" || present.token !== token) return;
   try {
     rmSync(join(adminDirectory, GATEWAY_WORKTREE_MARKER), { force: true });
   } catch (error) {

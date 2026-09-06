@@ -1625,7 +1625,11 @@ describe("worktree creation token (issue #305 ABA window)", () => {
     const admin = handle.adminDirectory;
     expect(await readWorktreeOwnerToken(handle.path, noopLogger)).toBe(handle.token);
 
-    discardAdoptedWorktreeMarker(admin, noopLogger);
+    // Scoped to the token that was written: a withdrawal must not take away an
+    // identity another creation now owns.
+    discardAdoptedWorktreeMarker(admin, "not-this-creation", noopLogger);
+    expect(await readWorktreeOwnerToken(handle.path, noopLogger)).toBe(handle.token);
+    discardAdoptedWorktreeMarker(admin, handle.token, noopLogger);
     expect(await readWorktreeOwnerToken(handle.path, noopLogger)).toBeNull();
     // Adoption is possible again, which is the property the withdrawal buys.
     const readopted = await adoptLegacyWorktreeIdentity(

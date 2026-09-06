@@ -3297,20 +3297,28 @@ async function adoptWorktreeIdentityForSession(
       worktreeToken: adopted.token,
       worktreeAdminDirectory: adopted.adminDirectory,
     };
-    const persisted = await Promise.resolve(
-      sessionManager.compareAndSetSession(sessionGenerationIdentity(session), {
-        kind: "replace_metadata",
-        expectedMetadata: session.metadata,
-        metadata,
-      })
-    );
-    if (!persisted) {
-      // The marker is on disk and the metadata that names it is not, so the
-      // worktree now carries an identity no session can claim and adoption
-      // would refuse it forever as "already marked". Take the marker back off.
-      // The boolean was previously discarded, which is how that state became
-      // reachable.
-      discardAdoptedWorktreeMarker(adopted.adminDirectory, runtime.logger);
+    // The marker is on disk and the metadata that names it is not yet, so from
+    // here every exit must either record it or take it back off. A `finally`
+    // rather than an `if`, because the persist can REJECT as well as return
+    // false: `compareAndSetSession` runs a query, and a rejected query threw
+    // straight past the previous `if (!persisted)` into the outer catch,
+    // leaving a worktree carrying an identity no session claims. Adoption then
+    // refuses it forever as "already marked". There is no path out of this
+    // block that skips the check now.
+    let recorded = false;
+    try {
+      recorded =
+        (await Promise.resolve(
+          sessionManager.compareAndSetSession(sessionGenerationIdentity(session), {
+            kind: "replace_metadata",
+            expectedMetadata: session.metadata,
+            metadata,
+          })
+        )) === true;
+    } finally {
+      if (!recorded) {
+        discardAdoptedWorktreeMarker(adopted.adminDirectory, adopted.token, runtime.logger);
+      }
     }
   } catch (error) {
     runtime.logger.debug?.(
