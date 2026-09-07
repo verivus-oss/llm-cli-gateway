@@ -676,6 +676,49 @@ describe("worktree identity adoption, through its production caller", () => {
     expect(acquired).toEqual({ locked: true, value: "ran" });
   });
 
+  it("self-heals an orphan recovery lock, but never steals a live reclaimer's", async () => {
+    // The round-18 blocker (codex): a reclaimer that crashes after creating the
+    // companion recovery lock but before its finally removes it leaves an orphan
+    // that blocked EVERY future reclaim of the dead primary forever, a permanent
+    // strand from one crash. An orphan recovery lock (a same-host dead PID, or no
+    // provenance at all) is now cleared; a live reclaimer's is still respected.
+    const { handle } = await legacyFixture("recovery-orphan");
+    const lockPath = join(handle.adminDirectory, "gateway-adopt.lock");
+    const recoveryPath = `${lockPath}.recovery`;
+    let deadPid = 2 ** 22;
+    while (deadPid > 1) {
+      try {
+        process.kill(deadPid, 0);
+        deadPid -= 1;
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException).code === "ESRCH") break;
+        deadPid -= 1;
+      }
+    }
+
+    // A crashed holder (dead-PID primary) plus an orphan, empty recovery lock a
+    // reclaimer left when it crashed right after creating it.
+    writeFileSync(lockPath, JSON.stringify({ token: "dead", pid: deadPid, hostname: hostname() }));
+    writeFileSync(recoveryPath, "");
+    const healed = await withWorktreeAdoptionLock(handle.path, noopLogger, async () => "ran", {
+      timeoutMs: 2000,
+      retryMs: 20,
+    });
+    expect(healed).toEqual({ locked: true, value: "ran" });
+    expect(existsSync(lockPath)).toBe(false);
+    expect(existsSync(recoveryPath)).toBe(false);
+
+    // A recovery lock held by a LIVE reclaimer (this process) must NOT be stolen.
+    writeFileSync(lockPath, JSON.stringify({ token: "dead2", pid: deadPid, hostname: hostname() }));
+    writeFileSync(recoveryPath, JSON.stringify({ pid: process.pid, hostname: hostname() }));
+    const blocked = await withWorktreeAdoptionLock(handle.path, noopLogger, async () => "ran", {
+      timeoutMs: 300,
+      retryMs: 20,
+    });
+    expect(blocked).toEqual({ locked: false });
+    expect(existsSync(recoveryPath)).toBe(true);
+  });
+
   it("does NOT reclaim a LIVE request-scoped worktree, whose token no session records", async () => {
     // The round-10 blocker. A request-scoped worktree (no sessionId) is created
     // live, and the branch that would persist its token is skipped, so NO
