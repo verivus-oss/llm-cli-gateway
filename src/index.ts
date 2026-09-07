@@ -3400,6 +3400,11 @@ export async function resolveWorktreeForRequest(
     );
   }
   const sessionManager = runtime.sessionManager;
+  // Set when a recorded worktree cannot be verified as still this session's own
+  // (removed, replaced, or its marker lost to a concurrent adoption). Rather than
+  // stranding the session on a permanent refusal, we fall through and hand it a
+  // FRESH worktree under a new unique name, abandoning the unverifiable one.
+  let recovering = false;
   if (sessionId) {
     // F3b: only a session the caller owns may steer worktree reuse; a foreign
     // session is treated as absent so its worktreePath cannot become this
@@ -3428,7 +3433,11 @@ export async function resolveWorktreeForRequest(
       }
       const adopted = session ? await getCallerOwnedSession(sessionManager, session.id) : null;
       const identitySession = adopted ?? session;
-      const validIdentity =
+      // The security and ownership boundary: a LIVE, same-host, same-repository
+      // gateway worktree at the recorded path. A worktree that is gone, recorded
+      // on another host, escaping its workspace, or not a managed gateway
+      // worktree fails here and the reuse is REFUSED, never silently recovered.
+      const worktreePresent =
         !cleanupPending &&
         typeof existingName === "string" &&
         ownerHostname === hostname() &&
@@ -3439,15 +3448,19 @@ export async function resolveWorktreeForRequest(
           path: existingPath,
           name: existingName,
           logger: runtime.logger,
-        })) &&
-        // Git identity proves a gateway worktree lives here, not that it is
-        // THIS session's. Path and branch both derive from the name, so only
-        // the creation token separates a reused worktree from a later one that
-        // took the same name after this one was removed. The record is the
-        // arbiter of that token: if the marker names an abandoned one a losing
-        // concurrent reclaim of THIS session wrote, reconcile it to the recorded
-        // token rather than stranding the worktree; a foreign or creation marker
-        // still refuses.
+        }));
+      if (!worktreePresent) {
+        throw new Error(
+          "Durable session worktree metadata no longer matches a same-host gateway-owned Git worktree. Start a new session or restore the original worktree."
+        );
+      }
+      // Git identity proves that A gateway worktree lives here, not that it is
+      // THIS session's: path and branch both derive from the name, so a later
+      // worktree that took the name after this one was removed looks identical.
+      // Only the creation token separates them. reconcile confirms (or repairs
+      // to) the recorded token; an absent, foreign, or other-creation marker
+      // cannot be confirmed.
+      const identityConfirmed =
         identitySession !== null &&
         (await reconcileWorktreeIdentity({
           worktreePath: existingPath,
@@ -3458,27 +3471,36 @@ export async function resolveWorktreeForRequest(
           sessionId: identitySession.id,
           logger: runtime.logger,
         }));
-      if (!validIdentity) {
-        throw new Error(
-          "Durable session worktree metadata no longer matches a same-host gateway-owned Git worktree. Start a new session or restore the original worktree."
-        );
+      if (identityConfirmed) {
+        return {
+          cwd: existingPath,
+          worktreePath: existingPath,
+          workspaceAlias:
+            typeof session?.metadata?.workspaceAlias === "string"
+              ? session.metadata.workspaceAlias
+              : options.workspaceAlias,
+          workspaceRoot:
+            typeof session?.metadata?.workspaceRoot === "string"
+              ? session.metadata.workspaceRoot
+              : options.workspaceRoot,
+          boundSession: session ?? undefined,
+        };
       }
-      return {
-        cwd: existingPath,
-        worktreePath: existingPath,
-        workspaceAlias:
-          typeof session?.metadata?.workspaceAlias === "string"
-            ? session.metadata.workspaceAlias
-            : options.workspaceAlias,
-        workspaceRoot:
-          typeof session?.metadata?.workspaceRoot === "string"
-            ? session.metadata.workspaceRoot
-            : options.workspaceRoot,
-        boundSession: session ?? undefined,
-      };
+      // The worktree is live and same-repo, but its identity cannot be confirmed
+      // as this session's (its marker was lost to a concurrent adoption, or the
+      // name was reused by a later worktree). Rather than strand the session on a
+      // permanent refusal, and rather than reuse a worktree that may be a
+      // different creation's, recover onto a FRESH worktree and leave the
+      // ambiguous one untouched for ordinary TTL cleanup.
+      runtime.logger.info?.(
+        `session ${sessionId} worktree at ${existingPath} could not be confirmed as its own; creating a fresh worktree`
+      );
+      recovering = true;
     }
   }
-  const name = worktreeOpt === true ? undefined : worktreeOpt.name;
+  // On recovery the recorded name may still be registered to the unverifiable
+  // worktree, so force a fresh unique name to avoid colliding with it.
+  const name = recovering ? undefined : worktreeOpt === true ? undefined : worktreeOpt.name;
   const ref = worktreeOpt === true ? undefined : worktreeOpt.ref;
   const handle: WorktreeHandle = await createWorktree({
     repoRoot,

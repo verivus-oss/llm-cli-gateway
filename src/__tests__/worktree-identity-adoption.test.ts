@@ -143,9 +143,17 @@ describe("worktree identity adoption, through its production caller", () => {
     rmSync(join(handle.adminDirectory, "gateway-owner.json"), { force: true });
     const runtime = resolveGatewayServerRuntime({ sessionManager: manager });
 
-    await expect(
-      resolveWorktreeForRequest({ name: "reconcile-absent" }, sessionId, runtime, { repoRoot })
-    ).rejects.toThrow(/Durable session worktree metadata no longer matches/);
+    const resolved = await resolveWorktreeForRequest(
+      { name: "reconcile-absent" },
+      sessionId,
+      runtime,
+      {
+        repoRoot,
+      }
+    );
+    // Recovers into a FRESH worktree rather than stranding; the unverifiable one
+    // is never reused.
+    expect((resolved as { worktreePath?: string }).worktreePath).not.toBe(handle.path);
     // Not stamped: the absent marker stays absent.
     expect(await readWorktreeOwnerToken(handle.path, noopLogger)).toBeNull();
   });
@@ -194,9 +202,17 @@ describe("worktree identity adoption, through its production caller", () => {
     writeFileSync(markerPath, "{ not json");
     const runtime = resolveGatewayServerRuntime({ sessionManager: manager });
 
-    await expect(
-      resolveWorktreeForRequest({ name: "reconcile-unreadable" }, sessionId, runtime, { repoRoot })
-    ).rejects.toThrow(/Durable session worktree metadata no longer matches/);
+    const resolved = await resolveWorktreeForRequest(
+      { name: "reconcile-unreadable" },
+      sessionId,
+      runtime,
+      {
+        repoRoot,
+      }
+    );
+    // Recovers into a fresh worktree; the unreadable marker is left corrupt, not
+    // materialised over.
+    expect((resolved as { worktreePath?: string }).worktreePath).not.toBe(handle.path);
     expect(readFileSync(markerPath, "utf8")).toBe("{ not json");
   });
 
@@ -212,10 +228,17 @@ describe("worktree identity adoption, through its production caller", () => {
     );
     const runtime = resolveGatewayServerRuntime({ sessionManager: manager });
 
-    await expect(
-      resolveWorktreeForRequest({ name: "reconcile-foreign" }, sessionId, runtime, { repoRoot })
-    ).rejects.toThrow(/Durable session worktree metadata no longer matches/);
-    // Left as found, not stamped to the recorded token.
+    const resolved = await resolveWorktreeForRequest(
+      { name: "reconcile-foreign" },
+      sessionId,
+      runtime,
+      {
+        repoRoot,
+      }
+    );
+    // Recovers into a fresh worktree; the foreign creation is left as found, not
+    // stamped to the recorded token.
+    expect((resolved as { worktreePath?: string }).worktreePath).not.toBe(handle.path);
     expect(await readWorktreeOwnerToken(handle.path, noopLogger)).toBe(
       "a-different-creations-token"
     );
@@ -224,15 +247,26 @@ describe("worktree identity adoption, through its production caller", () => {
   it("does NOT reconcile a marker another session adopted", async () => {
     // Provenance is per session: a marker carrying a DIFFERENT session's
     // adoptedBy is not this session's to repair.
-    const { repoRoot, manager, sessionId } = await recordedFixture("reconcile-other", () => ({
-      token: "another-sessions-token",
-      adoptedBy: "some-other-session-id",
-    }));
+    const { repoRoot, manager, sessionId, handle } = await recordedFixture(
+      "reconcile-other",
+      () => ({
+        token: "another-sessions-token",
+        adoptedBy: "some-other-session-id",
+      })
+    );
     const runtime = resolveGatewayServerRuntime({ sessionManager: manager });
 
-    await expect(
-      resolveWorktreeForRequest({ name: "reconcile-other" }, sessionId, runtime, { repoRoot })
-    ).rejects.toThrow(/Durable session worktree metadata no longer matches/);
+    const resolved = await resolveWorktreeForRequest(
+      { name: "reconcile-other" },
+      sessionId,
+      runtime,
+      {
+        repoRoot,
+      }
+    );
+    // Recovers into a fresh worktree; the other session's marker is untouched.
+    expect((resolved as { worktreePath?: string }).worktreePath).not.toBe(handle.path);
+    expect(await readWorktreeOwnerToken(handle.path, noopLogger)).toBe("another-sessions-token");
   });
 
   it("stamps identity and records it when the session is reused", async () => {
@@ -346,6 +380,8 @@ describe("worktree identity adoption, through its production caller", () => {
       () => undefined
     );
 
+    // A worktree recorded on another host is refused, not stamped: adoption never
+    // mints an identity for a host this gateway does not own.
     expect(await readWorktreeOwnerToken(handle.path, noopLogger)).toBeNull();
     expect(manager.getSession(sessionId)?.metadata?.worktreeToken).toBeUndefined();
   });
@@ -561,13 +597,15 @@ describe("worktree identity adoption, through its production caller", () => {
       worktreeOwnerInstanceId: "instance-stale",
     });
 
-    await resolveWorktreeForRequest({ name: "reqscoped-wt" }, stale.id, runtime, {
+    const resolved = (await resolveWorktreeForRequest({ name: "reqscoped-wt" }, stale.id, runtime, {
       repoRoot,
-    }).catch(() => undefined);
+    }).catch(() => undefined)) as { worktreePath?: string } | undefined;
 
-    // The live worktree's identity survives, and the legacy session took none.
+    // The live request-scoped worktree's identity survives untouched, and the
+    // stale session recovers onto a fresh, different worktree rather than
+    // reusing (and later being able to delete) one it cannot prove is its own.
     expect(await readWorktreeOwnerToken(livePath.path, noopLogger)).toBe(livePath.token);
-    expect(manager.getSession(stale.id)?.metadata?.worktreeToken).toBeUndefined();
+    expect(resolved?.worktreePath).not.toBe(livePath.path);
   });
 
   it("does NOT reclaim a marker written by a DIFFERENT session's adoption", async () => {
@@ -582,12 +620,19 @@ describe("worktree identity adoption, through its production caller", () => {
     );
     const runtime = resolveGatewayServerRuntime({ sessionManager: manager });
 
-    await resolveWorktreeForRequest({ name: "other-adopter" }, sessionId, runtime, {
-      repoRoot,
-    }).catch(() => undefined);
+    const resolved = (await resolveWorktreeForRequest(
+      { name: "other-adopter" },
+      sessionId,
+      runtime,
+      {
+        repoRoot,
+      }
+    ).catch(() => undefined)) as { worktreePath?: string } | undefined;
 
+    // Another session's adoption marker is untouched; this session recovers onto
+    // a fresh, different worktree rather than stealing it.
     expect(await readWorktreeOwnerToken(handle.path, noopLogger)).toBe(foreignToken);
-    expect(manager.getSession(sessionId)?.metadata?.worktreeToken).toBeUndefined();
+    expect(resolved?.worktreePath).not.toBe(handle.path);
   });
 
   it("does NOT reclaim an UNREADABLE marker, which could be a live identity", async () => {
@@ -601,13 +646,14 @@ describe("worktree identity adoption, through its production caller", () => {
     writeFileSync(markerPath, "{ this is not json");
     const runtime = resolveGatewayServerRuntime({ sessionManager: manager });
 
-    await resolveWorktreeForRequest({ name: "unreadable" }, sessionId, runtime, { repoRoot }).catch(
-      () => undefined
-    );
+    const resolved = (await resolveWorktreeForRequest({ name: "unreadable" }, sessionId, runtime, {
+      repoRoot,
+    }).catch(() => undefined)) as { worktreePath?: string } | undefined;
 
-    // Left exactly as found, and the session took no identity from it.
+    // Left exactly as found; the session recovers onto a fresh, different
+    // worktree rather than stamping over a marker it cannot read.
     expect(readFileSync(markerPath, "utf8")).toBe("{ this is not json");
-    expect(manager.getSession(sessionId)?.metadata?.worktreeToken).toBeUndefined();
+    expect(resolved?.worktreePath).not.toBe(handle.path);
   });
 
   it("counts a hidden cleanup tombstone as a claimant and refuses to adopt", async () => {
@@ -633,11 +679,13 @@ describe("worktree identity adoption, through its production caller", () => {
       manager.listPendingWorktreeCleanupSessions(hostname()).some(s => s.id === rival.id)
     ).toBe(true);
 
-    await resolveWorktreeForRequest({ name: "contested" }, sessionId, runtime, { repoRoot }).catch(
-      () => undefined
-    );
+    const resolved = (await resolveWorktreeForRequest({ name: "contested" }, sessionId, runtime, {
+      repoRoot,
+    }).catch(() => undefined)) as { worktreePath?: string } | undefined;
 
+    // A contested path (two records) is never adopted; the session recovers onto
+    // a fresh, different worktree and the contested one is left unmarked.
     expect(await readWorktreeOwnerToken(handle.path, noopLogger)).toBeNull();
-    expect(manager.getSession(sessionId)?.metadata?.worktreeToken).toBeUndefined();
+    expect(resolved?.worktreePath).not.toBe(handle.path);
   });
 });

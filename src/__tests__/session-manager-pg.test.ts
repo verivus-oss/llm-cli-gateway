@@ -708,11 +708,11 @@ describe("PostgreSQLSessionManager", () => {
     ).rejects.toThrow(/same-host gateway-owned Git worktree/);
   });
 
-  it("refuses to reuse a live worktree whose creation token is not this session's", async () => {
+  it("recovers onto a fresh worktree when a live one's creation token is not this session's", async () => {
     // Git identity proves a gateway worktree lives at the path, not that it is
-    // THIS session's. Both reviewers deleted the token conjunction from the
-    // reuse check and 129 tests stayed green, because nothing drove a
-    // replacement through reuse.
+    // THIS session's. When the token cannot be confirmed the session must not
+    // reuse the worktree (it may be a different creation's) and must not be
+    // stranded either: it recovers onto a fresh worktree instead.
     const repoRoot = initGitRepository();
     try {
       const session = await manager.createSession("claude", "reuse token mismatch");
@@ -737,9 +737,13 @@ describe("PostgreSQLSessionManager", () => {
         worktreeToken: "00000000-0000-4000-8000-000000000000",
       });
 
-      await expect(
-        resolveWorktreeForRequest(true, session.id, runtime, { repoRoot })
-      ).rejects.toThrow(/same-host gateway-owned Git worktree/);
+      // The live worktree at the path is a valid gateway worktree, but its
+      // creation token is not this session's, so it cannot be confirmed as its
+      // own. Rather than strand the session, reuse recovers onto a FRESH worktree
+      // and leaves the mismatched one untouched.
+      const recovered = await resolveWorktreeForRequest(true, session.id, runtime, { repoRoot });
+      expect(recovered.worktreePath).toBeTruthy();
+      expect(recovered.worktreePath).not.toBe(resolution.worktreePath);
     } finally {
       rmSync(repoRoot, { recursive: true, force: true });
     }
