@@ -631,6 +631,51 @@ describe("worktree identity adoption, through its production caller", () => {
     expect(git(repoRoot, "worktree", "list", "--porcelain")).toContain(handle.path);
   });
 
+  it("reclaims a dead same-host holder's lock, but never a live holder regardless of age", async () => {
+    // The round-17 blocker (codex): the lock's stale-window reclaim evicted a
+    // live-but-slow holder (a long pause, a stalled CAS), so a successor ran
+    // concurrently and reopened the three-party strand. Reclaim now keys ONLY on
+    // a provably-dead same-host PID, never on age, so a running holder is never
+    // displaced. A stuck lock defers adoption at the acquire timeout instead.
+    const { handle } = await legacyFixture("lock-reclaim");
+    const lockPath = join(handle.adminDirectory, "gateway-adopt.lock");
+
+    // A live holder (this very process) with an ancient acquiredAt must NOT be
+    // reclaimed: acquisition times out and adoption defers.
+    writeFileSync(
+      lockPath,
+      JSON.stringify({ token: "live", pid: process.pid, hostname: hostname(), acquiredAt: 0 })
+    );
+    const blocked = await withWorktreeAdoptionLock(handle.path, noopLogger, async () => "ran", {
+      timeoutMs: 300,
+      retryMs: 20,
+    });
+    expect(blocked).toEqual({ locked: false });
+    expect(existsSync(lockPath)).toBe(true);
+    expect((JSON.parse(readFileSync(lockPath, "utf8")) as { token: string }).token).toBe("live");
+
+    // A dead same-host PID IS reclaimed, so the guard is not simply inert.
+    let deadPid = 2 ** 22;
+    while (deadPid > 1) {
+      try {
+        process.kill(deadPid, 0);
+        deadPid -= 1;
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException).code === "ESRCH") break;
+        deadPid -= 1;
+      }
+    }
+    writeFileSync(
+      lockPath,
+      JSON.stringify({ token: "dead", pid: deadPid, hostname: hostname(), acquiredAt: Date.now() })
+    );
+    const acquired = await withWorktreeAdoptionLock(handle.path, noopLogger, async () => "ran", {
+      timeoutMs: 2000,
+      retryMs: 20,
+    });
+    expect(acquired).toEqual({ locked: true, value: "ran" });
+  });
+
   it("does NOT reclaim a LIVE request-scoped worktree, whose token no session records", async () => {
     // The round-10 blocker. A request-scoped worktree (no sessionId) is created
     // live, and the branch that would persist its token is skipped, so NO

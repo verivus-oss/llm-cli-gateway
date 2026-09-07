@@ -75,7 +75,10 @@ All notable changes to the llm-cli-gateway project.
   read-decide-write-record cycle for one worktree under a same-host exclusive lock
   held across the record write: the first adopter records and marks, later ones
   read the recorded marker and decline, so no loser can erase the winner's marker;
-  a present marker for a different creation still refuses. The Git
+  a present marker for a different creation still refuses. The lock is reclaimed
+  only when its holder's same-host process is proven gone, never on age, so a slow
+  live holder is never displaced; an unreclaimable lock defers adoption to the
+  next reuse rather than running unsynchronized. The Git
   administrative directory is recorded alongside it, because `git worktree
   remove` deletes that directory and `git worktree move` leaves it alone, so it
   answers whether a removal happened without reading anything a move or an

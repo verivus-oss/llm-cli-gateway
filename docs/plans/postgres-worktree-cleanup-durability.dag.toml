@@ -507,3 +507,24 @@ Evidence: docs/evidence/postgres-worktree-cleanup-2026-09-04.md.
 """
 idempotent = true
 validation = "adoption-not-locked is killed by a test that spies the production caller's adoptLegacy call and asserts the lock file is present; non-exclusive lock (wx->w) by a mutual-exclusion test; a third test drives three concurrent resolveWorktreeForRequest calls and asserts convergence on the recorded marker. Two-file oracle 100 tests; test:pg 231/231 on 5437."
+
+[[steps]]
+id = "round-17-review-repairs"
+depends_on = ["round-16-review-repairs"]
+actor = "assistant"
+status = """
+done 2026-09-07. codex found a P1 in the round-17 lock itself and reproduced it
+through resolveWorktreeForRequest; I confirmed it. reclaimDeadAdoptionLock
+reclaimed a lock EITHER on a dead same-host PID OR on age past a 60s stale
+window. The age branch is unsound: a live-but-slow holder (GC pause, suspended
+process, stalled CAS) crosses the window inside its critical section, a successor
+evicts it and runs concurrently, and the three-party strand reopens. Age is not
+proof of death and a filesystem marker has no fencing token. Fixed by reclaiming
+ONLY a provably-dead same-host PID (process.kill(pid,0) throws ESRCH); age
+removed. A running holder is never displaced; an unreclaimable stuck lock defers
+adoption at the acquire timeout (fail-closed), never an unlocked run. grok's run
+was cancelled at 22 minutes (reviewing superseded code) without a verdict.
+Evidence: docs/evidence/postgres-worktree-cleanup-2026-09-04.md.
+"""
+idempotent = true
+validation = "reclaim-a-live-holder-by-age is killed by a test that writes a live-PID lock with an ancient acquiredAt and asserts it is NOT reclaimed (acquisition defers); the same test writes a dead PID and asserts the lock IS reclaimed. Round-17 mutual-exclusion and lock-held tests still hold. Two-file oracle 101 tests."
