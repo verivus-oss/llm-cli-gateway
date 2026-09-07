@@ -107,7 +107,7 @@ render() {
       }
       for (const r of removed) {
         console.log(`LINE ${r.cli}: contract declares flag(s) the installed binary NO LONGER advertises: ${r.flags.join(" ")}`);
-        console.log("LINE   auto-applicable: run GATEWAY_DRIFT_MODE=apply (or npm run providers:rebaseline -- --apply) to edit the contract, acknowledgements and codegen tables together; it fails closed with a residual-reference report if an emitter survives.");
+        console.log(`LINE   ${j.applied ? "auto-applied removal: the rebaseliner edited" : "auto-applicable: run GATEWAY_DRIFT_MODE=apply (or npm run providers:rebaseline -- --apply) to edit"} the contract, acknowledgements and codegen tables together; it fails closed with a residual-reference report if an emitter survives.`);
       }
       if (!versionUpdates.length && !additive.length && !removed.length) {
         console.log("LINE no drift: installed CLIs match their contracts");
