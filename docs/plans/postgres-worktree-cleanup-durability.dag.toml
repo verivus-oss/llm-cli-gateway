@@ -461,3 +461,26 @@ Evidence: docs/evidence/postgres-worktree-cleanup-2026-09-04.md.
 """
 idempotent = true
 validation = "The absent-marker reconcile branch is killed by a test that drives the real reuse path with the fresh-loser end-state (recorded token, deleted marker, live registration); reconcile-any is killed by the unreadable and foreign-marker tests; dropping provenance by the foreign and other-session tests."
+
+[[steps]]
+id = "round-15-review-repairs"
+depends_on = ["round-14-review-repairs"]
+actor = "assistant"
+status = """
+done 2026-09-07. The round-15 repair (materialise the recorded token onto an
+ABSENT marker on reuse) was itself the next blocker, same pattern as prior
+rounds: validateManagedWorktreeIdentity proves a gateway registration under this
+name, not that it is THIS session's, and createWorktree registers before it
+writes the marker, so a REPLACEMENT creation in that window is an absent marker
+too. Materialising there stamped this session's token onto someone else's
+worktree (the ABA the token exists to catch), reproduced as STAMPED_OLD_TOKEN.
+Reverted reconcileWorktreeIdentity to REFUSE absent; prevent the fresh-loser
+strand at its source with an exclusive-create (wx) fresh-adoption marker write in
+adoptLegacyWorktreeIdentity. A two-process PG race does NOT kill the drop-wx
+mutant (reclaim-priorMarker and the read-back guard shadow wx's sub-microsecond
+window); the executed control is a deterministic in-process test forcing the
+both-read-absent interleaving through an afterMarkerReadForTest seam.
+Evidence: docs/evidence/postgres-worktree-cleanup-2026-09-04.md.
+"""
+idempotent = true
+validation = "drop-wx is killed by the seam test (fails first === null and strands end to end); materialise-absent by the ABSENT-marker and REPLACEMENT-worktree negatives; reconcile-any by the unreadable and other-session negatives. Two-file oracle 97/97, test:pg 231/231 on 5437."

@@ -18,9 +18,11 @@ import { hostname, tmpdir } from "os";
 import { join } from "path";
 import { resolveGatewayServerRuntime, resolveWorktreeForRequest } from "../index.js";
 import {
+  adoptLegacyWorktreeIdentity,
   createWorktree,
   discardAdoptedWorktreeMarker,
   readWorktreeOwnerToken,
+  settleFailedAdoptionMarker,
 } from "../worktree-manager.js";
 import { FileSessionManager } from "../session-manager.js";
 import { noopLogger } from "../logger.js";
@@ -121,33 +123,63 @@ describe("worktree identity adoption, through its production caller", () => {
     expect(await readWorktreeOwnerToken(handle.path, noopLogger)).toBe(recordedToken);
   });
 
-  it("reconciles an ABSENT marker a concurrent fresh loser deleted, from the record", async () => {
-    // The round-14 blocker (codex). Two processes both observe an unmarked
-    // worktree; the winner records its token, the loser's fresh adoption loses
-    // the CAS and its settle DELETES the marker. The store records a token, the
-    // worktree is a live registration, but the marker is gone. Round 14
-    // reconciled a mismatched token, not an absent one, so reuse stranded the
-    // session's own live worktree. The record is the arbiter: reuse
-    // materialises the recorded token onto the absent marker and succeeds.
-    const { repoRoot, manager, handle, sessionId, recordedToken } = await recordedFixture(
+  it("does NOT reconcile an ABSENT marker, which could be a replacement mid-creation", async () => {
+    // The round-15 blocker (codex). Round 15 materialised the recorded token
+    // onto an absent marker, on the theory that createWorktree always leaves a
+    // marker so an absent one is a lost one. False: createWorktree registers the
+    // worktree with `git worktree add` BEFORE it writes the marker, so a
+    // validated registration with no marker can be a REPLACEMENT creation caught
+    // in that window, indistinguishable from a lost marker because everything
+    // else is name-derived. Materialising the record there stamps this session's
+    // identity onto someone else's worktree, the ABA the token exists to catch.
+    // So an absent marker is refused; the concurrent fresh loser that would have
+    // stranded its own marker is prevented at the source (exclusive-create).
+    const { repoRoot, manager, handle, sessionId } = await recordedFixture(
       "reconcile-absent",
-      () => ({ token: "irrelevant" })
+      () => ({
+        token: "irrelevant",
+      })
     );
     rmSync(join(handle.adminDirectory, "gateway-owner.json"), { force: true });
-    expect(await readWorktreeOwnerToken(handle.path, noopLogger)).toBeNull();
     const runtime = resolveGatewayServerRuntime({ sessionManager: manager });
 
-    const resolved = await resolveWorktreeForRequest(
-      { name: "reconcile-absent" },
-      sessionId,
-      runtime,
-      {
-        repoRoot,
-      }
-    );
+    await expect(
+      resolveWorktreeForRequest({ name: "reconcile-absent" }, sessionId, runtime, { repoRoot })
+    ).rejects.toThrow(/Durable session worktree metadata no longer matches/);
+    // Not stamped: the absent marker stays absent.
+    expect(await readWorktreeOwnerToken(handle.path, noopLogger)).toBeNull();
+  });
 
-    expect((resolved as { worktreePath?: string }).worktreePath).toBe(handle.path);
-    expect(await readWorktreeOwnerToken(handle.path, noopLogger)).toBe(recordedToken);
+  it("does NOT stamp an old session's token onto a REPLACEMENT worktree with no marker yet", async () => {
+    // The round-15 ABA, end to end. The original worktree is removed and a
+    // replacement is created at the same name; caught before its marker write
+    // (or its marker not yet visible), the replacement is a validated gateway
+    // registration with an absent marker. The ORIGINAL session, which still
+    // records the old token, must not reconcile the replacement to that token,
+    // or its later cleanup would delete the replacement.
+    const { repoRoot, manager, handle, sessionId, recordedToken } = await recordedFixture(
+      "aba-replacement",
+      () => ({ token: "irrelevant" })
+    );
+    // Remove the original and create a replacement at the same name.
+    git(repoRoot, "worktree", "remove", "--force", handle.path);
+    git(repoRoot, "branch", "-D", "gateway/aba-replacement");
+    const replacement = await createWorktree({
+      repoRoot,
+      name: "aba-replacement",
+      logger: noopLogger,
+    });
+    const replacementToken = await readWorktreeOwnerToken(replacement.path, noopLogger);
+    rmSync(join(replacement.adminDirectory, "gateway-owner.json"), { force: true });
+    const runtime = resolveGatewayServerRuntime({ sessionManager: manager });
+
+    await resolveWorktreeForRequest({ name: "aba-replacement" }, sessionId, runtime, {
+      repoRoot,
+    }).catch(() => undefined);
+
+    // The replacement was NOT stamped with the original session's token.
+    expect(await readWorktreeOwnerToken(replacement.path, noopLogger)).not.toBe(recordedToken);
+    expect(replacementToken).not.toBe(recordedToken);
   });
 
   it("does NOT reconcile an UNREADABLE marker on the reuse path", async () => {
@@ -435,6 +467,68 @@ describe("worktree identity adoption, through its production caller", () => {
     // The overwritten live marker is put back, not deleted.
     expect(await readWorktreeOwnerToken(handle.path, noopLogger)).toBe(liveToken);
     expect(manager.getSession(sessionId)?.metadata?.worktreeToken).toBeUndefined();
+  });
+
+  it("wx lets only ONE of two fresh concurrent adoptions create a marker, so a both-read-absent race cannot strand", async () => {
+    // The round-16 blocker, and the one case here that does NOT go through
+    // resolveWorktreeForRequest. Two same-host instances reusing one pre-token
+    // session both read the marker ABSENT and each writes a fresh one. The
+    // marker read and the write are synchronous within a process, so this
+    // interleaving cannot be produced by two concurrent production calls in a
+    // single test; the `afterMarkerReadForTest` seam runs the second adoption to
+    // completion inside the first's read-to-write window, which is the only place
+    // `wx` acts. It makes the second exclusive create fail with EEXIST so exactly
+    // one marker is ever written. The dropped-`wx` mutant (flag "w") lets the
+    // loser clobber the winner's marker and then delete it on its lost record
+    // CAS, leaving the store's token with no marker on disk: a permanent strand.
+    type Adopted = Awaited<ReturnType<typeof adoptLegacyWorktreeIdentity>>;
+    const { manager, handle, sessionId } = await legacyFixture("both-absent");
+    const session = manager.getSession(sessionId)!;
+    const recorded = new Set<string>();
+    const recordsToken = (t: string): boolean => recorded.has(t);
+
+    let second: Adopted = null;
+    let interleaved = false;
+    const first = await adoptLegacyWorktreeIdentity(session, {
+      claimantsForPath: 1,
+      recordsToken,
+      logger: noopLogger,
+      afterMarkerReadForTest: async () => {
+        if (interleaved) return;
+        interleaved = true;
+        second = await adoptLegacyWorktreeIdentity(session, {
+          claimantsForPath: 1,
+          recordsToken,
+          logger: noopLogger,
+        });
+      },
+    });
+
+    // The seam fired and the second, fully concurrent, fresh adoption ran; `wx`
+    // then rejected the first call's own exclusive write (EEXIST), so it adopts
+    // nothing. Under the mutant the first call instead clobbers and returns a
+    // second live token, failing here.
+    expect(interleaved).toBe(true);
+    expect(second).not.toBeNull();
+    expect(first).toBeNull();
+
+    // Model the record CAS the production caller runs: the invocation that
+    // returned first (the interleaved second call) records its token and wins; a
+    // later one loses and withdraws its marker, exactly as
+    // adoptWorktreeIdentityForSession does in its finally.
+    const record = (r: Adopted): void => {
+      if (!r) return;
+      if (recorded.size === 0) recorded.add(r.token);
+      else settleFailedAdoptionMarker(r.adminDirectory, r.token, r.priorMarker, noopLogger);
+    };
+    record(second);
+    record(first);
+
+    // Exactly one token recorded and the marker on disk names it: no strand.
+    expect(recorded.size).toBe(1);
+    const disk = await readWorktreeOwnerToken(handle.path, noopLogger);
+    expect(disk).not.toBeNull();
+    expect(disk).toBe([...recorded][0]);
   });
 
   it("does NOT reclaim a LIVE request-scoped worktree, whose token no session records", async () => {
