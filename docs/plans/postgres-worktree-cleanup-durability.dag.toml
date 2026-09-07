@@ -528,26 +528,3 @@ Evidence: docs/evidence/postgres-worktree-cleanup-2026-09-04.md.
 """
 idempotent = true
 validation = "reclaim-a-live-holder-by-age is killed by a test that writes a live-PID lock with an ancient acquiredAt and asserts it is NOT reclaimed (acquisition defers); the same test writes a dead PID and asserts the lock IS reclaimed. Round-17 mutual-exclusion and lock-held tests still hold. Two-file oracle 101 tests."
-
-[[steps]]
-id = "round-18-review-repairs"
-depends_on = ["round-17-review-repairs"]
-actor = "assistant"
-status = """
-done 2026-09-07. grok approved; codex found a P1 and reproduced it through
-resolveWorktreeForRequest (verdict on transcript before its process died on the
-upstream content flag); I reproduced it independently. The round-17 companion
-recovery lock had no recovery of its own: a reclaimer that crashes after
-creating the recovery file but before its finally removes it leaves an ORPHAN,
-and every later reclaim fails at openSync(recovery, wx) EEXIST and returns
-false, so the dead primary is never reclaimed and adoption is refused forever, a
-permanent strand from one crash. Fixed by a self-healing recovery lock: an
-existing recovery file is reclaimed when it names a same-host dead PID or carries
-no provenance (empty/pre-fix orphan); a live reclaimer's is respected. The
-reclaimer writes its own PID into the recovery lock immediately so a later crash
-leaves a dead-PID file the next reclaimer heals. lockHolderProvenlyDead is
-shared by the primary and recovery reclaim.
-Evidence: docs/evidence/postgres-worktree-cleanup-2026-09-04.md.
-"""
-idempotent = true
-validation = "do-not-heal-orphan is killed by a test that plants a dead-PID primary + empty orphan recovery and asserts acquisition now succeeds; steal-any-recovery by the same test's second half (a live-PID recovery lock is not stolen, acquisition defers). Two-file oracle 102 tests; check 25/25; test:pg 231/231 on 5437."

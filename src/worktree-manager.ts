@@ -553,82 +553,54 @@ const ADOPTION_LOCK_RETRY_MS = 25;
 
 const sleep = (ms: number): Promise<void> => new Promise(resolve => setTimeout(resolve, ms));
 
-/** A lock file's parsed record, or null when it is absent, empty, or malformed. */
-function readLockRecord(path: string): { pid?: unknown; hostname?: unknown } | null {
-  try {
-    const parsed = JSON.parse(readFileSync(path, "utf8")) as unknown;
-    if (!parsed || typeof parsed !== "object") return null;
-    return parsed as { pid?: unknown; hostname?: unknown };
-  } catch {
-    return null;
-  }
-}
-
 /**
- * True only when a lock record names THIS host and a PID that no longer exists.
- * A same-host dead PID is the sole proof a holder is gone; a live PID, a foreign
- * host, or a missing PID is treated as a live holder and waited on. Age is never
- * a signal: a live-but-slow holder (a long GC pause, a suspended process, a
- * stalled record CAS) must never be evicted while still inside its critical
- * section, or a successor would run concurrently and reopen the strand the lock
- * closes.
- */
-function lockHolderProvenlyDead(record: { pid?: unknown; hostname?: unknown }): boolean {
-  if (record.hostname !== hostname() || typeof record.pid !== "number") return false;
-  try {
-    process.kill(record.pid, 0);
-    return false;
-  } catch (error) {
-    return (error as NodeJS.ErrnoException).code === "ESRCH";
-  }
-}
-
-/**
- * Reclaim an adoption lock ONLY when its holder is provably gone (a same-host
- * dead PID). A companion recovery lock serializes reclaimers so two contenders
- * cannot both validate the dead primary and then, after one recreates a live
- * lock in its place, have the other delete that live replacement.
- *
- * The recovery lock is itself self-healing, because it too can be orphaned: a
- * reclaimer that crashes after creating it but before its `finally` removes it
- * would otherwise block EVERY future reclaim of the dead primary forever, a
- * permanent strand from a single crash. So an existing recovery lock is
- * reclaimed when it names a same-host dead PID, or when it carries no usable
- * provenance at all (an empty or pre-fix file a crash left behind); a recovery
- * lock held by a live reclaimer is respected and waited on. The reclaimer writes
- * its own PID into the recovery lock immediately, so a later crash leaves a
- * dead-PID file the next reclaimer heals.
+ * Reclaim an adoption lock ONLY when its holder is provably gone: a same-host
+ * PID that no longer exists. Age is deliberately NOT a reclaim signal. An earlier
+ * version also evicted a lock older than a stale window, and that broke the one
+ * invariant the lock exists for: a live-but-slow holder (a long GC pause, a
+ * suspended process, a stalled record CAS) would be evicted while still inside
+ * its critical section, a successor would run concurrently, and the three-party
+ * strand this lock closes would reopen. A running holder is making progress or
+ * its process is wedged; the former must never be displaced, and the latter is
+ * cleared by ending that process, which turns it into the dead-PID case. A lock
+ * that cannot be reclaimed (a hostname mismatch, or a dead holder whose PID a
+ * live process now reuses) is waited on and then SKIPPED at the acquire timeout:
+ * adoption defers to the next reuse, never runs unlocked. A companion recovery
+ * lock serializes reclaimers so two contenders cannot both delete the file and
+ * then delete each other's replacement. A foreign-host, malformed, or live lock
+ * fails closed.
  */
 function reclaimDeadAdoptionLock(lockPath: string, logger: Logger): boolean {
   const recoveryPath = `${lockPath}.recovery`;
-  let recoveryFd: number | null = null;
-  for (let attempt = 0; attempt < 2 && recoveryFd === null; attempt += 1) {
-    try {
-      recoveryFd = openSync(recoveryPath, "wx", 0o600);
-    } catch (error) {
-      if ((error as NodeJS.ErrnoException).code !== "EEXIST") return false;
-      const holder = readLockRecord(recoveryPath);
-      // A live reclaimer owns it: wait. An orphan (dead PID, or no provenance)
-      // is cleared so the dead primary can still be reclaimed.
-      if (holder !== null && !lockHolderProvenlyDead(holder)) return false;
-      try {
-        unlinkSync(recoveryPath);
-      } catch (unlinkError) {
-        if ((unlinkError as NodeJS.ErrnoException).code !== "ENOENT") return false;
-      }
-    }
-  }
-  if (recoveryFd === null) return false;
+  let recoveryFd: number;
   try {
-    writeFileSync(recoveryFd, JSON.stringify({ pid: process.pid, hostname: hostname() }));
-    fsyncSync(recoveryFd);
-    const owner = readLockRecord(lockPath);
-    if (owner === null || !lockHolderProvenlyDead(owner)) return false;
+    recoveryFd = openSync(recoveryPath, "wx", 0o600);
+  } catch {
+    return false;
+  }
+  try {
+    let owner: { pid?: unknown; hostname?: unknown };
+    try {
+      owner = JSON.parse(readFileSync(lockPath, "utf8")) as typeof owner;
+    } catch {
+      return false;
+    }
+    if (!owner || typeof owner !== "object") return false;
+    // Same host and a PID that no longer exists is the only proof a holder is
+    // gone. Anything else (a live PID, a foreign host, a missing PID) is treated
+    // as a live holder and waited on.
+    if (owner.hostname !== hostname() || typeof owner.pid !== "number") return false;
+    try {
+      process.kill(owner.pid, 0);
+      return false;
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== "ESRCH") return false;
+    }
     try {
       unlinkSync(lockPath);
       return true;
-    } catch (error) {
-      return (error as NodeJS.ErrnoException).code === "ENOENT";
+    } catch {
+      return false;
     }
   } finally {
     try {
