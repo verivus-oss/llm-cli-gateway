@@ -562,6 +562,17 @@ type MarkerReading =
   | { kind: "none" }
   | { kind: "unreadable"; reason: string };
 
+/**
+ * What an adoption returns to its caller. `priorMarker` is present only when the
+ * adoption RECLAIMED a strand, and names the marker it overwrote, so the caller
+ * can restore it instead of deleting if the record fails to persist.
+ */
+export interface AdoptedWorktreeIdentity {
+  token: string;
+  adminDirectory: string;
+  priorMarker?: { token: string; adoptedBy: string };
+}
+
 function describeError(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
 }
@@ -1086,9 +1097,12 @@ export async function adoptLegacyWorktreeIdentity(
     recordsToken?: (token: string) => boolean;
     logger?: Logger;
   }
-): Promise<{ token: string; adminDirectory: string } | null> {
+): Promise<AdoptedWorktreeIdentity | null> {
   const logger = options.logger ?? noopLogger;
   const meta = session.metadata ?? {};
+  // Set only on the reclaim path, to the marker being overwritten, so a reclaim
+  // whose record loses a concurrent race can be undone by restoring it.
+  let priorMarker: { token: string; adoptedBy: string } | undefined;
   const worktreePath = typeof meta.worktreePath === "string" ? meta.worktreePath : null;
   if (worktreePath === null) return null;
   if (typeof meta.worktreeToken === "string") return null;
@@ -1141,6 +1155,13 @@ export async function adoptLegacyWorktreeIdentity(
       );
       return null;
     }
+    // Remember what we are overwriting. `recordsToken` was read before the
+    // administrative-directory await above, so a concurrent request on this same
+    // session can record a token in that window and this reclaim then overwrites
+    // a LIVE marker. If it does, our record CAS loses to the one that landed
+    // first, and the caller must put this marker back rather than delete it: the
+    // CAS, not the stale store read, is what decides which reclaim is real.
+    priorMarker = { token: marker.token, adoptedBy: session.id };
     logWarn(
       logger,
       `reclaiming this session's own stranded adoption marker at ${worktreePath} for session ${session.id}`
@@ -1168,41 +1189,64 @@ export async function adoptLegacyWorktreeIdentity(
       logger,
       `could not adopt the worktree at ${worktreePath} for session ${session.id}: ${describeError(error)}`
     );
-    // The write may have landed even though the read-back did not, so the same
-    // withdrawal the caller performs is owed here: a marker nobody records is
-    // the state this whole mechanism exists to prevent.
-    discardAdoptedWorktreeMarker(adminDirectory, token, logger);
+    // The write may have landed even though the read-back did not, so undo it on
+    // the same terms the caller uses: restore a marker we overwrote, or delete
+    // one we created, but never leave our unrecorded token behind.
+    settleFailedAdoptionMarker(adminDirectory, token, priorMarker, logger);
     return null;
   }
-  return { token, adminDirectory };
+  return { token, adminDirectory, priorMarker };
 }
 
 /**
- * Take back a marker written by an adoption whose metadata did not persist.
+ * Undo the marker an adoption wrote when its record failed to persist.
  *
  * Without this the worktree carries an identity that no session records, so
  * every later adoption attempt refuses it as "already marked" and cleanup can
  * never prove anything about it either. The write and the record are not atomic
  * and cannot be; undoing the half that landed is what keeps the pair honest.
+ *
+ * Only OUR marker is touched: `rmSync` on the path alone deletes whatever sits
+ * there, and by the time this runs another creation may already own the
+ * directory. A fresh adoption's marker is deleted. A RECLAIM's marker is
+ * RESTORED to what it overwrote, because a concurrent same-session adoption may
+ * have recorded that token between the store read and the CAS, in which case
+ * the marker we overwrote is a live identity and deleting it would brick the
+ * worktree the winning CAS owns.
  */
+export function settleFailedAdoptionMarker(
+  adminDirectory: string,
+  ourToken: string,
+  priorMarker: { token: string; adoptedBy: string } | undefined,
+  logger: Logger
+): void {
+  const present = readAdminMarker(adminDirectory);
+  if (present.kind !== "token" || present.token !== ourToken) return;
+  try {
+    if (priorMarker) {
+      writeFileSync(
+        join(adminDirectory, GATEWAY_WORKTREE_MARKER),
+        JSON.stringify({ token: priorMarker.token, adoptedBy: priorMarker.adoptedBy }),
+        { mode: 0o600 }
+      );
+    } else {
+      rmSync(join(adminDirectory, GATEWAY_WORKTREE_MARKER), { force: true });
+    }
+  } catch (error) {
+    logWarn(
+      logger,
+      `adopted marker in ${adminDirectory} could not be settled after its record failed to persist: ${describeError(error)}`
+    );
+  }
+}
+
+/** Delete a marker a fresh (non-reclaim) adoption wrote but never recorded. */
 export function discardAdoptedWorktreeMarker(
   adminDirectory: string,
   token: string,
   logger: Logger
 ): void {
-  // Only OUR marker. `rmSync` on the path alone deletes whatever sits there,
-  // and by the time a withdrawal runs another creation may already own the
-  // directory; taking its identity away would strand IT instead.
-  const present = readAdminMarker(adminDirectory);
-  if (present.kind !== "token" || present.token !== token) return;
-  try {
-    rmSync(join(adminDirectory, GATEWAY_WORKTREE_MARKER), { force: true });
-  } catch (error) {
-    logWarn(
-      logger,
-      `adopted marker in ${adminDirectory} could not be withdrawn after its record failed to persist: ${describeError(error)}`
-    );
-  }
+  settleFailedAdoptionMarker(adminDirectory, token, undefined, logger);
 }
 
 /** Remove the exact worktree authorized by durable session provenance. */

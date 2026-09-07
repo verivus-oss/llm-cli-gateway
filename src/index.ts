@@ -71,7 +71,7 @@ import {
   createWorktree,
   cleanupSessionWorktree,
   adoptLegacyWorktreeIdentity,
-  discardAdoptedWorktreeMarker,
+  settleFailedAdoptionMarker,
   readWorktreeOwnerToken,
   removeWorktree,
   removeWorktreeWithResult,
@@ -3326,7 +3326,15 @@ async function adoptWorktreeIdentityForSession(
         )) === true;
     } finally {
       if (!recorded) {
-        discardAdoptedWorktreeMarker(adopted.adminDirectory, adopted.token, runtime.logger);
+        // Restore a reclaimed strand's prior marker, or delete a fresh one: a
+        // reclaim whose CAS lost to a concurrent same-session adoption must not
+        // delete the live marker it overwrote.
+        settleFailedAdoptionMarker(
+          adopted.adminDirectory,
+          adopted.token,
+          adopted.priorMarker,
+          runtime.logger
+        );
       }
     }
   } catch (error) {

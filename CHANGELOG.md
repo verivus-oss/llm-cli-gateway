@@ -58,7 +58,10 @@ All notable changes to the llm-cli-gateway project.
   records no session holding that token. A worktree created without a session
   carries no adopter id, and an adoption the store has already recorded is a
   live identity even when a stale snapshot of its session lacks the token, so
-  neither is mistaken for a strand. The Git
+  neither is mistaken for a strand. The record compare-and-set is the final
+  arbiter under concurrency: a reclaim that loses it to an adoption another
+  request recorded first restores the marker it overwrote rather than deleting
+  it, so a live worktree is never bricked by a racing reclaim. The Git
   administrative directory is recorded alongside it, because `git worktree
   remove` deletes that directory and `git worktree move` leaves it alone, so it
   answers whether a removal happened without reading anything a move or an

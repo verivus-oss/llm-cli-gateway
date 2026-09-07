@@ -274,6 +274,34 @@ describe("worktree identity adoption, through its production caller", () => {
     expect(manager.getSession(sessionId)?.metadata?.worktreeToken).toBe(recordedToken);
   });
 
+  it("RESTORES the overwritten marker when a reclaim's record loses a concurrent race", async () => {
+    // The round-12 blocker (codex). recordsToken is read before an async admin-
+    // directory lookup, so a concurrent same-session adoption can record the
+    // token in that window; the stale snapshot then treats the live marker as a
+    // strand and the reclaim overwrites it. The CAS is the arbiter: when it
+    // loses, the marker it overwrote must be RESTORED, not deleted, or the live
+    // worktree the winning CAS owns is bricked. Modelled deterministically: a
+    // marker this session adopted and a store that does not (yet) record it, so
+    // the reclaim fires, with the record CAS failing as the concurrent loser.
+    const { repoRoot, manager, handle, sessionId } = await legacyFixture("concurrent");
+    const liveToken = "token-a-concurrent-adoption-recorded";
+    writeFileSync(
+      join(handle.adminDirectory, "gateway-owner.json"),
+      JSON.stringify({ token: liveToken, adoptedBy: sessionId })
+    );
+    // The record CAS loses to the concurrent adoption that landed first.
+    manager.compareAndSetSession = () => false;
+    const runtime = resolveGatewayServerRuntime({ sessionManager: manager });
+
+    await resolveWorktreeForRequest({ name: "concurrent" }, sessionId, runtime, { repoRoot }).catch(
+      () => undefined
+    );
+
+    // The overwritten live marker is put back, not deleted.
+    expect(await readWorktreeOwnerToken(handle.path, noopLogger)).toBe(liveToken);
+    expect(manager.getSession(sessionId)?.metadata?.worktreeToken).toBeUndefined();
+  });
+
   it("does NOT reclaim a LIVE request-scoped worktree, whose token no session records", async () => {
     // The round-10 blocker. A request-scoped worktree (no sessionId) is created
     // live, and the branch that would persist its token is skipped, so NO

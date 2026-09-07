@@ -394,3 +394,26 @@ Evidence: docs/evidence/postgres-worktree-cleanup-2026-09-04.md.
 """
 idempotent = true
 validation = "Both strand signals have a mutant a named test kills: dropping the store check is killed by the stale-snapshot regression, dropping provenance by the request-scoped regression; the adoption-write and unreadable guards likewise."
+
+[[steps]]
+id = "round-12-review-repairs"
+depends_on = ["round-11-review-repairs"]
+actor = "assistant"
+status = """
+done 2026-09-07. codex blocked (grok still running when it reported; codex failed
+on the upstream content flag but wrote the blocker first, confirmed in code).
+recordsToken is captured before adoptLegacyWorktreeIdentity awaits the admin-dir
+lookup, so a concurrent same-session adoption records the token in that window;
+the stale snapshot treats the live marker as a strand, the reclaim overwrites it,
+the record CAS loses, and the withdrawal deletes the live marker, bricking the
+worktree. The round-11 defect's concurrent form.
+Fixed by making the CAS the arbiter: adoption returns the marker it overwrote
+(priorMarker, reclaim path only), and on a failed record the marker is RESTORED,
+not deleted. A reclaim's CAS succeeds only for a genuine strand (session still
+has no token); when it loses to a real concurrent adoption, restoring puts that
+live identity back. recordsToken stays as a first-line refusal, not the
+correctness guarantee. Maintainer chose keep-patching over dropping recovery.
+Evidence: docs/evidence/postgres-worktree-cleanup-2026-09-04.md.
+"""
+idempotent = true
+validation = "The concurrent-race regression kills all three restore-path mutants: deleting instead of restoring (the round-12 behaviour), never setting priorMarker, and the caller dropping it."
