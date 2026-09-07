@@ -7,6 +7,7 @@ import { readFileSync, readdirSync } from "fs";
 import { join, dirname } from "path";
 import { fileURLToPath } from "url";
 import { POSTGRES_SCHEMA_MIGRATION_LEDGER } from "./postgres-job-store-schema.js";
+import { sessionNotTombstonedSql } from "./session-tombstone-sql.js";
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
@@ -43,6 +44,12 @@ const MIGRATION_LOCK_KEY = 1;
 // including a canonical TEXT shape whose active-session foreign key was lost.
 const SESSION_SUMMARY_COMPATIBILITY_MIGRATION_VERSIONS = new Set([2, 3]);
 
+/**
+ * The operator-facing summary view. It excludes worktree-cleanup tombstones for
+ * the same reason every gateway read does: a tombstone is a DELETED session,
+ * and a view that shows it makes a deleted session look live to anyone
+ * inspecting the database directly.
+ */
 const SESSION_SUMMARY_VIEW_SQL = `
   CREATE OR REPLACE VIEW session_summary AS
   SELECT
@@ -54,6 +61,7 @@ const SESSION_SUMMARY_VIEW_SQL = `
     (a.session_id IS NOT NULL) AS is_active
   FROM sessions s
   LEFT JOIN active_sessions a ON s.id = a.session_id
+  WHERE ${sessionNotTombstonedSql("s")}
 `;
 
 const SESSION_ID_COMPATIBILITY_SQL = `

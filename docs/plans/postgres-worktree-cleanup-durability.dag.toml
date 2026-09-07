@@ -1,0 +1,486 @@
+# Implementation plan: give PostgreSQL session deletion the same durable
+# worktree-cleanup guarantee the file-backed manager already has. Issue #305.
+#
+# `worktrees-on-postgres-sessions.dag.toml` restored creation and same-host reuse
+# and shipped the host-filtered tombstone READ side. No production PostgreSQL
+# deletion path writes the tombstone, so those two methods are reachable only
+# from tests that seed the metadata. #302 documented that boundary rather than
+# claiming parity; the docs reverse only once the runtime earns it.
+
+[meta]
+name = "durable worktree cleanup under Postgres sessions"
+schema_version = "1.1"
+owner = "verivus-oss"
+issue = 305
+measured_against = "44ccb34"
+extends = "docs/plans/worktrees-on-postgres-sessions.dag.toml"
+acceptance_resource = """
+A PostgreSQL session with a durably owned worktree survives deletion as a
+caller-invisible tombstone until verified Git removal finalizes it; a failed
+removal is still listed for the owning host after a restart; neither a foreign
+host's deletion nor database-side expiry destroys that retry record."""
+invariant_sources = ["src/session-manager-pg.ts", "src/session-manager.ts", "src/index.ts", "migrations/009_personal_config_kit_session_cleanup.sql"]
+
+[decision]
+one_spelling = """
+The file-backed manager expresses this rule twice: `removeOrStageSession` for
+the write, fourteen `isPendingWorktreeDeletion` guards for the reads. Hand
+reproducing fourteen guards in SQL is the shape that produced the four drifted
+`CHECK (cli IN ...)` lists s8 found. Both halves become ONE declared predicate
+each, in the manner of `principalScopeSql`: a staging expression for every
+deletion path, a not-tombstoned predicate spliced into every statement that
+reads or mutates a session row. Staging is one statement, two data-modifying
+CTEs over one snapshot selected on whether the row carries a durably owned
+worktree, unioning their RETURNING rows; a SELECT then a later UPDATE would be
+a second place the classification is taken, and a CTE cannot disagree with
+itself.
+"""
+
+staging_is_not_retention = """
+Staging changes what deletion MEANS for a worktree-bearing row, so the arm is
+entered only on the same four fields `hasDurablyOwnedWorktree` requires. An
+already-tombstoned row is excluded from every deletion path rather than
+re-staged: a second staging UPDATE would notify the observer again and race the
+first attempt. NOT a blanket sweep, NOT a cross-host retry, NOT a bound on how
+long a tombstone lives; that last one is a durable-state question
+`durable-state-lifecycle.dag.toml` owns, and this adds one.
+"""
+
+expiry_is_the_hard_one = """
+`cleanup_expired_sessions` is plpgsql with no gateway in the loop, so it cannot
+notify an observer and must not be given one. It can only preserve the record:
+stage the tombstone instead of deleting and let the owning host's lazy
+enumeration find it. `POSTGRES_IMMUTABLE_MIGRATION_SHA256` pins every file, so
+this is migration 026 replacing the function body, never an edit to 009.
+"""
+
+[[steps]]
+id = "hide-tombstones-from-reads"
+depends_on = []
+actor = "assistant"
+status = """
+done 2026-09-04. The census MOVED as the gate learned to see more: 35/23/6/6
+over one file at authorship, 32/20/6/6 over every module now. Read the gate.
+`session:tombstone:scope:check` derives the set and is in `npm run check`. The
+predicate is NOT uniform, found by doing it: an existence probe before an INSERT
+must stay unfiltered or the INSERT meets a key violation instead of the caller's
+conflict, so `getOrCreateKitSession` refuses a tombstoned id by name instead.
+Suite 5049 to 5060 and pg 201 to 207, 0 removed either side. Controls: all 23
+sites removed reddens 5 behavioural cases and leaves the live-session case
+green; the by-name refusal alone reddens exactly 1. FOUND, not fixed: the FILE
+store guards no Kit path at all, so it can hand back a deleted Kit session.
+Evidence: docs/evidence/postgres-worktree-cleanup-2026-09-04.md.
+"""
+action = """
+Declare the not-tombstoned predicate and splice it into every
+`PostgreSQLSessionManager` statement that reads or mutates a session row, not
+only `getSession` and `listSessions`. Derive the set from the class rather than
+a hand-written list of method names, and record the count. This lands FIRST and
+alone: until reads exclude tombstones, staging turns a deletion into a session
+that is still gettable, listable and resumable, which is worse than the gap.
+"""
+idempotent = true
+validation = "With a tombstone seeded directly, every enumerated read path reports the session absent; only `listPendingWorktreeCleanupSessions` returns it, to its owning host."
+
+[[steps]]
+id = "stage-on-delete"
+depends_on = ["hide-tombstones-from-reads"]
+actor = "assistant"
+status = """
+done 2026-09-04. `deleteOrStageSessionsSql` is the one statement, and its
+callers' predicates are checked by a throw on the production path rather than
+only by the gate. FOUND BY READING THE SCHEMA: both pointer tables cascade on
+DELETE, and a staged row is not deleted, so a tombstone stayed the active
+session and the active Kit pointer until two more CTEs cleared them. FOUND BY
+RUNNING IT: without COALESCE an absent key makes the ownership test NULL, so
+`WHERE NOT owned` matched nothing and every ordinary session stopped being
+deleted; 13 tests catch it, 10 of them pre-existing. Controls: staging arm
+disabled reddens 5, pointer clearing removed reddens exactly 1, a one-field
+ownership test reddens exactly 1.
+"""
+action = """
+Route `deleteSession`, the delete arm of `compareAndSetSession`, and
+`clearAllSessions` through the staging statement. `session_clear_all` reaches
+this by deleting each session individually and needs no separate change, which
+must be asserted rather than assumed. Principal scoping and the Kit attempt
+fence stay in the predicate, and the staging arm inherits them: same WHERE.
+"""
+idempotent = true
+validation = "All three paths tombstone a worktree-bearing row and still report it gone; a plain session is deleted outright; Kit attempt and foreign principal refuse."
+
+[[steps]]
+id = "expiry-preserves-the-record"
+depends_on = ["stage-on-delete"]
+actor = "assistant"
+status = """
+done 2026-09-04, migration 026, pinned at authorship. AMENDED: the signature is
+KEPT. Returning both counts needs a DROP FUNCTION and a new return type, which
+breaks an operator's scheduled call for no runtime gain; the integer keeps its
+meaning, sessions that stopped being live, and the split is visible in the data.
+No pointer clearing here, because expiry already excludes a session either
+pointer table references. The control runs the pre-026 definition from
+migrations/009 and restores 026 from the file, so it cannot drift.
+"""
+action = """
+Migration 026 redefines `cleanup_expired_sessions` to stage a tombstone on a
+worktree-bearing expired session and delete the rest, reporting both counts so
+an operator sees a row retained rather than removed. Extend the migration
+contract test's function inventory.
+"""
+idempotent = true
+validation = "The function leaves a tombstone the owning host lists where the pre-026 definition removed the row. Both states run."
+
+[[steps]]
+id = "observer-rejection-is-logged"
+depends_on = []
+actor = "assistant"
+status = "done 2026-09-04. Optional logger on the constructor, supplied by createSessionManager; id and error only. Restoring the silent catch reddens exactly 1."
+action = """
+`PostgreSQLSessionManager.notifySessionRemoved` discards both a throw and a
+rejected promise with no logger to report to. Thread one in and report session
+id and failure as the file manager does, without widening what is logged.
+"""
+idempotent = true
+validation = "A rejecting observer produces one bounded log line naming the session."
+
+[[steps]]
+id = "tests-and-negative-controls"
+depends_on = ["expiry-preserves-the-record", "observer-rejection-is-logged"]
+actor = "assistant"
+status = """
+done 2026-09-04. Suite 5049 to 5061 and pg 201 to 216, 0 removed either side;
+check 25 of 25. Every control above ran in both states. METHOD FINDING: the
+first expiry control measured the FIXTURE, because `createSession` claims the
+per-provider active pointer and expiry skips a pinned session, so it reported 1
+expiry where 2 were due.
+"""
+action = """
+`*-pg` coverage for: successful cleanup finalizes; failed cleanup persists and
+retries under a fresh manager; foreign-host deletion keeps the record and
+touches no filesystem; database-side expiry preserves it; observer rejection is
+reported; the same session id is recreated while a tombstone exists. Each test
+is shown red against a mutant removing exactly the scoping it claims, run in
+both states, both numbers recorded here.
+"""
+idempotent = true
+validation = "Every added test dies to its own mutation; suite set difference recorded, 0 removed."
+
+[[steps]]
+id = "reverse-the-documented-limitation"
+depends_on = ["tests-and-negative-controls"]
+actor = "assistant"
+status = """
+done 2026-09-04. Nine current surfaces carried the falsified claim; the release
+article and historical CHANGELOG entries are left in their historical context.
+Both consistency gates now assert the new claim AND the absence of the old one,
+because asserting only the new sentence passes with both present. METHOD
+FINDING: those gates spelled inner spaces as literal " ", so two assertions were
+passing on fill width rather than content; every space is a whitespace class now.
+"""
+action = """
+Only now: reverse what #302 wrote. The claim that PostgreSQL retains no failed
+cleanup is true today and false after this, so README, the `session_delete` and
+`session_clear_all` descriptions, the generated discovery artifacts, the tests
+pinning those sentences and the predecessor plan header all move together.
+State the residual: cleanup is still the owning host's, tombstones unbounded.
+"""
+idempotent = true
+validation = "No shipped surface claims a guarantee the runtime does not have, in either direction."
+
+[[steps]]
+id = "round-1-review-repairs"
+depends_on = ["reverse-the-documented-limitation"]
+actor = "assistant"
+status = """
+done 2026-09-04. Two BLOCKERS, both real, neither an instrument artefact.
+CODEX: cleanup removes the worktree before finalizing the record authorizing it,
+and path and branch BOTH derive from the name, so a crash in that window let a
+retry delete a live replacement. Fixed by a per-creation token in the worktree's
+Git admin directory, mirrored in session metadata. SUPERSEDED in round 2: a
+pre-token worktree standing at the recorded path is now refused outright,
+because a legacy record cannot prove it created it. Ordering was rejected: finalizing first discards the record this plan
+exists to keep. GROK: both new instruments over-reported. The builder splices
+the exclusion itself now, so its `includes` check is deleted rather than
+strengthened, and the gate sees every table spelling, refuses a computed table
+name, requires a BARE interpolation, and scans 157 modules not one. ALSO FIXED,
+not documented around: the file store guarded no Kit path, so it handed deleted
+Kit sessions back as live and falsified two shipped sentences. Suite 5049 to
+5073 and pg 201 to 223, 0 removed. SUPERSEDED in round 4: survivors remained,
+and both seats listed them. FOUND: 026's resumeEligible arm is unreachable, not just
+untested. Evidence: docs/evidence/postgres-worktree-cleanup-2026-09-04.md.
+"""
+idempotent = true
+validation = "Both blockers have a control that fails without the repair; the review is re-dispatched at the new head."
+
+[[steps]]
+id = "round-4-review-repairs"
+depends_on = ["round-1-review-repairs"]
+actor = "assistant"
+status = """
+done 2026-09-05. Both seats rejected on the SAME blocker, found independently
+and reproduced on real PostgreSQL: the token search failed closed on a failed
+enumeration and failed OPEN one level in, so a listed worktree whose marker
+could not be read answered "not ours" and cleanup finalized a live worktree.
+Third spelling of one defect, so the repair is structural rather than another
+guard: the search returns live / removed / indeterminate, reads administrative
+directories instead of checkouts, and records the admin directory as identity,
+because `git worktree remove` destroys it and `git worktree move` does not.
+The root was one layer further down again: `removeWorktreeWithResult` returned
+success whenever the recorded path was absent, so a refused removal finalized
+anyway. Success now means git no longer registers the path, pruned and READ
+BACK. Also closed: three more gate bypasses (USING, upsert-as-insert, a split
+verb), and the gate now reports the set it read rather than a count computed
+beside it. Evidence: docs/evidence/postgres-worktree-cleanup-2026-09-04.md.
+"""
+idempotent = true
+validation = "The four move scenarios are exercised end to end against real PostgreSQL. The blanket claim that every guard here has a killing test was FALSE: round 6 ran 97 mutants and 27 survived."
+
+[[steps]]
+id = "round-5-review-repairs"
+depends_on = ["round-4-review-repairs"]
+actor = "assistant"
+status = """
+done 2026-09-05. Two blockers, one per seat, both real and both in code written
+the round before. CODEX (run died mid-review, finding survived): the entry's
+`gitdir` is not promised absolute, and `worktree.useRelativePaths=true` is a
+supported setting, so resolving it against the process cwd made an ORDINARY
+move read as a removal. Resolved against the administrative directory now.
+GROK: a moved worktree whose checkout is then missing was finalized, on my
+argument that a retry would reach the same answer forever. That argument is
+wrong when the absence is transient, and the reviewer restored the checkout to
+prove it; it is indeterminate now, and the operator is told where the worktree
+was last seen. FOUND while repairing: the absent-path shortcut cannot simply be
+deleted, because three cases legitimately have git refuse a removal that did
+happen, so the confirmation asks about the `gateway/<name>` branch as well as
+the path. REMOVED: the repo-wide `git worktree prune`, which took no scope and
+discarded other worktrees' registrations. Two more gate bypasses closed, comma
+join and a parenthesised table. Evidence:
+docs/evidence/postgres-worktree-cleanup-2026-09-04.md.
+"""
+idempotent = true
+validation = "The relative-gitdir and moved-then-missing cases are shipped tests. Named guards have killing mutants; the tree as a whole does not, see round 6."
+
+[[steps]]
+id = "round-6-review-repairs"
+depends_on = ["round-5-review-repairs"]
+actor = "assistant"
+status = """
+done 2026-09-05. Both seats rejected the same defect independently: the
+confirmation added the round before fell back to `refs/heads/gateway/<name>`,
+which is derived from the worktree NAME, and that is the ABA weakness the
+creation marker exists to close. Renaming or detaching the branch reported a
+live registered worktree as removed and deleted the branch on the way out.
+Replaced by proof rather than a better guess: only a search that came back
+empty over this session's own identity licenses treating a refused removal as a
+completed one, and a session with no identity gets one narrow non-name-derived
+answer, that the repository registers no managed worktree at all.
+ADDED, because every session that predates this release is the identityless
+shape: `adoptLegacyWorktreeIdentity` backfills a marker onto a live pre-token
+worktree from the reuse path, where ownership is already proved. It refuses a
+contested path, a tombstone, an already-marked worktree and an ordinary
+directory. Tombstones are deliberately not adoptable.
+CORRECTED: this plan's claim that every guard has a killing test. Round 6 ran
+97 mutants; 27 survived. Evidence:
+docs/evidence/postgres-worktree-cleanup-2026-09-04.md.
+"""
+idempotent = true
+validation = "The three branch constructions and the adopter's four refusals each have a mutant only their own test kills; the surviving mutants are listed in the evidence rather than claimed closed."
+
+[[steps]]
+id = "round-7-review-repairs"
+depends_on = ["round-6-review-repairs"]
+actor = "assistant"
+status = """
+done 2026-09-05. One seat delivered, one died. GROK blocked and the defect was
+reproduced independently before it was accepted: the pre-token licence asked
+`isDirectPathChild`, which means a DIRECT CHILD of the gateway's worktree
+directory, while the prose claimed "inside" it. `git worktree move` relocates a
+checkout anywhere, so a move one directory deeper, or outside the container,
+reported a live registered worktree as removed. Sixth consecutive round where
+the previous repair produced the next blocker, and the mechanism is the same one
+as round 6: location substituted for identity, and location is what `move`
+changes. The test is total now, any linked worktree at all.
+ALSO FIXED from the same seat: adoption counted claimants from `listSessions`,
+which hides tombstones, so the contested-path case it exists to refuse was
+undercounted; and the caller discarded the persistence result, so a marker could
+land without its record and lock the worktree out of adoption forever. Two
+survivors closed with tests.
+CODEX exited 1 at 55 minutes mid-mutation-campaign with no verdict, its second
+failure in three attempts. That seat has not reviewed this change.
+Evidence: docs/evidence/postgres-worktree-cleanup-2026-09-04.md.
+"""
+idempotent = true
+validation = "The nested and outside-container moves each have a mutant only their own test kills; the enumeration-failure and marker-withdrawal guards likewise."
+
+[[steps]]
+id = "round-8-review-repairs"
+depends_on = ["round-7-review-repairs"]
+actor = "assistant"
+status = """
+done 2026-09-07. Both seats blocked independently on one guard, describing one
+defect class in two halves: a rejected persist skipped the withdrawal entirely
+(the call runs a query, so it throws rather than returning false), and the
+withdrawal itself was scoped to a directory rather than to the token it wrote,
+so it could strip a replacement creation's identity. Seventh consecutive round
+where the previous repair produced the next blocker. Fixed structurally: a
+try/finally leaves no exit path that skips the withdrawal, and the withdrawal
+returns unless the marker carries its own token. The wiring had no test at all;
+both helpers were covered and their caller was not.
+Evidence, including the 32 mutants surviving codex's 107-mutation campaign:
+docs/evidence/postgres-worktree-cleanup-2026-09-04.md.
+"""
+idempotent = true
+validation = "Each adoption-wiring guard has a mutant only its own named test kills, including the pre-fix `if (!persisted)` shape and the unscoped withdrawal; surviving mutants are enumerated in the evidence, not closed."
+
+[[steps]]
+id = "round-9-review-repairs"
+depends_on = ["round-8-review-repairs"]
+actor = "assistant"
+status = """
+done 2026-09-07. Seats SPLIT: grok approved, codex blocked, settled by
+experiment. codex falsified round 8's own repair: the withdrawal reads the
+marker before removing it, and when THAT read fails transiently the withdrawal
+declines, leaving the adoption's own marker unrecorded and the worktree refused
+forever as already marked. Fourth member of the identity-substitution series,
+name then location then directory then a fallible read. Fixed by RECOVERY rather
+than an infallible withdrawal: adoption now reclaims an orphan marker, a token no
+session records, and refuses every other token and every unreadable marker.
+An in-flight same-host window is disclosed, not closed.
+Evidence, including grok's three corrections to my round-9 claims and the
+disclosed residual: docs/evidence/postgres-worktree-cleanup-2026-09-04.md.
+"""
+idempotent = true
+validation = "Five recovery guards each have a mutant only its own named test kills, including recovery-off, reclaim-any, the tombstone term, the unreadable refusal and the token block; an end-to-end test strands on a failed withdrawal read and recovers on a healthy retry."
+
+[[steps]]
+id = "round-10-review-repairs"
+depends_on = ["round-9-review-repairs"]
+actor = "assistant"
+status = """
+done 2026-09-07. Both review jobs died from EXTERNAL causes (codex early exit,
+grok killed by a gateway restart mid-run), but grok found a blocker first and it
+is real. Round 9's recovery reclaimed a marker no session records as a strand;
+grok showed a request-scoped worktree (created with no sessionId) is live yet
+its token is NEVER recorded, so recovery stamped a fresh identity over a live
+worktree. Ninth consecutive round a repair produced the next blocker, same
+class: record-absence is not a strand.
+Fixed by PROVENANCE: adoption writes adoptedBy = session.id, and recovery
+reclaims only a marker this same session's own adoption wrote. A creation marker
+carries no adoptedBy, so a live request-scoped worktree is never a strand. The
+recordsToken plumbing is removed; provenance subsumes it and also closes round
+10's disclosed in-flight residual.
+Evidence: docs/evidence/postgres-worktree-cleanup-2026-09-04.md.
+"""
+idempotent = true
+validation = "Five guards each have a mutant a named test kills; the always-reclaim mutant (the round-10 defect) is killed by a regression that drives a real request-scoped createWorktree through resolveWorktreeForRequest, and dropping adoptedBy from the write is killed by the end-to-end strand-recover test."
+
+[[steps]]
+id = "round-11-review-repairs"
+depends_on = ["round-10-review-repairs"]
+actor = "assistant"
+status = """
+done 2026-09-07. grok completed and blocked (codex failed again on the upstream
+content flag, no verdict). Round 11 reclaimed by PROVENANCE alone, reading only
+the passed session snapshot; a snapshot taken before a successful adoption has no
+token, so provenance matched and the reclaim destroyed a recorded adoption (new
+token, CAS fails, marker withdrawn, reuse throws forever). Reproduced through the
+real caller; the parent refused it via recordsToken.
+The round-10 and round-11 blockers are duals: record-absence alone stamps a live
+request-scoped worktree, provenance alone destroys a recorded adoption via a
+stale snapshot. Neither signal alone suffices. Round 12 requires BOTH: reclaim
+iff adoptedBy === session.id AND the store records no such token. recordsToken is
+restored (I was wrong to remove it as redundant; the inverse test kills it).
+Evidence: docs/evidence/postgres-worktree-cleanup-2026-09-04.md.
+"""
+idempotent = true
+validation = "Both strand signals have a mutant a named test kills: dropping the store check is killed by the stale-snapshot regression, dropping provenance by the request-scoped regression; the adoption-write and unreadable guards likewise."
+
+[[steps]]
+id = "round-12-review-repairs"
+depends_on = ["round-11-review-repairs"]
+actor = "assistant"
+status = """
+done 2026-09-07. codex blocked (grok still running when it reported; codex failed
+on the upstream content flag but wrote the blocker first, confirmed in code).
+recordsToken is captured before adoptLegacyWorktreeIdentity awaits the admin-dir
+lookup, so a concurrent same-session adoption records the token in that window;
+the stale snapshot treats the live marker as a strand, the reclaim overwrites it,
+the record CAS loses, and the withdrawal deletes the live marker, bricking the
+worktree. The round-11 defect's concurrent form.
+Fixed by making the CAS the arbiter: adoption returns the marker it overwrote
+(priorMarker, reclaim path only), and on a failed record the marker is RESTORED,
+not deleted. A reclaim's CAS succeeds only for a genuine strand (session still
+has no token); when it loses to a real concurrent adoption, restoring puts that
+live identity back. recordsToken stays as a first-line refusal, not the
+correctness guarantee. Maintainer chose keep-patching over dropping recovery.
+Evidence: docs/evidence/postgres-worktree-cleanup-2026-09-04.md.
+"""
+idempotent = true
+validation = "The concurrent-race regression kills all three restore-path mutants: deleting instead of restoring (the round-12 behaviour), never setting priorMarker, and the caller dropping it."
+
+[[steps]]
+id = "round-13-review-repairs"
+depends_on = ["round-12-review-repairs"]
+actor = "assistant"
+status = """
+done 2026-09-07. BOTH seats completed and returned the same blocker: round 13's
+restore-on-failure fails at THREE overlapping first-adoptions of one session. p1
+wins the CAS (store=T1); p3's settle restores the token IT overwrote (T2), not
+the recorded T1. Store=T1, disk=T2, reuse throws forever. grok's mutation run
+showed the store check was no longer independently load-bearing, the tell the
+fix was at the wrong layer.
+Maintainer chose the CLASS fix after twelve site-patching rounds: the record CAS
+is authoritative and reuse RECONCILES the marker from it. reconcileWorktreeIdentity
+replaces the reuse-time token equality: a marker naming a different token but
+carrying THIS session's adoptedBy is rewritten to the recorded token; a foreign
+or creation marker still refuses (ABA). Closes the N-party class, not the
+three-party site. settle-on-failure stays as defense in depth.
+Evidence: docs/evidence/postgres-worktree-cleanup-2026-09-04.md.
+"""
+idempotent = true
+validation = "The reconcile test drives the real reuse path with the three-party end-state (store=winner, disk=abandoned intermediate this session adopted) and asserts repair; two negatives assert a foreign or creation marker still throws. Each reconcile mutant is killed by its own named test."
+
+[[steps]]
+id = "round-14-review-repairs"
+depends_on = ["round-13-review-repairs"]
+actor = "assistant"
+status = """
+done 2026-09-07. Seats SPLIT: grok approved, codex blocked, settled by
+experiment (I reproduced it) and I sided with codex. Round 14 reconciled a
+mismatched token but not an ABSENT marker. A concurrent fresh loser's settle
+DELETES its marker, so the store records a token, the worktree is a live
+registration, and the disk marker is gone; reuse then threw forever and the
+session could not reuse a worktree it owns. Same class as round 14, one site out
+(absent instead of mismatched). grok's approval sat over the acknowledged
+settle-delete case, which the instruments rule does not count as clean.
+Fixed by extending reconcileWorktreeIdentity to materialise the recorded token
+onto an absent marker too, since createWorktree always leaves a marker so a
+validated gateway worktree with none has a lost marker, not a foreign creation.
+An unreadable or foreign marker still refuses (ABA).
+Evidence: docs/evidence/postgres-worktree-cleanup-2026-09-04.md.
+"""
+idempotent = true
+validation = "The absent-marker reconcile branch is killed by a test that drives the real reuse path with the fresh-loser end-state (recorded token, deleted marker, live registration); reconcile-any is killed by the unreadable and foreign-marker tests; dropping provenance by the foreign and other-session tests."
+
+[[steps]]
+id = "round-15-review-repairs"
+depends_on = ["round-14-review-repairs"]
+actor = "assistant"
+status = """
+done 2026-09-07. The round-15 repair (materialise the recorded token onto an
+ABSENT marker on reuse) was itself the next blocker, same pattern as prior
+rounds: validateManagedWorktreeIdentity proves a gateway registration under this
+name, not that it is THIS session's, and createWorktree registers before it
+writes the marker, so a REPLACEMENT creation in that window is an absent marker
+too. Materialising there stamped this session's token onto someone else's
+worktree (the ABA the token exists to catch), reproduced as STAMPED_OLD_TOKEN.
+Reverted reconcileWorktreeIdentity to REFUSE absent; prevent the fresh-loser
+strand at its source with an exclusive-create (wx) fresh-adoption marker write in
+adoptLegacyWorktreeIdentity. A two-process PG race does NOT kill the drop-wx
+mutant (reclaim-priorMarker and the read-back guard shadow wx's sub-microsecond
+window); the executed control is a deterministic in-process test forcing the
+both-read-absent interleaving through an afterMarkerReadForTest seam.
+Evidence: docs/evidence/postgres-worktree-cleanup-2026-09-04.md.
+"""
+idempotent = true
+validation = "drop-wx is killed by the seam test (fails first === null and strands end to end); materialise-absent by the ABSENT-marker and REPLACEMENT-worktree negatives; reconcile-any by the unreadable and other-session negatives. Two-file oracle 97/97, test:pg 231/231 on 5437."

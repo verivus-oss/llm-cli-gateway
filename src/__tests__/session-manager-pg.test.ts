@@ -209,21 +209,23 @@ describe("PostgreSQLSessionManager", () => {
   //──────────────────────────────────────────────────────────────────────────
 
   describe("deleteSession", () => {
-    it("deletes rows before observers and cannot retain observer-side cleanup state", async () => {
+    it("stages a tombstone before notifying, and hands the observer that exact row", async () => {
+      // The observer used to be the only place a failed removal could have been
+      // recorded, and it could not: the row was already gone, so its own
+      // retention write returned false. The store retains it now, and the two
+      // assertions on the observer's view are kept to show that has NOT been
+      // achieved by making a deleted session visible again.
       const observed: Array<{
-        id: string;
+        session: Awaited<ReturnType<typeof manager.createSession>>;
         rowAfterDelete: Promise<Awaited<ReturnType<typeof manager.getSession>>>;
         retentionAfterDelete: Promise<boolean>;
       }> = [];
       const unsubscribe = manager.addSessionRemovalObserver(session => {
         const rowAfterDelete = manager.getSession(session.id);
         const retentionAfterDelete = rowAfterDelete.then(() =>
-          manager.updateSessionMetadata(session.id, {
-            worktreeCleanupPending: true,
-            worktreeCleanupPendingDeletion: true,
-          })
+          manager.updateSessionMetadata(session.id, { workspaceAlias: "observer" })
         );
-        observed.push({ id: session.id, rowAfterDelete, retentionAfterDelete });
+        observed.push({ session, rowAfterDelete, retentionAfterDelete });
         return retentionAfterDelete.then(() => undefined);
       });
       const deleted = await manager.createSession("claude", "Observer delete");
@@ -240,16 +242,29 @@ describe("PostgreSQLSessionManager", () => {
       expect(await manager.deleteSession("missing-session")).toBe(false);
       expect(observed).toEqual([]);
       expect(await manager.deleteSession(deleted.id)).toBe(true);
-      expect(observed.map(item => item.id)).toEqual([deleted.id]);
+      expect(observed.map(item => item.session.id)).toEqual([deleted.id]);
+      // The row handed to the observer already carries the tombstone, which is
+      // what tells it to acknowledge the removal rather than assume it.
+      expect(observed[0]!.session.metadata?.worktreeCleanupPendingDeletion).toBe(true);
+      expect(observed[0]!.session.metadata?.worktreeOwnerHostname).toBe(hostname());
       expect(await observed[0]!.rowAfterDelete).toBeNull();
       expect(await observed[0]!.retentionAfterDelete).toBe(false);
       expect(await manager.getSession(deleted.id)).toBeNull();
 
       expect(await manager.clearAllSessions("codex")).toBe(1);
-      expect(observed.map(item => item.id)).toEqual([deleted.id, cleared.id]);
+      expect(observed.map(item => item.session.id)).toEqual([deleted.id, cleared.id]);
+      expect(observed[1]!.session.metadata?.worktreeCleanupPendingDeletion).toBe(true);
       expect(await observed[1]!.rowAfterDelete).toBeNull();
       expect(await observed[1]!.retentionAfterDelete).toBe(false);
       expect(await manager.getSession(cleared.id)).toBeNull();
+
+      // Both survive as owning-host retry records, and finalizing is what ends
+      // them: no deletion path may drop the row on its own.
+      const pending = await manager.listPendingWorktreeCleanupSessions(hostname());
+      expect(pending.map(row => row.id).sort()).toEqual([cleared.id, deleted.id].sort());
+      for (const row of pending) {
+        expect(await manager.finalizePendingWorktreeCleanup(row)).toBe(true);
+      }
       expect(await manager.listPendingWorktreeCleanupSessions(hostname())).toEqual([]);
       unsubscribe();
     });
@@ -564,7 +579,7 @@ describe("PostgreSQLSessionManager", () => {
     }
   });
 
-  it("does not retain failed PostgreSQL worktree cleanup for retry", async () => {
+  it("retains failed PostgreSQL worktree cleanup for owning-host retry", async () => {
     const repoRoot = initGitRepository();
     const logger = {
       info: vi.fn(),
@@ -600,13 +615,24 @@ describe("PostgreSQLSessionManager", () => {
         await new Promise(resolve => setTimeout(resolve, 10));
       }
 
+      // The recorded NAME no longer matches Git's registration for the live
+      // path, so removal refuses. Identity by token is resolved from the path
+      // and still agrees; it is the name that is wrong, which is why this is
+      // the layout refusal rather than the token one. Either way the record
+      // must survive a failed removal, and that is what this test asserts.
       expect(logger.warn).toHaveBeenCalledWith(
         "Skipping cleanup for a non-managed worktree path",
         undefined
       );
       expect(existsSync(resolution.worktreePath!)).toBe(true);
       expect(await manager.getSession(session.id)).toBeNull();
-      expect(await manager.listPendingWorktreeCleanupSessions(hostname())).toEqual([]);
+
+      // The removal was refused, so the record MUST survive for the owning host
+      // to try again. This is the guarantee #305 adds and #302 recorded the
+      // absence of.
+      const pending = await manager.listPendingWorktreeCleanupSessions(hostname());
+      expect(pending.map(row => row.id)).toEqual([session.id]);
+      expect(pending[0]!.metadata?.worktreeOwnerHostname).toBe(hostname());
     } finally {
       await server.close();
       rmSync(repoRoot, { recursive: true, force: true });
@@ -655,7 +681,12 @@ describe("PostgreSQLSessionManager", () => {
       );
       expect(existsSync(resolution.worktreePath!)).toBe(true);
       expect(await manager.getSession(session.id)).toBeNull();
+
+      // Deletion processed HERE must not destroy the owning host's retry
+      // record, and must not offer that record to this host either.
       expect(await manager.listPendingWorktreeCleanupSessions(hostname())).toEqual([]);
+      const theirs = await manager.listPendingWorktreeCleanupSessions("some-other-host.invalid");
+      expect(theirs.map(row => row.id)).toEqual([session.id]);
     } finally {
       await server.close();
       rmSync(repoRoot, { recursive: true, force: true });
@@ -675,6 +706,47 @@ describe("PostgreSQLSessionManager", () => {
     await expect(
       resolveWorktreeForRequest(true, session.id, runtime, { repoRoot: process.cwd() })
     ).rejects.toThrow(/same-host gateway-owned Git worktree/);
+  });
+
+  it("recovers onto a fresh worktree when a live one's creation token is not this session's", async () => {
+    // Git identity proves a gateway worktree lives at the path, not that it is
+    // THIS session's. When the token cannot be confirmed the session must not
+    // reuse the worktree (it may be a different creation's) and must not be
+    // stranded either: it recovers onto a fresh worktree instead.
+    const repoRoot = initGitRepository();
+    try {
+      const session = await manager.createSession("claude", "reuse token mismatch");
+      const runtime = resolveGatewayServerRuntime({ sessionManager: manager });
+      const resolution = await resolveWorktreeForRequest(
+        { name: "pg-reuse-token" },
+        session.id,
+        runtime,
+        { repoRoot }
+      );
+      expect(resolution.worktreePath).toBeTruthy();
+      // Reuse works while the token agrees.
+      const reused = await resolveWorktreeForRequest(true, session.id, runtime, { repoRoot });
+      expect(reused.worktreePath).toBe(resolution.worktreePath);
+
+      // Now the session claims a worktree it did not create. The live one at
+      // that path is a perfectly valid gateway worktree, which is the point.
+      const persisted = (await manager.getSession(session.id))!;
+      expect(persisted.metadata?.worktreeToken).toBeTruthy();
+      await manager.updateSessionMetadata(session.id, {
+        ...persisted.metadata,
+        worktreeToken: "00000000-0000-4000-8000-000000000000",
+      });
+
+      // The live worktree at the path is a valid gateway worktree, but its
+      // creation token is not this session's, so it cannot be confirmed as its
+      // own. Rather than strand the session, reuse recovers onto a FRESH worktree
+      // and leaves the mismatched one untouched.
+      const recovered = await resolveWorktreeForRequest(true, session.id, runtime, { repoRoot });
+      expect(recovered.worktreePath).toBeTruthy();
+      expect(recovered.worktreePath).not.toBe(resolution.worktreePath);
+    } finally {
+      rmSync(repoRoot, { recursive: true, force: true });
+    }
   });
 
   it("database-side expiry removes no worktree and invokes no observer", async () => {
@@ -736,7 +808,12 @@ describe("PostgreSQLSessionManager", () => {
       worktreeCleanupPendingDeletion: true,
       worktreeOwnerHostname: "host-b.invalid",
     });
-    const current = (await manager.getSession(session.id))!;
+    // Read back through the tombstone surface, not `getSession`: a tombstone is
+    // a DELETED session and every caller-facing read now reports it absent.
+    const owner = "host-b.invalid";
+    const current = (await manager.listPendingWorktreeCleanupSessions(owner))[0]!;
+    expect(current.id).toBe(session.id);
+    expect(await manager.getSession(session.id)).toBeNull();
 
     // Same row, but presented as if this host owned it: the DELETE is fenced on
     // the stored hostname, so it must not match.
@@ -745,11 +822,11 @@ describe("PostgreSQLSessionManager", () => {
       metadata: { ...current.metadata, worktreeOwnerHostname: "host-a.invalid" },
     };
     expect(await manager.finalizePendingWorktreeCleanup(spoofed)).toBe(false);
-    expect(await manager.getSession(session.id)).not.toBeNull();
+    expect(await manager.listPendingWorktreeCleanupSessions(owner)).toHaveLength(1);
 
     // The true owner can finalize it.
     expect(await manager.finalizePendingWorktreeCleanup(current)).toBe(true);
-    expect(await manager.getSession(session.id)).toBeNull();
+    expect(await manager.listPendingWorktreeCleanupSessions(owner)).toEqual([]);
   });
 
   //──────────────────────────────────────────────────────────────────────────

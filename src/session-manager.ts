@@ -302,25 +302,49 @@ export function sessionMatchesKitBinding(
   );
 }
 
+import { WORKTREE_CLEANUP_TOMBSTONE_KEY } from "./session-tombstone-sql.js";
+
+export {
+  WORKTREE_CLEANUP_TOMBSTONE_KEY,
+  sessionNotTombstonedSql,
+} from "./session-tombstone-sql.js";
+
+/** Is this row a deleted session kept only for worktree-cleanup retry? */
+export function isWorktreeCleanupTombstone(session: Session | undefined | null): boolean {
+  return session?.metadata?.[WORKTREE_CLEANUP_TOMBSTONE_KEY] === true;
+}
+
 /** Strip internal concurrency and worktree ownership fields from every
  * caller-facing session projection. Durable storage retains them for CAS,
  * same-host reuse validation, and cleanup authorization.
  */
+/**
+ * Session metadata the gateway keeps for its own worktree bookkeeping and never
+ * hands to a caller.
+ *
+ * One list, used both to detect the keys and to remove them, because these were
+ * two hand-maintained lists and adding a sixth key meant remembering to edit
+ * both. A key present in the detector but missing from the deleter is a leak
+ * that the obvious test ("the projection has no owner hostname") does not see.
+ */
+export const INTERNAL_WORKTREE_METADATA_KEYS = [
+  "worktreeOwnerHostname",
+  "worktreeOwnerInstanceId",
+  "worktreeToken",
+  "worktreeAdminDirectory",
+  "worktreeCleanupPending",
+  "worktreeCleanupPendingDeletion",
+] as const;
+
 export function publicSafeSession(session: Session): Session {
   const hasInternalWorktreeOwnership =
     session.metadata !== undefined &&
-    ("worktreeOwnerHostname" in session.metadata ||
-      "worktreeOwnerInstanceId" in session.metadata ||
-      "worktreeCleanupPending" in session.metadata ||
-      "worktreeCleanupPendingDeletion" in session.metadata);
+    INTERNAL_WORKTREE_METADATA_KEYS.some(key => key in session.metadata!);
   if (session.generation === undefined && !hasInternalWorktreeOwnership) return session;
   const { generation: _generation, ...publicSession } = session;
   if (!hasInternalWorktreeOwnership) return publicSession;
   const metadata: Record<string, any> = { ...publicSession.metadata };
-  delete metadata.worktreeOwnerHostname;
-  delete metadata.worktreeOwnerInstanceId;
-  delete metadata.worktreeCleanupPending;
-  delete metadata.worktreeCleanupPendingDeletion;
+  for (const key of INTERNAL_WORKTREE_METADATA_KEYS) delete metadata[key];
   return { ...publicSession, metadata };
 }
 
@@ -502,7 +526,7 @@ export class FileSessionManager
   }
 
   private isPendingWorktreeDeletion(session: Session): boolean {
-    return session.metadata?.worktreeCleanupPendingDeletion === true;
+    return isWorktreeCleanupTombstone(session);
   }
 
   private hasDurablyOwnedWorktree(session: Session): boolean {
@@ -988,7 +1012,11 @@ export class FileSessionManager
   ): { session: Session; binding: KitSessionBinding } | null {
     if (execution.scopeRoot !== scopeRoot) return null;
     const session = this.storage.sessions[sessionId];
-    if (!session) return null;
+    // A tombstone is a DELETED session. Every Kit path here read the row
+    // directly and none of them checked, so a deleted Kit session could still
+    // be claimed, renewed, released, rebound and handed back as live, which is
+    // what made the PostgreSQL store stricter than this one.
+    if (!session || this.isPendingWorktreeDeletion(session)) return null;
     if (this.isExpired(session)) {
       this.evictSessionRow(sessionId);
       return null;
@@ -1156,6 +1184,10 @@ export class FileSessionManager
       const active = this.storage.sessions[activeSessionId];
       if (
         active &&
+        // Defence in depth, and unreachable while `removeOrStageSession` clears
+        // the Kit pointers before it stages a tombstone: no behavioural test can
+        // kill this line, and it is marked so it does not read as covered.
+        !this.isPendingWorktreeDeletion(active) &&
         !this.isExpired(active) &&
         sessionMatchesKitBinding(active, cli, requestedBinding, ownerPrincipal)
       ) {
@@ -1169,6 +1201,11 @@ export class FileSessionManager
 
     if (sessionId) {
       const identified = this.storage.sessions[sessionId];
+      if (identified && this.isPendingWorktreeDeletion(identified)) {
+        throw new Error(
+          `Kit session id ${sessionId} is awaiting worktree cleanup and cannot be reused`
+        );
+      }
       if (identified) {
         if (!sessionMatchesKitBinding(identified, cli, requestedBinding, ownerPrincipal)) {
           throw new Error(`Kit session id ${sessionId} is already bound to a different execution`);
@@ -1211,6 +1248,11 @@ export class FileSessionManager
     const activeSessionId = this.getActiveKitSessionId(cli, scopeRoot, execution, ownerPrincipal);
     if (activeSessionId !== sessionId) return false;
     const session = this.storage.sessions[sessionId];
+    // Defence in depth, same reason as the reuse branch above: the pointer this
+    // matched on is cleared before a tombstone is staged, so this cannot be
+    // driven. The invariant it stands behind is pinned by
+    // "clears the active Kit pointer when deletion stages a tombstone".
+    if (session && this.isPendingWorktreeDeletion(session)) return false;
     const binding = session ? getKitSessionBinding(session) : null;
     if (
       !session ||
@@ -1461,7 +1503,7 @@ export class FileSessionManager
     let ownerPrincipal = resolveOwnerPrincipal(getRequestContext());
     if (sessionId !== null) {
       const session = this.storage.sessions[sessionId];
-      if (!session) return false;
+      if (!session || this.isPendingWorktreeDeletion(session)) return false;
       if (this.isExpired(session)) {
         this.evictSessionRow(sessionId);
         return false;
@@ -1640,7 +1682,7 @@ export class FileSessionManager
     }
     this.assertKitStorageHealthy();
     const session = this.storage.sessions[sessionId];
-    if (!session) return false;
+    if (!session || this.isPendingWorktreeDeletion(session)) return false;
     if (this.isExpired(session)) {
       this.evictSessionRow(sessionId);
       return false;
@@ -1874,7 +1916,7 @@ export async function createSessionManager(
       db = await createDatabaseConnection(config, logger);
     }
 
-    return new PostgreSQLSessionManager(db.getDriver());
+    return new PostgreSQLSessionManager(db.getDriver(), logger);
   } else {
     // Use file-based storage with TTL from config
     const sessionTtlMs = config?.sessionTtl

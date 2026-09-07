@@ -34,6 +34,78 @@ async function makeServer(asyncJobsEnabled: boolean) {
   return createGatewayServer({ asyncJobManager: manager, persistence });
 }
 
+/**
+ * Verbs that put a session row in a caller's hands.
+ *
+ * Round 4 got past the previous list twice with ordinary English: "hands back"
+ * and "leak through" are the same claim as "returns", and neither was here.
+ * The list is the detector's whole reach, so it is spelled out once and both
+ * directions of the self-test read from it.
+ */
+const HANDS_TO_CALLER = String.raw`(returns?|exposes?|reveals?|surfaces?|lists?|hands?(\s+\w+)?\s+back|hands?\s+back|hands?|leaks?|yields?|gives?(\s+\w+)?\s+back|shows?|includes?)`;
+
+/**
+ * A claim that a caller-facing read hands back a tombstone.
+ *
+ * This matches PHRASES, and a phrase gate is not a truth gate: it cannot know
+ * whether a sentence is true, only whether it is shaped like the specific
+ * falsehood the behaviour suite disproves. Two consequences are load-bearing
+ * and neither is fixed by widening it further. It misses any paraphrase not
+ * built from these verbs. And it would flag a TRUE sentence built from them,
+ * which is why the owning-host listing -- the one API that really does return
+ * tombstones -- is excluded by name rather than by hoping no one writes it.
+ * The behaviour suite is what establishes the behaviour; this only stops the
+ * documentation drifting into stating the opposite.
+ */
+const OWNING_HOST_LISTING = /listPendingWorktreeCleanupSessions/i;
+const TOMBSTONE_VISIBILITY_CLAIM = new RegExp(
+  [
+    String.raw`\b` + HANDS_TO_CALLER + String.raw`\b[^.]{0,60}\b(cleanup\s+)?tombstones?\b`,
+    String.raw`\b` + HANDS_TO_CALLER + String.raw`\b[^.]{0,60}\bdeleted\s+sessions?\b`,
+    String.raw`\b((cleanup\s+)?tombstones?|deleted\s+sessions?)\b[^.]{0,60}\b(are|is|remain|stay)s?\s+(visible|readable|available)\b`,
+    String.raw`\b((cleanup\s+)?tombstones?|deleted\s+sessions?)\b[^.]{0,60}\b(leak|leaks|come|comes)\s+(back\s+)?(through|out\s+of)\b`,
+  ].join("|"),
+  "i"
+);
+const TOMBSTONE_VISIBILITY_LIE = {
+  test: (sentence: string): boolean =>
+    !OWNING_HOST_LISTING.test(sentence) && TOMBSTONE_VISIBILITY_CLAIM.test(sentence),
+};
+
+describe("the contradiction detector itself", () => {
+  // Gutting the regex left this suite 12/12 green, so the pattern was asserted
+  // by nothing. It is a narrow detector and its narrowness is the point, but
+  // its narrowness has to be measured rather than assumed.
+  it("matches the claims that contradict the behaviour suite", () => {
+    for (const lie of [
+      "PostgreSQL getSession still returns tombstones to callers.",
+      "session_get exposes cleanup tombstones to callers.",
+      "Deleted sessions are visible through session_list.",
+      "session_get returns a deleted session until cleanup completes.",
+      // Round 4 wrote both of these past the previous pattern.
+      "session_get hands cleanup tombstones back to callers.",
+      "getSession still hands back a tombstone.",
+      "Tombstones leak through session_get.",
+      "Tombstones remain visible to getSession.",
+    ]) {
+      expect(TOMBSTONE_VISIBILITY_LIE.test(lie), lie).toBe(true);
+    }
+  });
+
+  it("does not match the true statements the descriptions actually make", () => {
+    for (const truth of [
+      "Both managers stage a caller-hidden cleanup tombstone before cleanup runs.",
+      "A tombstone is not bounded by retention.",
+      "Deletion processed by a different host removes no worktree.",
+      // True, and built from the detector's own verbs: the owning-host listing
+      // is the one read that really does return tombstones.
+      "listPendingWorktreeCleanupSessions lists cleanup tombstones for the owning host.",
+    ]) {
+      expect(TOMBSTONE_VISIBILITY_LIE.test(truth), truth).toBe(false);
+    }
+  });
+});
+
 describe("MCP tool-surface usability (post-usability-review regressions)", () => {
   it("every registered tool carries a clear description (>= 20 chars, per .cursorrules)", async () => {
     const server = await makeServer(true);
@@ -68,17 +140,27 @@ describe("MCP tool-surface usability (post-usability-review regressions)", () =>
     expect(description).toMatch(/cleanup observers run asynchronously/i);
     expect(description).toMatch(/file-backed and PostgreSQL session managers/i);
     expect(description).toMatch(
-      /file-backed manager retains failed cleanup for retry when the manager is registered on the owning host/i
+      /[Bb]oth managers stage a caller-hidden cleanup tombstone before cleanup runs and retain a failed removal for retry by the host that owns the worktree/i
+    );
+    expect(description).toMatch(
+      /finalizing the record only once Git no longer registers the worktree, read back rather than inferred/i
     );
     expect(description).toMatch(/file-backed TTL eviction uses the same tombstone retry path/i);
     expect(description).toMatch(
-      /PostgreSQL deletes the session row before its cleanup observer runs/i
+      /[Dd]eletion processed by a different host removes no worktree and leaves the owning host's record intact/i
     );
-    expect(description).toMatch(/failed removal is not retained for automatic retry/i);
-    expect(description).toMatch(/different host cannot remove the owning host's worktree/i);
     expect(description).toMatch(
-      /cleanup_expired_sessions function invokes no gateway observer and performs no worktree cleanup/i
+      /cleanup_expired_sessions function stages the same tombstone instead of deleting a worktree-bearing session/i
     );
+    expect(description).toMatch(/tombstone is not bounded by retention/i);
+    // The corrected claim must not survive alongside the one it replaced.
+    expect(description).not.toMatch(/not retained for automatic retry/i);
+    expect(description).not.toMatch(/performs no worktree cleanup/i);
+    // These gates check that a phrase is present or absent; they cannot check
+    // that a paragraph is TRUE, and a reviewer proved it by inserting a false
+    // sentence that passed. This is the narrow class that IS checkable: a claim
+    // that a deleted session is still visible contradicts the suite directly.
+    expect(TOMBSTONE_VISIBILITY_LIE.test(description), description).toBe(false);
   });
 
   it("session_clear_all describes its per-session worktree cleanup guarantees", async () => {
@@ -91,17 +173,22 @@ describe("MCP tool-surface usability (post-usability-review regressions)", () =>
     expect(description).toMatch(/cleanup observers run asynchronously/i);
     expect(description).toMatch(/file-backed and PostgreSQL session managers/i);
     expect(description).toMatch(
-      /file-backed manager retains failed cleanup for retry when the manager is registered on the owning host/i
+      /[Bb]oth managers stage a caller-hidden cleanup tombstone before cleanup runs and retain a failed removal for retry by the host that owns the worktree/i
+    );
+    expect(description).toMatch(
+      /finalizing the record only once Git no longer registers the worktree, read back rather than inferred/i
     );
     expect(description).toMatch(/file-backed TTL eviction uses the same tombstone retry path/i);
     expect(description).toMatch(
-      /PostgreSQL deletes each session row before its cleanup observer runs/i
+      /[Dd]eletion processed by a different host removes no worktree and leaves the owning host's record intact/i
     );
-    expect(description).toMatch(/failed removal is not retained for automatic retry/i);
-    expect(description).toMatch(/different host cannot remove the owning host's worktree/i);
     expect(description).toMatch(
-      /cleanup_expired_sessions function invokes no gateway observer and performs no worktree cleanup/i
+      /cleanup_expired_sessions function stages the same tombstone instead of deleting a worktree-bearing session/i
     );
+    expect(description).toMatch(/tombstone is not bounded by retention/i);
+    expect(description).not.toMatch(/not retained for automatic retry/i);
+    expect(description).not.toMatch(/performs no worktree cleanup/i);
+    expect(TOMBSTONE_VISIBILITY_LIE.test(description), description).toBe(false);
   });
 
   it("workspace tools are described as remote-only and not a stdio path-access fallback", async () => {
@@ -317,20 +404,31 @@ describe("MCP tool-surface usability (post-usability-review regressions)", () =>
         /file-backed manager[^.]*TTL eviction|file-backed TTL eviction/i
       );
       expect(description, `${toolName}.worktree must qualify cleanup retry timing`).toMatch(
-        /retried when the file-backed manager is registered on the owning host/i
+        /retried when a manager is registered on the owning host/i
       );
-      expect(description, `${toolName}.worktree must disclose PostgreSQL cleanup limits`).toMatch(
-        /PostgreSQL[^.]*deletes the session row before its cleanup observer runs/i
+      expect(description, `${toolName}.worktree must say the record outlives a failure`).toMatch(
+        /finalized only once Git no longer registers the worktree, which is read back rather than inferred/i
       );
-      expect(description, `${toolName}.worktree must disclose the missing retry`).toMatch(
-        /failed removal is not retained for automatic retry/i
+      expect(
+        description,
+        `${toolName}.worktree must say that failing to look is not a removal`
+      ).toMatch(/whose owner marker cannot be read, is not a removal/i);
+      expect(description, `${toolName}.worktree must scope retry to the owning host`).toMatch(
+        /[Dd]eletion processed by another host removes no worktree and leaves the owning host's record intact/i
       );
       expect(description, `${toolName}.worktree must cover bulk deletion`).toMatch(
         /session_clear_all/i
       );
       expect(description, `${toolName}.worktree must cover database-side expiry`).toMatch(
-        /cleanup_expired_sessions function invokes no gateway observer and performs no worktree cleanup/i
+        /cleanup_expired_sessions function stages the same tombstone/i
       );
+      expect(description, `${toolName}.worktree must state the tombstone is unbounded`).toMatch(
+        /tombstone is not bounded by retention/i
+      );
+      expect(
+        description,
+        `${toolName}.worktree must not keep the claim #305 falsified`
+      ).not.toMatch(/not retained for automatic retry|performs no worktree cleanup/i);
       expect(
         description,
         `${toolName}.worktree must not restore the obsolete engine gate`

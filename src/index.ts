@@ -70,6 +70,9 @@ import {
 import {
   createWorktree,
   cleanupSessionWorktree,
+  adoptLegacyWorktreeIdentity,
+  settleFailedAdoptionMarker,
+  reconcileWorktreeIdentity,
   removeWorktree,
   removeWorktreeWithResult,
   validateManagedWorktreeIdentity,
@@ -1145,16 +1148,17 @@ export const CLI_OPTION_VALUE_SCHEMA = z.string().refine(value => !value.startsW
  * registration on its expected gateway branch. Named path collisions never
  * reuse manager state. Grok, Devin, and Mistral require an explicit
  * provider-native sessionId; fresh, createNewSession, and resumeLatest-only
- * worktree requests fail closed. The file-backed manager hides a durably owned
- * worktree session during session_delete or TTL eviction, then retains a
- * cleanup-pending tombstone after failed Git removal. Explicit PostgreSQL
- * deletion, including session_clear_all, deletes the session row before its
- * cleanup observer runs, so cleanup is a single attempt on the host processing
- * deletion. A failed removal is not retained for automatic retry, and deletion
- * from another host cannot remove the owning host's worktree. The database-side
- * cleanup_expired_sessions function invokes no gateway observer and performs no
- * worktree cleanup. Request-scoped worktrees are removed after terminal
- * completion or failed admission.
+ * worktree requests fail closed. BOTH managers hide a durably owned worktree
+ * session behind a cleanup tombstone during session_delete, session_clear_all
+ * or file-backed TTL eviction, and retain that tombstone after failed Git
+ * removal; it is finalized only after verified removal. Retry belongs to the
+ * host named in the ownership metadata, so deletion processed elsewhere removes
+ * no worktree and leaves that host's record intact. The database-side
+ * cleanup_expired_sessions function stages the same tombstone rather than
+ * deleting a worktree-bearing session; it invokes no gateway observer and so
+ * attempts no removal itself. A tombstone is not bounded by retention.
+ * Request-scoped worktrees are removed after terminal completion or failed
+ * admission.
  * Worktree materialization suppresses repository, system, and global Git
  * hooks and configured clean, smudge, and process checkout filters. It also
  * disables sparse checkout and lazy object fetching. Content that depends on
@@ -1203,16 +1207,19 @@ export const WORKTREE_SCHEMA = z
       "filters, sparse checkout, and lazy object fetching. Filter-dependent " +
       "content such as Git LFS remains in its " +
       "repository representation instead of executing host commands. On " +
-      "session_delete or file-backed TTL eviction, the file-backed manager hides " +
-      "a durably owned worktree session while cleanup runs. Failed Git removal " +
-      "retains a cleanup-pending tombstone, blocks reuse, and is retried when the " +
-      "file-backed manager is registered on the owning host. Explicit PostgreSQL " +
-      "deletion, including session_clear_all, " +
-      "deletes the session row before its cleanup observer runs, so cleanup is a " +
-      "single attempt on the host processing deletion. A failed removal is not " +
-      "retained for automatic retry, and deletion from another host cannot remove " +
-      "the owning host's worktree. The database-side cleanup_expired_sessions " +
-      "function invokes no gateway observer and performs no worktree cleanup. " +
+      "session_delete, session_clear_all or file-backed TTL eviction, both " +
+      "managers hide a durably owned worktree session while cleanup runs. Failed " +
+      "Git removal retains a cleanup-pending tombstone, blocks reuse, and is " +
+      "retried when a manager is registered on the owning host; the record is " +
+      "finalized only once Git no longer registers the worktree, which is read " +
+      "back rather than inferred from the recorded path being absent. A worktree " +
+      "that moved, or whose owner marker cannot be read, is not a removal. " +
+      "Deletion processed by another " +
+      "host removes no worktree and leaves the owning host's record intact. The " +
+      "database-side cleanup_expired_sessions function stages the same tombstone " +
+      "instead of deleting a worktree-bearing session; it invokes no gateway " +
+      "observer and so attempts no removal itself. A tombstone is not bounded by " +
+      "retention. " +
       "Successful responses are prefixed with " +
       "`[gateway] worktree=<absolute-path>\\n` so callers can use the " +
       "path. For Claude approvalStrategy:mcp_managed, requesting or reusing a " +
@@ -2275,6 +2282,10 @@ export interface ResolvedWorktree {
     repoRoot: string;
     path: string;
     name: string;
+    /** Creation token, so the durable binding can record which object this is. */
+    token: string;
+    /** Git admin directory, so the durable binding can record where it lives. */
+    adminDirectory: string;
   };
   /** Internal CAS snapshot after a successful worktree metadata binding. */
   boundSession?: Session;
@@ -3199,6 +3210,8 @@ function resolvedSessionScopeMetadata(
             ? {
                 worktreeOwnerHostname: hostname(),
                 worktreeOwnerInstanceId: runtime.asyncJobManager.getInstanceId(),
+                worktreeToken: resolution.requestOwnedWorktree.token,
+                worktreeAdminDirectory: resolution.requestOwnedWorktree.adminDirectory,
               }
             : {}),
         }
@@ -3239,6 +3252,97 @@ async function createSessionWithResolvedScope(
       );
     }
     return { created: false, session: rechecked, previousSession: rechecked };
+  }
+}
+
+/**
+ * Backfill creation identity onto one live pre-token session, then persist it.
+ *
+ * Called from the reuse path because that is where a legacy session is both
+ * live and already proved to belong to this caller on this host, which are two
+ * of the conditions adoption needs. The third, that exactly one session claims
+ * the path, is counted here rather than assumed: two pre-token sessions naming
+ * one worktree is the ABA case, and adoption must refuse it rather than pick.
+ *
+ * Best effort by design. A failure leaves the session exactly as it was, and
+ * cleanup keeps refusing it, which is the safe direction.
+ */
+async function adoptWorktreeIdentityForSession(
+  runtime: GatewayServerRuntime,
+  sessionManager: ISessionManager,
+  session: Session,
+  worktreePath: string
+): Promise<void> {
+  try {
+    // Tombstones are counted TOO. `listSessions` hides them on both stores,
+    // which is correct for callers and wrong for this question: a tombstone
+    // sharing the path with a live pre-token session is precisely the
+    // contested-path case adoption exists to refuse, and counting only visible
+    // rows would have reported one claimant and adopted.
+    const visible = await Promise.resolve(sessionManager.listSessions());
+    const tombstoned = await Promise.resolve(
+      sessionManager.listPendingWorktreeCleanupSessions(hostname())
+    );
+    const claimsPath = (candidate: Session): boolean =>
+      candidate.metadata?.worktreePath === worktreePath;
+    const claimantsForPath =
+      visible.filter(claimsPath).length + tombstoned.filter(claimsPath).length;
+    // Reclaim of a strand needs the store's current truth, not the possibly
+    // stale session snapshot this handler was given: a token some session
+    // already records is a live identity (including one this same session
+    // adopted under a snapshot taken before the record landed), not a strand.
+    // Tombstones are included for the same reason they are counted above.
+    const recordsToken = (token: string): boolean =>
+      visible.some(s => s.metadata?.worktreeToken === token) ||
+      tombstoned.some(s => s.metadata?.worktreeToken === token);
+    const adopted = await adoptLegacyWorktreeIdentity(session, {
+      claimantsForPath,
+      recordsToken,
+      logger: runtime.logger,
+    });
+    if (!adopted) return;
+    const metadata = {
+      ...(session.metadata ?? {}),
+      worktreeToken: adopted.token,
+      worktreeAdminDirectory: adopted.adminDirectory,
+    };
+    // The marker is on disk and the metadata that names it is not yet, so from
+    // here every exit must either record it or take it back off. A `finally`
+    // rather than an `if`, because the persist can REJECT as well as return
+    // false: `compareAndSetSession` runs a query, and a rejected query threw
+    // straight past the previous `if (!persisted)` into the outer catch,
+    // leaving a worktree carrying an identity no session claims. Adoption then
+    // refuses it forever as "already marked". There is no path out of this
+    // block that skips the check now.
+    let recorded = false;
+    try {
+      recorded =
+        (await Promise.resolve(
+          sessionManager.compareAndSetSession(sessionGenerationIdentity(session), {
+            kind: "replace_metadata",
+            expectedMetadata: session.metadata,
+            metadata,
+          })
+        )) === true;
+    } finally {
+      if (!recorded) {
+        // Restore a reclaimed strand's prior marker, or delete a fresh one: a
+        // reclaim whose CAS lost to a concurrent same-session adoption must not
+        // delete the live marker it overwrote.
+        settleFailedAdoptionMarker(
+          adopted.adminDirectory,
+          adopted.token,
+          adopted.priorMarker,
+          runtime.logger
+        );
+      }
+    }
+  } catch (error) {
+    runtime.logger.debug?.(
+      `worktree identity adoption skipped for session ${session.id}: ${
+        error instanceof Error ? error.message : String(error)
+      }`
+    );
   }
 }
 
@@ -3296,6 +3400,11 @@ export async function resolveWorktreeForRequest(
     );
   }
   const sessionManager = runtime.sessionManager;
+  // Set when a recorded worktree cannot be verified as still this session's own
+  // (removed, replaced, or its marker lost to a concurrent adoption). Rather than
+  // stranding the session on a permanent refusal, we fall through and hand it a
+  // FRESH worktree under a new unique name, abandoning the unverifiable one.
+  let recovering = false;
   if (sessionId) {
     // F3b: only a session the caller owns may steer worktree reuse; a foreign
     // session is treated as absent so its worktreePath cannot become this
@@ -3308,7 +3417,27 @@ export async function resolveWorktreeForRequest(
       const ownerHostname = session?.metadata?.worktreeOwnerHostname;
       const ownerInstanceId = session?.metadata?.worktreeOwnerInstanceId;
       const cleanupPending = session?.metadata?.worktreeCleanupPending === true;
-      const validIdentity =
+      // Every session that predates creation markers reaches here with no
+      // identity, and so does the worktree it points at. Comparing null to null
+      // would let a legacy record reuse whatever now stands at its path, and
+      // refusing outright would strand it. Stamp identity instead, ONCE, while
+      // the session is live and the caller has just been proved its owner: the
+      // marker is what every later decision about this worktree reads.
+      if (
+        session &&
+        !cleanupPending &&
+        typeof session.metadata?.worktreeToken !== "string" &&
+        ownerHostname === hostname()
+      ) {
+        await adoptWorktreeIdentityForSession(runtime, sessionManager, session, existingPath);
+      }
+      const adopted = session ? await getCallerOwnedSession(sessionManager, session.id) : null;
+      const identitySession = adopted ?? session;
+      // The security and ownership boundary: a LIVE, same-host, same-repository
+      // gateway worktree at the recorded path. A worktree that is gone, recorded
+      // on another host, escaping its workspace, or not a managed gateway
+      // worktree fails here and the reuse is REFUSED, never silently recovered.
+      const worktreePresent =
         !cleanupPending &&
         typeof existingName === "string" &&
         ownerHostname === hostname() &&
@@ -3320,27 +3449,58 @@ export async function resolveWorktreeForRequest(
           name: existingName,
           logger: runtime.logger,
         }));
-      if (!validIdentity) {
+      if (!worktreePresent) {
         throw new Error(
           "Durable session worktree metadata no longer matches a same-host gateway-owned Git worktree. Start a new session or restore the original worktree."
         );
       }
-      return {
-        cwd: existingPath,
-        worktreePath: existingPath,
-        workspaceAlias:
-          typeof session?.metadata?.workspaceAlias === "string"
-            ? session.metadata.workspaceAlias
-            : options.workspaceAlias,
-        workspaceRoot:
-          typeof session?.metadata?.workspaceRoot === "string"
-            ? session.metadata.workspaceRoot
-            : options.workspaceRoot,
-        boundSession: session ?? undefined,
-      };
+      // Git identity proves that A gateway worktree lives here, not that it is
+      // THIS session's: path and branch both derive from the name, so a later
+      // worktree that took the name after this one was removed looks identical.
+      // Only the creation token separates them. reconcile confirms (or repairs
+      // to) the recorded token; an absent, foreign, or other-creation marker
+      // cannot be confirmed.
+      const identityConfirmed =
+        identitySession !== null &&
+        (await reconcileWorktreeIdentity({
+          worktreePath: existingPath,
+          recordedToken:
+            typeof identitySession.metadata?.worktreeToken === "string"
+              ? identitySession.metadata.worktreeToken
+              : null,
+          sessionId: identitySession.id,
+          logger: runtime.logger,
+        }));
+      if (identityConfirmed) {
+        return {
+          cwd: existingPath,
+          worktreePath: existingPath,
+          workspaceAlias:
+            typeof session?.metadata?.workspaceAlias === "string"
+              ? session.metadata.workspaceAlias
+              : options.workspaceAlias,
+          workspaceRoot:
+            typeof session?.metadata?.workspaceRoot === "string"
+              ? session.metadata.workspaceRoot
+              : options.workspaceRoot,
+          boundSession: session ?? undefined,
+        };
+      }
+      // The worktree is live and same-repo, but its identity cannot be confirmed
+      // as this session's (its marker was lost to a concurrent adoption, or the
+      // name was reused by a later worktree). Rather than strand the session on a
+      // permanent refusal, and rather than reuse a worktree that may be a
+      // different creation's, recover onto a FRESH worktree and leave the
+      // ambiguous one untouched for ordinary TTL cleanup.
+      runtime.logger.info?.(
+        `session ${sessionId} worktree at ${existingPath} could not be confirmed as its own; creating a fresh worktree`
+      );
+      recovering = true;
     }
   }
-  const name = worktreeOpt === true ? undefined : worktreeOpt.name;
+  // On recovery the recorded name may still be registered to the unverifiable
+  // worktree, so force a fresh unique name to avoid colliding with it.
+  const name = recovering ? undefined : worktreeOpt === true ? undefined : worktreeOpt.name;
   const ref = worktreeOpt === true ? undefined : worktreeOpt.ref;
   const handle: WorktreeHandle = await createWorktree({
     repoRoot,
@@ -3361,6 +3521,8 @@ export async function resolveWorktreeForRequest(
           ? {
               worktreeOwnerHostname: hostname(),
               worktreeOwnerInstanceId: runtime.asyncJobManager.getInstanceId(),
+              worktreeToken: handle.token,
+              worktreeAdminDirectory: handle.adminDirectory,
             }
           : {}),
         ...(options.workspaceAlias ? { workspaceAlias: options.workspaceAlias } : {}),
@@ -3389,6 +3551,8 @@ export async function resolveWorktreeForRequest(
                 repoRoot,
                 path: handle.path,
                 name: handle.name,
+                token: handle.token,
+                adminDirectory: handle.adminDirectory,
               },
             }
           : {}),
@@ -3416,6 +3580,8 @@ export async function resolveWorktreeForRequest(
             repoRoot,
             path: handle.path,
             name: handle.name,
+            token: handle.token,
+            adminDirectory: handle.adminDirectory,
           },
         }
       : {}),
@@ -8672,12 +8838,12 @@ function ensureLiveKitSessionCleanup(runtime: GatewayServerRuntime): void {
  * than removed, and the Postgres tombstone query filters by hostname in SQL so
  * a foreign row is never even returned here.
  *
- * The file-backed manager notifies after hiding a durably owned session behind
- * a cleanup-pending tombstone. Verified Git removal then acknowledges and
- * deletes that tombstone. Explicit PostgreSQL deletion notifies after deleting
- * the row, so cleanup is one host-fenced attempt with no tombstone to retain for
- * acknowledgement or retry. Database-side PostgreSQL expiry invokes no
- * observer.
+ * BOTH managers notify after hiding a durably owned session behind a
+ * cleanup-pending tombstone, and verified Git removal then acknowledges and
+ * deletes it. A failed removal leaves the tombstone in place for the owning
+ * host to retry, which is what the enumeration below picks up at startup.
+ * Database-side PostgreSQL expiry invokes no observer at all, so it stages the
+ * tombstone itself and leaves the attempt to that host.
  *
  * Expressing this boundary as an engine check instead silently disabled
  * worktrees for every Postgres-backed host in 3.1.0-rc.5.
@@ -24060,7 +24226,7 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
 
   server.tool(
     "session_delete",
-    "Delete a gateway session record by ID. The tool result confirms record deletion; worktree cleanup observers run asynchronously and may still be in progress. Worktree cleanup runs on the processing host for file-backed and PostgreSQL session managers. The file-backed manager retains failed cleanup for retry when the manager is registered on the owning host. File-backed TTL eviction uses the same tombstone retry path. PostgreSQL deletes the session row before its cleanup observer runs, so a failed removal is not retained for automatic retry and a different host cannot remove the owning host's worktree. The database-side cleanup_expired_sessions function invokes no gateway observer and performs no worktree cleanup.",
+    "Delete a gateway session record by ID. The tool result confirms record deletion; worktree cleanup observers run asynchronously and may still be in progress. Worktree cleanup runs on the processing host for file-backed and PostgreSQL session managers. Both managers stage a caller-hidden cleanup tombstone before cleanup runs and retain a failed removal for retry by the host that owns the worktree, finalizing the record only once Git no longer registers the worktree, read back rather than inferred from the recorded path being absent. File-backed TTL eviction uses the same tombstone retry path. Deletion processed by a different host removes no worktree and leaves the owning host's record intact. The database-side cleanup_expired_sessions function stages the same tombstone instead of deleting a worktree-bearing session; it invokes no gateway observer and so attempts no removal itself. A tombstone is not bounded by retention.",
     {
       sessionId: z.string().describe("Session ID"),
     },
@@ -24236,7 +24402,7 @@ export function createGatewayServer(deps: GatewayServerDeps = {}): McpServer {
 
   server.tool(
     "session_clear_all",
-    "Delete all gateway session records, optionally scoped to one provider. The tool result confirms record deletion; worktree cleanup observers run asynchronously and may still be in progress. Worktree cleanup runs per session on the processing host for file-backed and PostgreSQL session managers. The file-backed manager retains failed cleanup for retry when the manager is registered on the owning host. File-backed TTL eviction uses the same tombstone retry path. PostgreSQL deletes each session row before its cleanup observer runs, so a failed removal is not retained for automatic retry and a different host cannot remove the owning host's worktree. The database-side cleanup_expired_sessions function invokes no gateway observer and performs no worktree cleanup.",
+    "Delete all gateway session records, optionally scoped to one provider. The tool result confirms record deletion; worktree cleanup observers run asynchronously and may still be in progress. Worktree cleanup runs per session on the processing host for file-backed and PostgreSQL session managers. Both managers stage a caller-hidden cleanup tombstone before cleanup runs and retain a failed removal for retry by the host that owns the worktree, finalizing the record only once Git no longer registers the worktree, read back rather than inferred from the recorded path being absent. File-backed TTL eviction uses the same tombstone retry path. Deletion processed by a different host removes no worktree and leaves the owning host's record intact. The database-side cleanup_expired_sessions function stages the same tombstone instead of deleting a worktree-bearing session; it invokes no gateway observer and so attempts no removal itself. A tombstone is not bounded by retention.",
     {
       cli: sessionProviderEnum.optional().describe(`Provider filter (${sessionProviderLabel})`),
     },

@@ -4,6 +4,9 @@ import {
   getKitSessionBinding,
   kitActiveSessionKey,
   sessionMatchesKitBinding,
+  isWorktreeCleanupTombstone,
+  sessionNotTombstonedSql,
+  WORKTREE_CLEANUP_TOMBSTONE_KEY,
   type IKitSessionManager,
   type SessionCleanupHook,
   type SessionRemovalObserverRegistrar,
@@ -29,6 +32,8 @@ import {
   type KitSessionAttempt,
 } from "./personal-config-types.js";
 import type { StorageConnection, StorageDriver } from "./storage/store.js";
+
+import type { Logger } from "./logger.js";
 
 export type { Logger } from "./logger.js";
 
@@ -117,6 +122,110 @@ class TransactionAbort<T> extends Error {
   }
 }
 
+/** The projection every session read in this module returns. */
+const SESSION_COLUMNS = `id, cli, description, metadata, created_at AS "createdAt",
+          last_used_at AS "lastUsedAt", owner_principal AS "ownerPrincipal",
+          session_generation AS generation`;
+
+/**
+ * The same four fields `hasDurablyOwnedWorktree` requires in the file store,
+ * and `jsonb_typeof(...) = 'string'` rather than `->> IS NOT NULL` because the
+ * file store tests `typeof === "string"`: a JSON number would satisfy the
+ * looser form and stage a row that owns no worktree.
+ *
+ * COALESCE is load-bearing, found by running it. An absent key makes
+ * `jsonb_typeof` return NULL, so the whole conjunction is NULL rather than
+ * false, and `WHERE NOT owned` then matches NOTHING: every ordinary session
+ * stopped being deleted at all while the tombstone arm looked correct.
+ */
+const DURABLY_OWNED_WORKTREE_SQL = `COALESCE(
+          jsonb_typeof(metadata->'worktreePath') = 'string'
+      AND jsonb_typeof(metadata->'worktreeName') = 'string'
+      AND jsonb_typeof(metadata->'worktreeOwnerHostname') = 'string'
+      AND jsonb_typeof(metadata->'worktreeOwnerInstanceId') = 'string', false)`;
+
+const TOMBSTONE_PATCH_SQL = `'{"worktreeCleanupPending": true, "${WORKTREE_CLEANUP_TOMBSTONE_KEY}": true}'::jsonb`;
+
+/**
+ * Delete the matching sessions, except those carrying a durably owned worktree,
+ * which are staged as caller-invisible cleanup tombstones instead. Returns the
+ * rows either way, staged ones carrying their new tombstone metadata, so a
+ * removal observer sees the exact ownership state it must act on.
+ *
+ * ONE statement, not a SELECT followed by an UPDATE. Both arms are
+ * data-modifying CTEs over a single snapshot, selected by `owned`, so the
+ * classification is taken once and the two halves cannot disagree about a row.
+ * `FOR UPDATE` on the target CTE is what lets the arms address rows by id
+ * without re-evaluating the caller's predicate a second time, which is the
+ * other way this could have been written and the way it could have drifted.
+ *
+ * The pointer tables are cleared explicitly for the staged rows. They cascade
+ * on DELETE, and a staged row is not deleted, so without this a tombstone would
+ * stay the active session for its provider and the active Kit pointer for its
+ * scope, both naming a row every caller-facing read now reports absent.
+ *
+ * The tombstone exclusion is spliced HERE, not required of the caller. An
+ * earlier version took it in `predicate` and checked that the string mentioned
+ * the key, which proved presence of a substring rather than exclusion of a row.
+ *
+ * Wrapping the caller's predicate in parentheses is NOT sufficient on its own
+ * either, and a reviewer proved it against a real server: `id = $1) OR true --`
+ * closes the parenthesis, introduces an OR, and comments out both the closing
+ * parenthesis and the conjunct that follows. So the exclusion is ALSO applied
+ * in the two arms, where the predicate's text cannot reach: `target` only
+ * classifies, and a row it wrongly admits is still touched by neither arm.
+ * The syntactic check below is the cheap outer layer, not the guarantee.
+ */
+/**
+ * Refuse a caller predicate that could terminate the expression it is spliced
+ * into. A comment introducer can discard everything after it and an unbalanced
+ * parenthesis can close the wrapper early; together they turn a conjunct into a
+ * disjunct. This does not make the splice safe on its own, which is why the
+ * arms carry the exclusion too, but a predicate that contains either of these
+ * is a programming error and should not reach PostgreSQL at all.
+ */
+function assertPredicateCannotEscape(predicate: string): void {
+  if (predicate.includes("--") || predicate.includes("/*")) {
+    throw new Error("A session deletion predicate may not contain an SQL comment");
+  }
+  let depth = 0;
+  for (const character of predicate) {
+    if (character === "(") depth += 1;
+    else if (character === ")") depth -= 1;
+    if (depth < 0) break;
+  }
+  if (depth !== 0) {
+    throw new Error("A session deletion predicate may not contain unbalanced parentheses");
+  }
+}
+
+export function deleteOrStageSessionsSql(predicate: string): string {
+  assertPredicateCannotEscape(predicate);
+  return `WITH target AS (
+            SELECT id, ${DURABLY_OWNED_WORKTREE_SQL} AS owned
+              FROM sessions
+             WHERE (${predicate})
+               AND ${sessionNotTombstonedSql()}
+               FOR UPDATE
+          ), staged AS (
+            UPDATE sessions
+               SET metadata = COALESCE(metadata, '{}'::jsonb) || ${TOMBSTONE_PATCH_SQL}
+             WHERE id IN (SELECT id FROM target WHERE owned)
+               AND ${sessionNotTombstonedSql()}
+            RETURNING ${SESSION_COLUMNS}
+          ), removed AS (
+            DELETE FROM sessions
+             WHERE id IN (SELECT id FROM target WHERE NOT owned)
+               AND ${sessionNotTombstonedSql()}
+            RETURNING ${SESSION_COLUMNS}
+          ), cleared_active AS (
+            DELETE FROM active_sessions WHERE session_id IN (SELECT id FROM staged)
+          ), cleared_kit AS (
+            DELETE FROM kit_active_sessions WHERE session_id IN (SELECT id FROM staged)
+          )
+          SELECT * FROM staged UNION ALL SELECT * FROM removed`;
+}
+
 function abortWith<T>(value: T): never {
   throw new TransactionAbort(value);
 }
@@ -164,7 +273,16 @@ export class PostgreSQLSessionManager
   private sessionSchemaReady: Promise<void> | null = null;
   private readonly removalObservers = new Set<SessionCleanupHook>();
 
-  constructor(private driver: StorageDriver) {}
+  /**
+   * `logger` is optional so every existing caller and test keeps compiling, but
+   * a manager built without one cannot report a failed removal observer, which
+   * is the loss this parameter exists to stop. Production builds it through
+   * `createSessionManager`, which always has one.
+   */
+  constructor(
+    private driver: StorageDriver,
+    private readonly logger?: Logger
+  ) {}
 
   /**
    * One statement outside a transaction.
@@ -197,15 +315,27 @@ export class PostgreSQLSessionManager
     return () => this.removalObservers.delete(observer);
   }
 
+  /**
+   * Session deletion stays best-effort when an observer fails, but it is no
+   * longer SILENT. A rejected worktree cleanup is exactly the case a tombstone
+   * is retained for, and discarding the rejection here left an operator with a
+   * retry record and nothing saying why the first attempt failed.
+   *
+   * The session ID and the error only: session metadata carries worktree paths
+   * and Kit identities, and this line is not the place to widen what is logged
+   * about either.
+   */
   private notifySessionRemoved(session: Session): void {
     for (const observer of this.removalObservers) {
       try {
         const result = observer(session);
         if (result && typeof (result as Promise<void>).catch === "function") {
-          void (result as Promise<void>).catch(() => undefined);
+          void (result as Promise<void>).catch(error => {
+            this.logger?.error(`session removal observer rejected for ${session.id}`, error);
+          });
         }
-      } catch {
-        // Session deletion remains best-effort when an in-memory observer fails.
+      } catch (error) {
+        this.logger?.error(`session removal observer threw for ${session.id}`, error);
       }
     }
   }
@@ -313,6 +443,11 @@ export class PostgreSQLSessionManager
       // error the moment this statement went through the driver. Every such
       // operator in this file is spelled as its function for that reason; they
       // are the same operator, so the semantics are unchanged.
+      //
+      // tombstone-scope: exempt. A privacy repair over every stored row. A
+      // tombstone still holds the Kit metadata migration 014 redacts, and its
+      // worktree keys are untouched by this statement, so skipping it would
+      // leave the one class of row an operator cannot inspect unrepaired.
       await this.execute(`
         UPDATE sessions AS session
         SET metadata = jsonb_set(
@@ -666,6 +801,13 @@ export class PostgreSQLSessionManager
       let replayed = 0;
       for (const record of plan.sessions) {
         const metadata = storedMigrationMetadata(record);
+        // tombstone-scope: exempt. Deliberately unfiltered. This read is
+        // an existence probe for a primary key, not a decision about what the
+        // caller may see: a worktree-cleanup tombstone still occupies the id,
+        // and hiding it here would send the INSERT below into a key violation
+        // instead of the conflict this loop reports. A tombstone carries
+        // metadata the source record does not, so it fails
+        // `migrationRecordMatchesExisting` and refuses the import by name.
         const existingRows = await connection.query<Session>(
           `SELECT id, cli, description, metadata, created_at AS "createdAt",
                   last_used_at AS "lastUsedAt", owner_principal AS "ownerPrincipal",
@@ -796,6 +938,7 @@ export class PostgreSQLSessionManager
          FROM kit_active_sessions AS active
          JOIN sessions AS s ON s.id = active.session_id
          WHERE active.cli = $1 AND active.scope_key = $2
+           AND ${sessionNotTombstonedSql("s")}
          FOR UPDATE OF active, s`,
         [cli, scopeKey]
       );
@@ -811,6 +954,12 @@ export class PostgreSQLSessionManager
       }
 
       if (sessionId) {
+        // tombstone-scope: exempt. Unfiltered for the same reason as the
+        // migration probe: a tombstone holds the primary key, so hiding it
+        // here sends the INSERT below into a key violation. It must not be
+        // REUSED either, because `sessionMatchesKitBinding` reads the Kit
+        // binding and ignores the worktree keys, so a deleted session would be
+        // handed back as a live one. The check below refuses it by name.
         const identifiedRows = await connection.query<Session>(
           `SELECT id, cli, description, metadata, created_at AS "createdAt",
                   last_used_at AS "lastUsedAt", owner_principal AS "ownerPrincipal",
@@ -819,6 +968,11 @@ export class PostgreSQLSessionManager
           [sessionId]
         );
         const identified = identifiedRows[0];
+        if (identified && isWorktreeCleanupTombstone(identified)) {
+          throw new Error(
+            `Kit session id ${sessionId} is awaiting worktree cleanup and cannot be reused`
+          );
+        }
         if (identified) {
           if (!sessionMatchesKitBinding(identified, cli, requestedBinding, ownerPrincipal)) {
             throw new Error(
@@ -894,7 +1048,7 @@ export class PostgreSQLSessionManager
         `SELECT id, cli, description, metadata, created_at AS "createdAt",
                 last_used_at AS "lastUsedAt", owner_principal AS "ownerPrincipal",
                 session_generation AS generation
-         FROM sessions WHERE id = $1 FOR UPDATE`,
+         FROM sessions WHERE id = $1 AND ${sessionNotTombstonedSql()} FOR UPDATE`,
         [sessionId]
       );
       const session = sessionRows[0];
@@ -941,7 +1095,7 @@ export class PostgreSQLSessionManager
         `SELECT id, cli, description, metadata, created_at AS "createdAt",
                 last_used_at AS "lastUsedAt", owner_principal AS "ownerPrincipal",
                 session_generation AS generation
-         FROM sessions WHERE id = $1 FOR UPDATE`,
+         FROM sessions WHERE id = $1 AND ${sessionNotTombstonedSql()} FOR UPDATE`,
         [sessionId]
       );
       const session = rows[0];
@@ -956,7 +1110,7 @@ export class PostgreSQLSessionManager
       await connection.execute(
         `UPDATE sessions
          SET metadata = jsonb_set(COALESCE(metadata, '{}'::jsonb), '{kit}', $1::jsonb, true)
-         WHERE id = $2`,
+         WHERE id = $2 AND ${sessionNotTombstonedSql()}`,
         [JSON.stringify({ ...binding, attempt: nextAttempt }), sessionId]
       );
       return true;
@@ -982,7 +1136,7 @@ export class PostgreSQLSessionManager
         `SELECT id, cli, description, metadata, created_at AS "createdAt",
                 last_used_at AS "lastUsedAt", owner_principal AS "ownerPrincipal",
                 session_generation AS generation
-         FROM sessions WHERE id = $1 FOR UPDATE`,
+         FROM sessions WHERE id = $1 AND ${sessionNotTombstonedSql()} FOR UPDATE`,
         [sessionId]
       );
       const session = rows[0];
@@ -1001,7 +1155,7 @@ export class PostgreSQLSessionManager
       await connection.execute(
         `UPDATE sessions
          SET metadata = jsonb_set(COALESCE(metadata, '{}'::jsonb), '{kit}', $1::jsonb, true)
-         WHERE id = $2`,
+         WHERE id = $2 AND ${sessionNotTombstonedSql()}`,
         [JSON.stringify({ ...binding, attempt: renewedAttempt }), sessionId]
       );
       return true;
@@ -1026,7 +1180,7 @@ export class PostgreSQLSessionManager
         `SELECT id, cli, description, metadata, created_at AS "createdAt",
                 last_used_at AS "lastUsedAt", owner_principal AS "ownerPrincipal",
                 session_generation AS generation
-         FROM sessions WHERE id = $1 FOR UPDATE`,
+         FROM sessions WHERE id = $1 AND ${sessionNotTombstonedSql()} FOR UPDATE`,
         [sessionId]
       );
       const session = rows[0];
@@ -1039,7 +1193,7 @@ export class PostgreSQLSessionManager
       await connection.execute(
         `UPDATE sessions
          SET metadata = jsonb_set(COALESCE(metadata, '{}'::jsonb), '{kit}', $1::jsonb, true)
-         WHERE id = $2`,
+         WHERE id = $2 AND ${sessionNotTombstonedSql()}`,
         [JSON.stringify(bindingWithoutAttempt), sessionId]
       );
       return true;
@@ -1054,7 +1208,7 @@ export class PostgreSQLSessionManager
     const rows = await this.query<Session>(
       `SELECT id, cli, description, metadata, created_at AS "createdAt", last_used_at AS "lastUsedAt", owner_principal AS "ownerPrincipal", session_generation AS generation
        FROM sessions
-       WHERE id = $1`,
+       WHERE id = $1 AND ${sessionNotTombstonedSql()}`,
       [sessionId]
     );
 
@@ -1069,10 +1223,11 @@ export class PostgreSQLSessionManager
     const query = cli
       ? `SELECT id, cli, description, metadata, created_at AS "createdAt", last_used_at AS "lastUsedAt", owner_principal AS "ownerPrincipal", session_generation AS generation
          FROM sessions
-         WHERE cli = $1
+         WHERE cli = $1 AND ${sessionNotTombstonedSql()}
          ORDER BY last_used_at DESC`
       : `SELECT id, cli, description, metadata, created_at AS "createdAt", last_used_at AS "lastUsedAt", owner_principal AS "ownerPrincipal", session_generation AS generation
          FROM sessions
+         WHERE ${sessionNotTombstonedSql()}
          ORDER BY last_used_at DESC`;
 
     return cli ? await this.query<Session>(query, [cli]) : await this.query<Session>(query);
@@ -1101,12 +1256,10 @@ export class PostgreSQLSessionManager
     // uses jsonb_exists rather than the `?` operator, so nothing collides.
     const scope = principalScopeSql("owner_principal", caller);
     const removed = await this.query<Session>(
-      `DELETE FROM sessions
-       WHERE id = ?
+      deleteOrStageSessionsSql(`id = ?
          AND ${scope.sql}
          AND (NOT jsonb_exists(COALESCE(metadata, '{}'::jsonb), 'kit')
-              OR NOT jsonb_exists(COALESCE(metadata, '{}'::jsonb)->'kit', 'attempt'))
-       RETURNING id, cli, description, metadata, created_at AS "createdAt", last_used_at AS "lastUsedAt", owner_principal AS "ownerPrincipal", session_generation AS generation`,
+              OR NOT jsonb_exists(COALESCE(metadata, '{}'::jsonb)->'kit', 'attempt'))`),
       [sessionId, ...scope.params]
     );
     const removedSession = removed[0];
@@ -1147,6 +1300,7 @@ export class PostgreSQLSessionManager
        SELECT ?, s.id, ?
          FROM sessions s
         WHERE s.id = ? AND s.cli = ? AND ${scope.sql}
+          AND ${sessionNotTombstonedSql("s")}
        ON CONFLICT (cli) DO UPDATE
           SET session_id = EXCLUDED.session_id, updated_at = EXCLUDED.updated_at`,
       [cli, now, sessionId, cli, ...scope.params]
@@ -1199,7 +1353,7 @@ export class PostgreSQLSessionManager
         `SELECT id, cli, description, metadata, created_at AS "createdAt",
                 last_used_at AS "lastUsedAt", owner_principal AS "ownerPrincipal",
                 session_generation AS generation
-         FROM sessions WHERE id = $1`,
+         FROM sessions WHERE id = $1 AND ${sessionNotTombstonedSql()}`,
         [sessionId]
       );
       const candidate = candidateRows[0];
@@ -1221,7 +1375,7 @@ export class PostgreSQLSessionManager
         `SELECT id, cli, description, metadata, created_at AS "createdAt",
                 last_used_at AS "lastUsedAt", owner_principal AS "ownerPrincipal",
                 session_generation AS generation
-         FROM sessions WHERE id = $1 FOR UPDATE`,
+         FROM sessions WHERE id = $1 AND ${sessionNotTombstonedSql()} FOR UPDATE`,
         [sessionId]
       );
       const session = sessionRows[0];
@@ -1311,7 +1465,8 @@ export class PostgreSQLSessionManager
     // is the one clock every writer shares, and GREATEST makes the write
     // monotonic whichever writer commits last.
     const rowsAffected = await this.execute(
-      "UPDATE sessions SET last_used_at = GREATEST(last_used_at, clock_timestamp()) WHERE id = $1",
+      `UPDATE sessions SET last_used_at = GREATEST(last_used_at, clock_timestamp())
+        WHERE id = $1 AND ${sessionNotTombstonedSql()}`,
       [sessionId]
     );
     return rowsAffected !== 0;
@@ -1327,7 +1482,7 @@ export class PostgreSQLSessionManager
     const rowsAffected = await this.execute(
       `UPDATE sessions
        SET metadata = COALESCE(metadata, '{}'::jsonb) || $1::jsonb
-       WHERE id = $2
+       WHERE id = $2 AND ${sessionNotTombstonedSql()}
        RETURNING id`,
       [JSON.stringify(metadata), sessionId]
     );
@@ -1363,6 +1518,7 @@ export class PostgreSQLSessionManager
         `UPDATE sessions
          SET metadata = $1::jsonb
          WHERE ${identityPredicate}
+           AND ${sessionNotTombstonedSql()}
          RETURNING id`,
         parameters
       );
@@ -1376,13 +1532,9 @@ export class PostgreSQLSessionManager
        AND session_generation = $5::uuid
        AND COALESCE(metadata, '{}'::jsonb) = $6::jsonb`;
     const rows = await this.query<Session>(
-      `DELETE FROM sessions
-       WHERE ${deleteIdentityPredicate}
+      deleteOrStageSessionsSql(`${deleteIdentityPredicate}
          AND (NOT jsonb_exists(COALESCE(metadata, '{}'::jsonb), 'kit')
-              OR NOT jsonb_exists(COALESCE(metadata, '{}'::jsonb)->'kit', 'attempt'))
-       RETURNING id, cli, description, metadata, created_at AS "createdAt",
-                 last_used_at AS "lastUsedAt", owner_principal AS "ownerPrincipal",
-                 session_generation AS generation`,
+              OR NOT jsonb_exists(COALESCE(metadata, '{}'::jsonb)->'kit', 'attempt'))`),
       parameters.slice(1)
     );
     const removed = rows[0];
@@ -1408,7 +1560,7 @@ export class PostgreSQLSessionManager
         `SELECT id, cli, description, metadata, created_at AS "createdAt",
                 last_used_at AS "lastUsedAt", owner_principal AS "ownerPrincipal",
                 session_generation AS generation
-         FROM sessions WHERE id = $1 FOR UPDATE`,
+         FROM sessions WHERE id = $1 AND ${sessionNotTombstonedSql()} FOR UPDATE`,
         [sessionId]
       );
       const session = rows[0];
@@ -1439,13 +1591,20 @@ export class PostgreSQLSessionManager
       await connection.execute(
         `UPDATE sessions
          SET metadata = jsonb_set(COALESCE(metadata, '{}'::jsonb), '{kit}', $1::jsonb, true)
-         WHERE id = $2`,
+         WHERE id = $2 AND ${sessionNotTombstonedSql()}`,
         [JSON.stringify(next), sessionId]
       );
       return true;
     });
   }
 
+  /**
+   * tombstone-scope: exempt. Unfiltered, matching the file store, which also
+   * enumerates every row here. This answers "which Kit
+   * releases must not be collected", and over-retaining a release for a
+   * tombstoned session is recoverable while collecting one still referenced is
+   * not. The two engines therefore agree, and they agree on the safe side.
+   */
   async getPinnedKitReleaseIds(): Promise<string[]> {
     const rows = await this.query<{ metadata: Record<string, unknown> | null }>(
       "SELECT metadata FROM sessions WHERE jsonb_exists(metadata, 'kit')"
@@ -1478,10 +1637,8 @@ export class PostgreSQLSessionManager
     const protectedAttempt = `(NOT jsonb_exists(COALESCE(metadata, '{}'::jsonb), 'kit')
       OR NOT jsonb_exists(COALESCE(metadata, '{}'::jsonb)->'kit', 'attempt'))`;
     const query = cli
-      ? `DELETE FROM sessions WHERE cli = $1 AND ${protectedAttempt}
-         RETURNING id, cli, description, metadata, created_at AS "createdAt", last_used_at AS "lastUsedAt", owner_principal AS "ownerPrincipal", session_generation AS generation`
-      : `DELETE FROM sessions WHERE ${protectedAttempt}
-         RETURNING id, cli, description, metadata, created_at AS "createdAt", last_used_at AS "lastUsedAt", owner_principal AS "ownerPrincipal", session_generation AS generation`;
+      ? deleteOrStageSessionsSql(`cli = $1 AND ${protectedAttempt}`)
+      : deleteOrStageSessionsSql(protectedAttempt);
     const removed = cli
       ? await this.query<Session>(query, [cli])
       : await this.query<Session>(query);
@@ -1499,6 +1656,9 @@ export class PostgreSQLSessionManager
    * the fetch, a foreign host's tombstones would already be in this process's
    * memory, one bug away from being acted on; applied in the query, they are
    * never returned at all.
+   *
+   * tombstone-scope: exempt. This is the one read that exists to FIND
+   * tombstones; the predicate is inverted here by construction.
    *
    * @param ownerHostname This instance's hostname; only its own rows are listed.
    */
@@ -1520,6 +1680,9 @@ export class PostgreSQLSessionManager
    * Fenced on the generation AND on the row still being a tombstone owned by
    * the same host, so a concurrent instance that re-created or adopted the
    * session cannot have its row deleted by a late acknowledgement from here.
+   * tombstone-scope: exempt. This statement's whole purpose is to remove a
+   * tombstone, so it selects them rather than excluding them.
+   *
    * This mirrors the status fencing the job store uses for the same reason.
    */
   async finalizePendingWorktreeCleanup(session: Session): Promise<boolean> {

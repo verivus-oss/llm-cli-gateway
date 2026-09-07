@@ -2,7 +2,7 @@
 # SHIPPED. Per-node `status` in this file was never maintained: 5 node(s)
 # below still read `planned` for code that is live. Do not read a `planned`
 # node here as evidence that something is unimplemented; check the code.
-# PostgreSQL worktree create/reuse and host-filtered tombstone list/finalize are live; deletion does not stage tombstones, as README and issue #305 record.
+# Create/reuse, list/finalize AND staging on delete are live; staging was #305.
 # Classified 2026-08-18 at HEAD 801950d. Index: docs/plans/README.md
 # ============================================================================
 # Implementation plan: restore gateway-managed worktrees under Postgres-backed
@@ -80,10 +80,10 @@ multiple instances (issue #139).
 
 pg_tombstones = """
 `PostgreSQLSessionManager.listPendingWorktreeCleanupSessions` and
-`finalizePendingWorktreeCleanup` are stubs returning `[]` and `false`
-(src/session-manager-pg.ts:1529-1536), justified by "worktrees are rejected with
-PostgreSQL persistence". Once worktrees are allowed, those stubs become the new
-failure mode: a tombstoned worktree would never be retried and never finalized.
+`finalizePendingWorktreeCleanup` were stubs returning `[]` and `false`,
+justified by "worktrees are rejected with PostgreSQL persistence". Once
+worktrees are allowed those stubs become the new failure mode: a tombstoned
+worktree would never be retried or finalized.
 
 They must be implemented with a host filter in the QUERY, so an instance can
 only ever see tombstones for worktrees on its own filesystem. A filter applied

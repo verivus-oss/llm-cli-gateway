@@ -6,14 +6,94 @@ All notable changes to the llm-cli-gateway project.
 
 ### Fixed
 
-- Public worktree guidance and MCP tool descriptions now distinguish the
-  session-manager capabilities precisely. PostgreSQL supports worktree creation
-  and same-host reuse, but explicit deletion, including `session_clear_all`,
-  removes its row before cleanup runs, so a failed removal is not retained for
-  automatic retry. The database-side `cleanup_expired_sessions` function runs
-  no gateway cleanup. After session deletion or file-backed TTL eviction, the
-  file-backed manager retains failed cleanup as a hidden tombstone and retries
-  it when that manager is registered on the owning host.
+- **PostgreSQL worktree cleanup is durable.** Session deletion,
+  `session_clear_all`, and compare-and-set deletion now stage a caller-hidden
+  cleanup tombstone for a session that owns a gateway worktree, instead of
+  deleting its row and making one unrecorded removal attempt. A failed removal
+  is retained for retry by the host that owns the worktree, and the record is
+  finalized only once Git no longer registers the worktree. That is read back
+  rather than inferred: an absent recorded path used to count as a removal on
+  its own, which left the registration behind. Deletion processed by a different
+  host removes no worktree and leaves that record intact. The database-side
+  `cleanup_expired_sessions` function stages the same tombstone rather than
+  deleting a worktree-bearing session; it invokes no gateway observer and so
+  attempts no removal itself. Session deletion, `session_clear_all`, and
+  file-backed TTL eviction now all keep a failed Git removal as a hidden
+  cleanup-pending tombstone and retry it on the owning host. Every
+  caller-facing PostgreSQL session read and
+  mutation excludes tombstones, enforced by a structural gate over the module.
+  A rejected removal observer is now logged instead of discarded. Both session
+  managers therefore give the same cleanup guarantee, and the public guidance
+  and MCP tool descriptions state it. A tombstone is not bounded by retention.
+  This supersedes the guidance correction that recorded the gap
+  (issues #302 and #305).
+- **A cleanup retry can no longer delete a live worktree.** Cleanup removes the
+  git worktree before it finalizes the record that authorized the removal, and
+  a managed worktree's path and branch both derive from its name, so a crash in
+  that window left a record naming a path a later session could legitimately
+  recreate; the retry then deleted the replacement. Each worktree now carries a
+  per-creation token, asked of git rather than guessed from the worktree's name,
+  and both cleanup and same-session reuse require it to match. A removal is
+  reported only when git performed one, or when a search over this session's own
+  creation identity came back empty, which is what a completed removal leaves
+  behind. A session that predates creation tokens has no such identity, and
+  rather than guessing on its behalf from the `gateway/<name>` branch, which is
+  derived from the worktree name and so carries the very ambiguity the token
+  closes, it is retained unless the repository registers no linked worktree at
+  all. That test is deliberately total: an earlier form asked only about
+  worktrees sitting directly under the gateway's own directory, and
+  `git worktree move` relocates a checkout anywhere, so a location test cannot
+  stand in for identity. **Such a session is given identity the first time it is reused**: the
+  gateway stamps a marker on the live worktree and records it, so ordinary
+  cleanup can decide. Adoption refuses a path more than one session claims, counting hidden
+  cleanup tombstones as claimants, a worktree that already carries another
+  creation's marker, an ordinary directory standing at the path, and a session
+  already awaiting cleanup. A marker whose record fails to persist is withdrawn
+  again, and that withdrawal removes only the token it wrote, never a
+  concurrent creation's. Because even that withdrawal can fail on a transient
+  read, adoption stamps the adopting session's own id into the marker, and such
+  a marker is reclaimed on the next reuse so a strand recovers on its own rather
+  than refusing the worktree forever. A strand is reclaimed only when both
+  signals agree: the marker carries this session's adopter id, and the store
+  records no session holding that token. A worktree created without a session
+  carries no adopter id, and an adoption the store has already recorded is a
+  live identity even when a stale snapshot of its session lacks the token, so
+  neither is mistaken for a strand. The record compare-and-set is the final
+  arbiter under concurrency: a reclaim that loses it to an adoption another
+  request recorded first restores the marker it overwrote rather than deleting
+  it, and reuse reconciles a marker this session's own adoption left on an
+  abandoned token, so however many concurrent reclaims leave the marker on the
+  wrong token, the next reuse repairs it from the record rather than stranding
+  the worktree. An ABSENT marker is refused, not materialised from the record: a
+  worktree is registered before its marker is written, so a missing marker on a
+  validated registration can be a replacement creation caught in that window,
+  not this session's lost marker, and stamping the recorded token there would be
+  the name-reuse ABA the token exists to catch. The strand that a losing fresh
+  adoption would otherwise leave behind (no marker on a recorded worktree) is
+  prevented at its source instead, by an exclusive-create marker write that lets
+  only one of two concurrent fresh adoptions of a pre-token session create the
+  marker; a present marker for a different creation still refuses. The Git
+  administrative directory is recorded alongside it, because `git worktree
+  remove` deletes that directory and `git worktree move` leaves it alone, so it
+  answers whether a removal happened without reading anything a move or an
+  unavailable volume can take away. Cleanup refuses to report a removal for a
+  worktree that was only moved, and refuses equally when it cannot establish
+  the answer: a marker it cannot read, a repository it cannot resolve, or a
+  worktree that moved and is then not at its new location, is a failure to look
+  and not a removal. The last of those is deliberately not treated as a removal
+  even though the checkout is missing, because a volume that is not mounted and
+  a directory that was deleted are indistinguishable, and finalizing the record
+  for the first leaves a tree that nothing can ever clean. **A worktree created before this release carries no token, so a
+  session cannot prove it created what stands at its recorded path and will no
+  longer remove it.** Those worktrees stay on disk, their durable records are
+  retained and listed for cleanup, and the warning names the path to remove by
+  hand. Deleting a live replacement is the outcome this refuses.
+- **The file-backed store no longer hands a deleted Kit session back as live.**
+  Every Personal Agent Config Kit path read the session row directly and none
+  checked for a cleanup tombstone, so a deleted session could still be claimed,
+  renewed, released, rebound, pointed at, and returned by
+  `getOrCreateKitSession`. Both stores now refuse, and reuse of a tombstoned id
+  is refused by name rather than silently granted.
 
 ## [3.2.0] - 2026-09-03
 

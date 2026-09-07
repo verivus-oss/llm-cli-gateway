@@ -350,17 +350,26 @@ describe("release to public Pages contract", () => {
       expect(document, `${name} must explain host-local ownership`).toMatch(
         /owning host|host that owns the filesystem artifact/i
       );
-      expect(document, `${name} must couple bulk deletion to PostgreSQL cleanup limits`).toMatch(
-        /(?:(?:Explicit\s+)?PostgreSQL\s+deletion,\s+including\s+`?session_clear_all`?,\s+deletes\s+(?:the|a)\s+session\s+row\s+before\s+(?:its|the)\s+cleanup\s+observer\s+runs|`?session_clear_all`?[^\n]{0,800}PostgreSQL\s+deletes\s+each\s+session\s+row\s+before\s+(?:its|the)\s+cleanup\s+observer\s+runs)/i
+      expect(document, `${name} must couple bulk deletion to the retained record`).toMatch(
+        // `[\s\S]`, not `[^\n]`: three of these five documents wrap their
+        // prose, and the previous line-bound form passed only on the two whose
+        // paragraphs happen to be one long line each.
+        /`?session_clear_all`?[\s\S]{0,400}(?:cleanup-pending\s+tombstone|cleanup\s+tombstone|retain(?:s|ed)?\s+(?:a\s+)?failed|record\s+intact)/i
       );
-      expect(document, `${name} must disclose the missing retry`).toMatch(
-        /failed\s+(?:worktree\s+)?removal\s+is\s+not\s+retained\s+for\s+automatic\s+retry/i
+      expect(document, `${name} must say who retries and when it is finalized`).toMatch(
+        /(?:retr(?:y|ies|ied)[^.]*owning\s+host|retry\s+by\s+the\s+host\s+that\s+owns\s+the\s+worktree)/i
       );
       expect(document, `${name} must cover database-side expiry`).toMatch(
-        /cleanup_expired_sessions[^.]*no\s+gateway\s+observer[^.]*no\s+worktree\s+cleanup/i
+        /cleanup_expired_sessions[^.]*stages\s+the\s+same\s+(?:tombstone|record)/i
       );
       expect(document, `${name} must not restore the obsolete engine gate`).not.toMatch(
         /PostgreSQL-backed sessions reject|fail closed with PostgreSQL session storage/i
+      );
+      // The claim #305 falsified must not survive anywhere current guidance is
+      // read. Historical release narrative is excluded from this loop on
+      // purpose; it stays true of the release it describes.
+      expect(document, `${name} must not keep the claim #305 falsified`).not.toMatch(
+        /not\s+retained\s+for\s+automatic\s+retry|performs\s+no\s+worktree\s+cleanup/i
       );
     }
 
@@ -374,8 +383,11 @@ describe("release to public Pages contract", () => {
       expect(document, `${name} must scope TTL eviction to the file store`).toMatch(
         /file-backed manager[^.]*TTL eviction|file-backed TTL eviction|TTL eviction in the file-backed manager/i
       );
-      expect(document, `${name} must scope file-backed retry to deletion or TTL eviction`).toMatch(
-        /session deletion[^.]*file-backed TTL eviction[^.]*failed (?:Git )?(?:worktree )?(?:removal|cleanup)[^.]*retr(?:y|ies)|file-backed manager[^.]*session deletion[^.]*TTL eviction[^.]*failed (?:Git )?(?:worktree )?(?:removal|cleanup)[^.]*retr(?:y|ies)/i
+      expect(document, `${name} must scope retry to deletion or TTL eviction`).toMatch(
+        // Every literal space is `\s+`: these documents wrap, and a form that
+        // demanded " " matched only where the phrase happened not to straddle a
+        // line break, which is a property of the fill width and not of the text.
+        /session\s+deletion[^.]*TTL\s+eviction[^.]*(?:failed\s+(?:Git\s+)?(?:worktree\s+)?(?:removal|cleanup)|cleanup-pending\s+tombstone)[^.]*retr(?:y|ies)/i
       );
     }
 

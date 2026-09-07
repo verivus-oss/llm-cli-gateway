@@ -78,6 +78,7 @@ npm run test:pg
 | `storage-drivers-pg.test.ts`             | The storage port over the PostgreSQL driver                |
 | `personal-config-persistence-pg.test.ts` | Kit admission and durable artefacts                        |
 | `provider-open-names-pg.test.ts`         | Provider-name projections on PostgreSQL                    |
+| `session-tombstone-scope-pg.test.ts`     | Worktree-cleanup tombstones hidden from every read path    |
 
 ## Running Tests
 

@@ -1,7 +1,16 @@
 import { spawn } from "child_process";
 import { randomUUID } from "crypto";
-import { existsSync, lstatSync, mkdirSync, realpathSync } from "fs";
-import { basename, isAbsolute, join, relative, resolve as resolvePath, sep } from "path";
+import {
+  existsSync,
+  rmSync,
+  lstatSync,
+  mkdirSync,
+  readdirSync,
+  readFileSync,
+  realpathSync,
+  writeFileSync,
+} from "fs";
+import { basename, dirname, isAbsolute, join, relative, resolve as resolvePath, sep } from "path";
 import { logWarn, noopLogger, type Logger } from "./logger.js";
 
 const GIT_TIMEOUT_MS = 10_000;
@@ -69,6 +78,22 @@ export interface WorktreeHandle {
   createdAt: string;
   /** True only when this call created the worktree and branch. */
   created: boolean;
+  /**
+   * Per-CREATION identity, stamped into the worktree's Git admin directory and
+   * mirrored into durable session metadata. See `GATEWAY_WORKTREE_MARKER`.
+   */
+  token: string;
+  /**
+   * The Git administrative directory git gave this worktree, mirrored into
+   * durable session metadata alongside the token.
+   *
+   * It is recorded because it answers "was this worktree removed?" without
+   * reading anything the checkout owns: `git worktree remove` deletes it and
+   * `git worktree move` leaves it alone, so a deleted or unreadable marker, or
+   * a checkout on storage that has gone away, cannot make a live worktree look
+   * removed.
+   */
+  adminDirectory: string;
 }
 
 export interface CreateWorktreeOptions {
@@ -83,6 +108,14 @@ export interface RemoveWorktreeOptions {
   path: string;
   name?: string;
   logger?: Logger;
+  /**
+   * The caller has already established that nothing live carries this session's
+   * creation identity, so a refused removal against an absent path is a removal
+   * that already happened rather than a worktree hiding somewhere else.
+   *
+   * Defaults to false: a caller that cannot prove it keeps the record.
+   */
+  removalProven?: boolean;
 }
 
 export interface ValidateManagedWorktreeOptions {
@@ -444,6 +477,418 @@ async function listRegisteredWorktrees(
   return registrations;
 }
 
+/**
+ * A managed worktree's on-disk identity is its path and its `gateway/<name>`
+ * branch, and BOTH derive from the name. Two worktrees created at the same name
+ * at different times are therefore indistinguishable, which is not a
+ * theoretical problem: cleanup removes the worktree before it finalizes the
+ * durable tombstone that authorized the removal, so a crash in that window
+ * leaves a tombstone naming a path that a later session can legitimately
+ * recreate. The retry then deletes the replacement, and the replacement's
+ * session survives in the store pointing at a directory that is gone.
+ *
+ * This marker is what tells the two apart. It is written once per creation into
+ * the worktree's Git ADMIN directory rather than into the checkout, because the
+ * checkout belongs to the caller and an agent working there would commit it.
+ *
+ * It is NOT hidden from that agent, and must not be relied on as if it were.
+ * The `.git` entry in a linked worktree is a FILE containing
+ * `gitdir: <admin dir>` (git-worktree(1) DETAILS), so anything in the
+ * administrative directory is reachable from inside the checkout by following
+ * it. This is an accident-detector for the remove-then-acknowledge window, not
+ * a control against a hostile process working in the worktree.
+ */
+const GATEWAY_WORKTREE_MARKER = "gateway-owner.json";
+
+/**
+ * The administrative directory git ACTUALLY gave this worktree, resolved from
+ * the worktree itself.
+ *
+ * Not `<common>/worktrees/<name>`. git-worktree(1) DETAILS says the private
+ * sub-directory's name is "usually the base name of the linked worktree's path,
+ * possibly appended with a number to make it unique", and the same section says
+ * outright: "do not make any assumption about whether a path belongs to
+ * $GIT_DIR or $GIT_COMMON_DIR ... Use `git rev-parse --git-path` to get the
+ * final path." Guessing by name is what that sentence forbids, and it is not
+ * theoretical: a stale `worktrees/beta` entry left by a dead worktree elsewhere
+ * makes a new `.worktrees/beta` get `worktrees/beta1`, so the guess reads and
+ * writes ANOTHER worktree's directory.
+ *
+ * Three conditions, because `rev-parse` alone is a trap. An ordinary directory
+ * that merely sits inside the repository resolves UPWARD and returns the main
+ * repository's `.git` with exit 0, so a naive resolver would put the gateway's
+ * marker inside `.git` itself. The result is accepted only when the path is its
+ * own toplevel and the resolved directory is a direct child of
+ * `<git common dir>/worktrees`.
+ */
+async function resolveWorktreeAdminDirectory(
+  worktreePath: string,
+  logger: Logger
+): Promise<string | null> {
+  if (!existsSync(worktreePath)) return null;
+  const gitDir = await execGit(worktreePath, ["rev-parse", "--absolute-git-dir"], logger);
+  if (gitDir.code !== 0) return null;
+  const topLevel = await execGit(worktreePath, ["rev-parse", "--show-toplevel"], logger);
+  if (topLevel.code !== 0) return null;
+  const commonDirectory = await canonicalGitCommonDirectory(worktreePath, logger);
+  if (!commonDirectory) return null;
+  try {
+    const resolved = realpathSync(gitDir.stdout.trim());
+    if (realpathSync(topLevel.stdout.trim()) !== realpathSync(worktreePath)) return null;
+    if (dirname(resolved) !== realpathSync(join(commonDirectory, "worktrees"))) return null;
+    return resolved;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * The outcome of asking whether a session's worktree is still alive.
+ *
+ * Three cases, not two, and that is the whole point. An earlier version
+ * answered `string | null` and every way of FAILING to look collapsed into the
+ * same `null` the caller read as "nothing found, the removal happened". Both
+ * halves of this module's history are that mistake: first a failed
+ * `git worktree list`, then a failed per-worktree marker read one level in.
+ * Making "could not tell" a value the caller has to destructure is what stops
+ * it being spelled the same way as "proven gone".
+ */
+type WorktreeSearchResult =
+  { kind: "live"; path: string } | { kind: "removed" } | { kind: "indeterminate"; reason: string };
+
+/** One admin directory's marker, or why it could not be established. */
+type MarkerReading =
+  | { kind: "token"; token: string; adoptedBy?: string }
+  | { kind: "none" }
+  | { kind: "unreadable"; reason: string };
+
+/**
+ * What an adoption returns to its caller. `priorMarker` is present only when the
+ * adoption RECLAIMED a strand, and names the marker it overwrote, so the caller
+ * can restore it instead of deleting if the record fails to persist.
+ */
+export interface AdoptedWorktreeIdentity {
+  token: string;
+  adminDirectory: string;
+  priorMarker?: { token: string; adoptedBy: string };
+}
+
+function describeError(error: unknown): string {
+  return error instanceof Error ? error.message : String(error);
+}
+
+/**
+ * Every linked worktree's administrative directory, read from the repository
+ * rather than from the checkouts.
+ *
+ * This is deliberately not `git worktree list` plus a walk into each checkout.
+ * That walk is what made cleanup fail open: a checkout on unavailable storage,
+ * or one whose marker is unreadable, answered the same way as a worktree that
+ * simply is not ours. The admin directories live under the repository's common
+ * directory, so they are readable exactly when the repository is, and the
+ * marker survives `git worktree move` untouched.
+ *
+ * An absent `worktrees` directory is a real answer, not a failure: git removes
+ * it along with the last linked worktree.
+ */
+async function listWorktreeAdminDirectories(
+  repoRoot: string,
+  logger: Logger
+): Promise<{ directories: string[] } | { failure: string }> {
+  // `execGit` REJECTS when git cannot be spawned at all, and this function's
+  // contract is to answer with a failure rather than to throw one past the
+  // caller: an exception escaping here would leave `cleanupSessionWorktree` to
+  // reject, which is a third spelling of the same "failure read as something
+  // else" defect.
+  let commonDirectory: string | null;
+  try {
+    commonDirectory = await canonicalGitCommonDirectory(repoRoot, logger);
+  } catch (error) {
+    return {
+      failure: `git could not resolve the common directory of ${repoRoot}: ${describeError(error)}`,
+    };
+  }
+  if (!commonDirectory) {
+    return { failure: `git could not resolve the common directory of ${repoRoot}` };
+  }
+  const container = join(commonDirectory, "worktrees");
+  try {
+    return {
+      directories: readdirSync(container, { withFileTypes: true })
+        .filter(entry => entry.isDirectory())
+        .map(entry => join(container, entry.name)),
+    };
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") return { directories: [] };
+    return { failure: `${container} could not be listed: ${describeError(error)}` };
+  }
+}
+
+/**
+ * Read one admin directory's owner marker.
+ *
+ * A missing marker file means this worktree carries no gateway identity, which
+ * is a fact. Anything else -- a permission error, an I/O error, a marker that
+ * does not parse -- is a failure to look, and is reported as such so that no
+ * caller can mistake it for a worktree that is not ours.
+ */
+function readAdminMarker(adminDirectory: string): MarkerReading {
+  let raw: string;
+  try {
+    raw = readFileSync(join(adminDirectory, GATEWAY_WORKTREE_MARKER), "utf8");
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") return { kind: "none" };
+    return {
+      kind: "unreadable",
+      reason: `${adminDirectory} owner marker could not be read: ${describeError(error)}`,
+    };
+  }
+  try {
+    const parsed = JSON.parse(raw) as { token?: unknown; adoptedBy?: unknown };
+    const token = parsed.token;
+    if (typeof token === "string" && token.length > 0) {
+      // `adoptedBy` is present only on a marker written by adoption, and names
+      // the session whose adoption wrote it. A creation marker has none. That
+      // is what lets recovery tell a strand from a live creation whose token no
+      // session records.
+      const adoptedBy = typeof parsed.adoptedBy === "string" ? parsed.adoptedBy : undefined;
+      return { kind: "token", token, adoptedBy };
+    }
+  } catch (error) {
+    return {
+      kind: "unreadable",
+      reason: `${adminDirectory} owner marker does not parse: ${describeError(error)}`,
+    };
+  }
+  // The gateway writes this file, so a present-but-tokenless marker is a
+  // corruption of our own record and not evidence that the worktree is
+  // someone else's.
+  return { kind: "unreadable", reason: `${adminDirectory} owner marker carries no token` };
+}
+
+/**
+ * The checkout an admin directory currently points at.
+ *
+ * git-worktree(1) DETAILS: the admin directory holds a `gitdir` file naming the
+ * worktree's `.git` file, and `git worktree move` rewrites exactly that. Used
+ * for the operator-facing message only; a failure to read it does not change
+ * any decision.
+ */
+function checkoutForAdminDirectory(adminDirectory: string): string | null {
+  try {
+    const recorded = readFileSync(join(adminDirectory, "gitdir"), "utf8").trim();
+    // RESOLVED against the administrative directory, because git does not
+    // promise this path is absolute. `worktree.useRelativePaths=true` is a
+    // supported setting and writes `../../../.worktrees/<name>/.git`, which
+    // `existsSync` then resolves against the gateway's own working directory
+    // and finds nothing. An ordinary `git worktree move` was enough to make a
+    // live worktree read as removed and lose its durable record.
+    return dirname(resolvePath(adminDirectory, recorded));
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Is the worktree this session created still alive, wherever git now keeps it?
+ *
+ * A recorded path going missing does NOT establish that the worktree was
+ * removed. `git worktree move` relocates the checkout and rewrites the entry's
+ * `gitdir`, leaving the session's recorded path stale while the worktree is
+ * alive and registered somewhere else. Treating that absence as success let
+ * cleanup report a removal that never happened, and the caller then finalized
+ * the durable record, so the worktree leaked with nothing left pointing at it.
+ *
+ * Two pieces of identity, and the admin directory is the stronger one.
+ * `git worktree remove` deletes the admin directory (builtin/worktree.c,
+ * `delete_git_dir`) and `git worktree move` leaves it exactly where it was, so
+ * its presence answers the question directly and without reading anything that
+ * a move or an unavailable volume can take away. The token is what tells a
+ * recycled admin directory -- git may hand the same name to a later worktree --
+ * apart from ours, and is the only identity sessions created before the admin
+ * directory was recorded have.
+ */
+async function locateLiveWorktree(
+  repoRoot: string,
+  identity: { token: string | null; adminDirectory: string | null; recordedPath: string },
+  logger: Logger
+): Promise<WorktreeSearchResult> {
+  const listing = await listWorktreeAdminDirectories(repoRoot, logger);
+  if ("failure" in listing) return { kind: "indeterminate", reason: listing.failure };
+
+  if (identity.adminDirectory !== null) {
+    const recorded = canonicalPath(identity.adminDirectory);
+    const match = listing.directories.find(directory => canonicalPath(directory) === recorded);
+    if (!match) return { kind: "removed" };
+    // The directory is still registered. It is ours unless its marker proves it
+    // now belongs to a different creation, in which case ours was removed and
+    // git reused the name.
+    const marker = readAdminMarker(match);
+    if (identity.token !== null && marker.kind === "token" && marker.token !== identity.token) {
+      return { kind: "removed" };
+    }
+    return liveOrPrunable(match, identity.recordedPath);
+  }
+
+  if (identity.token === null) {
+    return { kind: "indeterminate", reason: "session carries no worktree identity" };
+  }
+
+  const unreadable: string[] = [];
+  for (const directory of listing.directories) {
+    const marker = readAdminMarker(directory);
+    if (marker.kind === "token" && marker.token === identity.token) {
+      return liveOrPrunable(directory, identity.recordedPath);
+    }
+    if (marker.kind === "unreadable") unreadable.push(marker.reason);
+  }
+  // Not finding the token among the worktrees we could read says nothing about
+  // the ones we could not.
+  if (unreadable.length > 0) {
+    return { kind: "indeterminate", reason: unreadable.join("; ") };
+  }
+  return { kind: "removed" };
+}
+
+/**
+ * A registered administrative directory is a LIVE worktree only while the
+ * checkout it points at is still there.
+ *
+ * When it is not, the entry is the stale kind `git worktree prune` exists to
+ * clear, and refusing on it would be worse than useless: a retry takes the same
+ * path to the same answer, so the durable record would never be resolvable by
+ * the retry it is retained for, only by hand. Removal handles that case, and
+ * confirms the entry is gone before reporting success.
+ *
+ * The cost is stated rather than hidden: a checkout that is missing because its
+ * volume is unavailable, or because it was renamed outside git, is
+ * indistinguishable from one that was deleted. Git has no worktree either way,
+ * and the gateway reports the removal of what git knew about, not of a
+ * directory tree neither of them can name any more.
+ */
+function liveOrPrunable(adminDirectory: string, recordedPath: string): WorktreeSearchResult {
+  const checkout = checkoutForAdminDirectory(adminDirectory);
+  if (checkout === null) return { kind: "live", path: adminDirectory };
+  if (existsSync(checkout)) return { kind: "live", path: checkout };
+  // The checkout is not there. That is only a removal when the registration
+  // still names the path this session recorded, because then the removal about
+  // to run targets exactly that entry and git clears it.
+  //
+  // When the registration points SOMEWHERE ELSE and that is missing, the
+  // worktree moved and then went away, and the two reasons are
+  // indistinguishable: deleted, or on a volume that is not mounted right now.
+  // An earlier version finalized here on the argument that a retry would reach
+  // the same answer forever. That argument is wrong when the absence is
+  // temporary: restoring the checkout after the record was finalized leaves a
+  // directory tree that nothing will ever clean, while refusing costs only a
+  // visible pending-cleanup row naming where the worktree was last seen.
+  if (canonicalPath(checkout) === canonicalPath(recordedPath)) return { kind: "removed" };
+  return {
+    kind: "indeterminate",
+    reason: `the worktree moved to ${checkout}, which is not there now`,
+  };
+}
+
+function canonicalPath(path: string): string {
+  try {
+    return realpathSync(path);
+  } catch {
+    return resolvePath(path);
+  }
+}
+
+/**
+ * The token this worktree was created with, or null when there is none to read.
+ *
+ * Null covers four different situations on purpose, and every caller must treat
+ * them alike because none of them is evidence of ownership: the path is gone,
+ * the path is not a managed worktree, the worktree predates this marker, or the
+ * marker is unreadable. Only a token that is PRESENT and EQUAL authorises
+ * anything.
+ */
+export async function readWorktreeOwnerToken(
+  worktreePath: string,
+  logger: Logger
+): Promise<string | null> {
+  const admin = await resolveWorktreeAdminDirectory(worktreePath, logger);
+  if (!admin) return null;
+  try {
+    const parsed: unknown = JSON.parse(readFileSync(join(admin, GATEWAY_WORKTREE_MARKER), "utf8"));
+    const token = (parsed as { token?: unknown }).token;
+    return typeof token === "string" && token.length > 0 ? token : null;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Decide whether a worktree's on-disk marker names the identity the store has
+ * recorded, reconciling a mismatch the store is authorised to win.
+ *
+ * The record compare-and-set is the arbiter of a worktree's identity: whatever
+ * token a session durably holds is the one that won. The marker is a cache of
+ * that, and concurrent adoptions of one session can leave it naming an
+ * abandoned token a losing reclaim wrote (rounds 12 and 13: three overlapping
+ * first-adoptions settle so the store holds the winner while the disk holds an
+ * intermediate). Rather than defend every write ordering, reuse repairs the
+ * cache from the store.
+ *
+ * Repair is confined to THIS session's own marker. A marker carrying this
+ * session's `adoptedBy` was written by this session's adoption of the worktree
+ * at this path, so rewriting it to the recorded token cannot take another
+ * creation's identity. An ABSENT marker is NOT reconciled: a validated gateway
+ * registration with no marker can be a replacement creation caught between
+ * `git worktree add` and its marker write, and materialising the record there
+ * would be the ABA the token exists to catch. A creation marker (no
+ * `adoptedBy`), a marker adopted by another session, or an unreadable one that
+ * disagrees with the record is likewise a different creation and refused.
+ */
+export async function reconcileWorktreeIdentity(opts: {
+  worktreePath: string;
+  recordedToken: string | null;
+  sessionId: string;
+  logger: Logger;
+}): Promise<boolean> {
+  const { worktreePath, recordedToken, sessionId, logger } = opts;
+  if (recordedToken === null) return false;
+  const adminDirectory = await resolveWorktreeAdminDirectory(worktreePath, logger);
+  if (adminDirectory === null) return false;
+  const marker = readAdminMarker(adminDirectory);
+  if (marker.kind === "token" && marker.token === recordedToken) return true;
+  // Repair the cache to the record only for a token marker carrying THIS
+  // session's `adoptedBy`, which a losing concurrent reclaim left on a stale
+  // token. An ABSENT marker is deliberately NOT reconciled: `createWorktree`
+  // registers the worktree before it writes the marker, so a validated
+  // registration with no marker can be a REPLACEMENT creation caught in that
+  // window, indistinguishable from a lost marker because everything else is
+  // name-derived. Materialising the recorded token there would stamp this
+  // session's identity onto someone else's worktree, the ABA the token exists
+  // to catch. The concurrent fresh adoption that would otherwise strand its own
+  // marker is prevented at the source instead, by the exclusive-create write in
+  // `adoptLegacyWorktreeIdentity`. An unreadable marker, or one adopted by
+  // another session, is likewise a different creation and refused unchanged.
+  if (marker.kind !== "token" || marker.adoptedBy !== sessionId) return false;
+  try {
+    writeFileSync(
+      join(adminDirectory, GATEWAY_WORKTREE_MARKER),
+      JSON.stringify({ token: recordedToken, adoptedBy: sessionId }),
+      { mode: 0o600 }
+    );
+    if ((await readWorktreeOwnerToken(worktreePath, logger)) !== recordedToken) return false;
+    logWarn(
+      logger,
+      `reconciled the worktree marker at ${worktreePath} to the recorded identity for session ${sessionId}`
+    );
+    return true;
+  } catch (error) {
+    logWarn(
+      logger,
+      `could not reconcile the worktree marker at ${worktreePath} for session ${sessionId}: ${describeError(error)}`
+    );
+    return false;
+  }
+}
+
 async function canonicalGitCommonDirectory(
   repositoryPath: string,
   logger: Logger
@@ -574,12 +1019,45 @@ export async function createWorktree(opts: CreateWorktreeOptions): Promise<Workt
     throw error;
   }
 
+  // After the checkout, so a failed creation is torn down above rather than
+  // leaving a marker behind for a worktree that does not exist.
+  const token = randomUUID();
+  let adminDirectory: string;
+  try {
+    const admin = await resolveWorktreeAdminDirectory(finalTarget.path, logger);
+    if (!admin) {
+      throw new WorktreeError(
+        "Git administrative directory for the new worktree could not be resolved; refusing to create a worktree with no owner marker"
+      );
+    }
+    writeFileSync(join(admin, GATEWAY_WORKTREE_MARKER), JSON.stringify({ token }), {
+      mode: 0o600,
+    });
+    // READ IT BACK. `writeFileSync` returns void, so nothing above establishes
+    // that the marker exists and is readable; a call whose return value is
+    // never read has not been exercised. A worktree whose identity cannot be
+    // read back is worse than one with no identity, because cleanup would
+    // refuse it forever.
+    if ((await readWorktreeOwnerToken(finalTarget.path, logger)) !== token) {
+      throw new WorktreeError(
+        "Owner marker for the new worktree could not be read back; refusing to create an unidentifiable worktree"
+      );
+    }
+    adminDirectory = admin;
+  } catch (error) {
+    await execGit(repoRoot, ["worktree", "remove", "--force", finalTarget.path], logger);
+    await execGit(repoRoot, ["branch", "-D", branch], logger);
+    throw error;
+  }
+
   return {
     name,
     path: finalTarget.path,
     ref: resolvedRef,
     createdAt: new Date().toISOString(),
     created: true,
+    token,
+    adminDirectory,
   };
 }
 
@@ -599,6 +1077,260 @@ export function createWorktreeSessionCleanupHook(
   return async (session: { id: string; metadata?: Record<string, unknown> }): Promise<void> => {
     await cleanupSessionWorktree(session, logger, options);
   };
+}
+
+/**
+ * For a session with NO creation identity, is the repository certainly not
+ * still holding the worktree it is asking about?
+ *
+ * A pre-token session cannot name its worktree, so no observation can tie a
+ * surviving registration to it OR rule one out: a marked worktree might still
+ * be this session's, with the marker written after the session metadata was
+ * last touched. The only claim that holds is the total one. If the repository
+ * registers no managed worktree at all, there is nothing left that could be it.
+ *
+ * This is the honest form of the question the `gateway/<name>` branch was asked
+ * in an earlier version. The branch is derived from the worktree name, which is
+ * the ABA weakness the marker exists to close, and both review seats walked a
+ * live worktree past it by renaming the branch.
+ *
+ * Deliberately conservative: any other live gateway worktree in the same
+ * repository makes a pre-token session refuse. That population is transient,
+ * and `adoptLegacyWorktreeIdentity` clears it by giving those sessions the
+ * identity that lets the ordinary token search answer properly.
+ */
+async function noLinkedWorktreeRemains(repoRoot: string, logger: Logger): Promise<boolean> {
+  const listing = await listWorktreeAdminDirectories(repoRoot, logger);
+  if ("failure" in listing) return false;
+  // ANY linked worktree, wherever its checkout now sits.
+  //
+  // An earlier version excluded worktrees outside `<repoRoot>/.worktrees`, on
+  // the theory that a worktree the user made elsewhere cannot be ours. It
+  // asked `isDirectPathChild`, whose last condition is that the relative path
+  // contains no separator, so it meant "a DIRECT CHILD of .worktrees" rather
+  // than "inside" it. `git worktree move` relocates a checkout anywhere,
+  // including one directory deeper, and every such move made this answer true
+  // while the worktree was alive and registered. Location was standing in for
+  // identity, and location is the one thing `move` changes; that is the same
+  // substitution the `gateway/<name>` branch made a round earlier.
+  //
+  // A session with no identity cannot exclude ANY of them, so the only sound
+  // reading is the total one.
+  return listing.directories.length === 0;
+}
+
+/**
+ * Give a pre-token session the identity it was created without.
+ *
+ * Every session that exists when this ships is the pre-token shape, and a
+ * session with no identity can prove nothing: cleanup has to refuse, which
+ * leaves a durable record only an operator can resolve. Backfilling identity
+ * removes that population rather than making the refusal cheaper to live with.
+ *
+ * Adoption is only sound because of a property that did not exist before this
+ * release: `createWorktree` writes a marker and refuses to return a worktree
+ * whose marker cannot be read back. An UNMARKED live worktree therefore cannot
+ * be a replacement created after this ships, which is the object the ABA hazard
+ * is about. Three further conditions, each closing a way the assertion could be
+ * wrong:
+ *
+ * - The caller must have checked ownership; this is host-local state.
+ * - The path must resolve as a registered managed worktree, so an ordinary
+ *   directory left at the path by an out-of-band removal is not adopted.
+ * - Exactly ONE session may claim the path. Two pre-token sessions naming one
+ *   path is the ABA case itself, and it cannot be resolved by picking.
+ *
+ * A worktree that already carries a marker is left alone: some other creation
+ * owns it, and stamping over that would destroy the evidence this whole
+ * mechanism rests on. The one exception is a STRAND, and telling a strand from
+ * a live worktree needs TWO signals together: the marker's `adoptedBy` names
+ * this session (provenance), AND the store the caller reads records no session
+ * with that token (`recordsToken`). Provenance alone reclaims a stale snapshot
+ * of a recorded adoption; record-absence alone reclaims a live request-scoped
+ * worktree whose token is never recorded. A strand is a marker this session
+ * wrote whose token the store does not record, the write-then-record pair that
+ * came apart. A caller opts into recovery by supplying `recordsToken`; without
+ * it every token marker is left alone.
+ *
+ * Tombstones are NOT adoptable and this must not be called for one. A deleted
+ * session plus a live unmarked worktree is exactly the shape where the worktree
+ * belongs to a replacement whose own row a pre-release foreign-host deletion
+ * discarded, and adopting there would authorise deleting someone's working
+ * tree.
+ */
+export async function adoptLegacyWorktreeIdentity(
+  session: { id: string; metadata?: Record<string, unknown> },
+  options: {
+    claimantsForPath: number;
+    recordsToken?: (token: string) => boolean;
+    logger?: Logger;
+    // Test-only seam. Fires once, after the marker has been read and classified
+    // but before this call writes its own, so a test can interleave a second
+    // concurrent adoption into exactly the window `wx` exists to close: two
+    // fresh adoptions that both read the marker absent. Undefined in production.
+    afterMarkerReadForTest?: () => void | Promise<void>;
+  }
+): Promise<AdoptedWorktreeIdentity | null> {
+  const logger = options.logger ?? noopLogger;
+  const meta = session.metadata ?? {};
+  // Set only on the reclaim path, to the marker being overwritten, so a reclaim
+  // whose record loses a concurrent race can be undone by restoring it.
+  let priorMarker: { token: string; adoptedBy: string } | undefined;
+  const worktreePath = typeof meta.worktreePath === "string" ? meta.worktreePath : null;
+  if (worktreePath === null) return null;
+  if (typeof meta.worktreeToken === "string") return null;
+  if (meta.worktreeCleanupPendingDeletion === true || meta.worktreeCleanupPending === true) {
+    return null;
+  }
+  if (options.claimantsForPath !== 1) {
+    logWarn(
+      logger,
+      `not adopting the worktree at ${worktreePath} for session ${session.id}: ${options.claimantsForPath} sessions claim it`
+    );
+    return null;
+  }
+  if (!existsSync(worktreePath)) return null;
+
+  const adminDirectory = await resolveWorktreeAdminDirectory(worktreePath, logger);
+  if (adminDirectory === null) return null;
+  const marker = readAdminMarker(adminDirectory);
+  if (marker.kind === "unreadable") {
+    // Cannot tell whose identity this is. Touching it might destroy a live
+    // creation's marker, so refuse and leave the decision to a later attempt
+    // whose read succeeds. This is also the transient case: the round-8 strand
+    // read as a token once the filesystem recovered, and is reclaimed below.
+    return null;
+  }
+  if (marker.kind === "token") {
+    // Reclaim ONLY a strand, and a strand needs BOTH signals, because each one
+    // alone admits a different live worktree:
+    //
+    // - PROVENANCE (`adoptedBy === session.id`). Adoption stamps the adopting
+    //   session's id; a creation marker carries none. Without this, a
+    //   request-scoped worktree (created with no sessionId), whose token is
+    //   never recorded by any session, reads as an unrecorded token and a
+    //   fresh identity is stamped over a live creation.
+    // - UNRECORDED (`!recordsToken(marker.token)`, from the store the caller
+    //   reads fresh). Without this, a stale snapshot of THIS session taken
+    //   before a successful adoption also has no token, so provenance matches
+    //   and the reclaim stamps over an adoption the store has already recorded.
+    //
+    // A true strand is a marker this session wrote whose token the store does
+    // not record, which is exactly the write-then-record pair that came apart.
+    // Absent the predicate, treat the token as recorded and refuse, so a caller
+    // that cannot consult the store never reclaims.
+    const recorded = options.recordsToken ? options.recordsToken(marker.token) : true;
+    const isOwnStrand = marker.adoptedBy === session.id && !recorded;
+    if (!isOwnStrand) {
+      logWarn(
+        logger,
+        `not adopting the worktree at ${worktreePath} for session ${session.id}: it carries a live or foreign identity, not this session's strand`
+      );
+      return null;
+    }
+    // Remember what we are overwriting. `recordsToken` was read before the
+    // administrative-directory await above, so a concurrent request on this same
+    // session can record a token in that window and this reclaim then overwrites
+    // a LIVE marker. If it does, our record CAS loses to the one that landed
+    // first, and the caller must put this marker back rather than delete it: the
+    // CAS, not the stale store read, is what decides which reclaim is real.
+    priorMarker = { token: marker.token, adoptedBy: session.id };
+    logWarn(
+      logger,
+      `reclaiming this session's own stranded adoption marker at ${worktreePath} for session ${session.id}`
+    );
+  }
+
+  if (options.afterMarkerReadForTest) await options.afterMarkerReadForTest();
+
+  const token = randomUUID();
+  try {
+    // Stamp the adopting session's id, so that if this write lands but the
+    // record does not, a later reuse of THIS session can tell its own strand
+    // from a live creation marker (which carries no `adoptedBy`) and reclaim
+    // only the former.
+    //
+    // A FRESH adoption (no prior marker) writes EXCLUSIVELY: two concurrent
+    // adoptions of one pre-token session must not both create a marker, because
+    // the loser would clobber the winner and then, on its failed record, delete
+    // it, leaving the winner's worktree with a token in the store and no marker
+    // on disk. `wx` makes exactly one creator win; the other gets EEXIST, aborts
+    // below, and its withdrawal is a no-op because the marker on disk is not its
+    // token. A RECLAIM (prior marker present) instead overwrites, and its lost
+    // record is undone by restoring the marker it overwrote.
+    writeFileSync(
+      join(adminDirectory, GATEWAY_WORKTREE_MARKER),
+      JSON.stringify({ token, adoptedBy: session.id }),
+      { mode: 0o600, flag: priorMarker ? "w" : "wx" }
+    );
+    // Read back, for the same reason creation does: a marker that cannot be
+    // read is worse than none, because cleanup would refuse it forever.
+    if ((await readWorktreeOwnerToken(worktreePath, logger)) !== token) {
+      throw new WorktreeError("owner marker could not be read back");
+    }
+  } catch (error) {
+    logWarn(
+      logger,
+      `could not adopt the worktree at ${worktreePath} for session ${session.id}: ${describeError(error)}`
+    );
+    // The write may have landed even though the read-back did not, so undo it on
+    // the same terms the caller uses: restore a marker we overwrote, or delete
+    // one we created, but never leave our unrecorded token behind.
+    settleFailedAdoptionMarker(adminDirectory, token, priorMarker, logger);
+    return null;
+  }
+  return { token, adminDirectory, priorMarker };
+}
+
+/**
+ * Undo the marker an adoption wrote when its record failed to persist.
+ *
+ * Without this the worktree carries an identity that no session records, so
+ * every later adoption attempt refuses it as "already marked" and cleanup can
+ * never prove anything about it either. The write and the record are not atomic
+ * and cannot be; undoing the half that landed is what keeps the pair honest.
+ *
+ * Only OUR marker is touched: `rmSync` on the path alone deletes whatever sits
+ * there, and by the time this runs another creation may already own the
+ * directory. A fresh adoption's marker is deleted. A RECLAIM's marker is
+ * RESTORED to what it overwrote, because a concurrent same-session adoption may
+ * have recorded that token between the store read and the CAS, in which case
+ * the marker we overwrote is a live identity and deleting it would brick the
+ * worktree the winning CAS owns.
+ */
+export function settleFailedAdoptionMarker(
+  adminDirectory: string,
+  ourToken: string,
+  priorMarker: { token: string; adoptedBy: string } | undefined,
+  logger: Logger
+): void {
+  const present = readAdminMarker(adminDirectory);
+  if (present.kind !== "token" || present.token !== ourToken) return;
+  try {
+    if (priorMarker) {
+      writeFileSync(
+        join(adminDirectory, GATEWAY_WORKTREE_MARKER),
+        JSON.stringify({ token: priorMarker.token, adoptedBy: priorMarker.adoptedBy }),
+        { mode: 0o600 }
+      );
+    } else {
+      rmSync(join(adminDirectory, GATEWAY_WORKTREE_MARKER), { force: true });
+    }
+  } catch (error) {
+    logWarn(
+      logger,
+      `adopted marker in ${adminDirectory} could not be settled after its record failed to persist: ${describeError(error)}`
+    );
+  }
+}
+
+/** Delete a marker a fresh (non-reclaim) adoption wrote but never recorded. */
+export function discardAdoptedWorktreeMarker(
+  adminDirectory: string,
+  token: string,
+  logger: Logger
+): void {
+  settleFailedAdoptionMarker(adminDirectory, token, undefined, logger);
 }
 
 /** Remove the exact worktree authorized by durable session provenance. */
@@ -628,8 +1360,8 @@ export async function cleanupSessionWorktree(
   const worktreeName = typeof meta.worktreeName === "string" ? meta.worktreeName : undefined;
   // Layout invariant from createWorktree: <repoRoot>/.worktrees/<name>.
   // Strip the trailing two segments to recover repoRoot.
-  const marker = `${sep}.worktrees${sep}`;
-  const markerIdx = worktreePath.lastIndexOf(marker);
+  const layoutMarker = `${sep}.worktrees${sep}`;
+  const markerIdx = worktreePath.lastIndexOf(layoutMarker);
   if (markerIdx === -1) {
     logWarn(
       logger,
@@ -638,11 +1370,99 @@ export async function cleanupSessionWorktree(
     return false;
   }
   const repoRoot = worktreePath.slice(0, markerIdx);
+
+  // `git worktree remove` deletes the administrative directory
+  // (builtin/worktree.c, `delete_git_dir` calls `remove_dir_recursively` on
+  // it), so a SUCCESSFUL removal always destroys the marker. Checking identity
+  // against an absent path therefore reads the evidence of success as evidence
+  // of a foreign worktree, and an earlier version did exactly that: after a
+  // crash between the removal and the durable acknowledgement, the retry
+  // refused forever and the tombstone became immortal.
+  //
+  // But an absent recorded path is not by itself evidence of removal either.
+  // `git worktree move` leaves the recorded path stale while the worktree is
+  // alive elsewhere, and reporting success there made the caller finalize the
+  // durable record for a worktree that still exists. Absence only means the
+  // removal happened once nothing live still carries this session's token.
+  const recordedToken = typeof meta.worktreeToken === "string" ? meta.worktreeToken : null;
+  const recordedAdminDirectory =
+    typeof meta.worktreeAdminDirectory === "string" ? meta.worktreeAdminDirectory : null;
+  // Set only by a SEARCH that came back empty over this session's own identity.
+  // A session with no identity never sets it, and therefore never gets the
+  // benefit of the doubt when git refuses a removal.
+  let removalProven = false;
+  if (!existsSync(worktreePath) && (recordedToken !== null || recordedAdminDirectory !== null)) {
+    const located = await locateLiveWorktree(
+      repoRoot,
+      { token: recordedToken, adminDirectory: recordedAdminDirectory, recordedPath: worktreePath },
+      logger
+    );
+    if (located.kind === "live") {
+      logWarn(
+        logger,
+        `worktree for session ${session.id} is no longer at its recorded path but is still registered at ${located.path}; not reporting a removal that did not happen`
+      );
+      return false;
+    }
+    if (located.kind === "indeterminate") {
+      logWarn(
+        logger,
+        `cannot establish whether the worktree for session ${session.id} still exists (${located.reason}); refusing to report a removal that has not been verified`
+      );
+      return false;
+    }
+    removalProven = true;
+  }
+
+  // A session with no identity gets one narrow answer, derived from neither a
+  // name nor a location: if the repository registers no linked worktree at all,
+  // there is nothing left that could be this one.
+  if (
+    !existsSync(worktreePath) &&
+    recordedToken === null &&
+    recordedAdminDirectory === null &&
+    (await noLinkedWorktreeRemains(repoRoot, logger))
+  ) {
+    removalProven = true;
+  }
+
+  if (existsSync(worktreePath)) {
+    const recorded = recordedToken;
+    const onDisk = await readWorktreeOwnerToken(worktreePath, logger);
+
+    // A session recorded before creation tokens existed cannot prove it owns
+    // the live worktree at its path, so it removes nothing.
+    //
+    // Treating "no token on either side" as a match was the obvious
+    // compatibility rule and it reopened the exact defect the token exists to
+    // close: a reviewer deleted a live replacement with a stale legacy record,
+    // because `null === null`. On a DESTRUCTIVE operation an unprovable claim
+    // has to fail closed. The cost is bounded and visible: the worktree stays
+    // on disk and the durable record is retained, so the session still appears
+    // in the pending-cleanup listing for an operator to resolve by hand. The
+    // cost of the alternative is someone else's working tree.
+    if (recorded === null) {
+      logWarn(
+        logger,
+        `worktree on session ${session.id} predates gateway creation tokens; refusing to remove a worktree this session cannot prove it created. Remove ${worktreePath} manually if it is stale.`
+      );
+      return false;
+    }
+    if (recorded !== onDisk) {
+      logWarn(
+        logger,
+        `worktree on session ${session.id} no longer carries this session's creation token; skipping cleanup`
+      );
+      return false;
+    }
+  }
+
   return removeWorktreeWithResult({
     repoRoot,
     path: worktreePath,
     name: worktreeName,
     logger,
+    removalProven,
   });
 }
 
@@ -650,11 +1470,6 @@ export async function removeWorktree(opts: RemoveWorktreeOptions): Promise<void>
   await removeWorktreeWithResult(opts);
 }
 
-/**
- * Remove a managed worktree and report whether no live gateway-owned worktree
- * remains at the path. Callers that must release durable ownership use this
- * result instead of treating best-effort logging as successful cleanup.
- */
 export async function removeWorktreeWithResult(opts: RemoveWorktreeOptions): Promise<boolean> {
   const logger = opts.logger ?? noopLogger;
   if (!opts.repoRoot || !opts.path) {
@@ -713,6 +1528,25 @@ export async function removeWorktreeWithResult(opts: RemoveWorktreeOptions): Pro
         `git worktree remove --force failed (code ${remove.code}): ${remove.stderr.trim()}`
       );
       if (managed.exists && existsSync(managed.path)) return false;
+      // git refused and the recorded path is absent. That is what an ALREADY
+      // COMPLETED removal looks like from a retry, and also what a worktree
+      // that MOVED AWAY looks like, and nothing observable here separates them.
+      //
+      // Only the caller knows. `cleanupSessionWorktree` establishes identity
+      // before it gets here: when it says the removal is proven, it has already
+      // searched every administrative directory for this session's creation
+      // token and found none, which is what a completed removal leaves behind.
+      // A session with no identity to search by has proven nothing, and an
+      // earlier version guessed on its behalf from the `gateway/<name>` branch.
+      // That is the ABA weakness the creation token exists to close, and both
+      // review seats walked a live worktree through it by renaming the branch.
+      if (!opts.removalProven) {
+        logWarn(
+          logger,
+          `git refused to remove ${managed.path} and this session cannot prove the worktree is gone; retaining it`
+        );
+        return false;
+      }
     }
     if (managed.name) {
       const branch = `gateway/${managed.name}`;

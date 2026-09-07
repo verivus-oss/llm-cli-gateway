@@ -83,14 +83,16 @@ registered `workspace` for repository-dependent work. A gateway worktree also
 requires a selected registered workspace and never falls back to process cwd.
 Cwd-scoped `resumeLatest` requests fail closed without a stable target.
 Gateway worktrees work with file-backed and PostgreSQL session managers, but
-their filesystem ownership remains host-local. For session deletion and
-file-backed TTL eviction, the file-backed manager retains failed cleanup for
-retry when that manager is registered on the owning host.
-Explicit PostgreSQL deletion, including `session_clear_all`, deletes the session
-row before its cleanup observer runs, so a failed removal is not retained for
-automatic retry, and deletion from another host cannot remove the owning host's
-worktree. The database-side `cleanup_expired_sessions` function invokes no
-gateway observer and performs no worktree cleanup.
+their filesystem ownership remains host-local. For session deletion,
+`session_clear_all`, and file-backed TTL eviction, both managers keep a failed
+Git removal as a hidden cleanup-pending tombstone and retry cleanup when a
+manager is registered on the owning host; the record is finalized only once Git
+no longer registers the worktree, read back rather than inferred from the
+recorded path being absent. Deletion processed by a different host removes no worktree
+and leaves the owning host's record intact. The database-side
+`cleanup_expired_sessions` function stages the same tombstone instead of
+deleting a worktree-bearing session; it invokes no gateway observer and so
+attempts no removal itself. A tombstone is not bounded by retention.
 
 ## Security model
 
