@@ -49,8 +49,11 @@ All notable changes to the llm-cli-gateway project.
   cleanup tombstones as claimants, a worktree that already carries another
   creation's marker, an ordinary directory standing at the path, and a session
   already awaiting cleanup. A marker whose record fails to persist is withdrawn
-  again, so a half-completed adoption cannot leave a worktree carrying an
-  identity no session claims. The Git
+  again, and that withdrawal removes only the token it wrote, never a
+  concurrent creation's. Because even that withdrawal can fail on a transient
+  read, a marker left carrying a token no session records is treated as an
+  orphan and reclaimed on the next reuse, so a strand recovers on its own rather
+  than refusing the worktree forever. The Git
   administrative directory is recorded alongside it, because `git worktree
   remove` deletes that directory and `git worktree move` leaves it alone, so it
   answers whether a removal happened without reading anything a move or an

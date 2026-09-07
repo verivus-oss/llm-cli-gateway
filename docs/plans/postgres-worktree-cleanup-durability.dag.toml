@@ -331,3 +331,23 @@ docs/evidence/postgres-worktree-cleanup-2026-09-04.md.
 """
 idempotent = true
 validation = "Each adoption-wiring guard has a mutant only its own named test kills, including the pre-fix `if (!persisted)` shape and the unscoped withdrawal; surviving mutants are enumerated in the evidence, not closed."
+
+[[steps]]
+id = "round-9-review-repairs"
+depends_on = ["round-8-review-repairs"]
+actor = "assistant"
+status = """
+done 2026-09-07. Seats SPLIT: grok approved, codex blocked, settled by
+experiment. codex falsified round 8's own repair: the withdrawal reads the
+marker before removing it, and when THAT read fails transiently the withdrawal
+declines, leaving the adoption's own marker unrecorded and the worktree refused
+forever as already marked. Fourth member of the identity-substitution series,
+name then location then directory then a fallible read. Fixed by RECOVERY rather
+than an infallible withdrawal: adoption now reclaims an orphan marker, a token no
+session records, and refuses every other token and every unreadable marker.
+An in-flight same-host window is disclosed, not closed.
+Evidence, including grok's three corrections to my round-9 claims and the
+disclosed residual: docs/evidence/postgres-worktree-cleanup-2026-09-04.md.
+"""
+idempotent = true
+validation = "Five recovery guards each have a mutant only its own named test kills, including recovery-off, reclaim-any, the tombstone term, the unreadable refusal and the token block; an end-to-end test strands on a failed withdrawal read and recovers on a healthy retry."

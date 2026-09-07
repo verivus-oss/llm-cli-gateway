@@ -1053,7 +1053,15 @@ async function noLinkedWorktreeRemains(repoRoot: string, logger: Logger): Promis
  *
  * A worktree that already carries a marker is left alone: some other creation
  * owns it, and stamping over that would destroy the evidence this whole
- * mechanism rests on.
+ * mechanism rests on. The one exception is an ORPHAN marker, a token that no
+ * session this host can enumerate records. That state is reachable only through
+ * this mechanism's own non-atomic write-then-record: when an adoption's marker
+ * lands but its record does not, the withdrawal that should take the marker
+ * back declines if its read of the marker fails, and the worktree is then
+ * refused forever as "already marked". Reclaiming an orphan is how that
+ * transient failure stops being permanent. A caller opts into recovery by
+ * supplying `recordsToken`; without it every token marker is left alone, as
+ * before.
  *
  * Tombstones are NOT adoptable and this must not be called for one. A deleted
  * session plus a live unmarked worktree is exactly the shape where the worktree
@@ -1063,7 +1071,11 @@ async function noLinkedWorktreeRemains(repoRoot: string, logger: Logger): Promis
  */
 export async function adoptLegacyWorktreeIdentity(
   session: { id: string; metadata?: Record<string, unknown> },
-  options: { claimantsForPath: number; logger?: Logger }
+  options: {
+    claimantsForPath: number;
+    recordsToken?: (token: string) => boolean;
+    logger?: Logger;
+  }
 ): Promise<{ token: string; adminDirectory: string } | null> {
   const logger = options.logger ?? noopLogger;
   const meta = session.metadata ?? {};
@@ -1085,7 +1097,36 @@ export async function adoptLegacyWorktreeIdentity(
   const adminDirectory = await resolveWorktreeAdminDirectory(worktreePath, logger);
   if (adminDirectory === null) return null;
   const marker = readAdminMarker(adminDirectory);
-  if (marker.kind !== "none") return null;
+  if (marker.kind === "unreadable") {
+    // Cannot tell whose identity this is. Touching it might destroy a live
+    // creation's marker, so refuse and leave the decision to a later attempt
+    // whose read succeeds. This is also the transient case: the round-8 strand
+    // read as a token once the filesystem recovered, and is reclaimed below.
+    return null;
+  }
+  if (marker.kind === "token") {
+    // A present token marker is normally a live creation's identity and must be
+    // left untouched. The sole exception is an ORPHAN: a token no session this
+    // host records. The single-claimant check above and tombstone counting in
+    // the caller are what make reclaiming it sound. A live replacement's
+    // `createWorktree` records its token in the same store before it returns,
+    // so a token no session records cannot be a live replacement; and a
+    // replacement whose owning session was deleted would surface as a second,
+    // tombstone, claimant and fail the count. Absent the predicate, treat every
+    // token as owned and refuse, which is the pre-recovery behaviour.
+    const recorded = options.recordsToken ? options.recordsToken(marker.token) : true;
+    if (recorded) {
+      logWarn(
+        logger,
+        `not adopting the worktree at ${worktreePath} for session ${session.id}: it already carries another creation's identity`
+      );
+      return null;
+    }
+    logWarn(
+      logger,
+      `reclaiming an orphaned worktree marker at ${worktreePath} for session ${session.id}: no session records its token`
+    );
+  }
 
   const token = randomUUID();
   try {

@@ -3287,8 +3287,18 @@ async function adoptWorktreeIdentityForSession(
       candidate.metadata?.worktreePath === worktreePath;
     const claimantsForPath =
       visible.filter(claimsPath).length + tombstoned.filter(claimsPath).length;
+    // A marker whose token no enumerable session records is an orphan left by a
+    // prior adoption whose record never landed; recovery reclaims it rather
+    // than refusing the worktree forever. Tombstones are included for the same
+    // reason they are counted above: a deleted owner still records its token,
+    // and a token a tombstone holds is a worktree pending cleanup, not an
+    // orphan. The current session is pre-token, so it records no token here.
+    const recordsToken = (token: string): boolean =>
+      visible.some(s => s.metadata?.worktreeToken === token) ||
+      tombstoned.some(s => s.metadata?.worktreeToken === token);
     const adopted = await adoptLegacyWorktreeIdentity(session, {
       claimantsForPath,
+      recordsToken,
       logger: runtime.logger,
     });
     if (!adopted) return;
