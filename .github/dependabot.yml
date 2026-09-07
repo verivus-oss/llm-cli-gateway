@@ -72,6 +72,19 @@ updates:
       # still surfaces for review, and the audit blocklist stays the hard gate.
       - dependency-name: "body-parser"
         versions: ["2.3.0"]
+      # TypeScript 7 (major) cannot be adopted yet, and it is purely an upstream
+      # linter block, not our code: `tsc -p tsconfig.build.json` is clean under
+      # 7.0.2. typescript-eslint HARD-REFUSES TS 7 at load ("does not support TS
+      # 7.0") and will not support it until TS 7.1 ships a programmatic API
+      # (tracking: typescript-eslint/typescript-eslint#10940, open, no target
+      # date; latest 8.70 still peers typescript <6.1.0). The documented TS6/TS7
+      # side-by-side alias works but means two type systems in one repo for zero
+      # present benefit, so we stay on TypeScript 6 and ignore the major bump
+      # until typescript-eslint declares TS 7 support. Dependabot kept re-proposing
+      # this un-mergeable bump (PR #187). Re-test on a scratch branch when
+      # typescript-eslint#10940 ships, then remove this entry.
+      - dependency-name: "typescript"
+        update-types: ["version-update:semver-major"]
 
   - package-ecosystem: "pip"
     directory: "/requirements/ci"
