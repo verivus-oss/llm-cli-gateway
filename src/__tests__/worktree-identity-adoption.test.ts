@@ -243,6 +243,37 @@ describe("worktree identity adoption, through its production caller", () => {
     expect(recovered.getSession(sessionId)?.metadata?.worktreeToken).toBe(token);
   });
 
+  it("does NOT destroy a recorded adoption reached through a STALE session snapshot", async () => {
+    // The round-11 blocker. Provenance alone reclaims too much: a snapshot of
+    // THIS session taken before a successful adoption has no token, so the early
+    // guard passes and `adoptedBy === session.id` matches the marker the
+    // adoption wrote. Without the store check, the reclaim mints a new token,
+    // the CAS fails against the recorded one, the marker is withdrawn, and reuse
+    // throws forever. `recordsToken`, read fresh from the store, refuses it: the
+    // token is already recorded, so it is a live identity, not a strand.
+    const { repoRoot, manager, handle, sessionId } = await legacyFixture("stale-snap");
+    // A snapshot from BEFORE the first adoption: no token, exactly what an
+    // admission taken before a concurrent request's adoption committed holds.
+    const staleSnapshot = structuredClone(manager.getSession(sessionId)!);
+    const runtime = resolveGatewayServerRuntime({ sessionManager: manager });
+
+    // First reuse adopts and records successfully.
+    await resolveWorktreeForRequest({ name: "stale-snap" }, sessionId, runtime, { repoRoot });
+    const recordedToken = manager.getSession(sessionId)?.metadata?.worktreeToken;
+    expect(typeof recordedToken).toBe("string");
+    expect(staleSnapshot.metadata?.worktreeToken).toBeUndefined();
+
+    // Second reuse arrives with the stale snapshot. The recorded identity must
+    // survive; before the store check it was overwritten and then withdrawn.
+    await resolveWorktreeForRequest({ name: "stale-snap" }, sessionId, runtime, {
+      repoRoot,
+      expectedSession: staleSnapshot,
+    }).catch(() => undefined);
+
+    expect(await readWorktreeOwnerToken(handle.path, noopLogger)).toBe(recordedToken);
+    expect(manager.getSession(sessionId)?.metadata?.worktreeToken).toBe(recordedToken);
+  });
+
   it("does NOT reclaim a LIVE request-scoped worktree, whose token no session records", async () => {
     // The round-10 blocker. A request-scoped worktree (no sessionId) is created
     // live, and the branch that would persist its token is skipped, so NO

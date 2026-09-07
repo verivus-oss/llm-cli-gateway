@@ -373,3 +373,24 @@ Evidence: docs/evidence/postgres-worktree-cleanup-2026-09-04.md.
 """
 idempotent = true
 validation = "Five guards each have a mutant a named test kills; the always-reclaim mutant (the round-10 defect) is killed by a regression that drives a real request-scoped createWorktree through resolveWorktreeForRequest, and dropping adoptedBy from the write is killed by the end-to-end strand-recover test."
+
+[[steps]]
+id = "round-11-review-repairs"
+depends_on = ["round-10-review-repairs"]
+actor = "assistant"
+status = """
+done 2026-09-07. grok completed and blocked (codex failed again on the upstream
+content flag, no verdict). Round 11 reclaimed by PROVENANCE alone, reading only
+the passed session snapshot; a snapshot taken before a successful adoption has no
+token, so provenance matched and the reclaim destroyed a recorded adoption (new
+token, CAS fails, marker withdrawn, reuse throws forever). Reproduced through the
+real caller; the parent refused it via recordsToken.
+The round-10 and round-11 blockers are duals: record-absence alone stamps a live
+request-scoped worktree, provenance alone destroys a recorded adoption via a
+stale snapshot. Neither signal alone suffices. Round 12 requires BOTH: reclaim
+iff adoptedBy === session.id AND the store records no such token. recordsToken is
+restored (I was wrong to remove it as redundant; the inverse test kills it).
+Evidence: docs/evidence/postgres-worktree-cleanup-2026-09-04.md.
+"""
+idempotent = true
+validation = "Both strand signals have a mutant a named test kills: dropping the store check is killed by the stale-snapshot regression, dropping provenance by the request-scoped regression; the adoption-write and unreadable guards likewise."

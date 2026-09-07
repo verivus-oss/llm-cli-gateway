@@ -1063,16 +1063,15 @@ async function noLinkedWorktreeRemains(repoRoot: string, logger: Logger): Promis
  *
  * A worktree that already carries a marker is left alone: some other creation
  * owns it, and stamping over that would destroy the evidence this whole
- * mechanism rests on. The one exception is a STRAND: a marker this same
- * session's own adoption wrote and then failed to record, which the adoption
- * marks with `adoptedBy = session.id`. Its non-atomic write-then-record can
- * leave a marker on disk with no record when the record fails to persist and
- * the withdrawal that should take it back cannot read it; the worktree would
- * then be refused forever as already marked. Reclaiming that strand, and only
- * that strand, is how the transient failure stops being permanent. A creation
- * marker carries no `adoptedBy`, so a live worktree whose token no session
- * records (a request-scoped worktree, whose token is never recorded at all) is
- * never mistaken for a strand.
+ * mechanism rests on. The one exception is a STRAND, and telling a strand from
+ * a live worktree needs TWO signals together: the marker's `adoptedBy` names
+ * this session (provenance), AND the store the caller reads records no session
+ * with that token (`recordsToken`). Provenance alone reclaims a stale snapshot
+ * of a recorded adoption; record-absence alone reclaims a live request-scoped
+ * worktree whose token is never recorded. A strand is a marker this session
+ * wrote whose token the store does not record, the write-then-record pair that
+ * came apart. A caller opts into recovery by supplying `recordsToken`; without
+ * it every token marker is left alone.
  *
  * Tombstones are NOT adoptable and this must not be called for one. A deleted
  * session plus a live unmarked worktree is exactly the shape where the worktree
@@ -1082,7 +1081,11 @@ async function noLinkedWorktreeRemains(repoRoot: string, logger: Logger): Promis
  */
 export async function adoptLegacyWorktreeIdentity(
   session: { id: string; metadata?: Record<string, unknown> },
-  options: { claimantsForPath: number; logger?: Logger }
+  options: {
+    claimantsForPath: number;
+    recordsToken?: (token: string) => boolean;
+    logger?: Logger;
+  }
 ): Promise<{ token: string; adminDirectory: string } | null> {
   const logger = options.logger ?? noopLogger;
   const meta = session.metadata ?? {};
@@ -1112,23 +1115,29 @@ export async function adoptLegacyWorktreeIdentity(
     return null;
   }
   if (marker.kind === "token") {
-    // Reclaim ONLY a strand: a marker THIS session's own adoption wrote and
-    // then failed to record. Adoption stamps `adoptedBy` with the adopting
-    // session's id; a creation marker carries none. So the one marker safe to
-    // stamp over is one this same session already tried to adopt.
+    // Reclaim ONLY a strand, and a strand needs BOTH signals, because each one
+    // alone admits a different live worktree:
     //
-    // The round-10 predicate was "a token no session records". That is not the
-    // same set: a request-scoped worktree (created with no sessionId) is live
-    // and its token is NEVER recorded by any session, so that predicate stamped
-    // a fresh identity over a live creation. Record-absence is not provenance.
-    // A marker whose `adoptedBy` is this session, at a path only this session
-    // claims, cannot be a live creation: a creation writes no `adoptedBy`, and
-    // a successful adoption by this session would have recorded a token and
-    // returned above before reaching here.
-    if (marker.adoptedBy !== session.id) {
+    // - PROVENANCE (`adoptedBy === session.id`). Adoption stamps the adopting
+    //   session's id; a creation marker carries none. Without this, a
+    //   request-scoped worktree (created with no sessionId), whose token is
+    //   never recorded by any session, reads as an unrecorded token and a
+    //   fresh identity is stamped over a live creation.
+    // - UNRECORDED (`!recordsToken(marker.token)`, from the store the caller
+    //   reads fresh). Without this, a stale snapshot of THIS session taken
+    //   before a successful adoption also has no token, so provenance matches
+    //   and the reclaim stamps over an adoption the store has already recorded.
+    //
+    // A true strand is a marker this session wrote whose token the store does
+    // not record, which is exactly the write-then-record pair that came apart.
+    // Absent the predicate, treat the token as recorded and refuse, so a caller
+    // that cannot consult the store never reclaims.
+    const recorded = options.recordsToken ? options.recordsToken(marker.token) : true;
+    const isOwnStrand = marker.adoptedBy === session.id && !recorded;
+    if (!isOwnStrand) {
       logWarn(
         logger,
-        `not adopting the worktree at ${worktreePath} for session ${session.id}: it carries an identity this session did not write`
+        `not adopting the worktree at ${worktreePath} for session ${session.id}: it carries a live or foreign identity, not this session's strand`
       );
       return null;
     }

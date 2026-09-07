@@ -3287,8 +3287,17 @@ async function adoptWorktreeIdentityForSession(
       candidate.metadata?.worktreePath === worktreePath;
     const claimantsForPath =
       visible.filter(claimsPath).length + tombstoned.filter(claimsPath).length;
+    // Reclaim of a strand needs the store's current truth, not the possibly
+    // stale session snapshot this handler was given: a token some session
+    // already records is a live identity (including one this same session
+    // adopted under a snapshot taken before the record landed), not a strand.
+    // Tombstones are included for the same reason they are counted above.
+    const recordsToken = (token: string): boolean =>
+      visible.some(s => s.metadata?.worktreeToken === token) ||
+      tombstoned.some(s => s.metadata?.worktreeToken === token);
     const adopted = await adoptLegacyWorktreeIdentity(session, {
       claimantsForPath,
+      recordsToken,
       logger: runtime.logger,
     });
     if (!adopted) return;
