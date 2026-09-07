@@ -550,25 +550,16 @@ async function resolveWorktreeAdminDirectory(
 const GATEWAY_ADOPTION_LOCK = "gateway-adopt.lock";
 const ADOPTION_LOCK_TIMEOUT_MS = 10_000;
 const ADOPTION_LOCK_RETRY_MS = 25;
+const ADOPTION_LOCK_STALE_MS = 60_000;
 
 const sleep = (ms: number): Promise<void> => new Promise(resolve => setTimeout(resolve, ms));
 
 /**
- * Reclaim an adoption lock ONLY when its holder is provably gone: a same-host
- * PID that no longer exists. Age is deliberately NOT a reclaim signal. An earlier
- * version also evicted a lock older than a stale window, and that broke the one
- * invariant the lock exists for: a live-but-slow holder (a long GC pause, a
- * suspended process, a stalled record CAS) would be evicted while still inside
- * its critical section, a successor would run concurrently, and the three-party
- * strand this lock closes would reopen. A running holder is making progress or
- * its process is wedged; the former must never be displaced, and the latter is
- * cleared by ending that process, which turns it into the dead-PID case. A lock
- * that cannot be reclaimed (a hostname mismatch, or a dead holder whose PID a
- * live process now reuses) is waited on and then SKIPPED at the acquire timeout:
- * adoption defers to the next reuse, never runs unlocked. A companion recovery
- * lock serializes reclaimers so two contenders cannot both delete the file and
- * then delete each other's replacement. A foreign-host, malformed, or live lock
- * fails closed.
+ * Reclaim an adoption lock whose holder is provably gone: a same-host PID that
+ * no longer exists, or a lock older than the stale window (a hung holder). A
+ * companion recovery lock serializes reclaimers so two contenders cannot both
+ * delete the file and then delete each other's replacement. A foreign-host,
+ * malformed, or live-and-fresh lock fails closed and is waited on instead.
  */
 function reclaimDeadAdoptionLock(lockPath: string, logger: Logger): boolean {
   const recoveryPath = `${lockPath}.recovery`;
@@ -579,23 +570,23 @@ function reclaimDeadAdoptionLock(lockPath: string, logger: Logger): boolean {
     return false;
   }
   try {
-    let owner: { pid?: unknown; hostname?: unknown };
+    let owner: { pid?: unknown; hostname?: unknown; acquiredAt?: unknown };
     try {
       owner = JSON.parse(readFileSync(lockPath, "utf8")) as typeof owner;
     } catch {
       return false;
     }
     if (!owner || typeof owner !== "object") return false;
-    // Same host and a PID that no longer exists is the only proof a holder is
-    // gone. Anything else (a live PID, a foreign host, a missing PID) is treated
-    // as a live holder and waited on.
-    if (owner.hostname !== hostname() || typeof owner.pid !== "number") return false;
-    try {
-      process.kill(owner.pid, 0);
-      return false;
-    } catch (error) {
-      if ((error as NodeJS.ErrnoException).code !== "ESRCH") return false;
+    const age = Date.now() - (typeof owner.acquiredAt === "number" ? owner.acquiredAt : 0);
+    let dead = false;
+    if (owner.hostname === hostname() && typeof owner.pid === "number") {
+      try {
+        process.kill(owner.pid, 0);
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException).code === "ESRCH") dead = true;
+      }
     }
+    if (!dead && age < ADOPTION_LOCK_STALE_MS) return false;
     try {
       unlinkSync(lockPath);
       return true;
@@ -635,16 +626,13 @@ function reclaimDeadAdoptionLock(lockPath: string, logger: Logger): boolean {
 export async function withWorktreeAdoptionLock<T>(
   worktreePath: string,
   logger: Logger,
-  critical: (adminDirectory: string) => Promise<T>,
-  options: { timeoutMs?: number; retryMs?: number } = {}
+  critical: (adminDirectory: string) => Promise<T>
 ): Promise<{ locked: true; value: T } | { locked: false }> {
-  const timeoutMs = options.timeoutMs ?? ADOPTION_LOCK_TIMEOUT_MS;
-  const retryMs = options.retryMs ?? ADOPTION_LOCK_RETRY_MS;
   const adminDirectory = await resolveWorktreeAdminDirectory(worktreePath, logger);
   if (adminDirectory === null) return { locked: false };
   const lockPath = join(adminDirectory, GATEWAY_ADOPTION_LOCK);
   const token = randomUUID();
-  const deadline = Date.now() + timeoutMs;
+  const deadline = Date.now() + ADOPTION_LOCK_TIMEOUT_MS;
   for (;;) {
     let fd: number | null = null;
     try {
@@ -677,7 +665,7 @@ export async function withWorktreeAdoptionLock<T>(
         logWarn(logger, `timed out acquiring worktree adoption lock ${lockPath}`);
         return { locked: false };
       }
-      await sleep(retryMs);
+      await sleep(ADOPTION_LOCK_RETRY_MS);
     }
   }
   try {
