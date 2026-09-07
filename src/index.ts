@@ -73,6 +73,7 @@ import {
   adoptLegacyWorktreeIdentity,
   settleFailedAdoptionMarker,
   reconcileWorktreeIdentity,
+  withWorktreeAdoptionLock,
   removeWorktree,
   removeWorktreeWithResult,
   validateManagedWorktreeIdentity,
@@ -3295,48 +3296,59 @@ async function adoptWorktreeIdentityForSession(
     const recordsToken = (token: string): boolean =>
       visible.some(s => s.metadata?.worktreeToken === token) ||
       tombstoned.some(s => s.metadata?.worktreeToken === token);
-    const adopted = await adoptLegacyWorktreeIdentity(session, {
-      claimantsForPath,
-      recordsToken,
-      logger: runtime.logger,
-    });
-    if (!adopted) return;
-    const metadata = {
-      ...(session.metadata ?? {}),
-      worktreeToken: adopted.token,
-      worktreeAdminDirectory: adopted.adminDirectory,
-    };
-    // The marker is on disk and the metadata that names it is not yet, so from
-    // here every exit must either record it or take it back off. A `finally`
-    // rather than an `if`, because the persist can REJECT as well as return
-    // false: `compareAndSetSession` runs a query, and a rejected query threw
-    // straight past the previous `if (!persisted)` into the outer catch,
-    // leaving a worktree carrying an identity no session claims. Adoption then
-    // refuses it forever as "already marked". There is no path out of this
-    // block that skips the check now.
-    let recorded = false;
-    try {
-      recorded =
-        (await Promise.resolve(
-          sessionManager.compareAndSetSession(sessionGenerationIdentity(session), {
-            kind: "replace_metadata",
-            expectedMetadata: session.metadata,
-            metadata,
-          })
-        )) === true;
-    } finally {
-      if (!recorded) {
-        // Restore a reclaimed strand's prior marker, or delete a fresh one: a
-        // reclaim whose CAS lost to a concurrent same-session adoption must not
-        // delete the live marker it overwrote.
-        settleFailedAdoptionMarker(
-          adopted.adminDirectory,
-          adopted.token,
-          adopted.priorMarker,
-          runtime.logger
-        );
+    // Serialize the whole read-decide-write-record cycle for this worktree. All
+    // adopters are same-host, so the lock makes concurrent adoptions of one
+    // pre-token session run one at a time: the first records and marks, the rest
+    // see the recorded marker and decline, so no losing reclaim or fresh loser
+    // can erase the winner's marker. When the lock cannot be taken the cycle is
+    // skipped, not run unlocked, and retries on the next reuse.
+    await withWorktreeAdoptionLock(worktreePath, runtime.logger, async adminDirectory => {
+      const adopted = await adoptLegacyWorktreeIdentity(session, {
+        claimantsForPath,
+        recordsToken,
+        adminDirectory,
+        logger: runtime.logger,
+      });
+      if (!adopted) return;
+      const metadata = {
+        ...(session.metadata ?? {}),
+        worktreeToken: adopted.token,
+        worktreeAdminDirectory: adopted.adminDirectory,
+      };
+      // The marker is on disk and the metadata that names it is not yet, so from
+      // here every exit must either record it or take it back off. A `finally`
+      // rather than an `if`, because the persist can REJECT as well as return
+      // false: `compareAndSetSession` runs a query, and a rejected query threw
+      // straight past the previous `if (!persisted)` into the outer catch,
+      // leaving a worktree carrying an identity no session claims. Adoption then
+      // refuses it forever as "already marked". There is no path out of this
+      // block that skips the check now.
+      let recorded = false;
+      try {
+        recorded =
+          (await Promise.resolve(
+            sessionManager.compareAndSetSession(sessionGenerationIdentity(session), {
+              kind: "replace_metadata",
+              expectedMetadata: session.metadata,
+              metadata,
+            })
+          )) === true;
+      } finally {
+        if (!recorded) {
+          // Restore a reclaimed strand's prior marker, or delete a fresh one: a
+          // reclaim whose CAS lost to a concurrent same-session adoption must not
+          // delete the live marker it overwrote. Under the lock this fires only
+          // when the CAS itself fails (a rejected query or a genuinely stale
+          // generation), never a concurrent adoption that raced the disk.
+          settleFailedAdoptionMarker(
+            adopted.adminDirectory,
+            adopted.token,
+            adopted.priorMarker,
+            runtime.logger
+          );
+        }
       }
-    }
+    });
   } catch (error) {
     runtime.logger.debug?.(
       `worktree identity adoption skipped for session ${session.id}: ${

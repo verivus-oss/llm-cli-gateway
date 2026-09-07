@@ -11,7 +11,7 @@
  * because the fault they probe (a torn or unreadable marker) cannot be driven
  * through the production writer.
  */
-import { describe, it, expect, afterEach } from "vitest";
+import { describe, it, expect, afterEach, vi } from "vitest";
 import { execFileSync } from "child_process";
 import { chmodSync, existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "fs";
 import { hostname, tmpdir } from "os";
@@ -23,7 +23,9 @@ import {
   discardAdoptedWorktreeMarker,
   readWorktreeOwnerToken,
   settleFailedAdoptionMarker,
+  withWorktreeAdoptionLock,
 } from "../worktree-manager.js";
+import * as worktreeManager from "../worktree-manager.js";
 import { FileSessionManager } from "../session-manager.js";
 import { noopLogger } from "../logger.js";
 
@@ -529,6 +531,104 @@ describe("worktree identity adoption, through its production caller", () => {
     const disk = await readWorktreeOwnerToken(handle.path, noopLogger);
     expect(disk).not.toBeNull();
     expect(disk).toBe([...recorded][0]);
+  });
+
+  it("withWorktreeAdoptionLock serializes concurrent holders on one worktree", async () => {
+    // The round-16 blocker (codex): a three-party fresh + reclaim + reclaim race
+    // still stranded because wx guards only the fresh-fresh write; a reclaim
+    // overwrite and its restore/delete run unlocked. The fix serializes the whole
+    // read-decide-write-record cycle, so mutual exclusion is the property that
+    // closes the class. Here the second holder must not enter until the first
+    // leaves; a lock that does not exclude (or a non-blocking acquire) fails.
+    const { handle } = await legacyFixture("lock-mutex");
+    const lockPath = join(handle.adminDirectory, "gateway-adopt.lock");
+    let holderInside = false;
+    let secondSawHolderInside: boolean | null = null;
+    let releaseFirst: () => void = () => undefined;
+    const firstReleased = new Promise<void>(resolve => {
+      releaseFirst = resolve;
+    });
+    const first = withWorktreeAdoptionLock(handle.path, noopLogger, async () => {
+      holderInside = true;
+      await firstReleased;
+      holderInside = false;
+      return "first";
+    });
+    const start = Date.now();
+    while (!holderInside) {
+      if (Date.now() - start > 2000) throw new Error("first holder never entered the lock");
+      await new Promise(resolve => setTimeout(resolve, 5));
+    }
+    // The lock file is present on disk while a holder is inside.
+    expect(existsSync(lockPath)).toBe(true);
+    const second = withWorktreeAdoptionLock(handle.path, noopLogger, async () => {
+      secondSawHolderInside = holderInside;
+      return "second";
+    });
+    // Give the second acquirer a generous window to (wrongly) run while the first
+    // still holds the lock. It must still be blocked.
+    await new Promise(resolve => setTimeout(resolve, 250));
+    expect(secondSawHolderInside).toBeNull();
+    releaseFirst();
+    const [a, b] = await Promise.all([first, second]);
+    expect(a).toEqual({ locked: true, value: "first" });
+    expect(b).toEqual({ locked: true, value: "second" });
+    // When the second finally ran, the first had already exited: true serialization.
+    expect(secondSawHolderInside).toBe(false);
+    // The lock is released after the last holder.
+    expect(existsSync(lockPath)).toBe(false);
+  });
+
+  it("runs adoption INSIDE the worktree lock at its production call site", async () => {
+    // The lock closes the class only if the real adoption cycle actually runs
+    // under it. Drop the lock wrapper from adoptWorktreeIdentityForSession and
+    // adoptLegacyWorktreeIdentity runs with no lock file present, which this
+    // catches. Spying the module the production caller imports also proves the
+    // caller reaches the helper at all.
+    const { repoRoot, manager, handle, sessionId } = await legacyFixture("lock-held");
+    const runtime = resolveGatewayServerRuntime({ sessionManager: manager });
+    const lockPath = join(handle.adminDirectory, "gateway-adopt.lock");
+    const original = worktreeManager.adoptLegacyWorktreeIdentity;
+    let sawLockHeld: boolean | null = null;
+    const spy = vi
+      .spyOn(worktreeManager, "adoptLegacyWorktreeIdentity")
+      .mockImplementation((s, o) => {
+        sawLockHeld = existsSync(lockPath);
+        return original(s, o);
+      });
+    try {
+      await resolveWorktreeForRequest({ name: handle.name }, sessionId, runtime, { repoRoot });
+    } finally {
+      spy.mockRestore();
+    }
+    expect(sawLockHeld).toBe(true);
+    // Adoption still completed: record and marker agree.
+    const token = manager.getSession(sessionId)?.metadata?.worktreeToken;
+    expect(typeof token).toBe("string");
+    expect(await readWorktreeOwnerToken(handle.path, noopLogger)).toBe(token);
+  });
+
+  it("converges when three adoptions of one session run concurrently, without a strand", async () => {
+    // The lock makes the first adopter both write the marker AND win the record
+    // CAS before any other runs, so a later reclaim's restore always restores the
+    // winner's own token rather than a stale one, and no fresh loser deletes a
+    // winner's marker. The end state is always the recorded token on disk.
+    const { repoRoot, manager, handle, sessionId } = await legacyFixture("lock-converge");
+    const runtime = resolveGatewayServerRuntime({ sessionManager: manager });
+    const invoke = (): Promise<unknown> =>
+      resolveWorktreeForRequest({ name: handle.name }, sessionId, runtime, { repoRoot }).then(
+        value => value,
+        error => error
+      );
+
+    await Promise.all([invoke(), invoke(), invoke()]);
+
+    const token = manager.getSession(sessionId)?.metadata?.worktreeToken;
+    expect(typeof token).toBe("string");
+    const disk = await readWorktreeOwnerToken(handle.path, noopLogger);
+    expect(disk).not.toBeNull();
+    expect(disk).toBe(token);
+    expect(git(repoRoot, "worktree", "list", "--porcelain")).toContain(handle.path);
   });
 
   it("does NOT reclaim a LIVE request-scoped worktree, whose token no session records", async () => {

@@ -68,11 +68,14 @@ All notable changes to the llm-cli-gateway project.
   worktree is registered before its marker is written, so a missing marker on a
   validated registration can be a replacement creation caught in that window,
   not this session's lost marker, and stamping the recorded token there would be
-  the name-reuse ABA the token exists to catch. The strand that a losing fresh
-  adoption would otherwise leave behind (no marker on a recorded worktree) is
-  prevented at its source instead, by an exclusive-create marker write that lets
-  only one of two concurrent fresh adoptions of a pre-token session create the
-  marker; a present marker for a different creation still refuses. The Git
+  the name-reuse ABA the token exists to catch. The strand that concurrent
+  adoptions would otherwise leave behind (a winner's marker erased by a losing
+  reclaim's restore or a fresh loser's delete, no marker on a recorded worktree)
+  is prevented at its source instead, by serializing the whole
+  read-decide-write-record cycle for one worktree under a same-host exclusive lock
+  held across the record write: the first adopter records and marks, later ones
+  read the recorded marker and decline, so no loser can erase the winner's marker;
+  a present marker for a different creation still refuses. The Git
   administrative directory is recorded alongside it, because `git worktree
   remove` deletes that directory and `git worktree move` leaves it alone, so it
   answers whether a removal happened without reading anything a move or an

@@ -484,3 +484,26 @@ Evidence: docs/evidence/postgres-worktree-cleanup-2026-09-04.md.
 """
 idempotent = true
 validation = "drop-wx is killed by the seam test (fails first === null and strands end to end); materialise-absent by the ABSENT-marker and REPLACEMENT-worktree negatives; reconcile-any by the unreadable and other-session negatives. Two-file oracle 97/97, test:pg 231/231 on 5437."
+
+[[steps]]
+id = "round-16-review-repairs"
+depends_on = ["round-15-review-repairs"]
+actor = "assistant"
+status = """
+done 2026-09-07. Seats SPLIT at 1335c6f: grok approved, codex found a P1 and
+reproduced it through three real resolveWorktreeForRequest calls; I reproduced it
+independently (scratchpad threeparty.mjs) before accepting. wx stops two FRESH
+adoptions both creating a marker, but a RECLAIM overwrites with "w" and settle is
+token-scoped: with three concurrent adoptions of one session, C wins the record
+CAS, B's losing reclaim RESTORES a stale prior, and A's fresh loss DELETES its
+token, erasing the winner's marker -> reuse refuses the absent marker forever.
+Same class as every round since 9: concurrent adoptions mutating one unlocked
+marker. Fixed by serializing the whole read-decide-write-record cycle with a
+per-worktree O_EXCL sidecar lock (withWorktreeAdoptionLock), held across the
+async record CAS; all adopters are same-host so it suffices. First adopter records
+and marks, the rest read the recorded marker and decline; restore is now correct
+because the first writer is also the CAS winner. wx kept as belt-and-suspenders.
+Evidence: docs/evidence/postgres-worktree-cleanup-2026-09-04.md.
+"""
+idempotent = true
+validation = "adoption-not-locked is killed by a test that spies the production caller's adoptLegacy call and asserts the lock file is present; non-exclusive lock (wx->w) by a mutual-exclusion test; a third test drives three concurrent resolveWorktreeForRequest calls and asserts convergence on the recorded marker. Two-file oracle 100 tests; test:pg 231/231 on 5437."

@@ -1,15 +1,20 @@
 import { spawn } from "child_process";
 import { randomUUID } from "crypto";
 import {
+  closeSync,
   existsSync,
+  fsyncSync,
+  openSync,
   rmSync,
   lstatSync,
   mkdirSync,
   readdirSync,
   readFileSync,
   realpathSync,
+  unlinkSync,
   writeFileSync,
 } from "fs";
+import { hostname } from "os";
 import { basename, dirname, isAbsolute, join, relative, resolve as resolvePath, sep } from "path";
 import { logWarn, noopLogger, type Logger } from "./logger.js";
 
@@ -539,6 +544,150 @@ async function resolveWorktreeAdminDirectory(
     return resolved;
   } catch {
     return null;
+  }
+}
+
+const GATEWAY_ADOPTION_LOCK = "gateway-adopt.lock";
+const ADOPTION_LOCK_TIMEOUT_MS = 10_000;
+const ADOPTION_LOCK_RETRY_MS = 25;
+const ADOPTION_LOCK_STALE_MS = 60_000;
+
+const sleep = (ms: number): Promise<void> => new Promise(resolve => setTimeout(resolve, ms));
+
+/**
+ * Reclaim an adoption lock whose holder is provably gone: a same-host PID that
+ * no longer exists, or a lock older than the stale window (a hung holder). A
+ * companion recovery lock serializes reclaimers so two contenders cannot both
+ * delete the file and then delete each other's replacement. A foreign-host,
+ * malformed, or live-and-fresh lock fails closed and is waited on instead.
+ */
+function reclaimDeadAdoptionLock(lockPath: string, logger: Logger): boolean {
+  const recoveryPath = `${lockPath}.recovery`;
+  let recoveryFd: number;
+  try {
+    recoveryFd = openSync(recoveryPath, "wx", 0o600);
+  } catch {
+    return false;
+  }
+  try {
+    let owner: { pid?: unknown; hostname?: unknown; acquiredAt?: unknown };
+    try {
+      owner = JSON.parse(readFileSync(lockPath, "utf8")) as typeof owner;
+    } catch {
+      return false;
+    }
+    if (!owner || typeof owner !== "object") return false;
+    const age = Date.now() - (typeof owner.acquiredAt === "number" ? owner.acquiredAt : 0);
+    let dead = false;
+    if (owner.hostname === hostname() && typeof owner.pid === "number") {
+      try {
+        process.kill(owner.pid, 0);
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException).code === "ESRCH") dead = true;
+      }
+    }
+    if (!dead && age < ADOPTION_LOCK_STALE_MS) return false;
+    try {
+      unlinkSync(lockPath);
+      return true;
+    } catch {
+      return false;
+    }
+  } finally {
+    try {
+      closeSync(recoveryFd);
+      unlinkSync(recoveryPath);
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== "ENOENT") {
+        logWarn(
+          logger,
+          `could not clear adoption recovery lock ${recoveryPath}: ${describeError(error)}`
+        );
+      }
+    }
+  }
+}
+
+/**
+ * Serialize every read-decide-write-record cycle for ONE worktree's identity
+ * marker. Each round of this fix removed one interleaving and the next round
+ * found another, all of the same shape: concurrent adoptions of one pre-token
+ * session mutating a single unlocked marker file, so a losing reclaim's restore
+ * or a fresh loser's delete erases a concurrent winner's marker. All adopters
+ * are same-host (reuse requires `ownerHostname === hostname()`), so a sidecar
+ * O_EXCL lock held across the whole critical section makes them run one at a
+ * time: the first records and marks, the rest read the recorded marker and
+ * decline to re-adopt. The lock spans an async record CAS, so acquisition yields
+ * the event loop between attempts rather than spinning, or a same-process holder
+ * awaiting the CAS could never make progress. When the lock cannot be taken the
+ * critical section is SKIPPED, never run unlocked: a deferred adoption retries on
+ * the next reuse, an unsynchronized one strands.
+ */
+export async function withWorktreeAdoptionLock<T>(
+  worktreePath: string,
+  logger: Logger,
+  critical: (adminDirectory: string) => Promise<T>
+): Promise<{ locked: true; value: T } | { locked: false }> {
+  const adminDirectory = await resolveWorktreeAdminDirectory(worktreePath, logger);
+  if (adminDirectory === null) return { locked: false };
+  const lockPath = join(adminDirectory, GATEWAY_ADOPTION_LOCK);
+  const token = randomUUID();
+  const deadline = Date.now() + ADOPTION_LOCK_TIMEOUT_MS;
+  for (;;) {
+    let fd: number | null = null;
+    try {
+      fd = openSync(lockPath, "wx", 0o600);
+      writeFileSync(
+        fd,
+        JSON.stringify({ token, pid: process.pid, hostname: hostname(), acquiredAt: Date.now() })
+      );
+      fsyncSync(fd);
+      closeSync(fd);
+      fd = null;
+      break;
+    } catch (error) {
+      if (fd !== null) {
+        try {
+          closeSync(fd);
+        } catch {
+          /* fd already gone */
+        }
+      }
+      if ((error as NodeJS.ErrnoException).code !== "EEXIST") {
+        logWarn(
+          logger,
+          `could not acquire worktree adoption lock ${lockPath}: ${describeError(error)}`
+        );
+        return { locked: false };
+      }
+      if (reclaimDeadAdoptionLock(lockPath, logger)) continue;
+      if (Date.now() >= deadline) {
+        logWarn(logger, `timed out acquiring worktree adoption lock ${lockPath}`);
+        return { locked: false };
+      }
+      await sleep(ADOPTION_LOCK_RETRY_MS);
+    }
+  }
+  try {
+    return { locked: true, value: await critical(adminDirectory) };
+  } finally {
+    try {
+      const current: unknown = JSON.parse(readFileSync(lockPath, "utf8"));
+      if (
+        current &&
+        typeof current === "object" &&
+        (current as { token?: unknown }).token === token
+      ) {
+        unlinkSync(lockPath);
+      }
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== "ENOENT") {
+        logWarn(
+          logger,
+          `could not release worktree adoption lock ${lockPath}: ${describeError(error)}`
+        );
+      }
+    }
   }
 }
 
@@ -1164,6 +1313,10 @@ export async function adoptLegacyWorktreeIdentity(
     claimantsForPath: number;
     recordsToken?: (token: string) => boolean;
     logger?: Logger;
+    // Pre-resolved administrative directory, supplied by the caller that already
+    // resolved it to take the adoption lock. Reused so the git spawn runs once
+    // and the marker this writes is provably the one the lock guards.
+    adminDirectory?: string;
     // Test-only seam. Fires once, after the marker has been read and classified
     // but before this call writes its own, so a test can interleave a second
     // concurrent adoption into exactly the window `wx` exists to close: two
@@ -1191,7 +1344,8 @@ export async function adoptLegacyWorktreeIdentity(
   }
   if (!existsSync(worktreePath)) return null;
 
-  const adminDirectory = await resolveWorktreeAdminDirectory(worktreePath, logger);
+  const adminDirectory =
+    options.adminDirectory ?? (await resolveWorktreeAdminDirectory(worktreePath, logger));
   if (adminDirectory === null) return null;
   const marker = readAdminMarker(adminDirectory);
   if (marker.kind === "unreadable") {
