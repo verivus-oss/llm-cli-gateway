@@ -821,6 +821,62 @@ export async function readWorktreeOwnerToken(
   }
 }
 
+/**
+ * Decide whether a worktree's on-disk marker names the identity the store has
+ * recorded, reconciling a mismatch the store is authorised to win.
+ *
+ * The record compare-and-set is the arbiter of a worktree's identity: whatever
+ * token a session durably holds is the one that won. The marker is a cache of
+ * that, and concurrent adoptions of one session can leave it naming an
+ * abandoned token a losing reclaim wrote (rounds 12 and 13: three overlapping
+ * first-adoptions settle so the store holds the winner while the disk holds an
+ * intermediate). Rather than defend every write ordering, reuse repairs the
+ * cache from the store.
+ *
+ * Repair is confined to THIS session's own marker. A marker carrying this
+ * session's `adoptedBy` was written by this session's adoption of the worktree
+ * at this path, so rewriting it to the recorded token cannot take another
+ * creation's identity. A creation marker (no `adoptedBy`) or one adopted by
+ * another session that disagrees with the record is a different creation, the
+ * ABA case the token exists to catch, and is refused unchanged.
+ */
+export async function reconcileWorktreeIdentity(opts: {
+  worktreePath: string;
+  recordedToken: string | null;
+  sessionId: string;
+  logger: Logger;
+}): Promise<boolean> {
+  const { worktreePath, recordedToken, sessionId, logger } = opts;
+  if (recordedToken === null) return false;
+  const adminDirectory = await resolveWorktreeAdminDirectory(worktreePath, logger);
+  if (adminDirectory === null) return false;
+  const marker = readAdminMarker(adminDirectory);
+  if (marker.kind !== "token") return false;
+  if (marker.token === recordedToken) return true;
+  // The disk names a different token than the store. Only reconcile our own
+  // adoption's marker; anything else is a different creation and must refuse.
+  if (marker.adoptedBy !== sessionId) return false;
+  try {
+    writeFileSync(
+      join(adminDirectory, GATEWAY_WORKTREE_MARKER),
+      JSON.stringify({ token: recordedToken, adoptedBy: sessionId }),
+      { mode: 0o600 }
+    );
+    if ((await readWorktreeOwnerToken(worktreePath, logger)) !== recordedToken) return false;
+    logWarn(
+      logger,
+      `reconciled the worktree marker at ${worktreePath} to the recorded identity for session ${sessionId}`
+    );
+    return true;
+  } catch (error) {
+    logWarn(
+      logger,
+      `could not reconcile the worktree marker at ${worktreePath} for session ${sessionId}: ${describeError(error)}`
+    );
+    return false;
+  }
+}
+
 async function canonicalGitCommonDirectory(
   repositoryPath: string,
   logger: Logger

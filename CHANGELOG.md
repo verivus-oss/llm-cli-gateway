@@ -61,7 +61,11 @@ All notable changes to the llm-cli-gateway project.
   neither is mistaken for a strand. The record compare-and-set is the final
   arbiter under concurrency: a reclaim that loses it to an adoption another
   request recorded first restores the marker it overwrote rather than deleting
-  it, so a live worktree is never bricked by a racing reclaim. The Git
+  it, and reuse reconciles the marker to the recorded token, so however many
+  concurrent reclaims leave the marker on an abandoned token, the next reuse
+  repairs it from the record rather than stranding the worktree. Reconciliation
+  is confined to a marker this session's own adoption wrote; a marker for a
+  different creation still refuses. The Git
   administrative directory is recorded alongside it, because `git worktree
   remove` deletes that directory and `git worktree move` leaves it alone, so it
   answers whether a removal happened without reading anything a move or an

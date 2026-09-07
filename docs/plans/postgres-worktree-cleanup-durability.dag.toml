@@ -417,3 +417,25 @@ Evidence: docs/evidence/postgres-worktree-cleanup-2026-09-04.md.
 """
 idempotent = true
 validation = "The concurrent-race regression kills all three restore-path mutants: deleting instead of restoring (the round-12 behaviour), never setting priorMarker, and the caller dropping it."
+
+[[steps]]
+id = "round-13-review-repairs"
+depends_on = ["round-12-review-repairs"]
+actor = "assistant"
+status = """
+done 2026-09-07. BOTH seats completed and returned the same blocker: round 13's
+restore-on-failure fails at THREE overlapping first-adoptions of one session. p1
+wins the CAS (store=T1); p3's settle restores the token IT overwrote (T2), not
+the recorded T1. Store=T1, disk=T2, reuse throws forever. grok's mutation run
+showed the store check was no longer independently load-bearing, the tell the
+fix was at the wrong layer.
+Maintainer chose the CLASS fix after twelve site-patching rounds: the record CAS
+is authoritative and reuse RECONCILES the marker from it. reconcileWorktreeIdentity
+replaces the reuse-time token equality: a marker naming a different token but
+carrying THIS session's adoptedBy is rewritten to the recorded token; a foreign
+or creation marker still refuses (ABA). Closes the N-party class, not the
+three-party site. settle-on-failure stays as defense in depth.
+Evidence: docs/evidence/postgres-worktree-cleanup-2026-09-04.md.
+"""
+idempotent = true
+validation = "The reconcile test drives the real reuse path with the three-party end-state (store=winner, disk=abandoned intermediate this session adopted) and asserts repair; two negatives assert a foreign or creation marker still throws. Each reconcile mutant is killed by its own named test."

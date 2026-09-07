@@ -68,6 +68,94 @@ describe("worktree identity adoption, through its production caller", () => {
     return { repoRoot, manager, handle, sessionId: session.id, storePath };
   };
 
+  /**
+   * A session that already owns a real, recorded gateway worktree, with the
+   * on-disk marker forced to a given shape. Models the durable end-state a
+   * concurrent race leaves: the store holds the winning token, the disk may hold
+   * something else.
+   */
+  const recordedFixture = async (
+    label: string,
+    diskMarker: (sessionId: string, recordedToken: string) => unknown
+  ) => {
+    const repoRoot = initRepository(label);
+    cleanups.push(repoRoot);
+    const storage = mkdtempSync(join(tmpdir(), `adopt-store-${label}-`));
+    cleanups.push(storage);
+    const manager = new FileSessionManager(join(storage, "sessions.json"));
+    const handle = await createWorktree({ repoRoot, name: label, logger: noopLogger });
+    const recordedToken = "winner-token-the-store-recorded";
+    const session = manager.createSession("claude", label);
+    manager.updateSessionMetadata(session.id, {
+      worktreePath: handle.path,
+      worktreeName: handle.name,
+      worktreeOwnerHostname: hostname(),
+      worktreeOwnerInstanceId: "instance-recorded",
+      worktreeToken: recordedToken,
+      worktreeAdminDirectory: handle.adminDirectory,
+    });
+    writeFileSync(
+      join(handle.adminDirectory, "gateway-owner.json"),
+      JSON.stringify(diskMarker(session.id, recordedToken))
+    );
+    return { repoRoot, manager, handle, sessionId: session.id, recordedToken };
+  };
+
+  it("reconciles a marker this session adopted but a race left on an abandoned token", async () => {
+    // The round-13 blocker. Three overlapping first-adoptions of one session
+    // settle so the store holds the winning token and the disk holds an
+    // intermediate one a losing reclaim wrote. The record is the arbiter: reuse
+    // repairs the marker to the recorded token rather than throwing.
+    const { repoRoot, manager, handle, sessionId, recordedToken } = await recordedFixture(
+      "reconcile",
+      sid => ({ token: "abandoned-intermediate-token", adoptedBy: sid })
+    );
+    const runtime = resolveGatewayServerRuntime({ sessionManager: manager });
+
+    const resolved = await resolveWorktreeForRequest({ name: "reconcile" }, sessionId, runtime, {
+      repoRoot,
+    });
+
+    // Reuse succeeded and the marker now names the recorded (winning) token.
+    expect((resolved as { worktreePath?: string }).worktreePath).toBe(handle.path);
+    expect(await readWorktreeOwnerToken(handle.path, noopLogger)).toBe(recordedToken);
+  });
+
+  it("does NOT reconcile a marker with no adopter provenance (a different creation)", async () => {
+    // A creation marker (no adoptedBy) that disagrees with the record is the ABA
+    // case: a worktree the name was reused for after this session's was removed.
+    // Reconcile must refuse, and reuse must throw, not stamp over it.
+    const { repoRoot, manager, sessionId, handle } = await recordedFixture(
+      "reconcile-foreign",
+      () => ({
+        token: "a-different-creations-token",
+      })
+    );
+    const runtime = resolveGatewayServerRuntime({ sessionManager: manager });
+
+    await expect(
+      resolveWorktreeForRequest({ name: "reconcile-foreign" }, sessionId, runtime, { repoRoot })
+    ).rejects.toThrow(/Durable session worktree metadata no longer matches/);
+    // Left as found, not stamped to the recorded token.
+    expect(await readWorktreeOwnerToken(handle.path, noopLogger)).toBe(
+      "a-different-creations-token"
+    );
+  });
+
+  it("does NOT reconcile a marker another session adopted", async () => {
+    // Provenance is per session: a marker carrying a DIFFERENT session's
+    // adoptedBy is not this session's to repair.
+    const { repoRoot, manager, sessionId } = await recordedFixture("reconcile-other", () => ({
+      token: "another-sessions-token",
+      adoptedBy: "some-other-session-id",
+    }));
+    const runtime = resolveGatewayServerRuntime({ sessionManager: manager });
+
+    await expect(
+      resolveWorktreeForRequest({ name: "reconcile-other" }, sessionId, runtime, { repoRoot })
+    ).rejects.toThrow(/Durable session worktree metadata no longer matches/);
+  });
+
   it("stamps identity and records it when the session is reused", async () => {
     const { repoRoot, manager, handle, sessionId } = await legacyFixture("happy");
     const runtime = resolveGatewayServerRuntime({ sessionManager: manager });

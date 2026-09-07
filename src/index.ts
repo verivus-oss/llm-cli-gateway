@@ -72,7 +72,7 @@ import {
   cleanupSessionWorktree,
   adoptLegacyWorktreeIdentity,
   settleFailedAdoptionMarker,
-  readWorktreeOwnerToken,
+  reconcileWorktreeIdentity,
   removeWorktree,
   removeWorktreeWithResult,
   validateManagedWorktreeIdentity,
@@ -3443,11 +3443,21 @@ export async function resolveWorktreeForRequest(
         // Git identity proves a gateway worktree lives here, not that it is
         // THIS session's. Path and branch both derive from the name, so only
         // the creation token separates a reused worktree from a later one that
-        // took the same name after this one was removed.
-        (await readWorktreeOwnerToken(existingPath, runtime.logger)) ===
-          (typeof identitySession?.metadata?.worktreeToken === "string"
-            ? identitySession.metadata.worktreeToken
-            : null);
+        // took the same name after this one was removed. The record is the
+        // arbiter of that token: if the marker names an abandoned one a losing
+        // concurrent reclaim of THIS session wrote, reconcile it to the recorded
+        // token rather than stranding the worktree; a foreign or creation marker
+        // still refuses.
+        identitySession !== null &&
+        (await reconcileWorktreeIdentity({
+          worktreePath: existingPath,
+          recordedToken:
+            typeof identitySession.metadata?.worktreeToken === "string"
+              ? identitySession.metadata.worktreeToken
+              : null,
+          sessionId: identitySession.id,
+          logger: runtime.logger,
+        }));
       if (!validIdentity) {
         throw new Error(
           "Durable session worktree metadata no longer matches a same-host gateway-owned Git worktree. Start a new session or restore the original worktree."
