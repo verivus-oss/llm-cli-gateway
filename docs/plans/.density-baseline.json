@@ -20,7 +20,7 @@
   "local-stdio-remote-http-workspace-gating.dag.toml": 384,
   "mistral-kit-provider.dag.toml": 225,
   "outstanding-work-fix.dag.toml": 361,
-  "postgres-worktree-cleanup-durability.dag.toml": 442,
+  "postgres-worktree-cleanup-durability.dag.toml": 464,
   "provider-contract-drift-rc3.dag.toml": 526,
   "provider-contract-removal-autoapply.dag.toml": 330,
   "provider-owned-sessions.dag.toml": 328,

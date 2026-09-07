@@ -836,9 +836,13 @@ export async function readWorktreeOwnerToken(
  * Repair is confined to THIS session's own marker. A marker carrying this
  * session's `adoptedBy` was written by this session's adoption of the worktree
  * at this path, so rewriting it to the recorded token cannot take another
- * creation's identity. A creation marker (no `adoptedBy`) or one adopted by
- * another session that disagrees with the record is a different creation, the
- * ABA case the token exists to catch, and is refused unchanged.
+ * creation's identity. An ABSENT marker on a validated gateway worktree is the
+ * same shape one layer out: a losing concurrent fresh adoption deleted it, and
+ * a real different creation would carry its own marker rather than none, so the
+ * recorded token is materialised there too. A creation marker (no `adoptedBy`),
+ * a marker adopted by another session, or an unreadable one that disagrees with
+ * the record is a different creation, the ABA case the token exists to catch,
+ * and is refused unchanged.
  */
 export async function reconcileWorktreeIdentity(opts: {
   worktreePath: string;
@@ -851,11 +855,24 @@ export async function reconcileWorktreeIdentity(opts: {
   const adminDirectory = await resolveWorktreeAdminDirectory(worktreePath, logger);
   if (adminDirectory === null) return false;
   const marker = readAdminMarker(adminDirectory);
-  if (marker.kind !== "token") return false;
-  if (marker.token === recordedToken) return true;
-  // The disk names a different token than the store. Only reconcile our own
-  // adoption's marker; anything else is a different creation and must refuse.
-  if (marker.adoptedBy !== sessionId) return false;
+  if (marker.kind === "token" && marker.token === recordedToken) return true;
+  // Repair the cache to the record, but only for a marker this session can be
+  // shown to own:
+  // - a token marker carrying THIS session's `adoptedBy`, which a losing
+  //   concurrent reclaim left on a stale token; or
+  // - an ABSENT marker, which a losing concurrent FRESH adoption deleted.
+  //   `createWorktree` writes a marker and reads it back before returning, so a
+  //   validated gateway worktree (the caller confirmed the live registration
+  //   for this name) with no marker at all is one whose marker was lost, not a
+  //   different creation, which would carry its own. Materialising the recorded
+  //   token there is what keeps a concurrent fresh loser from stranding the
+  //   worktree the winning record names.
+  // An unreadable marker, or a token marker adopted by another session, is a
+  // different creation and is refused unchanged: the ABA case the token exists
+  // to catch.
+  const ownedByThisSession =
+    (marker.kind === "token" && marker.adoptedBy === sessionId) || marker.kind === "none";
+  if (!ownedByThisSession) return false;
   try {
     writeFileSync(
       join(adminDirectory, GATEWAY_WORKTREE_MARKER),

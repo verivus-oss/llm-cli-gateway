@@ -439,3 +439,25 @@ Evidence: docs/evidence/postgres-worktree-cleanup-2026-09-04.md.
 """
 idempotent = true
 validation = "The reconcile test drives the real reuse path with the three-party end-state (store=winner, disk=abandoned intermediate this session adopted) and asserts repair; two negatives assert a foreign or creation marker still throws. Each reconcile mutant is killed by its own named test."
+
+[[steps]]
+id = "round-14-review-repairs"
+depends_on = ["round-13-review-repairs"]
+actor = "assistant"
+status = """
+done 2026-09-07. Seats SPLIT: grok approved, codex blocked, settled by
+experiment (I reproduced it) and I sided with codex. Round 14 reconciled a
+mismatched token but not an ABSENT marker. A concurrent fresh loser's settle
+DELETES its marker, so the store records a token, the worktree is a live
+registration, and the disk marker is gone; reuse then threw forever and the
+session could not reuse a worktree it owns. Same class as round 14, one site out
+(absent instead of mismatched). grok's approval sat over the acknowledged
+settle-delete case, which the instruments rule does not count as clean.
+Fixed by extending reconcileWorktreeIdentity to materialise the recorded token
+onto an absent marker too, since createWorktree always leaves a marker so a
+validated gateway worktree with none has a lost marker, not a foreign creation.
+An unreadable or foreign marker still refuses (ABA).
+Evidence: docs/evidence/postgres-worktree-cleanup-2026-09-04.md.
+"""
+idempotent = true
+validation = "The absent-marker reconcile branch is killed by a test that drives the real reuse path with the fresh-loser end-state (recorded token, deleted marker, live registration); reconcile-any is killed by the unreadable and foreign-marker tests; dropping provenance by the foreign and other-session tests."

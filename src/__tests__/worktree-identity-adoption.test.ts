@@ -121,6 +121,53 @@ describe("worktree identity adoption, through its production caller", () => {
     expect(await readWorktreeOwnerToken(handle.path, noopLogger)).toBe(recordedToken);
   });
 
+  it("reconciles an ABSENT marker a concurrent fresh loser deleted, from the record", async () => {
+    // The round-14 blocker (codex). Two processes both observe an unmarked
+    // worktree; the winner records its token, the loser's fresh adoption loses
+    // the CAS and its settle DELETES the marker. The store records a token, the
+    // worktree is a live registration, but the marker is gone. Round 14
+    // reconciled a mismatched token, not an absent one, so reuse stranded the
+    // session's own live worktree. The record is the arbiter: reuse
+    // materialises the recorded token onto the absent marker and succeeds.
+    const { repoRoot, manager, handle, sessionId, recordedToken } = await recordedFixture(
+      "reconcile-absent",
+      () => ({ token: "irrelevant" })
+    );
+    rmSync(join(handle.adminDirectory, "gateway-owner.json"), { force: true });
+    expect(await readWorktreeOwnerToken(handle.path, noopLogger)).toBeNull();
+    const runtime = resolveGatewayServerRuntime({ sessionManager: manager });
+
+    const resolved = await resolveWorktreeForRequest(
+      { name: "reconcile-absent" },
+      sessionId,
+      runtime,
+      {
+        repoRoot,
+      }
+    );
+
+    expect((resolved as { worktreePath?: string }).worktreePath).toBe(handle.path);
+    expect(await readWorktreeOwnerToken(handle.path, noopLogger)).toBe(recordedToken);
+  });
+
+  it("does NOT reconcile an UNREADABLE marker on the reuse path", async () => {
+    // An unreadable marker (present but corrupt) is not an absent one: it could
+    // be a live different creation whose marker is momentarily unreadable, so
+    // reuse must refuse, not materialise over it.
+    const { repoRoot, manager, handle, sessionId } = await recordedFixture(
+      "reconcile-unreadable",
+      () => ({ token: "irrelevant" })
+    );
+    const markerPath = join(handle.adminDirectory, "gateway-owner.json");
+    writeFileSync(markerPath, "{ not json");
+    const runtime = resolveGatewayServerRuntime({ sessionManager: manager });
+
+    await expect(
+      resolveWorktreeForRequest({ name: "reconcile-unreadable" }, sessionId, runtime, { repoRoot })
+    ).rejects.toThrow(/Durable session worktree metadata no longer matches/);
+    expect(readFileSync(markerPath, "utf8")).toBe("{ not json");
+  });
+
   it("does NOT reconcile a marker with no adopter provenance (a different creation)", async () => {
     // A creation marker (no adoptedBy) that disagrees with the record is the ABA
     // case: a worktree the name was reused for after this session's was removed.
