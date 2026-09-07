@@ -351,3 +351,25 @@ disclosed residual: docs/evidence/postgres-worktree-cleanup-2026-09-04.md.
 """
 idempotent = true
 validation = "Five recovery guards each have a mutant only its own named test kills, including recovery-off, reclaim-any, the tombstone term, the unreadable refusal and the token block; an end-to-end test strands on a failed withdrawal read and recovers on a healthy retry."
+
+[[steps]]
+id = "round-10-review-repairs"
+depends_on = ["round-9-review-repairs"]
+actor = "assistant"
+status = """
+done 2026-09-07. Both review jobs died from EXTERNAL causes (codex early exit,
+grok killed by a gateway restart mid-run), but grok found a blocker first and it
+is real. Round 9's recovery reclaimed a marker no session records as a strand;
+grok showed a request-scoped worktree (created with no sessionId) is live yet
+its token is NEVER recorded, so recovery stamped a fresh identity over a live
+worktree. Ninth consecutive round a repair produced the next blocker, same
+class: record-absence is not a strand.
+Fixed by PROVENANCE: adoption writes adoptedBy = session.id, and recovery
+reclaims only a marker this same session's own adoption wrote. A creation marker
+carries no adoptedBy, so a live request-scoped worktree is never a strand. The
+recordsToken plumbing is removed; provenance subsumes it and also closes round
+10's disclosed in-flight residual.
+Evidence: docs/evidence/postgres-worktree-cleanup-2026-09-04.md.
+"""
+idempotent = true
+validation = "Five guards each have a mutant a named test kills; the always-reclaim mutant (the round-10 defect) is killed by a regression that drives a real request-scoped createWorktree through resolveWorktreeForRequest, and dropping adoptedBy from the write is killed by the end-to-end strand-recover test."

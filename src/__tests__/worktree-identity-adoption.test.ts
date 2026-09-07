@@ -183,19 +183,18 @@ describe("worktree identity adoption, through its production caller", () => {
     expect(manager.getSession(sessionId)?.metadata?.worktreeToken).toBeUndefined();
   });
 
-  it("reclaims an orphaned marker no session records, so a strand is not permanent", async () => {
+  it("reclaims THIS session's own stranded adoption marker, so a strand is not permanent", async () => {
     // The round-9 blocker. Round 8's withdrawal reads the marker before
     // removing it, so it takes back only its own token. When that read fails,
-    // the withdrawal declines and the marker stays: a token no session records,
-    // on a worktree adoption would otherwise refuse forever as "already
-    // marked". A transient read error at the wrong instant became permanent.
-    // Recovery reclaims that orphan: once the filesystem is healthy, the next
-    // reuse mints a fresh identity over it and records it.
+    // the withdrawal declines and the marker stays, with no record. Recovery
+    // reclaims it, but ONLY a strand: a marker THIS session's own adoption
+    // wrote, which carries `adoptedBy = session.id`. Here that state is set up
+    // directly; the end-to-end test below produces it through the real caller.
     const { repoRoot, manager, handle, sessionId } = await legacyFixture("orphan");
-    const strandedToken = "stranded-token-no-session-records";
+    const strandedToken = "stranded-token-this-session-wrote";
     writeFileSync(
       join(handle.adminDirectory, "gateway-owner.json"),
-      JSON.stringify({ token: strandedToken })
+      JSON.stringify({ token: strandedToken, adoptedBy: sessionId })
     );
     const runtime = resolveGatewayServerRuntime({ sessionManager: manager });
 
@@ -203,7 +202,7 @@ describe("worktree identity adoption, through its production caller", () => {
 
     const token = await readWorktreeOwnerToken(handle.path, noopLogger);
     expect(token).not.toBeNull();
-    // A fresh identity, not the orphan's, and the record agrees with it.
+    // A fresh identity, not the strand's, and the record agrees with it.
     expect(token).not.toBe(strandedToken);
     expect(manager.getSession(sessionId)?.metadata?.worktreeToken).toBe(token);
   });
@@ -244,69 +243,62 @@ describe("worktree identity adoption, through its production caller", () => {
     expect(recovered.getSession(sessionId)?.metadata?.worktreeToken).toBe(token);
   });
 
-  it("does NOT reclaim a marker a live session records, leaving that identity intact", async () => {
-    // The other side of recovery: a token a session records is a live
-    // creation's identity, not an orphan, and must be left untouched even
-    // though only one session claims THIS path. A predicate that always reports
-    // "orphan" would stamp over a replacement's marker, which is the ABA hazard
-    // the whole token exists to prevent.
-    const { repoRoot, manager, handle, sessionId } = await legacyFixture("live-owned");
-    const liveToken = "token-a-live-replacement-records";
-    writeFileSync(
-      join(handle.adminDirectory, "gateway-owner.json"),
-      JSON.stringify({ token: liveToken })
-    );
-    // A DIFFERENT session records that token, at a different path, so it is not
-    // a second claimant of this path: the recordsToken guard alone must refuse.
-    const owner = manager.createSession("claude", "owner");
-    manager.updateSessionMetadata(owner.id, {
-      worktreePath: join(repoRoot, ".worktrees", "a-different-worktree"),
-      worktreeToken: liveToken,
-    });
+  it("does NOT reclaim a LIVE request-scoped worktree, whose token no session records", async () => {
+    // The round-10 blocker. A request-scoped worktree (no sessionId) is created
+    // live, and the branch that would persist its token is skipped, so NO
+    // session ever records it. Round 10 reclaimed on "no session records this
+    // token" and so stamped a fresh identity over this live worktree. The
+    // marker it wrote carries no `adoptedBy`, so provenance leaves it alone.
+    const { repoRoot, manager } = await legacyFixture("reqscoped");
     const runtime = resolveGatewayServerRuntime({ sessionManager: manager });
 
-    await resolveWorktreeForRequest({ name: "live-owned" }, sessionId, runtime, { repoRoot }).catch(
-      () => undefined
+    // A live request-scoped named worktree. Its marker has a token no session
+    // records.
+    const live = await resolveWorktreeForRequest({ name: "reqscoped-wt" }, undefined, runtime, {
+      repoRoot,
+    });
+    const livePath = (live as { requestOwnedWorktree?: { path: string; token: string } })
+      .requestOwnedWorktree!;
+    expect(livePath.token).toEqual(expect.any(String));
+    expect(manager.listSessions().some(s => s.metadata?.worktreeToken === livePath.token)).toBe(
+      false
     );
 
-    // Untouched, and the legacy session got no identity from it.
-    expect(await readWorktreeOwnerToken(handle.path, noopLogger)).toBe(liveToken);
-    expect(manager.getSession(sessionId)?.metadata?.worktreeToken).toBeUndefined();
-  });
-
-  it("does NOT reclaim a marker a cleanup tombstone records", async () => {
-    // A tombstone still records the token of the worktree it is trying to clean
-    // up. That token is not an orphan, and reclaiming it would hand a live
-    // pre-token session a worktree already scheduled for removal.
-    const { repoRoot, manager, handle, sessionId } = await legacyFixture("tombstone-owned");
-    const pendingToken = "token-a-tombstone-still-records";
-    writeFileSync(
-      join(handle.adminDirectory, "gateway-owner.json"),
-      JSON.stringify({ token: pendingToken })
-    );
-    const owner = manager.createSession("claude", "pending");
-    manager.updateSessionMetadata(owner.id, {
-      // A DIFFERENT path, so the tombstone is not a second claimant of this
-      // path: the recordsToken guard alone must refuse. worktreeName is
-      // required for deleteSession to stage a durable cleanup tombstone rather
-      // than finalize the row.
-      worktreePath: join(repoRoot, ".worktrees", "a-worktree-pending-cleanup"),
-      worktreeName: "a-worktree-pending-cleanup",
-      worktreeToken: pendingToken,
+    // A legacy pre-token session pointed at that exact live path.
+    const stale = manager.createSession("claude", "stale");
+    manager.updateSessionMetadata(stale.id, {
+      worktreePath: livePath.path,
+      worktreeName: "reqscoped-wt",
       worktreeOwnerHostname: hostname(),
-      worktreeOwnerInstanceId: "instance-pending",
+      worktreeOwnerInstanceId: "instance-stale",
     });
-    expect(manager.deleteSession(owner.id)).toBe(true);
-    expect(
-      manager.listPendingWorktreeCleanupSessions(hostname()).some(s => s.id === owner.id)
-    ).toBe(true);
-    const runtime = resolveGatewayServerRuntime({ sessionManager: manager });
 
-    await resolveWorktreeForRequest({ name: "tombstone-owned" }, sessionId, runtime, {
+    await resolveWorktreeForRequest({ name: "reqscoped-wt" }, stale.id, runtime, {
       repoRoot,
     }).catch(() => undefined);
 
-    expect(await readWorktreeOwnerToken(handle.path, noopLogger)).toBe(pendingToken);
+    // The live worktree's identity survives, and the legacy session took none.
+    expect(await readWorktreeOwnerToken(livePath.path, noopLogger)).toBe(livePath.token);
+    expect(manager.getSession(stale.id)?.metadata?.worktreeToken).toBeUndefined();
+  });
+
+  it("does NOT reclaim a marker written by a DIFFERENT session's adoption", async () => {
+    // A strand belongs to the session that wrote it. A marker whose `adoptedBy`
+    // names another session must not be reclaimed here, or one session could
+    // steal another's in-flight adoption.
+    const { repoRoot, manager, handle, sessionId } = await legacyFixture("other-adopter");
+    const foreignToken = "token-another-session-adopted";
+    writeFileSync(
+      join(handle.adminDirectory, "gateway-owner.json"),
+      JSON.stringify({ token: foreignToken, adoptedBy: "a-different-session-id" })
+    );
+    const runtime = resolveGatewayServerRuntime({ sessionManager: manager });
+
+    await resolveWorktreeForRequest({ name: "other-adopter" }, sessionId, runtime, {
+      repoRoot,
+    }).catch(() => undefined);
+
+    expect(await readWorktreeOwnerToken(handle.path, noopLogger)).toBe(foreignToken);
     expect(manager.getSession(sessionId)?.metadata?.worktreeToken).toBeUndefined();
   });
 

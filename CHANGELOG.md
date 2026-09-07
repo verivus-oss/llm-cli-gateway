@@ -51,9 +51,11 @@ All notable changes to the llm-cli-gateway project.
   already awaiting cleanup. A marker whose record fails to persist is withdrawn
   again, and that withdrawal removes only the token it wrote, never a
   concurrent creation's. Because even that withdrawal can fail on a transient
-  read, a marker left carrying a token no session records is treated as an
-  orphan and reclaimed on the next reuse, so a strand recovers on its own rather
-  than refusing the worktree forever. The Git
+  read, adoption stamps the adopting session's own id into the marker, and a
+  marker carrying this session's id that was never recorded is reclaimed on the
+  next reuse, so a strand recovers on its own rather than refusing the worktree
+  forever. Only such a strand is reclaimed: a worktree created without a session
+  carries no adopter id, so it is never mistaken for one. The Git
   administrative directory is recorded alongside it, because `git worktree
   remove` deletes that directory and `git worktree move` leaves it alone, so it
   answers whether a removal happened without reading anything a move or an

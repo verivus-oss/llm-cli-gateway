@@ -558,7 +558,9 @@ type WorktreeSearchResult =
 
 /** One admin directory's marker, or why it could not be established. */
 type MarkerReading =
-  { kind: "token"; token: string } | { kind: "none" } | { kind: "unreadable"; reason: string };
+  | { kind: "token"; token: string; adoptedBy?: string }
+  | { kind: "none" }
+  | { kind: "unreadable"; reason: string };
 
 function describeError(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
@@ -631,8 +633,16 @@ function readAdminMarker(adminDirectory: string): MarkerReading {
     };
   }
   try {
-    const token = (JSON.parse(raw) as { token?: unknown }).token;
-    if (typeof token === "string" && token.length > 0) return { kind: "token", token };
+    const parsed = JSON.parse(raw) as { token?: unknown; adoptedBy?: unknown };
+    const token = parsed.token;
+    if (typeof token === "string" && token.length > 0) {
+      // `adoptedBy` is present only on a marker written by adoption, and names
+      // the session whose adoption wrote it. A creation marker has none. That
+      // is what lets recovery tell a strand from a live creation whose token no
+      // session records.
+      const adoptedBy = typeof parsed.adoptedBy === "string" ? parsed.adoptedBy : undefined;
+      return { kind: "token", token, adoptedBy };
+    }
   } catch (error) {
     return {
       kind: "unreadable",
@@ -1053,15 +1063,16 @@ async function noLinkedWorktreeRemains(repoRoot: string, logger: Logger): Promis
  *
  * A worktree that already carries a marker is left alone: some other creation
  * owns it, and stamping over that would destroy the evidence this whole
- * mechanism rests on. The one exception is an ORPHAN marker, a token that no
- * session this host can enumerate records. That state is reachable only through
- * this mechanism's own non-atomic write-then-record: when an adoption's marker
- * lands but its record does not, the withdrawal that should take the marker
- * back declines if its read of the marker fails, and the worktree is then
- * refused forever as "already marked". Reclaiming an orphan is how that
- * transient failure stops being permanent. A caller opts into recovery by
- * supplying `recordsToken`; without it every token marker is left alone, as
- * before.
+ * mechanism rests on. The one exception is a STRAND: a marker this same
+ * session's own adoption wrote and then failed to record, which the adoption
+ * marks with `adoptedBy = session.id`. Its non-atomic write-then-record can
+ * leave a marker on disk with no record when the record fails to persist and
+ * the withdrawal that should take it back cannot read it; the worktree would
+ * then be refused forever as already marked. Reclaiming that strand, and only
+ * that strand, is how the transient failure stops being permanent. A creation
+ * marker carries no `adoptedBy`, so a live worktree whose token no session
+ * records (a request-scoped worktree, whose token is never recorded at all) is
+ * never mistaken for a strand.
  *
  * Tombstones are NOT adoptable and this must not be called for one. A deleted
  * session plus a live unmarked worktree is exactly the shape where the worktree
@@ -1071,11 +1082,7 @@ async function noLinkedWorktreeRemains(repoRoot: string, logger: Logger): Promis
  */
 export async function adoptLegacyWorktreeIdentity(
   session: { id: string; metadata?: Record<string, unknown> },
-  options: {
-    claimantsForPath: number;
-    recordsToken?: (token: string) => boolean;
-    logger?: Logger;
-  }
+  options: { claimantsForPath: number; logger?: Logger }
 ): Promise<{ token: string; adminDirectory: string } | null> {
   const logger = options.logger ?? noopLogger;
   const meta = session.metadata ?? {};
@@ -1105,34 +1112,43 @@ export async function adoptLegacyWorktreeIdentity(
     return null;
   }
   if (marker.kind === "token") {
-    // A present token marker is normally a live creation's identity and must be
-    // left untouched. The sole exception is an ORPHAN: a token no session this
-    // host records. The single-claimant check above and tombstone counting in
-    // the caller are what make reclaiming it sound. A live replacement's
-    // `createWorktree` records its token in the same store before it returns,
-    // so a token no session records cannot be a live replacement; and a
-    // replacement whose owning session was deleted would surface as a second,
-    // tombstone, claimant and fail the count. Absent the predicate, treat every
-    // token as owned and refuse, which is the pre-recovery behaviour.
-    const recorded = options.recordsToken ? options.recordsToken(marker.token) : true;
-    if (recorded) {
+    // Reclaim ONLY a strand: a marker THIS session's own adoption wrote and
+    // then failed to record. Adoption stamps `adoptedBy` with the adopting
+    // session's id; a creation marker carries none. So the one marker safe to
+    // stamp over is one this same session already tried to adopt.
+    //
+    // The round-10 predicate was "a token no session records". That is not the
+    // same set: a request-scoped worktree (created with no sessionId) is live
+    // and its token is NEVER recorded by any session, so that predicate stamped
+    // a fresh identity over a live creation. Record-absence is not provenance.
+    // A marker whose `adoptedBy` is this session, at a path only this session
+    // claims, cannot be a live creation: a creation writes no `adoptedBy`, and
+    // a successful adoption by this session would have recorded a token and
+    // returned above before reaching here.
+    if (marker.adoptedBy !== session.id) {
       logWarn(
         logger,
-        `not adopting the worktree at ${worktreePath} for session ${session.id}: it already carries another creation's identity`
+        `not adopting the worktree at ${worktreePath} for session ${session.id}: it carries an identity this session did not write`
       );
       return null;
     }
     logWarn(
       logger,
-      `reclaiming an orphaned worktree marker at ${worktreePath} for session ${session.id}: no session records its token`
+      `reclaiming this session's own stranded adoption marker at ${worktreePath} for session ${session.id}`
     );
   }
 
   const token = randomUUID();
   try {
-    writeFileSync(join(adminDirectory, GATEWAY_WORKTREE_MARKER), JSON.stringify({ token }), {
-      mode: 0o600,
-    });
+    // Stamp the adopting session's id, so that if this write lands but the
+    // record does not, a later reuse of THIS session can tell its own strand
+    // from a live creation marker (which carries no `adoptedBy`) and reclaim
+    // only the former.
+    writeFileSync(
+      join(adminDirectory, GATEWAY_WORKTREE_MARKER),
+      JSON.stringify({ token, adoptedBy: session.id }),
+      { mode: 0o600 }
+    );
     // Read back, for the same reason creation does: a marker that cannot be
     // read is worse than none, because cleanup would refuse it forever.
     if ((await readWorktreeOwnerToken(worktreePath, logger)) !== token) {
