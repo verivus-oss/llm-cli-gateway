@@ -34,7 +34,11 @@ import type { FlightRecorderOperations } from "./storage/operations.js";
 import { redactSecrets, isRedactionEnabled } from "./secret-redaction.js";
 import { getRequestContext, principalScopeSql, resolveOwnerPrincipal } from "./request-context.js";
 import { derivePromptSignals } from "./token-estimator.js";
-import { FlightRecorderRuntime, truncateThinkingBlocks } from "./flight-recorder-runtime.js";
+import {
+  FlightRecorderRuntime,
+  RESERVED_MIGRATED_RANK,
+  truncateThinkingBlocks,
+} from "./flight-recorder-runtime.js";
 import { PostgresFlightRecorder } from "./flight-recorder-pg.js";
 import {
   POSTGRES_RECORDER_TARGET,
@@ -608,7 +612,8 @@ const SQL_UPDATE_COMPRESSION = `UPDATE gateway_metadata
              compression_original_chars = @original_chars,
              compression_compressed_chars = @compressed_chars,
              compression_tokens_saved_est = @tokens_saved_est
-         WHERE request_id = @id AND compression_route IS NULL`;
+         WHERE request_id = @id AND compression_route IS NULL
+           AND completion_rank < ${RESERVED_MIGRATED_RANK}`;
 
 const SQL_UPDATE_ROUTING = `UPDATE gateway_metadata
          SET routed = 1,
@@ -617,7 +622,7 @@ const SQL_UPDATE_ROUTING = `UPDATE gateway_metadata
              route_reason = @reason,
              route_considered = @considered,
              route_reroutes = @reroutes
-         WHERE request_id = @id`;
+         WHERE request_id = @id AND completion_rank < ${RESERVED_MIGRATED_RANK}`;
 
 const SQL_SCHEMA = `
       CREATE TABLE IF NOT EXISTS _migrations (

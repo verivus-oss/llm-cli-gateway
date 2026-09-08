@@ -191,6 +191,62 @@ describe("a whole transcript round trip", () => {
     expect(() => new Date(row?.datetime_utc ?? "").toISOString()).not.toThrow();
   });
 
+  it("does not rewrite routing or compression on a migrated (rank 3) row (#287)", async () => {
+    await recorder.logStart({ ...START, correlationId: "pg-migrated" });
+    await recorder.logComplete("pg-migrated", RESULT);
+    // Reserved rank 3 marks a row imported by the transcript cutover.
+    await raw("UPDATE gateway_metadata SET completion_rank = 3 WHERE request_id = 'pg-migrated'");
+
+    await recorder.recordRouting("pg-migrated", { reason: "cheapest-capable", considered: 4 });
+    await recorder.recordCompressionTelemetry("pg-migrated", {
+      route: "native",
+      transforms: ["dedupe"],
+      originalChars: 10,
+      compressedChars: 5,
+      estimatedTokensSaved: 2,
+    });
+
+    const rows = await raw<{
+      routed: boolean | null;
+      route_reason: string | null;
+      compression_route: string | null;
+      completion_rank: number;
+    }>(
+      "SELECT routed, route_reason, compression_route, completion_rank FROM gateway_metadata WHERE request_id = 'pg-migrated'"
+    );
+    expect(rows[0].completion_rank).toBe(3);
+    expect(rows[0].routed).toBeNull();
+    expect(rows[0].route_reason).toBeNull();
+    expect(rows[0].compression_route).toBeNull();
+  });
+
+  it("still applies routing and compression to a live (rank < 3) row (#287)", async () => {
+    await recorder.logStart({ ...START, correlationId: "pg-live" });
+    await recorder.logComplete("pg-live", RESULT);
+
+    await recorder.recordRouting("pg-live", { reason: "cheapest-capable", considered: 4 });
+    await recorder.recordCompressionTelemetry("pg-live", {
+      route: "native",
+      transforms: ["dedupe"],
+      originalChars: 10,
+      compressedChars: 5,
+      estimatedTokensSaved: 2,
+    });
+
+    const rows = await raw<{
+      routed: boolean | null;
+      route_reason: string | null;
+      compression_route: string | null;
+      completion_rank: number;
+    }>(
+      "SELECT routed, route_reason, compression_route, completion_rank FROM gateway_metadata WHERE request_id = 'pg-live'"
+    );
+    expect(rows[0].completion_rank).toBe(2);
+    expect(rows[0].routed).toBe(true);
+    expect(rows[0].route_reason).toBe("cheapest-capable");
+    expect(rows[0].compression_route).toBe("native");
+  });
+
   it("stores the two 1/0 columns as real booleans", async () => {
     await recorder.logStart(START);
     await recorder.logComplete(ID, RESULT);
