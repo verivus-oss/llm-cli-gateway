@@ -42,7 +42,7 @@ separately.
 
 - https://github.com/johannschopplich/tokenx - 2 kB zero-dependency heuristic (language-aware chars/token divisors, CJK handling): ~95-98% accuracy vs real tokenizers on prose, ~4.7% deviation on 4,000 LOC of TypeScript.
 - https://bulkmd.app/blog/estimating-llm-token-cost-in-the-browser - Content-aware divisors vs cl100k: prose ~3.6 chars/token, Markdown tables ~3.2, minified JSON ~3.0, Python ~2.4, TypeScript ~2.2, URLs/hashes ~2.0; a flat divisor of 4 under-counts technical content by ~40%.
-- https://claudeguide.io/claude-token-counting-accurate - chars/4 is -6% on English prose but under-counts Python by 29%, JSON by 58%, HTML by 74%, Korean by 150%; structured text tokenizes at roughly 1 token per 2.5-3 chars.
+- claudeguide.io/claude-token-counting-accurate (source page removed 2026-09; finding retained here) - chars/4 is -6% on English prose but under-counts Python by 29%, JSON by 58%, HTML by 74%, Korean by 150%; structured text tokenizes at roughly 1 token per 2.5-3 chars.
 - https://blog.gopenai.com/counting-claude-tokens-without-a-tokenizer-e767f2b6e632 - For Claude, Anthropic's 3.5-chars/token heuristic showed up to ~20% MAPE, tiktoken up to ~12%; simple multi-feature linear models (bytes+words+lines) hit ~0.8-2% error. The current `estimateTokens` (words x 1.3) is the weakest estimator class per https://theneuralbase.com/context-window/learn/beginner/code-file-characters-divided-by-4/ .
 
 ### 6. Evidence of risk from "lossless" reformatting
