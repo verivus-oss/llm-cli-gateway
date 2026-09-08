@@ -16,14 +16,15 @@
     },
     "@modelcontextprotocol/sdk": {
       "acceptedVersions": [
-        "1.29.0"
+        "1.29.0",
+        "1.30.0"
       ],
       "source": "registry.npmjs.org",
       "state": "trusted",
       "firstVetted": "2026-07-10",
-      "lastReviewed": "2026-07-10",
+      "lastReviewed": "2026-09-08",
       "reviewers": [],
-      "rationale": "bootstrap from 2.16.0 shipped closure, not individually reviewed"
+      "rationale": "bootstrap from 2.16.0 shipped closure, not individually reviewed; 1.30.0 roll-forward 2026-09-08: minor bump of an already-trusted package, resolved from registry.npmjs.org with integrity, socket-policy-drift tripwire clean"
     },
     "accepts": {
       "acceptedVersions": [
@@ -942,14 +943,15 @@
     },
     "smol-toml": {
       "acceptedVersions": [
-        "1.7.0"
+        "1.7.0",
+        "1.8.0"
       ],
       "source": "registry.npmjs.org",
       "state": "trusted",
       "firstVetted": "2026-07-10",
-      "lastReviewed": "2026-07-10",
+      "lastReviewed": "2026-09-08",
       "reviewers": [],
-      "rationale": "bootstrap from 2.16.0 shipped closure, not individually reviewed"
+      "rationale": "bootstrap from 2.16.0 shipped closure, not individually reviewed; 1.8.0 roll-forward 2026-09-08: minor bump of an already-trusted package, resolved from registry.npmjs.org with integrity, socket-policy-drift tripwire clean"
     },
     "statuses": {
       "acceptedVersions": [
@@ -1035,14 +1037,15 @@
     },
     "zod": {
       "acceptedVersions": [
-        "4.4.3"
+        "4.4.3",
+        "4.5.4"
       ],
       "source": "registry.npmjs.org",
       "state": "trusted",
       "firstVetted": "2026-07-10",
-      "lastReviewed": "2026-07-10",
+      "lastReviewed": "2026-09-08",
       "reviewers": [],
-      "rationale": "bootstrap from 2.16.0 shipped closure, not individually reviewed"
+      "rationale": "bootstrap from 2.16.0 shipped closure, not individually reviewed; 4.5.4 roll-forward 2026-09-08: minor bump of an already-trusted package, resolved from registry.npmjs.org with integrity, socket-policy-drift tripwire clean"
     },
     "zod-to-json-schema": {
       "acceptedVersions": [
