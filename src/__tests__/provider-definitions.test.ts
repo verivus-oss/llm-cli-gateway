@@ -198,19 +198,27 @@ describe("provider-definitions registry", () => {
   it("mistral admin families are grounded honestly against vibe --help", () => {
     const mistral = getProviderDefinition("mistral");
     const byFamily = Object.fromEntries(mistral.adminSubcommands.map(f => [f.family, f]));
-    // The only real vibe CLI admin surface is two FLAGS.
+    // vibe 2.25.0's admin surface is two FLAGS plus one real subcommand: `update`
+    // (a self-update alias for --check-upgrade). The flags:
     expect(adminSurfaceKind(byFamily.setup)).toBe("cli-flag");
     expect(adminSurfaceKind(byFamily["check-upgrade"])).toBe("cli-flag");
     // --check-upgrade prompts to install an update: mutating, not read-only.
     expect(byFamily["check-upgrade"].safety).toBe("mutating-gated");
     // config/mcp/skills/agents are read-only config PROJECTIONS, never claimed as
-    // invokable `vibe <cmd>` subcommands (vibe --help advertises no subcommands).
+    // invokable `vibe <cmd>` subcommands. `mcp` stays a projection even though
+    // vibe 2.25.0 exposes a real `vibe mcp add/remove`: the gateway projects its
+    // config read-only rather than surfacing the mutation.
     for (const fam of ["config", "mcp", "skills", "agents"]) {
       expect(adminSurfaceKind(byFamily[fam])).toBe("config-projection");
       expect(byFamily[fam].safety).toBe("read-only");
     }
-    // No mistral admin family is a cli-subcommand (there are no vibe subcommands).
+    // `update` is the one real cli-subcommand family (vibe 2.25.0 added it), and
+    // it is the only one: every other mistral admin family is a flag or a
+    // projection, never an invokable subcommand.
+    expect(adminSurfaceKind(byFamily.update)).toBe("cli-subcommand");
+    expect(byFamily.update.safety).toBe("mutating-gated");
     for (const family of mistral.adminSubcommands) {
+      if (family.family === "update") continue;
       expect(adminSurfaceKind(family)).not.toBe("cli-subcommand");
     }
   });
