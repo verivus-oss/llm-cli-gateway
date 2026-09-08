@@ -95,6 +95,24 @@ describe("SqliteStorageDriver", () => {
     rmSync(dir, { recursive: true, force: true });
   });
 
+  it("sets busy_timeout on both the writable and read-only connections (#291)", async () => {
+    // busy_timeout is per connection. The recorder and the job store share one
+    // logs.db on separate connections, and a value of 0 made the recorder's
+    // schema bootstrap fail "database is locked" the instant the job store held
+    // the bootstrap write lock. Assert the value directly rather than by timing:
+    // node:sqlite is synchronous, so a same-process lock holder cannot release
+    // while the waiter blocks the thread, which is the very starvation the
+    // transaction deadline exists to bound.
+    const onWritable = await driver.withConnection("write", c =>
+      c.query<{ timeout: number }>("PRAGMA busy_timeout")
+    );
+    expect(onWritable[0]?.timeout).toBe(5000);
+    const onReadable = await driver.withConnection("analytics_read", c =>
+      c.query<{ timeout: number }>("PRAGMA busy_timeout")
+    );
+    expect(onReadable[0]?.timeout).toBe(5000);
+  });
+
   it("a failing ROLLBACK does not replace the error that caused it", async () => {
     // SQLite auto-rolls-back on SQLITE_FULL and some I/O errors, so the catch's
     // own ROLLBACK then fails with "cannot rollback - no transaction is active"
