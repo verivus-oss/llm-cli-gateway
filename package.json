@@ -162,7 +162,7 @@
     "@types/pg": "^8.11.10",
     "@typescript-eslint/eslint-plugin": "^8.61.1",
     "@typescript-eslint/parser": "^8.59.4",
-    "@vitest/coverage-v8": "^4.1.9",
+    "@vitest/coverage-v8": "^5.0.0",
     "better-sqlite3": "^13.0.3",
     "eslint": "^10.5.0",
     "eslint-config-prettier": "^10.1.8",
