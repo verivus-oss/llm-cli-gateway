@@ -68,7 +68,8 @@ describe("FlightRecorder least-cost-routing telemetry (LCR phase_1)", () => {
       const info = db
         .prepare("UPDATE gateway_metadata SET completion_rank = ? WHERE request_id = ?")
         .run(rank, id);
-      if (info.changes !== 1) throw new Error(`expected to rank exactly one row, changed ${info.changes}`);
+      if (info.changes !== 1)
+        throw new Error(`expected to rank exactly one row, changed ${info.changes}`);
     } finally {
       db.close();
     }
