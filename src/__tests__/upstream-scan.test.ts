@@ -1,4 +1,5 @@
 import { describe, expect, it } from "vitest";
+import { createHash } from "node:crypto";
 import { existsSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import {
@@ -318,6 +319,49 @@ describe("upstream scanner hardening", () => {
     // (Object.values(subcommands).some(p => p.helpExitedNonzero)) escalates it.
     expect(probe.helpExitedNonzero).toBe(true);
     expect(probe.existence).not.toBe("missing");
+  });
+
+  it("keeps an advertised subcommand present when its --help falls back to root help (alias command)", () => {
+    // Regression for the mistral `vibe update` case: `update` is advertised in
+    // root help (it is an alias for --check-upgrade) but `vibe update --help`
+    // returns the root help verbatim. That root-hash match must NOT downgrade a
+    // command the parent advertises to "missing"; existence is decided by
+    // parent-help advertisement, and the root-fallback only means the help is
+    // not trusted for flag comparison.
+    const ROOT_HELP = "usage: faketool [PROMPT]\n\nCommands:\n  update  Update now.\n";
+    // runReadOnlyCliCommand returns `${stdout}\n${stderr}`, so the probe's help
+    // text (stdout=ROOT_HELP, stderr="") hashes ROOT_HELP + "\n".
+    const outputHash = createHash("sha256").update(`${ROOT_HELP}\n`).digest("hex");
+    const subDef = { commandPath: ["update"], helpArgs: [["--help"]], aliases: [] };
+    const contract = { executable: "faketool", subcommands: [subDef] };
+    const rootHelp = { available: true, commands: ["update"], helpHash: outputHash };
+    const machinery = {
+      subcommandHelpProbeIsUntrusted,
+      flattenCliSubcommands: subs => subs,
+      getExtendedPath: () => process.env.PATH ?? "",
+      envWithExtendedPath: env => env,
+      // The subcommand help probe spawns successfully and prints the root help
+      // verbatim, so its output hashes to rootHelp.helpHash and fellBackToRoot.
+      resolveCommandForSpawn: () => ({
+        command: process.execPath,
+        args: ["-e", `process.stdout.write(${JSON.stringify(ROOT_HELP)})`],
+      }),
+      extractDiscoveredFlags: () => [],
+      computeSubcommandFlagDrift: () => ({
+        missingFlags: [],
+        extraFlags: [],
+        acknowledgedExtraFlags: [],
+        warnings: [],
+      }),
+    };
+
+    const probes = probeInstalledCliSubcommands(machinery, contract, rootHelp, 5000);
+    const probe = probes.update;
+    expect(probe).toBeDefined();
+    // Advertised in the parent, so it exists even though its --help fell back to root.
+    expect(probe.existence).toBe("present");
+    // Its help is not used for flag comparison (root-fallback).
+    expect(probe.available).toBe(false);
   });
 
   // The scanner imports the shared predicate from the compiled runtime via

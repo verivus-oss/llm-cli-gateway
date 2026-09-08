@@ -1081,9 +1081,17 @@ export function probeInstalledCliSubcommands(machinery, contract, rootHelp, time
     const fellBackToRoot =
       available && rootHelp.helpHash && helpHash === rootHelp.helpHash && commandPath.length > 0;
     if (fellBackToRoot) {
+      // The command's own `--help` returned the root help verbatim. For a command
+      // that does NOT exist this is the CLI falling back to root help, so its help
+      // is untrustworthy for flag comparison and `available` goes false. It does
+      // NOT by itself prove absence: an alias/action command that is genuinely
+      // advertised in its parent's help (e.g. `vibe update`, an alias for
+      // `--check-upgrade`) legitimately has no distinct help. Existence is decided
+      // by `pathState` (parent-help advertisement) below, the authoritative
+      // signal; the root-hash match only governs flag-drift trust.
       available = false;
       warnings.push(
-        "subcommand help matched root help output, so the command was treated as unavailable"
+        "subcommand help matched root help output, so its help is not used for flag comparison"
       );
     }
     if (pathState.state === "unknown") warnings.push(pathState.reason);
@@ -1108,7 +1116,12 @@ export function probeInstalledCliSubcommands(machinery, contract, rootHelp, time
       checkedHelpCommands,
       available,
       helpExitedNonzero,
-      existence: fellBackToRoot ? "missing" : pathState.state,
+      // pathState is authoritative for existence: a command advertised in its
+      // parent's help exists even when its own `--help` falls back to root. Only
+      // downgrade to missing on root-fallback when the parent did not advertise
+      // it (pathState is not "present").
+      existence:
+        pathState.state === "present" ? "present" : fellBackToRoot ? "missing" : pathState.state,
       missingFlags: drift.missingFlags,
       extraFlags: drift.extraFlags,
       acknowledgedExtraFlags: drift.acknowledgedExtraFlags,
