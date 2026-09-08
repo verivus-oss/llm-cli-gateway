@@ -1,7 +1,7 @@
 {
   "schemaVersion": "upstream-scan-snapshot.v2",
   "cli": "mistral",
-  "fetchedAt": "2026-09-03T01:23:01.621Z",
+  "fetchedAt": "2026-09-08T21:23:44.067Z",
   "sources": [
     {
       "url": "https://api.github.com/repos/mistralai/mistral-vibe/releases/latest",
@@ -25,10 +25,10 @@
     }
   ],
   "helpSurface": {
-    "probedAt": "2026-09-03T01:22:59.093Z",
+    "probedAt": "2026-09-08T21:23:42.601Z",
     "available": true,
-    "version": "vibe 2.24.5",
-    "targetVersion": "vibe 2.24.5",
+    "version": "vibe 2.25.0",
+    "targetVersion": "vibe 2.25.0",
     "versionMatchesTarget": true,
     "discoveredFlags": [
       "--add-dir",
@@ -51,21 +51,22 @@
       "--worktree",
       "--yolo"
     ],
-    "helpHash": "676b065f55ff066b74d1c7ec64c76dfdd44ddba8a3697e2480eb5158a0c9da82",
+    "helpHash": "99e4186bb84bbdb1dab84e4a44b0a86d47de17b49d20f6bbfc599e6eaa7b6cb3",
     "extraVsContract": [],
     "missingFromBinary": [],
     "arityMismatches": [],
     "enumMismatches": []
   },
   "rootCommands": [
-    "mcp"
+    "mcp",
+    "update"
   ],
   "subcommands": {
     "mcp": {
       "commandPath": [
         "mcp"
       ],
-      "probedAt": "2026-09-03T01:22:59.093Z",
+      "probedAt": "2026-09-08T21:23:42.567Z",
       "available": true,
       "existence": "present",
       "discoveredFlags": [],
@@ -75,9 +76,27 @@
       "arityMismatches": [],
       "enumMismatches": [],
       "risk": "writes_local_config",
-      "exposure": "tracked_only",
+      "exposure": "not_exposed",
       "tier": "catalog",
-      "summary": "Upstream-declared mistral command (auto-catalogued, unverified)."
+      "summary": "Manage MCP server configuration (vibe mcp add/remove)."
+    },
+    "update": {
+      "commandPath": [
+        "update"
+      ],
+      "probedAt": "2026-09-08T21:23:42.601Z",
+      "available": false,
+      "existence": "present",
+      "discoveredFlags": [],
+      "helpHash": "99e4186bb84bbdb1dab84e4a44b0a86d47de17b49d20f6bbfc599e6eaa7b6cb3",
+      "extraVsContract": [],
+      "missingFromBinary": [],
+      "arityMismatches": [],
+      "enumMismatches": [],
+      "risk": "updates_binary",
+      "exposure": "not_exposed",
+      "tier": "catalog",
+      "summary": "Check for a Vibe update now (same as --check-upgrade)."
     }
   }
 }

@@ -1081,9 +1081,17 @@ export function probeInstalledCliSubcommands(machinery, contract, rootHelp, time
     const fellBackToRoot =
       available && rootHelp.helpHash && helpHash === rootHelp.helpHash && commandPath.length > 0;
     if (fellBackToRoot) {
+      // The command's own `--help` returned the root help verbatim. For a command
+      // that does NOT exist this is the CLI falling back to root help, so its help
+      // is untrustworthy for flag comparison and `available` goes false. It does
+      // NOT by itself prove absence: an alias/action command that is genuinely
+      // advertised in its parent's help (e.g. `vibe update`, an alias for
+      // `--check-upgrade`) legitimately has no distinct help. Existence is decided
+      // by `pathState` (parent-help advertisement) below, the authoritative
+      // signal; the root-hash match only governs flag-drift trust.
       available = false;
       warnings.push(
-        "subcommand help matched root help output, so the command was treated as unavailable"
+        "subcommand help matched root help output, so its help is not used for flag comparison"
       );
     }
     if (pathState.state === "unknown") warnings.push(pathState.reason);
@@ -1108,7 +1116,20 @@ export function probeInstalledCliSubcommands(machinery, contract, rootHelp, time
       checkedHelpCommands,
       available,
       helpExitedNonzero,
-      existence: fellBackToRoot ? "missing" : pathState.state,
+      // A command advertised in its parent's help whose own `--help` falls back
+      // to root is ambiguous: it is either a genuine alias/action with no
+      // distinct help (`vibe update`) or a command stale-advertised in help that
+      // no longer executes. The scan cannot tell them apart from help alone, so
+      // it trusts the advertisement ONLY for a subcommand that explicitly
+      // declares `helpFallsBackToRoot`. For any other command a root-fallback
+      // stays a missing-drift signal, preserving removal detection for a
+      // stale-advertised-but-removed command (#319 review, codex blocker). When
+      // there is no root-fallback, existence is `pathState` as probed.
+      existence: fellBackToRoot
+        ? subcommand.helpFallsBackToRoot && pathState.state === "present"
+          ? "present"
+          : "missing"
+        : pathState.state,
       missingFlags: drift.missingFlags,
       extraFlags: drift.extraFlags,
       acknowledgedExtraFlags: drift.acknowledgedExtraFlags,

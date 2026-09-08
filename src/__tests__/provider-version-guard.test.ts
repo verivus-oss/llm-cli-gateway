@@ -21,10 +21,10 @@ import { CLI_TYPES } from "../provider-types.js";
  * test below meaningful.
  */
 const REAL_INSTALLED: Record<string, string> = {
-  claude: "2.1.259 (Claude Code)",
-  codex: "codex-cli 0.153.0",
+  claude: "2.1.265 (Claude Code)",
+  codex: "codex-cli 0.153.4",
   // agy reports a bare version with no product prefix, unlike codex and mistral.
-  gemini: "1.1.25",
+  gemini: "1.1.27",
   // Verbatim from `grok --version` on this host. 1.0.4 appended a
   // release-channel marker AFTER the build hash and 1.0.5 does NOT, so this
   // entry no longer carries the `[stable]` spelling it was pinned for. That
@@ -33,7 +33,7 @@ const REAL_INSTALLED: Record<string, string> = {
   // was never the only place the marker was tested. See the comment on
   // PROVIDER_TARGET_VERSIONS.grok for what the hash-less target cost.
   grok: "grok 1.0.13 (5e9a58528b76)",
-  mistral: "vibe 2.24.5",
+  mistral: "vibe 2.25.0",
   devin: "devin 3000.6.14 (18033302)",
   cursor: "2026.09.02-c22c1a3",
 };

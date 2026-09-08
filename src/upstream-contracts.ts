@@ -205,6 +205,17 @@ export interface CliSubcommandContract {
    * spawn failure (`result.error`) still marks the subcommand unavailable.
    */
   helpProbeExitTolerant?: boolean;
+  /**
+   * True for a command that is advertised in its parent's help but whose own
+   * `--help` legitimately returns the parent (root) help verbatim, because it is
+   * an alias/action with no distinct help of its own (e.g. `vibe update`, an
+   * alias for `--check-upgrade`). Without this, the scan's root-fallback guard
+   * would mark such a command MISSING even though the parent advertises it. It
+   * is opt-in PER SUBCOMMAND so an unmarked command whose help falls back to
+   * root is still reported as drift, which preserves removal detection for a
+   * command that is stale-advertised but no longer executes.
+   */
+  helpFallsBackToRoot?: boolean;
 }
 
 export interface ContractViolation {
@@ -492,6 +503,7 @@ function subcommand(
     fixtures?: readonly CliContractFixture[];
     acknowledgedUpstreamFlags?: readonly string[];
     helpProbeExitTolerant?: boolean;
+    helpFallsBackToRoot?: boolean;
     allowsEndOfOptionsPrompt?: boolean;
   } = {}
 ): CliSubcommandContract {
@@ -512,6 +524,7 @@ function subcommand(
     acknowledgedUpstreamFlags: options.acknowledgedUpstreamFlags ?? [],
     ...(options.allowsEndOfOptionsPrompt ? { allowsEndOfOptionsPrompt: true } : {}),
     ...(options.helpProbeExitTolerant ? { helpProbeExitTolerant: true } : {}),
+    ...(options.helpFallsBackToRoot ? { helpFallsBackToRoot: true } : {}),
   };
 }
 
@@ -592,7 +605,11 @@ export const UPSTREAM_CLI_CONTRACTS: Record<CliType, CliContract> = {
       rm: subcommand(
         ["rm"],
         "Upstream-declared claude command (auto-catalogued, unverified).",
-        "writes_local_config"
+        "writes_local_config",
+        [],
+        {
+          acknowledgedUpstreamFlags: ["--discard-unpushed"],
+        }
       ),
       // Auto-declared by `npm run providers:rebaseline`: upstream advertises
       // this command. Catalogued only (exposure defaults to tracked_only, so it
@@ -1942,6 +1959,21 @@ export const UPSTREAM_CLI_CONTRACTS: Record<CliType, CliContract> = {
       // this command. Catalogued only (exposure defaults to tracked_only, so it
       // is not reachable by callers); risk is a conservative default pending
       // maintainer verification.
+      // Maintainer-verified 2026-09-09 against agy 1.1.27: `agy remote-control`
+      // is a daemon control surface with start/status/stop children. Kept
+      // not_exposed as a conformance subcommand; the caller-facing projection is
+      // the approval-gated `remote-control` admin family in provider-definitions.
+      "remote-control": subcommand(
+        ["remote-control"],
+        "Register/start, inspect, and stop the agy remote-control daemon (start/status/stop).",
+        "writes_local_config",
+        [],
+        { exposure: "not_exposed" }
+      ),
+      // Auto-declared by `npm run providers:rebaseline`: upstream advertises
+      // this command. Catalogued only (exposure defaults to tracked_only, so it
+      // is not reachable by callers); risk is a conservative default pending
+      // maintainer verification.
       "mic-serve": subcommand(
         ["mic-serve"],
         "Upstream-declared gemini command (auto-catalogued, unverified).",
@@ -3037,14 +3069,27 @@ export const UPSTREAM_CLI_CONTRACTS: Record<CliType, CliContract> = {
     },
     helpArgs: [["--help"]],
     subcommands: {
-      // Auto-declared by `npm run providers:rebaseline`: upstream advertises
-      // this command. Catalogued only (exposure defaults to tracked_only, so it
-      // is not reachable by callers); risk is a conservative default pending
-      // maintainer verification.
+      // Maintainer-verified 2026-09-09 against vibe 2.25.0 root help.
+      // `vibe update` is a self-update alias for `--check-upgrade`; its `--help`
+      // returns the root usage rather than subcommand-specific help, so the
+      // probe is exit-tolerant. Not exposed as a tool, like every other
+      // provider's update/upgrade family.
+      update: subcommand(
+        ["update"],
+        "Check for a Vibe update now (same as --check-upgrade).",
+        "updates_binary",
+        [],
+        { exposure: "not_exposed", helpProbeExitTolerant: true, helpFallsBackToRoot: true }
+      ),
+      // Maintainer-verified 2026-09-09: `vibe mcp` manages the provider's own
+      // MCP server configuration (`vibe mcp {add,remove}`). It writes local
+      // config and is not surfaced as a caller-reachable tool.
       mcp: subcommand(
         ["mcp"],
-        "Upstream-declared mistral command (auto-catalogued, unverified).",
-        "writes_local_config"
+        "Manage MCP server configuration (vibe mcp add/remove).",
+        "writes_local_config",
+        [],
+        { exposure: "not_exposed" }
       ),
     },
     maxPositionals: 0,

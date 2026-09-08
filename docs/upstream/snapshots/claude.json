@@ -1,7 +1,7 @@
 {
   "schemaVersion": "upstream-scan-snapshot.v2",
   "cli": "claude",
-  "fetchedAt": "2026-09-03T01:22:38.690Z",
+  "fetchedAt": "2026-09-08T21:23:26.207Z",
   "sources": [
     {
       "url": "https://code.claude.com/docs/en/changelog.md",
@@ -13,10 +13,10 @@
     }
   ],
   "helpSurface": {
-    "probedAt": "2026-09-03T01:22:38.690Z",
+    "probedAt": "2026-09-08T21:23:26.207Z",
     "available": true,
-    "version": "2.1.259 (Claude Code)",
-    "targetVersion": "claude 2.1.259",
+    "version": "2.1.265 (Claude Code)",
+    "targetVersion": "claude 2.1.265",
     "versionMatchesTarget": true,
     "discoveredFlags": [
       "--add-dir",
@@ -88,7 +88,7 @@
       "--version",
       "--worktree"
     ],
-    "helpHash": "6018e09b3fdef27a6c6df71a3147e2f44713c9fa4a903238863a561a9aefc697",
+    "helpHash": "b020e981685e4997e56df1c263b2fafbe7a290616d26421ba74d900e23bca73c",
     "extraVsContract": [],
     "missingFromBinary": [],
     "arityMismatches": [],
@@ -122,7 +122,7 @@
       "commandPath": [
         "agents"
       ],
-      "probedAt": "2026-09-03T01:22:35.965Z",
+      "probedAt": "2026-09-08T21:23:24.302Z",
       "available": true,
       "existence": "present",
       "discoveredFlags": [
@@ -143,7 +143,7 @@
         "--settings",
         "--strict-mcp-config"
       ],
-      "helpHash": "41c63f198b04b257cab28502d1a952b85d6230f53d1725b45c6fff2db1483eec",
+      "helpHash": "a1b8b9ef2f518a63f9283fa408cf9feff76254f35b5c2af9762d74cabccac967",
       "extraVsContract": [],
       "missingFromBinary": [],
       "arityMismatches": [],
@@ -157,7 +157,7 @@
       "commandPath": [
         "attach"
       ],
-      "probedAt": "2026-09-03T01:22:36.173Z",
+      "probedAt": "2026-09-08T21:23:24.404Z",
       "available": true,
       "existence": "present",
       "discoveredFlags": [],
@@ -175,7 +175,7 @@
       "commandPath": [
         "auth"
       ],
-      "probedAt": "2026-09-03T01:22:36.324Z",
+      "probedAt": "2026-09-08T21:23:24.492Z",
       "available": true,
       "existence": "present",
       "discoveredFlags": [],
@@ -193,7 +193,7 @@
       "commandPath": [
         "auto-mode"
       ],
-      "probedAt": "2026-09-03T01:22:36.500Z",
+      "probedAt": "2026-09-08T21:23:24.579Z",
       "available": true,
       "existence": "present",
       "discoveredFlags": [],
@@ -211,7 +211,7 @@
       "commandPath": [
         "doctor"
       ],
-      "probedAt": "2026-09-03T01:22:36.655Z",
+      "probedAt": "2026-09-08T21:23:24.667Z",
       "available": true,
       "existence": "present",
       "discoveredFlags": [],
@@ -229,7 +229,7 @@
       "commandPath": [
         "gateway"
       ],
-      "probedAt": "2026-09-03T01:22:36.817Z",
+      "probedAt": "2026-09-08T21:23:24.759Z",
       "available": true,
       "existence": "present",
       "discoveredFlags": [
@@ -249,14 +249,14 @@
       "commandPath": [
         "import"
       ],
-      "probedAt": "2026-09-03T01:22:36.960Z",
+      "probedAt": "2026-09-08T21:23:24.851Z",
       "available": true,
       "existence": "present",
       "discoveredFlags": [
         "--dry-run",
         "--yes"
       ],
-      "helpHash": "40139c71d0abaff833101545468b977948ef0674a492ef256020e91498474a98",
+      "helpHash": "efa0b9ee4f10f6e6e8c54a6388429a71be145c7d2e8c503a0dda4bf319088200",
       "extraVsContract": [],
       "missingFromBinary": [],
       "arityMismatches": [],
@@ -270,7 +270,7 @@
       "commandPath": [
         "install"
       ],
-      "probedAt": "2026-09-03T01:22:37.108Z",
+      "probedAt": "2026-09-08T21:23:24.943Z",
       "available": true,
       "existence": "present",
       "discoveredFlags": [
@@ -290,7 +290,7 @@
       "commandPath": [
         "kill"
       ],
-      "probedAt": "2026-09-03T01:22:37.279Z",
+      "probedAt": "2026-09-08T21:23:25.053Z",
       "available": true,
       "existence": "present",
       "discoveredFlags": [],
@@ -308,7 +308,7 @@
       "commandPath": [
         "logs"
       ],
-      "probedAt": "2026-09-03T01:22:37.422Z",
+      "probedAt": "2026-09-08T21:23:25.166Z",
       "available": true,
       "existence": "present",
       "discoveredFlags": [],
@@ -326,7 +326,7 @@
       "commandPath": [
         "mcp"
       ],
-      "probedAt": "2026-09-03T01:22:37.534Z",
+      "probedAt": "2026-09-08T21:23:25.250Z",
       "available": true,
       "existence": "present",
       "discoveredFlags": [],
@@ -344,7 +344,7 @@
       "commandPath": [
         "plugin"
       ],
-      "probedAt": "2026-09-03T01:22:37.645Z",
+      "probedAt": "2026-09-08T21:23:25.343Z",
       "available": true,
       "existence": "present",
       "discoveredFlags": [],
@@ -362,7 +362,7 @@
       "commandPath": [
         "plugins"
       ],
-      "probedAt": "2026-09-03T01:22:37.752Z",
+      "probedAt": "2026-09-08T21:23:25.426Z",
       "available": true,
       "existence": "present",
       "discoveredFlags": [],
@@ -380,7 +380,7 @@
       "commandPath": [
         "project"
       ],
-      "probedAt": "2026-09-03T01:22:37.856Z",
+      "probedAt": "2026-09-08T21:23:25.518Z",
       "available": true,
       "existence": "present",
       "discoveredFlags": [],
@@ -398,7 +398,7 @@
       "commandPath": [
         "respawn"
       ],
-      "probedAt": "2026-09-03T01:22:37.987Z",
+      "probedAt": "2026-09-08T21:23:25.625Z",
       "available": true,
       "existence": "present",
       "discoveredFlags": [],
@@ -416,11 +416,13 @@
       "commandPath": [
         "rm"
       ],
-      "probedAt": "2026-09-03T01:22:38.117Z",
+      "probedAt": "2026-09-08T21:23:25.740Z",
       "available": true,
       "existence": "present",
-      "discoveredFlags": [],
-      "helpHash": "13c34686846b50b515f0582835a69e2956dd127bc3ff5bb2ef0aba4934199fe5",
+      "discoveredFlags": [
+        "--discard-unpushed"
+      ],
+      "helpHash": "93a90188dfc75ac6e76c2dd7cd2ee8aa368f9a7443aed18394af00dd74a77e4c",
       "extraVsContract": [],
       "missingFromBinary": [],
       "arityMismatches": [],
@@ -434,7 +436,7 @@
       "commandPath": [
         "setup-token"
       ],
-      "probedAt": "2026-09-03T01:22:38.226Z",
+      "probedAt": "2026-09-08T21:23:25.832Z",
       "available": true,
       "existence": "present",
       "discoveredFlags": [],
@@ -452,7 +454,7 @@
       "commandPath": [
         "stop"
       ],
-      "probedAt": "2026-09-03T01:22:38.355Z",
+      "probedAt": "2026-09-08T21:23:25.944Z",
       "available": true,
       "existence": "present",
       "discoveredFlags": [],
@@ -470,7 +472,7 @@
       "commandPath": [
         "ultrareview"
       ],
-      "probedAt": "2026-09-03T01:22:38.470Z",
+      "probedAt": "2026-09-08T21:23:26.037Z",
       "available": true,
       "existence": "present",
       "discoveredFlags": [
@@ -493,7 +495,7 @@
       "commandPath": [
         "update"
       ],
-      "probedAt": "2026-09-03T01:22:38.580Z",
+      "probedAt": "2026-09-08T21:23:26.128Z",
       "available": true,
       "existence": "present",
       "discoveredFlags": [],
@@ -511,7 +513,7 @@
       "commandPath": [
         "upgrade"
       ],
-      "probedAt": "2026-09-03T01:22:38.689Z",
+      "probedAt": "2026-09-08T21:23:26.207Z",
       "available": true,
       "existence": "present",
       "discoveredFlags": [],

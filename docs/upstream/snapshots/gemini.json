@@ -1,7 +1,7 @@
 {
   "schemaVersion": "upstream-scan-snapshot.v2",
   "cli": "gemini",
-  "fetchedAt": "2026-09-03T03:10:05.882Z",
+  "fetchedAt": "2026-09-08T21:23:27.753Z",
   "sources": [
     {
       "url": "https://antigravity.google/docs/cli-overview",
@@ -33,10 +33,10 @@
     }
   ],
   "helpSurface": {
-    "probedAt": "2026-09-03T03:10:05.882Z",
+    "probedAt": "2026-09-08T21:23:27.752Z",
     "available": true,
-    "version": "1.1.25",
-    "targetVersion": "1.1.25",
+    "version": "1.1.27",
+    "targetVersion": "1.1.27",
     "versionMatchesTarget": true,
     "discoveredFlags": [
       "--add-dir",
@@ -60,7 +60,7 @@
       "--prompt-interactive",
       "--sandbox"
     ],
-    "helpHash": "81169a03280ed0aff3036e98c21e9a3883c5bf0f0531bc8eb12fd2a660c46a4a",
+    "helpHash": "31c782c581599b9a69d6c56679871d4fd4c47ac4638c50d11d7d9b477f6aa0d4",
     "extraVsContract": [],
     "missingFromBinary": [],
     "arityMismatches": [],
@@ -77,6 +77,7 @@
     "models",
     "plugin",
     "plugins",
+    "remote-control",
     "update"
   ],
   "subcommands": {
@@ -84,7 +85,7 @@
       "commandPath": [
         "agent"
       ],
-      "probedAt": "2026-09-03T03:10:05.382Z",
+      "probedAt": "2026-09-08T21:23:27.275Z",
       "available": true,
       "existence": "present",
       "discoveredFlags": [],
@@ -102,7 +103,7 @@
       "commandPath": [
         "changelog"
       ],
-      "probedAt": "2026-09-03T03:10:05.446Z",
+      "probedAt": "2026-09-08T21:23:27.326Z",
       "available": true,
       "existence": "present",
       "discoveredFlags": [],
@@ -120,7 +121,7 @@
       "commandPath": [
         "install"
       ],
-      "probedAt": "2026-09-03T03:10:05.506Z",
+      "probedAt": "2026-09-08T21:23:27.378Z",
       "available": true,
       "existence": "present",
       "discoveredFlags": [
@@ -142,7 +143,7 @@
       "commandPath": [
         "mcp"
       ],
-      "probedAt": "2026-09-03T03:10:05.565Z",
+      "probedAt": "2026-09-08T21:23:27.430Z",
       "available": true,
       "existence": "present",
       "discoveredFlags": [],
@@ -160,7 +161,7 @@
       "commandPath": [
         "mic-serve"
       ],
-      "probedAt": "2026-09-03T03:10:05.632Z",
+      "probedAt": "2026-09-08T21:23:27.484Z",
       "available": true,
       "existence": "present",
       "discoveredFlags": [
@@ -180,7 +181,7 @@
       "commandPath": [
         "models"
       ],
-      "probedAt": "2026-09-03T03:10:05.698Z",
+      "probedAt": "2026-09-08T21:23:27.537Z",
       "available": true,
       "existence": "present",
       "discoveredFlags": [],
@@ -198,7 +199,7 @@
       "commandPath": [
         "plugin"
       ],
-      "probedAt": "2026-09-03T03:10:05.761Z",
+      "probedAt": "2026-09-08T21:23:27.591Z",
       "available": true,
       "existence": "present",
       "discoveredFlags": [],
@@ -216,7 +217,7 @@
       "commandPath": [
         "plugins"
       ],
-      "probedAt": "2026-09-03T03:10:05.824Z",
+      "probedAt": "2026-09-08T21:23:27.645Z",
       "available": true,
       "existence": "present",
       "discoveredFlags": [],
@@ -230,11 +231,29 @@
       "tier": "catalog",
       "summary": "Alias for Antigravity plugin management."
     },
+    "remote-control": {
+      "commandPath": [
+        "remote-control"
+      ],
+      "probedAt": "2026-09-08T21:23:27.697Z",
+      "available": true,
+      "existence": "present",
+      "discoveredFlags": [],
+      "helpHash": "410f53fc0fa2bbd7ce38ffe682c9b58a38da744c991c1fcb7a6b56fdf4463703",
+      "extraVsContract": [],
+      "missingFromBinary": [],
+      "arityMismatches": [],
+      "enumMismatches": [],
+      "risk": "writes_local_config",
+      "exposure": "not_exposed",
+      "tier": "catalog",
+      "summary": "Register/start, inspect, and stop the agy remote-control daemon (start/status/stop)."
+    },
     "update": {
       "commandPath": [
         "update"
       ],
-      "probedAt": "2026-09-03T03:10:05.882Z",
+      "probedAt": "2026-09-08T21:23:27.752Z",
       "available": true,
       "existence": "present",
       "discoveredFlags": [],

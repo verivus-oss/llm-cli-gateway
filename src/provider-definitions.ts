@@ -448,9 +448,9 @@ const KIT_UNSUPPORTED: ProviderPersonalConfigKit = {
  * all follow automatically.
  */
 export const PROVIDER_TARGET_VERSIONS: Record<CliType, string> = {
-  claude: "claude 2.1.259",
-  codex: "codex-cli 0.153.0",
-  gemini: "1.1.25",
+  claude: "claude 2.1.265",
+  codex: "codex-cli 0.153.4",
+  gemini: "1.1.27",
   // The build hash here is load-bearing. grok 1.0.4 reports
   // `grok 1.0.4 (d846eb93d9) [stable]`, putting a release-channel marker after
   // the hash, and `comparableVersion` in scripts/upstream-scan.mjs reads the
@@ -462,7 +462,7 @@ export const PROVIDER_TARGET_VERSIONS: Record<CliType, string> = {
   // result was a baseline that reported drift forever. The normalizer is fixed
   // (see its comment) and the tool now writes this spelling itself.
   grok: "grok 1.0.13 (5e9a58528b76)",
-  mistral: "vibe 2.24.5",
+  mistral: "vibe 2.25.0",
   devin: "devin 3000.6.14 (18033302)",
   cursor: "cursor-agent 2026.09.02-c22c1a3",
 };
@@ -899,6 +899,12 @@ const PROVIDER_DEFINITIONS = {
     },
     adminSubcommands: [
       {
+        family: "remote-control",
+        safety: "mutating-gated",
+        evidence:
+          "1.1.27 root help advertises `remote-control`. Maintainer-verified 2026-09-09: `agy remote-control <subcommand>` is a daemon control surface (start registers and starts the remote-control daemon, status reports it, stop unregisters it). mutating-gated is correct and deliberate: this is a remote-access daemon, so exposure stays behind an approval rather than free or read-only.",
+      },
+      {
         family: "mic-serve",
         safety: "mutating-gated",
         evidence:
@@ -1165,6 +1171,12 @@ const PROVIDER_DEFINITIONS = {
       },
     },
     adminSubcommands: [
+      {
+        family: "update",
+        safety: "mutating-gated",
+        evidence:
+          "vibe 2.25.0 root help advertises `update`. Maintainer-verified 2026-09-09: it is a self-update alias for `--check-upgrade`, so mutating-gated matches every other provider's update family. The contract declares it `not_exposed`.",
+      },
       // Two top-level FLAGS plus, since vibe 2.24.1, one subcommand. --setup
       // writes an API key; --check-upgrade "Check for a Vibe update now, prompt
       // to install it, and exit" mutates. The older claim that vibe advertises

@@ -1,4 +1,5 @@
 import { describe, expect, it } from "vitest";
+import { createHash } from "node:crypto";
 import { existsSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import {
@@ -318,6 +319,70 @@ describe("upstream scanner hardening", () => {
     // (Object.values(subcommands).some(p => p.helpExitedNonzero)) escalates it.
     expect(probe.helpExitedNonzero).toBe(true);
     expect(probe.existence).not.toBe("missing");
+  });
+
+  // Both cases share this: a subcommand advertised in root help whose own
+  // --help returns the root help verbatim (fellBackToRoot). Whether that keeps
+  // it "present" (a declared alias) or reports "missing" (an undeclared command,
+  // preserving removal detection) is the scoped behaviour under review in #319.
+  const rootFallbackProbe = subDef => {
+    const ROOT_HELP = "usage: faketool [PROMPT]\n\nCommands:\n  update  Update now.\n";
+    // runReadOnlyCliCommand returns `${stdout}\n${stderr}`, so the probe's help
+    // text (stdout=ROOT_HELP, stderr="") hashes ROOT_HELP + "\n".
+    const outputHash = createHash("sha256").update(`${ROOT_HELP}\n`).digest("hex");
+    const contract = { executable: "faketool", subcommands: [subDef] };
+    const rootHelp = { available: true, commands: ["update"], helpHash: outputHash };
+    const machinery = {
+      subcommandHelpProbeIsUntrusted,
+      flattenCliSubcommands: subs => subs,
+      getExtendedPath: () => process.env.PATH ?? "",
+      envWithExtendedPath: env => env,
+      // Spawn succeeds and prints the root help verbatim, so its output hashes to
+      // rootHelp.helpHash and fellBackToRoot is true.
+      resolveCommandForSpawn: () => ({
+        command: process.execPath,
+        args: ["-e", `process.stdout.write(${JSON.stringify(ROOT_HELP)})`],
+      }),
+      extractDiscoveredFlags: () => [],
+      computeSubcommandFlagDrift: () => ({
+        missingFlags: [],
+        extraFlags: [],
+        acknowledgedExtraFlags: [],
+        warnings: [],
+      }),
+    };
+    return probeInstalledCliSubcommands(machinery, contract, rootHelp, 5000).update;
+  };
+
+  it("keeps a DECLARED alias present when its --help falls back to root help (helpFallsBackToRoot)", () => {
+    // The mistral `vibe update` case: advertised in root help (an alias for
+    // --check-upgrade), `vibe update --help` returns root help verbatim. With
+    // helpFallsBackToRoot declared, that root-hash match must NOT downgrade it.
+    const probe = rootFallbackProbe({
+      commandPath: ["update"],
+      helpArgs: [["--help"]],
+      aliases: [],
+      helpFallsBackToRoot: true,
+    });
+    expect(probe).toBeDefined();
+    expect(probe.existence).toBe("present");
+    // Its help is still not used for flag comparison (root-fallback).
+    expect(probe.available).toBe(false);
+  });
+
+  it("still reports MISSING for an UNDECLARED command whose --help falls back to root (preserves removal detection; #319 codex blocker)", () => {
+    // Same fixture WITHOUT helpFallsBackToRoot: a command stale-advertised in
+    // parent help but genuinely removed presents this way (its --help falls back
+    // to root). The scan must keep flagging it as drift rather than silently
+    // accept it as present, so removal detection is not lost.
+    const probe = rootFallbackProbe({
+      commandPath: ["update"],
+      helpArgs: [["--help"]],
+      aliases: [],
+    });
+    expect(probe).toBeDefined();
+    expect(probe.existence).toBe("missing");
+    expect(probe.available).toBe(false);
   });
 
   // The scanner imports the shared predicate from the compiled runtime via
