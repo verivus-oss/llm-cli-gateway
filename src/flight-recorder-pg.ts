@@ -31,7 +31,11 @@ import {
 import { parsePgDsn, SSL_FILE_REFUSAL, type TargetFieldSource } from "./storage/pg-dsn-parse.js";
 import { showLogField } from "./storage/log-field.js";
 import type { StorageConnection } from "./storage/store.js";
-import { FlightRecorderRuntime, truncateThinkingBlocks } from "./flight-recorder-runtime.js";
+import {
+  FlightRecorderRuntime,
+  RESERVED_MIGRATED_RANK,
+  truncateThinkingBlocks,
+} from "./flight-recorder-runtime.js";
 import { postgresFailureMessage } from "./storage/postgres-diagnostics.js";
 import type {
   CacheAggregateRow,
@@ -96,6 +100,7 @@ const SQL_UPDATE_COMPRESSION = `
       SET compression_route = ?, compression_transforms = ?, compression_original_chars = ?,
           compression_compressed_chars = ?, compression_tokens_saved_est = ?
       WHERE request_id = ? AND compression_route IS NULL
+        AND completion_rank < ${RESERVED_MIGRATED_RANK}
     `;
 
 /** `routed` is BOOLEAN here; SQLite wrote the integer 1 into the same column. */
@@ -103,7 +108,7 @@ const SQL_UPDATE_ROUTING = `
       UPDATE gateway_metadata
       SET routed = TRUE, route_est_cost_usd = ?, route_est_confidence = ?,
           route_reason = ?, route_considered = ?, route_reroutes = ?
-      WHERE request_id = ?
+      WHERE request_id = ? AND completion_rank < ${RESERVED_MIGRATED_RANK}
     `;
 
 /**

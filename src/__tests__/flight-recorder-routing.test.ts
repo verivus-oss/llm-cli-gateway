@@ -60,6 +60,32 @@ describe("FlightRecorder least-cost-routing telemetry (LCR phase_1)", () => {
     await rec.logStart({ correlationId: id, cli: "claude", model: "sonnet", prompt: "hi" });
   }
 
+  // The reserved migrated rank (3) cannot be produced through the recorder API
+  // by design, so simulate the transcript cutover's import the way #287 does.
+  function setCompletionRank(p: string, id: string, rank: number): void {
+    const db = new BetterSqlite3(p);
+    try {
+      const info = db
+        .prepare("UPDATE gateway_metadata SET completion_rank = ? WHERE request_id = ?")
+        .run(rank, id);
+      if (info.changes !== 1) throw new Error(`expected to rank exactly one row, changed ${info.changes}`);
+    } finally {
+      db.close();
+    }
+  }
+
+  const completed = {
+    response: "body",
+    durationMs: 1,
+    retryCount: 0,
+    circuitBreakerState: "closed" as const,
+    costUsd: 0,
+    costBasis: "provider-reported" as const,
+    optimizationApplied: false,
+    exitCode: 0,
+    status: "completed" as const,
+  };
+
   it("a fresh DB opens clean and has the new columns", async () => {
     const rec = new FlightRecorder(dbPath);
     await rec.close();
@@ -111,6 +137,55 @@ describe("FlightRecorder least-cost-routing telemetry (LCR phase_1)", () => {
     expect(meta.route_reason).toBe("cheapest-capable");
     expect(meta.route_considered).toBe(4);
     expect(meta.route_reroutes).toBe(1);
+  });
+
+  it("does not rewrite routing or compression on a migrated (rank 3) row (#287)", async () => {
+    const rec = new FlightRecorder(dbPath);
+    await seedStarted(rec, "migrated-1");
+    await rec.logComplete("migrated-1", { ...completed, response: "imported body" });
+    // Reserved rank 3 marks a row the cutover imported from a predecessor logs.db.
+    setCompletionRank(dbPath, "migrated-1", 3);
+
+    // A live request colliding on the migrated correlationId tries to write its
+    // own telemetry onto that row. The rank fence must refuse both writes.
+    await rec.recordRouting("migrated-1", { reason: "cheapest-capable", considered: 4 });
+    await rec.recordCompressionTelemetry("migrated-1", {
+      route: "native",
+      transforms: ["dedupe"],
+      originalChars: 10,
+      compressedChars: 5,
+      estimatedTokensSaved: 2,
+    });
+    await rec.close();
+
+    const meta = readMeta(dbPath, "migrated-1");
+    expect(meta.completion_rank).toBe(3);
+    expect(meta.routed).toBeNull();
+    expect(meta.route_reason).toBeNull();
+    expect(meta.compression_route).toBeNull();
+  });
+
+  it("still applies routing and compression to a live (rank < 3) row (#287)", async () => {
+    const rec = new FlightRecorder(dbPath);
+    await seedStarted(rec, "live-1");
+    // An observed completion lands at rank 2, below the reserved migrated rank.
+    await rec.logComplete("live-1", { ...completed, response: "live body" });
+
+    await rec.recordRouting("live-1", { reason: "cheapest-capable", considered: 4 });
+    await rec.recordCompressionTelemetry("live-1", {
+      route: "native",
+      transforms: ["dedupe"],
+      originalChars: 10,
+      compressedChars: 5,
+      estimatedTokensSaved: 2,
+    });
+    await rec.close();
+
+    const meta = readMeta(dbPath, "live-1");
+    expect(meta.completion_rank).toBe(2);
+    expect(meta.routed).toBe(1);
+    expect(meta.route_reason).toBe("cheapest-capable");
+    expect(meta.compression_route).toBe("native");
   });
 
   it("round-trips both a T1 provider-reported and a T2 derived-from-tokens basis", async () => {

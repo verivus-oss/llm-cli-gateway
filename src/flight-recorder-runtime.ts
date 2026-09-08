@@ -13,6 +13,17 @@
  */
 import type { FlightRecorderHealth, FlightRecorderState } from "./flight-recorder.js";
 
+/**
+ * Completion rank reserved for imported history: rows the transcript cutover
+ * copies from a `logs.db` that predates this engine. The completion fence is
+ * `stored <= incoming` and no live completion can produce a rank this high, so
+ * nothing live may complete a migrated row. Metadata writes (routing and
+ * compression) honour the same reservation by refusing any row at this rank; see
+ * SQL_UPDATE_ROUTING / SQL_UPDATE_COMPRESSION in both recorders (#287). Do not
+ * reuse this value for anything else: the reservation is the whole mechanism.
+ */
+export const RESERVED_MIGRATED_RANK = 3;
+
 const MAX_THINKING_BYTES = 1_000_000;
 
 const TRUNCATION_SUFFIX = "[TRUNCATED]";
