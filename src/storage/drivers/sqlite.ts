@@ -38,6 +38,19 @@ import type { StorageConnection, StorageDriver, StorageEngine } from "../store.j
 /** Inside the 3s SIGTERM-to-SIGKILL window in `executor.ts:454`. */
 const DEFAULT_DRAIN_TIMEOUT_MS = 2000;
 
+/**
+ * Per-connection lock wait (#291). `busy_timeout` is PER CONNECTION, and two
+ * subsystems (flight recorder and job store) default to the same shared
+ * `logs.db` on separate connections. Set on every connection this driver opens
+ * so a write or a schema bootstrap waits for the write lock instead of failing
+ * immediately with SQLITE_BUSY ("database is locked"). The recorder's driver
+ * previously set none, so `ensureSchema` failed the instant the job store held
+ * the bootstrap write lock. Matches the job store's own value (#139). The
+ * transaction deadline still bounds the transaction as a whole; this only
+ * governs one statement's wait for the lock.
+ */
+const STORAGE_BUSY_TIMEOUT_MS = 5000;
+
 const CLOSING_MESSAGE = "storage: sqlite driver is closing and is not accepting new work";
 
 /** Writers sharing one SQLite file must not race across driver instances. */
@@ -184,6 +197,9 @@ export class SqliteStorageDriver implements StorageDriver {
     } = {}
   ) {
     this.writable = openDatabase(dbPath);
+    // Set before any BEGIN IMMEDIATE (including the bootstrap DDL's), because a
+    // busy_timeout of 0 makes a contended lock fail instantly rather than wait.
+    this.writable.exec(`PRAGMA busy_timeout = ${STORAGE_BUSY_TIMEOUT_MS}`);
     this.drainTimeoutMs = options.drainTimeoutMs ?? DEFAULT_DRAIN_TIMEOUT_MS;
     this.transactionDeadlineMs = options.transactionDeadlineMs ?? STORAGE_TRANSACTION_DEADLINE_MS;
     this.readSnapshotDeadlineMs =
@@ -205,7 +221,11 @@ export class SqliteStorageDriver implements StorageDriver {
     if (!READ_ONLY_OPERATION_CLASSES.has(operation)) {
       return connectionOver(this.writable, transactionControl, deadline);
     }
-    this.readable ??= openReadOnly(this.dbPath);
+    if (this.readable === null) {
+      this.readable = openReadOnly(this.dbPath);
+      // Same per-connection lock wait as the writable connection (#291).
+      this.readable.exec(`PRAGMA busy_timeout = ${STORAGE_BUSY_TIMEOUT_MS}`);
+    }
     return connectionOver(this.readable, transactionControl, deadline);
   }
 
