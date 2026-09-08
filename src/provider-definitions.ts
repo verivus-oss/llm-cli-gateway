@@ -448,7 +448,7 @@ const KIT_UNSUPPORTED: ProviderPersonalConfigKit = {
  * all follow automatically.
  */
 export const PROVIDER_TARGET_VERSIONS: Record<CliType, string> = {
-  claude: "claude 2.1.263",
+  claude: "claude 2.1.265",
   codex: "codex-cli 0.153.4",
   gemini: "1.1.27",
   // The build hash here is load-bearing. grok 1.0.4 reports

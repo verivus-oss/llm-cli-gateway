@@ -1116,12 +1116,20 @@ export function probeInstalledCliSubcommands(machinery, contract, rootHelp, time
       checkedHelpCommands,
       available,
       helpExitedNonzero,
-      // pathState is authoritative for existence: a command advertised in its
-      // parent's help exists even when its own `--help` falls back to root. Only
-      // downgrade to missing on root-fallback when the parent did not advertise
-      // it (pathState is not "present").
-      existence:
-        pathState.state === "present" ? "present" : fellBackToRoot ? "missing" : pathState.state,
+      // A command advertised in its parent's help whose own `--help` falls back
+      // to root is ambiguous: it is either a genuine alias/action with no
+      // distinct help (`vibe update`) or a command stale-advertised in help that
+      // no longer executes. The scan cannot tell them apart from help alone, so
+      // it trusts the advertisement ONLY for a subcommand that explicitly
+      // declares `helpFallsBackToRoot`. For any other command a root-fallback
+      // stays a missing-drift signal, preserving removal detection for a
+      // stale-advertised-but-removed command (#319 review, codex blocker). When
+      // there is no root-fallback, existence is `pathState` as probed.
+      existence: fellBackToRoot
+        ? subcommand.helpFallsBackToRoot && pathState.state === "present"
+          ? "present"
+          : "missing"
+        : pathState.state,
       missingFlags: drift.missingFlags,
       extraFlags: drift.extraFlags,
       acknowledgedExtraFlags: drift.acknowledgedExtraFlags,
