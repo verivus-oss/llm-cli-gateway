@@ -276,13 +276,21 @@ import fs from 'node:fs';
 // Access-Control-Request-Headers), and GHSA-f23p-vx2j-j53r (memo() retains SSR
 // output across requests).
 //
-// The package.json#overrides pin is an EXACT 4.12.34 rather than the previous
-// ^4.12.27 caret: a caret at the new fix line resolves to the 4.13.x head, which
-// turns a patch roll-forward into a minor one for no security gain, and every
-// resolved version has to be individually ledgered under supply-chain-guard
-// anyway. This tripwire reads the lockfile, not the override string, so it
-// guards the floor whichever form the pin takes.
-const FLOOR = [4, 12, 34];
+// A third set landed on 2026-09-08 with fix line 4.13.5: GHSA-crvj-82cr-hjcx /
+// CVE-2026-84363 (request smuggling, query parser does not stop at a URL
+// fragment), GHSA-g6gw-c38x-mqfc / CVE-2026-84364 (unbounded nesting in
+// parseBody dot-notation, off by default) and GHSA-gqvv-2mrq-wpjv /
+// CVE-2026-84365 (path traversal in toSSG, build-time only). None is on the
+// gateway runtime path (transitive hono/ws only).
+//
+// The package.json#overrides pin is now an EXACT 4.13.5. The previous EXACT
+// 4.12.34 pin deliberately stayed off the 4.13.x minor because nothing then
+// required it; the third set changed that: its fix line is 4.13.5, inside the
+// minor, so clearing it forces the minor and the pin follows to an exact
+// 4.13.5 (still exact, not a caret, so each resolved version is individually
+// ledgered under supply-chain-guard). This tripwire reads the lockfile, not the
+// override string, so it guards the floor whichever form the pin takes.
+const FLOOR = [4, 13, 5];
 function below(version) {
   const parts = version.split('.').map(n => parseInt(n, 10));
   for (let i = 0; i < FLOOR.length; i++) {
