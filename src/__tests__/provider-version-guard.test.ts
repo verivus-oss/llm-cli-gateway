@@ -24,7 +24,7 @@ const REAL_INSTALLED: Record<string, string> = {
   claude: "2.1.266 (Claude Code)",
   codex: "codex-cli 0.153.4",
   // agy reports a bare version with no product prefix, unlike codex and mistral.
-  gemini: "1.1.27",
+  gemini: "1.1.28",
   // Verbatim from `grok --version` on this host. The release-channel marker is
   // version-dependent: 1.0.4 appended `[stable]` after the build hash, 1.0.5
   // dropped it, and 1.0.24 appends it again. This entry carries the banner

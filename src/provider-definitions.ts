@@ -450,7 +450,7 @@ const KIT_UNSUPPORTED: ProviderPersonalConfigKit = {
 export const PROVIDER_TARGET_VERSIONS: Record<CliType, string> = {
   claude: "claude 2.1.266",
   codex: "codex-cli 0.153.4",
-  gemini: "1.1.27",
+  gemini: "1.1.28",
   // The build hash here is load-bearing. grok 1.0.4 reports
   // `grok 1.0.4 (d846eb93d9) [stable]`, putting a release-channel marker after
   // the hash, and `comparableVersion` in scripts/upstream-scan.mjs reads the
