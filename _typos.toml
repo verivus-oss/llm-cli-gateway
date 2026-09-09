@@ -14,6 +14,13 @@ extend-ignore-identifiers-re = [
   # `claude-sonnet-4-5`, `LLM_GATEWAY_LOGS_DB`).
   "^[A-Z][A-Za-z0-9_-]+$",
   "^[a-z][a-z0-9_-]*$",
+  # Git commit hashes in provider version banners start with a digit, so the
+  # two identifier patterns above (which require a leading letter) do not cover
+  # them, and typos word-splits a hash and flags any dictionary-shaped run
+  # inside it, e.g. `caf` inside the cursor build hash `6caf4ff`. Skip any
+  # lowercase-hex token of git-hash length. Recurs on every release that lands
+  # a new build hash.
+  "^[0-9a-f]{7,40}$",
 ]
 
 [default.extend-words]
