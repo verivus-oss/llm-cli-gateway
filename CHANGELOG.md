@@ -114,12 +114,17 @@ All notable changes to the llm-cli-gateway project.
 ### Changed
 
 - Provider upstream contracts and version targets refreshed to the installed
-  CLI versions: claude 2.1.266, codex-cli 0.153.4, gemini 1.1.27, mistral vibe
+  CLI versions: claude 2.1.266, codex-cli 0.153.4, gemini 1.1.28, mistral vibe
   2.25.0, grok 1.0.24, cursor-agent 2026.09.08. Gemini remote-control is now
   classified as a mutating admin surface, the upstream drift scan's
   subcommand-existence check is scoped so a declared alias that falls back to
   root help is not misreported as removed, and grok 1.0.24's new `usage`
   subcommand is catalogued. (#319, #321)
+- Provider child processes now receive the gateway launch context as environment
+  (`LLM_GATEWAY_CORRELATION_ID`, `LLM_GATEWAY_JOB_ID`, `LLM_GATEWAY_SESSION_ID`,
+  `LLM_GATEWAY_PROVIDER`), and any inherited `LLM_GATEWAY_*` launch variables are
+  stripped before the context is applied so a child cannot read a stale parent's
+  values. (#297)
 - Development-toolchain updates: better-sqlite3 13 and vitest 5, both
   devDependencies only. The published package uses Node's built-in `node:sqlite`
   and ships neither. Also eslint, CI Python, and pinned GitHub Actions bumps.
