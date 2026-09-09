@@ -3,15 +3,26 @@
 // npm install, no verdaccio.
 import { afterEach, beforeEach, describe, it, expect } from "vitest";
 import { execFileSync } from "node:child_process";
-import { mkdtempSync, mkdirSync, rmSync, symlinkSync, writeFileSync, copyFileSync } from "node:fs";
+import {
+  mkdtempSync,
+  mkdirSync,
+  rmSync,
+  symlinkSync,
+  writeFileSync,
+  copyFileSync,
+  readFileSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import {
   EXPECTED_TREE_PROBLEMS,
+  REVIEWED_CONSUMER_VERSIONS,
   OK_MARKER,
   classifyConsumerTree,
   collectInvalidNodes,
+  collectPackageVersions,
+  reviewedVersionProblems,
   formatConsumerTreeReport,
   isDirectInvocation,
   parseInvalid,
@@ -26,6 +37,23 @@ const HONO_INVALID = '"^1.19.9" from node_modules/@modelcontextprotocol/sdk';
 // got wrong; the two must be treated as the same reviewed pin.
 const HONO_INVALID_NESTED =
   '"^1.19.9" from node_modules/llm-cli-gateway/node_modules/@modelcontextprotocol/sdk';
+
+// The classifier tests below exercise the matching logic against a representative
+// reviewed pin. They pass this sample EXPLICITLY rather than leaning on the
+// production EXPECTED_TREE_PROBLEMS, which is now empty: the SDK broadened its
+// @hono/node-server range to `^1.19.9 || ^2.0.5`, so the 2.0.11 pin is in-range
+// and no longer surfaces as an `invalid` marker to review (see the module's own
+// header). Keeping the sample local keeps this coverage stable across future
+// edits to the production list.
+const SAMPLE_REVIEWED = [
+  {
+    name: "@hono/node-server",
+    version: "2.0.11",
+    range: "^1.19.9",
+    requiredBy: "@modelcontextprotocol/sdk",
+    reason: "GHSA-frvp-7c67-39w9 security pin; see package.json#overrides",
+  },
+];
 
 /** Build a consumer tree shaped like real `npm ls --all --json` output. */
 function treeOf({ honoServer, extraDeps = {}, problems = [] } = {}) {
@@ -80,7 +108,7 @@ describe("collectInvalidNodes", () => {
 
 describe("classifyConsumerTree", () => {
   it("accepts the tree that carries exactly the reviewed security pin", () => {
-    const result = classifyConsumerTree(pinnedTree());
+    const result = classifyConsumerTree(pinnedTree(), SAMPLE_REVIEWED);
     expect(result.ok).toBe(true);
     expect(result.unexpected).toEqual([]);
     expect(result.missing).toEqual([]);
@@ -91,7 +119,10 @@ describe("classifyConsumerTree", () => {
     // The override was dropped, so npm resolved the SDK's own ^1.19.9 range.
     // The tree is now internally consistent, which a plain `npm ls` exit-0
     // check would happily pass while the advisory pin silently stopped shipping.
-    const result = classifyConsumerTree(treeOf({ honoServer: { version: "1.19.15" } }));
+    const result = classifyConsumerTree(
+      treeOf({ honoServer: { version: "1.19.15" } }),
+      SAMPLE_REVIEWED
+    );
     expect(result.ok).toBe(false);
     expect(result.missing).toHaveLength(1);
     expect(result.missing[0].name).toBe("@hono/node-server");
@@ -103,7 +134,8 @@ describe("classifyConsumerTree", () => {
 
   it("fails when the pinned version drifts to an unreviewed one", () => {
     const result = classifyConsumerTree(
-      treeOf({ honoServer: { version: "2.0.12", invalid: HONO_INVALID } })
+      treeOf({ honoServer: { version: "2.0.12", invalid: HONO_INVALID } }),
+      SAMPLE_REVIEWED
     );
     expect(result.ok).toBe(false);
     expect(result.unexpected.map(e => e.version)).toEqual(["2.0.12"]);
@@ -117,7 +149,8 @@ describe("classifyConsumerTree", () => {
         extraDeps: {
           "some-pkg": { version: "9.9.9", invalid: '"^1.0.0" from node_modules/llm-cli-gateway' },
         },
-      })
+      }),
+      SAMPLE_REVIEWED
     );
     expect(result.ok).toBe(false);
     expect(result.unexpected.map(e => e.name)).toEqual(["some-pkg"]);
@@ -129,7 +162,8 @@ describe("classifyConsumerTree", () => {
       treeOf({
         honoServer: { version: "2.0.11", invalid: HONO_INVALID },
         problems: ["missing: smol-toml@1.7.0, required by llm-cli-gateway@3.0.0"],
-      })
+      }),
+      SAMPLE_REVIEWED
     );
     expect(result.ok).toBe(false);
     expect(result.otherProblems).toHaveLength(1);
@@ -144,7 +178,8 @@ describe("classifyConsumerTree", () => {
         problems: [
           "invalid: @hono/node-server@2.0.11 /tmp/consumer/node_modules/@hono/node-server",
         ],
-      })
+      }),
+      SAMPLE_REVIEWED
     );
     expect(result.ok).toBe(true);
     expect(result.otherProblems).toEqual([]);
@@ -232,8 +267,15 @@ describe("CLI process (fail-closed under path aliasing)", () => {
     dependencies: {
       "llm-cli-gateway": {
         version: "3.0.0",
-        // Reviewed security pin absent: this MUST be rejected.
-        dependencies: { "@modelcontextprotocol/sdk": { version: "1.29.0", dependencies: {} } },
+        // An UNREVIEWED out-of-range package: nothing in EXPECTED_TREE_PROBLEMS
+        // (now empty) accounts for it, so the gate MUST reject this regardless of
+        // the path the CLI was invoked through.
+        dependencies: {
+          "@modelcontextprotocol/sdk": {
+            version: "1.29.0",
+            dependencies: { "@hono/node-server": { version: "2.0.11", invalid: HONO_INVALID } },
+          },
+        },
       },
     },
   };
@@ -258,7 +300,7 @@ describe("CLI process (fail-closed under path aliasing)", () => {
     }
   }
 
-  it("rejects a tree missing the reviewed pin when run through a SYMLINKED path", () => {
+  it("rejects a tree with an unreviewed out-of-range package when run through a SYMLINKED path", () => {
     // Regression: pathToFileURL(argv[1]) preserves symlinks while node
     // canonicalizes import.meta.url, so the guard skipped the whole body and
     // exited 0 having verified nothing. bash's logical `pwd` in ROOT_DIR
@@ -275,11 +317,11 @@ describe("CLI process (fail-closed under path aliasing)", () => {
 
     const viaLink = runChecker(join(link, "check-consumer-tree.mjs"), treeFile);
     expect(viaLink.status).not.toBe(0);
-    expect(viaLink.out).toContain("NO LONGER reaching consumers");
+    expect(viaLink.out).toContain("UNREVIEWED out-of-range");
     expect(viaLink.out).not.toContain(OK_MARKER);
   });
 
-  it("rejects a tree missing the reviewed pin when run through a path with spaces", () => {
+  it("rejects a tree with an unreviewed out-of-range package when run through a path with spaces", () => {
     const spaced = join(dir, "dir with space");
     mkdirSync(spaced);
     const script = join(spaced, "check-consumer-tree.mjs");
@@ -307,7 +349,9 @@ describe("CLI process (fail-closed under path aliasing)", () => {
               "@modelcontextprotocol/sdk": {
                 version: "1.29.0",
                 dependencies: {
-                  "@hono/node-server": { version: "2.0.11", invalid: HONO_INVALID },
+                  // In-range (valid) now that the SDK accepts ^2.0.5: a clean
+                  // tree with no reviewed problems is the only thing that passes.
+                  "@hono/node-server": { version: "2.0.11" },
                 },
               },
             },
@@ -329,13 +373,46 @@ describe("CLI process (fail-closed under path aliasing)", () => {
       expect(res.out).not.toContain(OK_MARKER);
     }
   });
+
+  it("rejects a vulnerable in-range @hono/node-server that carries no invalid marker", () => {
+    // End-to-end proof of the positive pin assertion: 1.19.14 satisfies the
+    // SDK's ^1.19.9, so npm reports no `invalid` and the empty
+    // EXPECTED_TREE_PROBLEMS would let it through, but it is affected by
+    // GHSA-frvp (< 1.19.15). The CLI must fail and NOT print the OK marker.
+    const treeFile = join(dir, "vulnerable.json");
+    writeFileSync(
+      treeFile,
+      JSON.stringify({
+        name: "consumer",
+        problems: [],
+        dependencies: {
+          "llm-cli-gateway": {
+            version: "3.2.1",
+            dependencies: {
+              "@modelcontextprotocol/sdk": {
+                version: "1.30.0",
+                dependencies: { "@hono/node-server": { version: "1.19.14" } },
+              },
+            },
+          },
+        },
+      })
+    );
+    const res = runChecker(MODULE_PATH, treeFile);
+    expect(res.status).not.toBe(0);
+    expect(res.out).toContain("is not the reviewed pin");
+    expect(res.out).not.toContain(OK_MARKER);
+  });
 });
 
 describe("EXPECTED_TREE_PROBLEMS", () => {
   it("documents a justification for every tolerated entry", () => {
-    // An entry without a reason is an undocumented exception; the whole point
-    // of the list is that each one carries its advisory rationale.
-    expect(EXPECTED_TREE_PROBLEMS.length).toBeGreaterThan(0);
+    // The list is currently empty (see the module header: the SDK broadened its
+    // @hono/node-server range to `^1.19.9 || ^2.0.5`, so the 2.0.11 pin is in
+    // range and no longer surfaces as an `invalid` marker to review). That is a
+    // valid state: the tripwire still rejects any UNEXPECTED marker. If an entry
+    // is ever added back, it must carry its advisory rationale, because an entry
+    // without a reason is an undocumented exception.
     for (const entry of EXPECTED_TREE_PROBLEMS) {
       expect(entry.name).toBeTruthy();
       expect(entry.version).toMatch(/^\d+\.\d+\.\d+/);
@@ -348,15 +425,57 @@ describe("EXPECTED_TREE_PROBLEMS", () => {
     }
   });
 
-  it("pins @hono/node-server at or above the GHSA-frvp-7c67-39w9 patched floor", () => {
-    // Ratchet: the advisory's GitHub-mirror range is `< 2.0.5`. If someone
-    // lowers this entry to satisfy the SDK's declared range, the pin would stop
-    // clearing `npm audit` and this fails rather than shipping a flagged version.
-    const hono = EXPECTED_TREE_PROBLEMS.find(e => e.name === "@hono/node-server");
-    expect(hono).toBeDefined();
-    const [major, minor, patch] = hono.version.split(".").map(Number);
+  it("keeps the @hono/node-server override at or above the GHSA-frvp-7c67-39w9 patched floor", () => {
+    // Ratchet moved to the override itself. The advisory range is `< 2.0.5`;
+    // package.json#overrides pins @hono/node-server, and lowering that pin below
+    // 2.0.5 would ship a flagged version, so assert the floor here rather than on
+    // the (now empty) reviewed list.
+    const pkgPath = fileURLToPath(new URL("../package.json", import.meta.url));
+    const pkg = JSON.parse(readFileSync(pkgPath, "utf8"));
+    const pinned = pkg.overrides?.["@hono/node-server"];
+    expect(pinned).toBeTruthy();
+    const [major, minor, patch] = String(pinned)
+      .replace(/^[^\d]*/, "")
+      .split(".")
+      .map(Number);
     expect(major).toBeGreaterThanOrEqual(2);
     expect(major > 2 || minor > 0 || patch >= 5).toBe(true);
+  });
+});
+
+describe("reviewedVersionProblems (positive pin assertion)", () => {
+  const pinned = REVIEWED_CONSUMER_VERSIONS["@hono/node-server"];
+
+  it("accepts the reviewed pin at its exact version", () => {
+    const tree = treeOf({ honoServer: { version: pinned } });
+    expect(reviewedVersionProblems(tree)).toEqual([]);
+    expect(collectPackageVersions(tree, "@hono/node-server")).toEqual([pinned]);
+  });
+
+  it("rejects a vulnerable in-range resolution the SDK's ^1.19.9 still admits", () => {
+    // The differential that the invalid-marker check used to catch and the
+    // empty EXPECTED_TREE_PROBLEMS would otherwise miss: 1.19.14 satisfies
+    // ^1.19.9, carries no `invalid` marker, but is affected by GHSA-frvp
+    // (< 1.19.15).
+    const tree = treeOf({ honoServer: { version: "1.19.14" } });
+    const problems = reviewedVersionProblems(tree);
+    expect(problems).toHaveLength(1);
+    expect(problems[0]).toContain("1.19.14");
+    expect(problems[0]).toContain(pinned);
+  });
+
+  it("rejects a patched-but-unreviewed drift (e.g. 2.1.1)", () => {
+    const problems = reviewedVersionProblems(treeOf({ honoServer: { version: "2.1.1" } }));
+    expect(problems).toHaveLength(1);
+    expect(problems[0]).toContain("2.1.1");
+  });
+
+  it("rejects the pin being absent entirely", () => {
+    const tree = treeOf({});
+    expect(collectPackageVersions(tree, "@hono/node-server")).toEqual([]);
+    const problems = reviewedVersionProblems(tree);
+    expect(problems).toHaveLength(1);
+    expect(problems[0]).toContain("absent");
   });
 });
 
@@ -378,7 +497,8 @@ describe("parseInvalid / nesting independence", () => {
     // consumer, and an exact-string match against the repo-local spelling
     // reported the pin as BOTH unreviewed and missing.
     const result = classifyConsumerTree(
-      treeOf({ honoServer: { version: "2.0.11", invalid: HONO_INVALID_NESTED } })
+      treeOf({ honoServer: { version: "2.0.11", invalid: HONO_INVALID_NESTED } }),
+      SAMPLE_REVIEWED
     );
     expect(result.ok).toBe(true);
     expect(result.unexpected).toEqual([]);
@@ -393,7 +513,8 @@ describe("parseInvalid / nesting independence", () => {
           version: "2.0.11",
           invalid: '"^1.19.9" from node_modules/some-other-pkg',
         },
-      })
+      }),
+      SAMPLE_REVIEWED
     );
     expect(result.ok).toBe(false);
     expect(result.unexpected).toHaveLength(1);
@@ -408,7 +529,8 @@ describe("parseInvalid / nesting independence", () => {
           invalid:
             '"^3.0.0" from node_modules/llm-cli-gateway/node_modules/@modelcontextprotocol/sdk',
         },
-      })
+      }),
+      SAMPLE_REVIEWED
     );
     expect(result.ok).toBe(false);
   });

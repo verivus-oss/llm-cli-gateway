@@ -23,29 +23,47 @@ import { fileURLToPath } from "node:url";
 /**
  * Reviewed, expected-and-required consumer-tree problems.
  *
- * @hono/node-server: package.json#overrides pins 2.0.11 while
- * @modelcontextprotocol/sdk declares ^1.19.9. GHSA-frvp-7c67-39w9 (serve-static
- * path traversal on Windows via encoded backslash) declares `< 2.0.5` affected
- * in the GitHub Advisory Database that `npm audit` consumes, so no version
- * inside the SDK's declared major clears `npm audit --audit-level=moderate`,
- * and the override is the only way to ship a version that scanner accepts.
+ * Empty as of 2026-09-09, and that is the anticipated end state, not a dropped
+ * guard. This list held one entry: @hono/node-server, pinned to 2.0.11 by
+ * package.json#overrides for GHSA-frvp-7c67-39w9 (serve-static path traversal on
+ * Windows via encoded backslash, affected `< 2.0.5`, patched 2.0.5). While
+ * @modelcontextprotocol/sdk declared @hono/node-server as `^1.19.9` alone, the
+ * 2.0.11 pin sat outside that range and npm reported it `invalid` in every
+ * consumer tree, so this gate asserted that reviewed `invalid` marker was
+ * present (a security pin that silently stopped shipping is the failure it
+ * catches).
  *
- * Upstream (honojs/node-server GHSA-frvp-7c67-39w9) actually lists TWO patched
- * versions, 2.0.5 and 1.19.15; the GitHub Advisory Database mirror collapsed
- * that to `< 2.0.5` and dropped the 1.19.15 pair. 1.19.15 does carry the fix
- * (guard regex identical to 2.0.5/2.0.11). EXIT CONDITION: once the mirror is
- * corrected, both this override and this entry can be deleted, because npm
- * resolves ^1.19.9 to a patched 1.19.x by itself and the tree goes clean.
+ * The SDK has since broadened its declaration to `^1.19.9 || ^2.0.5`. 2.0.11
+ * satisfies that `^2.0.5` alternative, so npm now resolves it as VALID and emits
+ * no downstream `invalid` marker; the tree goes clean for this dependency. That
+ * is exactly the EXIT CONDITION the prior revision of this comment named (the
+ * mechanism differed: the SDK widened its own range rather than the advisory
+ * mirror being corrected), so there is no `invalid` marker for this list to
+ * require. The override remains, pinning the exact reviewed and tested 2.0.11,
+ * and the shipped shrinkwrap pins that into consumers.
+ *
+ * The SDK range does NOT guarantee safety on its own: the `^1.19.9` alternative
+ * still admits vulnerable 1.19.x (< 1.19.15, GHSA-frvp), and `^2.0.5` admits
+ * 2.0.5-2.0.9 (GHSA-9mqv, patched 2.0.10). What used to prove the pin reached
+ * consumers was its `invalid` marker; with that marker gone, REVIEWED_CONSUMER_
+ * VERSIONS below replaces it with a POSITIVE assertion that the consumer's
+ * @hono/node-server actually is the reviewed patched pin, so a tree that
+ * resolved it to a vulnerable version (or dropped it) is rejected rather than
+ * read as clean. The tripwire also still fails on any UNEXPECTED `invalid`
+ * marker, so a new unreviewed override cannot enter the shipped closure silently.
  */
-export const EXPECTED_TREE_PROBLEMS = [
-  {
-    name: "@hono/node-server",
-    version: "2.0.11",
-    range: "^1.19.9",
-    requiredBy: "@modelcontextprotocol/sdk",
-    reason: "GHSA-frvp-7c67-39w9 security pin; see package.json#overrides",
-  },
-];
+export const EXPECTED_TREE_PROBLEMS = [];
+
+/**
+ * Packages whose exact resolved version this gate asserts in the consumer tree,
+ * because their reviewed security pin no longer surfaces as an `invalid` marker.
+ * @hono/node-server: pinned to 2.0.11 (GHSA-frvp fixed 2.0.5, GHSA-9mqv fixed
+ * 2.0.10; 2.0.11 clears both). The SDK admits vulnerable 1.19.x and 2.0.5-2.0.9,
+ * so "not flagged invalid" is not sufficient: require the reviewed version.
+ */
+export const REVIEWED_CONSUMER_VERSIONS = {
+  "@hono/node-server": "2.0.11",
+};
 
 /**
  * Split npm's `invalid` string into the range and the package that demanded it.
@@ -108,6 +126,36 @@ export function collectInvalidNodes(tree) {
 }
 
 /**
+ * The published package whose consumer install this gate verifies. A tree that
+ * does not contain it is degenerate or the wrong input. While
+ * EXPECTED_TREE_PROBLEMS held the @hono/node-server pin, an empty or malformed
+ * tree failed by having that pin `missing`; now that the list is empty, assert
+ * the subject's presence explicitly so the gate still fails closed on `{}`,
+ * `[]`, or any tree that is not actually this package's consumer install.
+ */
+export const SUBJECT_PACKAGE = "llm-cli-gateway";
+
+/** True when the subject package appears anywhere in the dependency tree. */
+export function treeContainsSubject(tree, subject = SUBJECT_PACKAGE) {
+  let found = false;
+  (function walk(node) {
+    if (found || !node || typeof node !== "object") return;
+    if (node.name === subject) {
+      found = true;
+      return;
+    }
+    for (const [name, dep] of Object.entries(node.dependencies ?? {})) {
+      if (name === subject) {
+        found = true;
+        return;
+      }
+      walk(dep);
+    }
+  })(tree);
+  return found;
+}
+
+/**
  * Classify a consumer tree against the reviewed expectations.
  *
  * @param {object} tree Parsed `npm ls --all --json` output.
@@ -123,6 +171,14 @@ export function classifyConsumerTree(tree, expected = EXPECTED_TREE_PROBLEMS) {
   // does not add it here, so an absent optional peer (pg) never reaches this.
   const otherProblems = (tree.problems ?? []).filter(p => !p.startsWith("invalid:"));
 
+  // Fail closed on a degenerate or wrong tree: if the package this gate exists to
+  // verify is not present, there is nothing to have classified, so never pass.
+  if (!treeContainsSubject(tree)) {
+    otherProblems.push(
+      `consumer tree does not contain ${SUBJECT_PACKAGE} (degenerate or wrong input)`
+    );
+  }
+
   const expectedKeys = new Set(expected.map(problemKey));
   const foundKeys = new Set(found.map(problemKey));
 
@@ -136,6 +192,48 @@ export function classifyConsumerTree(tree, expected = EXPECTED_TREE_PROBLEMS) {
     missing,
     otherProblems,
   };
+}
+
+/** Collect every resolved version of `name` anywhere in the tree. */
+export function collectPackageVersions(tree, name) {
+  const versions = new Set();
+  (function walk(node) {
+    if (!node || typeof node !== "object") return;
+    for (const [depName, dep] of Object.entries(node.dependencies ?? {})) {
+      if (depName === name && dep && typeof dep.version === "string") versions.add(dep.version);
+      walk(dep);
+    }
+  })(tree);
+  return [...versions];
+}
+
+/**
+ * Assert every REVIEWED_CONSUMER_VERSIONS package resolves to its reviewed pin
+ * in the consumer tree. Returns operator-facing problem strings; empty is clean.
+ * This is the positive replacement for the retired `invalid`-marker proof: it
+ * rejects a pin that is absent, or that drifted to an unreviewed (and possibly
+ * vulnerable) version, neither of which npm reports as `invalid` now that the
+ * SDK range admits the 2.x line.
+ *
+ * @param {object} tree Parsed `npm ls --all --json` output.
+ * @param {Record<string,string>} reviewed Package -> exact reviewed version.
+ * @returns {string[]}
+ */
+export function reviewedVersionProblems(tree, reviewed = REVIEWED_CONSUMER_VERSIONS) {
+  const problems = [];
+  for (const [name, wanted] of Object.entries(reviewed)) {
+    const versions = collectPackageVersions(tree, name);
+    if (versions.length === 0) {
+      problems.push(`${name} is absent: reviewed pin ${wanted} did not reach the consumer`);
+      continue;
+    }
+    for (const v of versions.filter(found => found !== wanted)) {
+      problems.push(
+        `${name}@${v} is not the reviewed pin ${wanted}: the pin did not reach the consumer or drifted to an unreviewed version`
+      );
+    }
+  }
+  return problems;
 }
 
 /**
@@ -234,9 +332,15 @@ if (isDirectInvocation(import.meta.url, process.argv[1])) {
   }
   const tree = JSON.parse(fs.readFileSync(file, "utf8"));
   const result = classifyConsumerTree(tree);
+  const versionProblems = reviewedVersionProblems(tree);
   const { errors, info } = formatConsumerTreeReport(result);
   for (const line of errors) console.error(line);
-  for (const line of info) console.log(line);
-  if (result.ok) console.log(OK_MARKER);
-  process.exit(result.ok ? 0 : 1);
+  if (versionProblems.length > 0) {
+    console.error("Reviewed consumer pin did not reach the tree at its exact version:");
+    for (const p of versionProblems) console.error(`  ${p}`);
+  }
+  const ok = result.ok && versionProblems.length === 0;
+  if (ok) for (const line of info) console.log(line);
+  if (ok) console.log(OK_MARKER);
+  process.exit(ok ? 0 : 1);
 }
