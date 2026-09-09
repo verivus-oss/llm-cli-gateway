@@ -1,7 +1,7 @@
 {
   "schemaVersion": "upstream-scan-snapshot.v2",
   "cli": "devin",
-  "fetchedAt": "2026-09-08T21:23:44.145Z",
+  "fetchedAt": "2026-09-09T00:26:20.688Z",
   "sources": [
     {
       "url": "https://cli.devin.ai/docs/reference/commands",
@@ -29,7 +29,7 @@
     }
   ],
   "helpSurface": {
-    "probedAt": "2026-09-08T21:23:44.141Z",
+    "probedAt": "2026-09-09T00:26:20.684Z",
     "available": true,
     "version": "devin 3000.6.14 (18033302)",
     "targetVersion": "devin 3000.6.14 (18033302)",
@@ -82,7 +82,7 @@
       "commandPath": [
         "acp"
       ],
-      "probedAt": "2026-09-08T21:23:44.081Z",
+      "probedAt": "2026-09-09T00:26:20.624Z",
       "available": true,
       "existence": "present",
       "discoveredFlags": [
@@ -103,7 +103,7 @@
       "commandPath": [
         "auth"
       ],
-      "probedAt": "2026-09-08T21:23:44.084Z",
+      "probedAt": "2026-09-09T00:26:20.628Z",
       "available": true,
       "existence": "present",
       "discoveredFlags": [],
@@ -121,7 +121,7 @@
       "commandPath": [
         "cloud"
       ],
-      "probedAt": "2026-09-08T21:23:44.087Z",
+      "probedAt": "2026-09-09T00:26:20.631Z",
       "available": true,
       "existence": "present",
       "discoveredFlags": [],
@@ -139,7 +139,7 @@
       "commandPath": [
         "desktop"
       ],
-      "probedAt": "2026-09-08T21:23:44.091Z",
+      "probedAt": "2026-09-09T00:26:20.635Z",
       "available": true,
       "existence": "present",
       "discoveredFlags": [],
@@ -157,7 +157,7 @@
       "commandPath": [
         "doctor"
       ],
-      "probedAt": "2026-09-08T21:23:44.094Z",
+      "probedAt": "2026-09-09T00:26:20.638Z",
       "available": true,
       "existence": "present",
       "discoveredFlags": [
@@ -177,7 +177,7 @@
       "commandPath": [
         "list"
       ],
-      "probedAt": "2026-09-08T21:23:44.097Z",
+      "probedAt": "2026-09-09T00:26:20.641Z",
       "available": true,
       "existence": "present",
       "discoveredFlags": [
@@ -197,7 +197,7 @@
       "commandPath": [
         "mcp"
       ],
-      "probedAt": "2026-09-08T21:23:44.100Z",
+      "probedAt": "2026-09-09T00:26:20.645Z",
       "available": true,
       "existence": "present",
       "discoveredFlags": [],
@@ -215,7 +215,7 @@
       "commandPath": [
         "migrate"
       ],
-      "probedAt": "2026-09-08T21:23:44.104Z",
+      "probedAt": "2026-09-09T00:26:20.648Z",
       "available": true,
       "existence": "present",
       "discoveredFlags": [],
@@ -233,7 +233,7 @@
       "commandPath": [
         "models"
       ],
-      "probedAt": "2026-09-08T21:23:44.107Z",
+      "probedAt": "2026-09-09T00:26:20.652Z",
       "available": true,
       "existence": "present",
       "discoveredFlags": [],
@@ -251,7 +251,7 @@
       "commandPath": [
         "plugins"
       ],
-      "probedAt": "2026-09-08T21:23:44.111Z",
+      "probedAt": "2026-09-09T00:26:20.655Z",
       "available": true,
       "existence": "present",
       "discoveredFlags": [],
@@ -269,7 +269,7 @@
       "commandPath": [
         "rm"
       ],
-      "probedAt": "2026-09-08T21:23:44.114Z",
+      "probedAt": "2026-09-09T00:26:20.658Z",
       "available": true,
       "existence": "present",
       "discoveredFlags": [
@@ -289,7 +289,7 @@
       "commandPath": [
         "rules"
       ],
-      "probedAt": "2026-09-08T21:23:44.118Z",
+      "probedAt": "2026-09-09T00:26:20.661Z",
       "available": true,
       "existence": "present",
       "discoveredFlags": [],
@@ -307,7 +307,7 @@
       "commandPath": [
         "sandbox"
       ],
-      "probedAt": "2026-09-08T21:23:44.121Z",
+      "probedAt": "2026-09-09T00:26:20.665Z",
       "available": true,
       "existence": "present",
       "discoveredFlags": [],
@@ -325,7 +325,7 @@
       "commandPath": [
         "setup"
       ],
-      "probedAt": "2026-09-08T21:23:44.125Z",
+      "probedAt": "2026-09-09T00:26:20.668Z",
       "available": true,
       "existence": "present",
       "discoveredFlags": [
@@ -345,7 +345,7 @@
       "commandPath": [
         "skills"
       ],
-      "probedAt": "2026-09-08T21:23:44.128Z",
+      "probedAt": "2026-09-09T00:26:20.671Z",
       "available": true,
       "existence": "present",
       "discoveredFlags": [],
@@ -363,7 +363,7 @@
       "commandPath": [
         "ssh"
       ],
-      "probedAt": "2026-09-08T21:23:44.132Z",
+      "probedAt": "2026-09-09T00:26:20.674Z",
       "available": true,
       "existence": "present",
       "discoveredFlags": [
@@ -383,7 +383,7 @@
       "commandPath": [
         "uninstall"
       ],
-      "probedAt": "2026-09-08T21:23:44.135Z",
+      "probedAt": "2026-09-09T00:26:20.678Z",
       "available": true,
       "existence": "present",
       "discoveredFlags": [
@@ -404,7 +404,7 @@
       "commandPath": [
         "update"
       ],
-      "probedAt": "2026-09-08T21:23:44.138Z",
+      "probedAt": "2026-09-09T00:26:20.681Z",
       "available": true,
       "existence": "present",
       "discoveredFlags": [
@@ -424,7 +424,7 @@
       "commandPath": [
         "version"
       ],
-      "probedAt": "2026-09-08T21:23:44.141Z",
+      "probedAt": "2026-09-09T00:26:20.684Z",
       "available": true,
       "existence": "present",
       "discoveredFlags": [],

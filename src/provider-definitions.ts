@@ -448,7 +448,7 @@ const KIT_UNSUPPORTED: ProviderPersonalConfigKit = {
  * all follow automatically.
  */
 export const PROVIDER_TARGET_VERSIONS: Record<CliType, string> = {
-  claude: "claude 2.1.265",
+  claude: "claude 2.1.266",
   codex: "codex-cli 0.153.4",
   gemini: "1.1.27",
   // The build hash here is load-bearing. grok 1.0.4 reports
@@ -461,10 +461,10 @@ export const PROVIDER_TARGET_VERSIONS: Record<CliType, string> = {
   // at end-of-string; the tool and the scan read one banner two ways and the
   // result was a baseline that reported drift forever. The normalizer is fixed
   // (see its comment) and the tool now writes this spelling itself.
-  grok: "grok 1.0.13 (5e9a58528b76)",
+  grok: "grok 1.0.24 (68e414c661e3)",
   mistral: "vibe 2.25.0",
   devin: "devin 3000.6.14 (18033302)",
-  cursor: "cursor-agent 2026.09.02-c22c1a3",
+  cursor: "cursor-agent 2026.09.08-6caf4ff",
 };
 
 const PROVIDER_DEFINITIONS = {
@@ -1045,6 +1045,12 @@ const PROVIDER_DEFINITIONS = {
       },
     },
     adminSubcommands: [
+      {
+        family: "usage",
+        safety: "mutating-gated",
+        evidence:
+          "grok 1.0.24 (68e414c661e3) [stable] root help advertises `usage`. Auto-declared by `npm run providers:rebaseline`. safety is the conservative default: a read-only misclassification would remove a control, a gated one only adds an approval, so generated families are never `read-only`. UNVERIFIED pending maintainer review.",
+      },
       {
         family: "clone",
         safety: "mutating-gated",
