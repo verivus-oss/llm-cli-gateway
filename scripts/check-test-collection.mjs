@@ -15,9 +15,18 @@
  * not a count: a count only works as a control if something compares it, and a
  * suite already red for other reasons hides a total that quietly dropped by 64.
  *
- * NOT `--filesOnly`. That globs filenames and exits 0 on a file that cannot be
- * parsed, so the first version of this gate passed in both states. Full
- * collection transforms every file, which is the property being asserted.
+ * TWO probes, because vitest 5's `list` answers only half the question. Full
+ * collection (`vitest list`, expanding every suite) exits non-zero on a file
+ * that cannot be transformed, so it is the transform guard. But it does NOT
+ * emit the tests of a file whose every case lives under a conditional block
+ * describe (`describe.skipIf(...)` / `describe.runIf(...)`): vitest 5 does not
+ * expand those during listing, so such a file (e.g. cli-entrypoint.test.ts,
+ * job-progress-wire-capability.test.ts) transforms and runs yet lists zero
+ * tests, and a `> suite > test` parse would drop it. `--filesOnly` enumerates
+ * every INCLUDED transformable file regardless, so it answers membership. It
+ * cannot be the gate alone (it exits 0 on an unparseable file), which is why
+ * the full-collection transform guard runs first; together they assert both
+ * that every tracked file transforms and that every tracked file is collected.
  */
 import { execFileSync } from "node:child_process";
 import { dirname, join } from "node:path";
@@ -38,13 +47,18 @@ const tracked = new Set(
     .filter(Boolean)
 );
 
-let listing;
+const listEnv = { ...process.env, PG_TESTS: "1", INTEGRATION_TESTS: "1", CI: "1" };
+
+// Transform guard: full collection exits non-zero on any file that cannot be
+// transformed. Its listed output is not used for membership (see the header:
+// vitest 5 drops conditional-block-describe files from it); only its exit
+// status matters here.
 try {
-  listing = execFileSync("npx", ["vitest", "list"], {
+  execFileSync("npx", ["vitest", "list"], {
     cwd: ROOT,
     encoding: "utf8",
     maxBuffer: 32 * 1024 * 1024,
-    env: { ...process.env, PG_TESTS: "1", INTEGRATION_TESTS: "1", CI: "1" },
+    env: listEnv,
   });
 } catch (error) {
   // A file that cannot be transformed makes vitest exit non-zero. That is the
@@ -54,10 +68,16 @@ try {
   process.exit(1);
 }
 
-// Each line is `path > suite > test`; the file is everything before the first
-// separator, and a file with no tests still had to transform to say so.
+// Membership: `--filesOnly` enumerates every included, transformable test file,
+// one path per line, including files whose tests are all conditional.
+const filesListing = execFileSync("npx", ["vitest", "list", "--filesOnly"], {
+  cwd: ROOT,
+  encoding: "utf8",
+  maxBuffer: 32 * 1024 * 1024,
+  env: listEnv,
+});
 const collected = new Set(
-  listing
+  filesListing
     .split("\n")
     .map(line => line.split(" > ")[0].trim())
     .filter(line => /\.test\.(ts|mjs)$/.test(line))
