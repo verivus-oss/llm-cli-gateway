@@ -1,7 +1,7 @@
 {
   "schemaVersion": "upstream-scan-snapshot.v2",
   "cli": "grok",
-  "fetchedAt": "2026-09-08T21:23:41.982Z",
+  "fetchedAt": "2026-09-09T00:26:18.502Z",
   "sources": [
     {
       "url": "https://docs.x.ai/developers/release-notes.md",
@@ -13,10 +13,10 @@
     }
   ],
   "helpSurface": {
-    "probedAt": "2026-09-08T21:23:41.512Z",
+    "probedAt": "2026-09-09T00:26:18.065Z",
     "available": true,
-    "version": "grok 1.0.13 (5e9a58528b76)",
-    "targetVersion": "grok 1.0.13 (5e9a58528b76)",
+    "version": "grok 1.0.24 (68e414c661e3) [stable]",
+    "targetVersion": "grok 1.0.24 (68e414c661e3)",
     "versionMatchesTarget": true,
     "discoveredFlags": [
       "--agent",
@@ -60,7 +60,7 @@
       "--worktree",
       "--worktree-ref"
     ],
-    "helpHash": "966f4c04e49d33a303f55f31a35fec325b2944cdda3b74d152614e9c0c870e39",
+    "helpHash": "37bd75c9af4741eb0d606e8782e0edc9466399229e21814bc8d0ae47b5f130e6",
     "extraVsContract": [],
     "missingFromBinary": [
       "--best-of-n",
@@ -92,6 +92,7 @@
     "setup",
     "trace",
     "update",
+    "usage",
     "version",
     "worktree",
     "wrap"
@@ -101,7 +102,7 @@
       "commandPath": [
         "agent"
       ],
-      "probedAt": "2026-09-08T21:23:29.672Z",
+      "probedAt": "2026-09-09T00:26:05.938Z",
       "available": true,
       "existence": "present",
       "discoveredFlags": [
@@ -121,7 +122,7 @@
         "--reauth",
         "--xai-api-base-url"
       ],
-      "helpHash": "f8f9ebebf079f386bbb77ac747aa26054ca07c8ab4112c24315967d545645115",
+      "helpHash": "ba7579c7d90a0d29b46689d15bf93acadad84bda58976fbf01d2b6f93e454c8a",
       "extraVsContract": [],
       "missingFromBinary": [],
       "arityMismatches": [],
@@ -136,7 +137,7 @@
         "agent",
         "headless"
       ],
-      "probedAt": "2026-09-08T21:23:30.609Z",
+      "probedAt": "2026-09-09T00:26:06.824Z",
       "available": true,
       "existence": "present",
       "discoveredFlags": [
@@ -146,7 +147,7 @@
         "--grok-ws-url",
         "--leader-socket"
       ],
-      "helpHash": "ad01f94e43b2c23fcc8659b416f2c3a46b8e11489e4e32ee39039478c6bef4f2",
+      "helpHash": "9db74690874d76a1cc2d8df9cb312346c638f70ab3ba6be2161c293d262d29f7",
       "extraVsContract": [],
       "missingFromBinary": [],
       "arityMismatches": [],
@@ -161,7 +162,7 @@
         "agent",
         "leader"
       ],
-      "probedAt": "2026-09-08T21:23:31.060Z",
+      "probedAt": "2026-09-09T00:26:07.277Z",
       "available": true,
       "existence": "present",
       "discoveredFlags": [
@@ -174,7 +175,7 @@
         "--no-exit-on-disconnect",
         "--relay-on-demand"
       ],
-      "helpHash": "9026a1343dcfe1b79bd8da1b373ed0547db0fa8911e0d8c424d908d9d944e21e",
+      "helpHash": "af8a424ec6db4e1dde6b58f8d4d8884e8884777101bab705a1fc5804ccc314d4",
       "extraVsContract": [],
       "missingFromBinary": [],
       "arityMismatches": [],
@@ -189,7 +190,7 @@
         "agent",
         "serve"
       ],
-      "probedAt": "2026-09-08T21:23:31.533Z",
+      "probedAt": "2026-09-09T00:26:07.709Z",
       "available": true,
       "existence": "present",
       "discoveredFlags": [
@@ -202,7 +203,7 @@
         "--remote",
         "--secret"
       ],
-      "helpHash": "420017368f71cb24763a15f73b0d5a7d162788439f8e23256851e038fc145892",
+      "helpHash": "3296c2f90d5e94d682be26c4390da31e19430a0f44a50fd7bf76f2f5f247dcde",
       "extraVsContract": [],
       "missingFromBinary": [],
       "arityMismatches": [],
@@ -217,7 +218,7 @@
         "agent",
         "stdio"
       ],
-      "probedAt": "2026-09-08T21:23:32.022Z",
+      "probedAt": "2026-09-09T00:26:08.148Z",
       "available": true,
       "existence": "present",
       "discoveredFlags": [
@@ -225,7 +226,7 @@
         "--debug-file",
         "--leader-socket"
       ],
-      "helpHash": "057b98d76709c0e4f986373403c056cfa75e08e07e88952ca1cfaf2090c49095",
+      "helpHash": "c7dbbdb8fa0428524e92b13fda4ef6e9f00a8cbdde35459a898c5b5a8e703421",
       "extraVsContract": [],
       "missingFromBinary": [],
       "arityMismatches": [],
@@ -239,7 +240,7 @@
       "commandPath": [
         "clone"
       ],
-      "probedAt": "2026-09-08T21:23:32.467Z",
+      "probedAt": "2026-09-09T00:26:08.595Z",
       "available": true,
       "existence": "present",
       "discoveredFlags": [
@@ -250,7 +251,7 @@
         "--full-history",
         "--leader-socket"
       ],
-      "helpHash": "afb37b11063b291a8f8e9a3ed3371045d604c7126d3bdf7d132462ebbca7adb4",
+      "helpHash": "1197c26b61cab1c21f3a590ccfba3000bad553ee7aae1c12c4684b584520b7c0",
       "extraVsContract": [],
       "missingFromBinary": [],
       "arityMismatches": [],
@@ -264,7 +265,7 @@
       "commandPath": [
         "completions"
       ],
-      "probedAt": "2026-09-08T21:23:32.912Z",
+      "probedAt": "2026-09-09T00:26:09.040Z",
       "available": true,
       "existence": "present",
       "discoveredFlags": [
@@ -272,7 +273,7 @@
         "--debug-file",
         "--leader-socket"
       ],
-      "helpHash": "31a1be5d931a3234cc27868eb9d32ba1f68df59f6ad799772ccfa227a937aceb",
+      "helpHash": "b3bc4059d13bac37c6e53335b8802621aec8e08618a543c9919041f66d6b27c3",
       "extraVsContract": [],
       "missingFromBinary": [],
       "arityMismatches": [],
@@ -286,7 +287,7 @@
       "commandPath": [
         "dashboard"
       ],
-      "probedAt": "2026-09-08T21:23:33.374Z",
+      "probedAt": "2026-09-09T00:26:09.500Z",
       "available": true,
       "existence": "present",
       "discoveredFlags": [
@@ -294,7 +295,7 @@
         "--debug-file",
         "--leader-socket"
       ],
-      "helpHash": "688ae98469a8c1d733a77de2a0c0742ea5cd79475baa777a79bb29f801a290d0",
+      "helpHash": "55e4cda9cd6f794f7692f4670de29a9641cb2f6913aea68c2d395c9f36b1d3c8",
       "extraVsContract": [],
       "missingFromBinary": [],
       "arityMismatches": [],
@@ -308,7 +309,7 @@
       "commandPath": [
         "doctor"
       ],
-      "probedAt": "2026-09-08T21:23:33.828Z",
+      "probedAt": "2026-09-09T00:26:09.967Z",
       "available": true,
       "existence": "present",
       "discoveredFlags": [
@@ -317,7 +318,7 @@
         "--json",
         "--leader-socket"
       ],
-      "helpHash": "43d539914f6906cd6fda8f21d3f1c6e21cfb7a553d37e4bd038167267a9e98a8",
+      "helpHash": "3898d09a474f8d7b274702f386421da023f4ee94b28272801a2acf8208dae738",
       "extraVsContract": [],
       "missingFromBinary": [],
       "arityMismatches": [],
@@ -331,7 +332,7 @@
       "commandPath": [
         "du"
       ],
-      "probedAt": "2026-09-08T21:23:34.270Z",
+      "probedAt": "2026-09-09T00:26:10.421Z",
       "available": true,
       "existence": "present",
       "discoveredFlags": [
@@ -340,7 +341,7 @@
         "--json",
         "--leader-socket"
       ],
-      "helpHash": "e496a82da81908d2cfa726a5c6686a743cefa654030193023902057bd85ef0cf",
+      "helpHash": "df232ac21f68c7fd9d1ce4374a65a2e56315e53a6aae23e703134c3d20e35364",
       "extraVsContract": [],
       "missingFromBinary": [],
       "arityMismatches": [],
@@ -354,7 +355,7 @@
       "commandPath": [
         "export"
       ],
-      "probedAt": "2026-09-08T21:23:34.717Z",
+      "probedAt": "2026-09-09T00:26:10.859Z",
       "available": true,
       "existence": "present",
       "discoveredFlags": [
@@ -363,7 +364,7 @@
         "--debug-file",
         "--leader-socket"
       ],
-      "helpHash": "03caa59f80d17240eaf95dff7e5a374eada4e18773762acf1acbd89cd77ece29",
+      "helpHash": "f74a888b39a60a31bc585c29a549ac500a2dc6864a391707506f7c65b9565922",
       "extraVsContract": [],
       "missingFromBinary": [],
       "arityMismatches": [],
@@ -377,7 +378,7 @@
       "commandPath": [
         "inspect"
       ],
-      "probedAt": "2026-09-08T21:23:35.158Z",
+      "probedAt": "2026-09-09T00:26:11.339Z",
       "available": true,
       "existence": "present",
       "discoveredFlags": [
@@ -386,7 +387,7 @@
         "--json",
         "--leader-socket"
       ],
-      "helpHash": "8218b7005fb645a989dc7605d07ae99ba910bd8153de76df384ea92ce9c95307",
+      "helpHash": "f4562d6b5b35879305c564217cbe36564ad1b99e1082d3cb0e9e5af13de63b7e",
       "extraVsContract": [],
       "missingFromBinary": [],
       "arityMismatches": [],
@@ -400,7 +401,7 @@
       "commandPath": [
         "leader"
       ],
-      "probedAt": "2026-09-08T21:23:35.600Z",
+      "probedAt": "2026-09-09T00:26:11.795Z",
       "available": true,
       "existence": "present",
       "discoveredFlags": [
@@ -408,7 +409,7 @@
         "--debug-file",
         "--leader-socket"
       ],
-      "helpHash": "fc0ff010c1bd30df5bae747206e279e8ae4c362168f40b72216de8e8128c25ab",
+      "helpHash": "0af32d78211576547a13f53ac8a45310b3e991a80b4ca2d9ab9b81431a4989ee",
       "extraVsContract": [],
       "missingFromBinary": [],
       "arityMismatches": [],
@@ -422,7 +423,7 @@
       "commandPath": [
         "login"
       ],
-      "probedAt": "2026-09-08T21:23:36.056Z",
+      "probedAt": "2026-09-09T00:26:12.241Z",
       "available": true,
       "existence": "present",
       "discoveredFlags": [
@@ -432,7 +433,7 @@
         "--leader-socket",
         "--oauth"
       ],
-      "helpHash": "f88f91a8ca47a3619e2b3abc439c002df03b546bcfaa431652edab7e264f08e5",
+      "helpHash": "48450d7999afd854881f945b9aafeb857735e6e04e8989bff538cbbad6e2e1f5",
       "extraVsContract": [],
       "missingFromBinary": [],
       "arityMismatches": [],
@@ -446,7 +447,7 @@
       "commandPath": [
         "logout"
       ],
-      "probedAt": "2026-09-08T21:23:36.515Z",
+      "probedAt": "2026-09-09T00:26:12.698Z",
       "available": true,
       "existence": "present",
       "discoveredFlags": [
@@ -454,7 +455,7 @@
         "--debug-file",
         "--leader-socket"
       ],
-      "helpHash": "3dc6c9ac5a53fb73fd3abc09a09efa68b6dfaaeb434988ac908603e7bcfc4b65",
+      "helpHash": "dbecc5a9bf2b2c02fae4169f3146ea391d47bcb287be29a079142b2796990f2b",
       "extraVsContract": [],
       "missingFromBinary": [],
       "arityMismatches": [],
@@ -468,7 +469,7 @@
       "commandPath": [
         "mcp"
       ],
-      "probedAt": "2026-09-08T21:23:36.981Z",
+      "probedAt": "2026-09-09T00:26:13.132Z",
       "available": true,
       "existence": "present",
       "discoveredFlags": [
@@ -476,7 +477,7 @@
         "--debug-file",
         "--leader-socket"
       ],
-      "helpHash": "b77c80d9810332e65e1e0134d36e00045f3fca0edd486d94d180fb7d44a7a714",
+      "helpHash": "7fc2a7b72b74ca33545dc05a3ce4548820af89bc5f5b3be05a0b3c385b92a34b",
       "extraVsContract": [],
       "missingFromBinary": [],
       "arityMismatches": [],
@@ -490,7 +491,7 @@
       "commandPath": [
         "memory"
       ],
-      "probedAt": "2026-09-08T21:23:37.423Z",
+      "probedAt": "2026-09-09T00:26:13.582Z",
       "available": true,
       "existence": "present",
       "discoveredFlags": [
@@ -498,7 +499,7 @@
         "--debug-file",
         "--leader-socket"
       ],
-      "helpHash": "f9e46ecf5734e9aecae21bff067db2667561f2c07c8b7844752c47c32dfc4a3e",
+      "helpHash": "c875e29ee514aa851a59bf6be4c48ca795bdfd13028083a12c40f8d30a32e082",
       "extraVsContract": [],
       "missingFromBinary": [],
       "arityMismatches": [],
@@ -512,7 +513,7 @@
       "commandPath": [
         "models"
       ],
-      "probedAt": "2026-09-08T21:23:37.881Z",
+      "probedAt": "2026-09-09T00:26:14.023Z",
       "available": true,
       "existence": "present",
       "discoveredFlags": [
@@ -520,7 +521,7 @@
         "--debug-file",
         "--leader-socket"
       ],
-      "helpHash": "3ef9acb4dd1a15b90f51c80b38dc93a3cf9ee1bb81cb083db4091c2fa04c50b6",
+      "helpHash": "c30613ff9054928cb795fe0f04e776048a87fe674561ac4cc78bb54e80a898ac",
       "extraVsContract": [],
       "missingFromBinary": [],
       "arityMismatches": [],
@@ -534,7 +535,7 @@
       "commandPath": [
         "plugin"
       ],
-      "probedAt": "2026-09-08T21:23:38.329Z",
+      "probedAt": "2026-09-09T00:26:14.475Z",
       "available": true,
       "existence": "present",
       "discoveredFlags": [
@@ -542,7 +543,7 @@
         "--debug-file",
         "--leader-socket"
       ],
-      "helpHash": "8ad52f19d4c8a69775545013f3f61af0f1444976261177fb9ed6b6ff290f70ad",
+      "helpHash": "1fed18e9476b015d3e132bd6be9011e4081ef9f0750be5321b2e3bac24f9dfcb",
       "extraVsContract": [],
       "missingFromBinary": [],
       "arityMismatches": [],
@@ -556,7 +557,7 @@
       "commandPath": [
         "sessions"
       ],
-      "probedAt": "2026-09-08T21:23:38.792Z",
+      "probedAt": "2026-09-09T00:26:14.912Z",
       "available": true,
       "existence": "present",
       "discoveredFlags": [
@@ -564,7 +565,7 @@
         "--debug-file",
         "--leader-socket"
       ],
-      "helpHash": "dfee729c94c507dcfaebf086b75ced0731aace43ace9e535075b8f1064d32985",
+      "helpHash": "963deb051e2c8ac53805d4bf9f7e218176df1930c2f7559f952ca85ea55f4e69",
       "extraVsContract": [],
       "missingFromBinary": [],
       "arityMismatches": [],
@@ -578,7 +579,7 @@
       "commandPath": [
         "setup"
       ],
-      "probedAt": "2026-09-08T21:23:39.249Z",
+      "probedAt": "2026-09-09T00:26:15.351Z",
       "available": true,
       "existence": "present",
       "discoveredFlags": [
@@ -587,7 +588,7 @@
         "--json",
         "--leader-socket"
       ],
-      "helpHash": "c73c20614328f7b9c51638af3e14a0d257d0618066ea409aad44df2f6e3d1495",
+      "helpHash": "8d31ea5abc982f69a9ebf7f540c23b79ace1b59c5ba809411eb9f61cda2c490c",
       "extraVsContract": [],
       "missingFromBinary": [],
       "arityMismatches": [],
@@ -601,7 +602,7 @@
       "commandPath": [
         "trace"
       ],
-      "probedAt": "2026-09-08T21:23:39.701Z",
+      "probedAt": "2026-09-09T00:26:15.809Z",
       "available": true,
       "existence": "present",
       "discoveredFlags": [
@@ -612,7 +613,7 @@
         "--local",
         "--output"
       ],
-      "helpHash": "71b59a3637e05a6e5705de2acf28efd8b998acfdf53c4d406fd34b9bfe725a5a",
+      "helpHash": "fd4fedc92b60faa3146eb46f2c080a54f49d0f8f7e93cfb6e8d4d6d1432b8d45",
       "extraVsContract": [],
       "missingFromBinary": [],
       "arityMismatches": [],
@@ -626,7 +627,7 @@
       "commandPath": [
         "update"
       ],
-      "probedAt": "2026-09-08T21:23:40.155Z",
+      "probedAt": "2026-09-09T00:26:16.260Z",
       "available": true,
       "existence": "present",
       "discoveredFlags": [
@@ -640,7 +641,7 @@
         "--stable",
         "--version"
       ],
-      "helpHash": "ecdf2a599cd19e5593adde54866826d688baa4f45ec1bdcc3258bb192f31be17",
+      "helpHash": "8db3cce6fcfd2c93d693eed84c96332dc9a0710c249dde517887e0801cc9ae6d",
       "extraVsContract": [],
       "missingFromBinary": [],
       "arityMismatches": [],
@@ -650,11 +651,33 @@
       "tier": "catalog",
       "summary": "Update the Grok CLI binary."
     },
+    "usage": {
+      "commandPath": [
+        "usage"
+      ],
+      "probedAt": "2026-09-09T00:26:16.717Z",
+      "available": true,
+      "existence": "present",
+      "discoveredFlags": [
+        "--debug",
+        "--debug-file",
+        "--leader-socket"
+      ],
+      "helpHash": "cfb6aebd974a46333332815307c733438e4018a0610a7e479005f8555ea61b84",
+      "extraVsContract": [],
+      "missingFromBinary": [],
+      "arityMismatches": [],
+      "enumMismatches": [],
+      "risk": "writes_local_config",
+      "exposure": "tracked_only",
+      "tier": "catalog",
+      "summary": "Print persisted token and cost usage for a session."
+    },
     "version": {
       "commandPath": [
         "version"
       ],
-      "probedAt": "2026-09-08T21:23:40.612Z",
+      "probedAt": "2026-09-09T00:26:17.183Z",
       "available": true,
       "existence": "present",
       "discoveredFlags": [
@@ -663,7 +686,7 @@
         "--json",
         "--leader-socket"
       ],
-      "helpHash": "0e2b707034bac7a8e912a4109ab93ce1b6797537143211cbceb430356def3f21",
+      "helpHash": "2f927fb0c827b8012d59baf5d7542c3b37cdd721f6e5258c5c895c2758dda182",
       "extraVsContract": [],
       "missingFromBinary": [],
       "arityMismatches": [],
@@ -677,7 +700,7 @@
       "commandPath": [
         "worktree"
       ],
-      "probedAt": "2026-09-08T21:23:41.072Z",
+      "probedAt": "2026-09-09T00:26:17.624Z",
       "available": true,
       "existence": "present",
       "discoveredFlags": [
@@ -685,7 +708,7 @@
         "--debug-file",
         "--leader-socket"
       ],
-      "helpHash": "365783698dd6908f5f9e1c41f5a4f80fb44df242690bfc9d249d15036aa3964f",
+      "helpHash": "ce7dedffbb106bdcf04897030641e24cb6355575e53d2c2ee7317bc1bb5476d9",
       "extraVsContract": [],
       "missingFromBinary": [],
       "arityMismatches": [],
@@ -699,7 +722,7 @@
       "commandPath": [
         "wrap"
       ],
-      "probedAt": "2026-09-08T21:23:41.512Z",
+      "probedAt": "2026-09-09T00:26:18.065Z",
       "available": true,
       "existence": "present",
       "discoveredFlags": [
@@ -707,7 +730,7 @@
         "--debug-file",
         "--leader-socket"
       ],
-      "helpHash": "7c717195522c7f7fe0cb23dc504886fff2391f33444153b93737ee1ff8e11332",
+      "helpHash": "2a70c77a7ac225f39561990480ee3c22fd0142536802c1f4cd0eb22dd2000500",
       "extraVsContract": [],
       "missingFromBinary": [],
       "arityMismatches": [],

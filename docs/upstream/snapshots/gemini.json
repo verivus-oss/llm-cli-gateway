@@ -1,7 +1,7 @@
 {
   "schemaVersion": "upstream-scan-snapshot.v2",
   "cli": "gemini",
-  "fetchedAt": "2026-09-08T21:23:27.753Z",
+  "fetchedAt": "2026-09-09T00:26:03.981Z",
   "sources": [
     {
       "url": "https://antigravity.google/docs/cli-overview",
@@ -33,7 +33,7 @@
     }
   ],
   "helpSurface": {
-    "probedAt": "2026-09-08T21:23:27.752Z",
+    "probedAt": "2026-09-09T00:26:03.981Z",
     "available": true,
     "version": "1.1.27",
     "targetVersion": "1.1.27",
@@ -85,7 +85,7 @@
       "commandPath": [
         "agent"
       ],
-      "probedAt": "2026-09-08T21:23:27.275Z",
+      "probedAt": "2026-09-09T00:26:03.476Z",
       "available": true,
       "existence": "present",
       "discoveredFlags": [],
@@ -103,7 +103,7 @@
       "commandPath": [
         "changelog"
       ],
-      "probedAt": "2026-09-08T21:23:27.326Z",
+      "probedAt": "2026-09-09T00:26:03.534Z",
       "available": true,
       "existence": "present",
       "discoveredFlags": [],
@@ -121,7 +121,7 @@
       "commandPath": [
         "install"
       ],
-      "probedAt": "2026-09-08T21:23:27.378Z",
+      "probedAt": "2026-09-09T00:26:03.591Z",
       "available": true,
       "existence": "present",
       "discoveredFlags": [
@@ -143,7 +143,7 @@
       "commandPath": [
         "mcp"
       ],
-      "probedAt": "2026-09-08T21:23:27.430Z",
+      "probedAt": "2026-09-09T00:26:03.645Z",
       "available": true,
       "existence": "present",
       "discoveredFlags": [],
@@ -161,7 +161,7 @@
       "commandPath": [
         "mic-serve"
       ],
-      "probedAt": "2026-09-08T21:23:27.484Z",
+      "probedAt": "2026-09-09T00:26:03.699Z",
       "available": true,
       "existence": "present",
       "discoveredFlags": [
@@ -181,7 +181,7 @@
       "commandPath": [
         "models"
       ],
-      "probedAt": "2026-09-08T21:23:27.537Z",
+      "probedAt": "2026-09-09T00:26:03.754Z",
       "available": true,
       "existence": "present",
       "discoveredFlags": [],
@@ -199,7 +199,7 @@
       "commandPath": [
         "plugin"
       ],
-      "probedAt": "2026-09-08T21:23:27.591Z",
+      "probedAt": "2026-09-09T00:26:03.812Z",
       "available": true,
       "existence": "present",
       "discoveredFlags": [],
@@ -217,7 +217,7 @@
       "commandPath": [
         "plugins"
       ],
-      "probedAt": "2026-09-08T21:23:27.645Z",
+      "probedAt": "2026-09-09T00:26:03.870Z",
       "available": true,
       "existence": "present",
       "discoveredFlags": [],
@@ -235,7 +235,7 @@
       "commandPath": [
         "remote-control"
       ],
-      "probedAt": "2026-09-08T21:23:27.697Z",
+      "probedAt": "2026-09-09T00:26:03.925Z",
       "available": true,
       "existence": "present",
       "discoveredFlags": [],
@@ -253,7 +253,7 @@
       "commandPath": [
         "update"
       ],
-      "probedAt": "2026-09-08T21:23:27.752Z",
+      "probedAt": "2026-09-09T00:26:03.981Z",
       "available": true,
       "existence": "present",
       "discoveredFlags": [],

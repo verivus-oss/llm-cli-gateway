@@ -2279,6 +2279,21 @@ export const UPSTREAM_CLI_CONTRACTS: Record<CliType, CliContract> = {
     helpArgs: [["--help"]],
     subcommands: acknowledgeSubcommandFlags(
       {
+        // New in grok 1.0.24. `grok usage <SESSION_ID> [TURN]` prints persisted
+        // token and cost usage for a session. Catalogued only (exposure defaults
+        // to tracked_only, so it is not reachable by callers); risk stays the
+        // conservative auto-declared default pending maintainer verification. Its
+        // options are `--debug` / `--debug-file` (globally acknowledged) and
+        // `--leader-socket`.
+        usage: subcommand(
+          ["usage"],
+          "Print persisted token and cost usage for a session.",
+          "writes_local_config",
+          [],
+          {
+            acknowledgedUpstreamFlags: ["--leader-socket"],
+          }
+        ),
         // Auto-declared by `npm run providers:rebaseline`: upstream advertises
         // this command. Catalogued only (exposure defaults to tracked_only, so it
         // is not reachable by callers); risk is a conservative default pending
