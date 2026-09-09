@@ -2,7 +2,7 @@
   "openapi": "3.1.0",
   "info": {
     "title": "llm-cli-gateway MCP HTTP API",
-    "version": "3.2.0",
+    "version": "3.2.1",
     "description": "Streamable HTTP MCP endpoint for llm-cli-gateway. Local stdio remains the default and HTTP is opt-in. The documented default /mcp endpoint uses a configured static bearer token; the built-in OAuth 2.0 server is optional."
   },
   "servers": [

@@ -4,6 +4,8 @@ All notable changes to the llm-cli-gateway project.
 
 ## [Unreleased]
 
+## [3.2.1] - 2026-09-09
+
 ### Fixed
 
 - **PostgreSQL worktree cleanup is durable.** Session deletion,
@@ -94,6 +96,48 @@ All notable changes to the llm-cli-gateway project.
   renewed, released, rebound, pointed at, and returned by
   `getOrCreateKitSession`. Both stores now refuse, and reuse of a tombstoned id
   is refused by name rather than silently granted.
+- **The flight recorder no longer logs a bootstrap "database is locked" error
+  under startup contention.** When the recorder and the job store share one
+  SQLite `logs.db`, the recorder's storage-driver connection carried no
+  `busy_timeout`, so its schema bootstrap could fail the instant the job store
+  held the write lock (swallowed and retried, but logged as if it were
+  corruption). Every connection the SQLite storage driver opens now sets a
+  `busy_timeout`, so a contended write or bootstrap waits for the lock instead
+  of failing immediately. (#291)
+- **Imported transcript history is no longer rewritable by live metadata
+  writes.** Routing and compression telemetry writes now carry the same
+  reserved-rank fence that already protected completion writes, so a live
+  request colliding on a migrated request id can no longer overwrite an imported
+  row's routing or compression telemetry. Applied in both the SQLite and
+  PostgreSQL recorders. (#287)
+
+### Changed
+
+- Provider upstream contracts and version targets refreshed to the installed
+  CLI versions: claude 2.1.266, codex-cli 0.153.4, gemini 1.1.27, mistral vibe
+  2.25.0, grok 1.0.24, cursor-agent 2026.09.08. Gemini remote-control is now
+  classified as a mutating admin surface, the upstream drift scan's
+  subcommand-existence check is scoped so a declared alias that falls back to
+  root help is not misreported as removed, and grok 1.0.24's new `usage`
+  subcommand is catalogued. (#319, #321)
+- Development-toolchain updates: better-sqlite3 13 and vitest 5, both
+  devDependencies only. The published package uses Node's built-in `node:sqlite`
+  and ships neither. Also eslint, CI Python, and pinned GitHub Actions bumps.
+- The supply-chain prod-closure ledger is rolled forward to the current
+  dependency closure, restoring a green `dep-drift-scan` release gate. (#308)
+
+### Security
+
+- **hono pinned to 4.13.5.** hono reaches the closure only transitively through
+  the MCP SDK; the override moves from 4.12.34 to 4.13.5 to clear three
+  advisories that affect 4.12.34: GHSA-crvj-82cr-hjcx / CVE-2026-84363
+  (query-parser request smuggling), GHSA-g6gw-c38x-mqfc / CVE-2026-84364
+  (parseBody dot-notation DoS, off by default) and GHSA-gqvv-2mrq-wpjv /
+  CVE-2026-84365 (toSSG path traversal, build-time). All three surfaces are off
+  the gateway runtime path, which reaches hono only through
+  `@hono/node-server`'s websocket helper; the pin and the release-audit hono
+  floor are raised in lock-step and the change was validated by three
+  independent reviewers. (#320)
 
 ## [3.2.0] - 2026-09-03
 
