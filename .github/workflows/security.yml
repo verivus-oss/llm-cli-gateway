@@ -78,7 +78,7 @@ jobs:
         # requirements-security.txt succeeds under python 3.13 and yields the
         # pinned zizmor 1.26.1).
         if: github.repository == 'verivus-oss/llm-cli-gateway'
-        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
         with:
           python-version: "3.12"
 
@@ -204,7 +204,7 @@ jobs:
             installer/build-release.sh
 
       - name: Source-code spellcheck (typos)
-        uses: crate-ci/typos@d43b6c087ac471e2ea7b8af622ff15f05c0c365b # v1.50.1
+        uses: crate-ci/typos@7f9d0819ca1c008ade73f4b41fa9d258d48f605b # v1.51.1
 
       # ---------------------------------------------------------------
       # Secret + CVE scanning.
